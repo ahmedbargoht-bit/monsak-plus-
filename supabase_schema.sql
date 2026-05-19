@@ -174,3 +174,22 @@ INSERT INTO holidays (date, name, type) VALUES
 ON CONFLICT (date) DO NOTHING;
 
 -- ✅ تم إنشاء كل الجداول بنجاح
+
+-- ── طلبيات التوريد (من المنسقين الثابتين) ───────────────────
+CREATE TABLE IF NOT EXISTS supply_requests (
+  id          BIGSERIAL PRIMARY KEY,
+  name        TEXT NOT NULL,
+  route       TEXT,
+  fea         TEXT,
+  cat         TEXT,
+  grp         TEXT,
+  snf         TEXT NOT NULL,
+  qty         INTEGER DEFAULT 1,
+  date        TEXT,
+  note        TEXT,
+  status      TEXT DEFAULT 'pending',
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE supply_requests ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "public_all" ON supply_requests FOR ALL USING (true) WITH CHECK (true);
