@@ -450,6 +450,7 @@ textarea{width:100%;padding:8px 12px;border:1px solid var(--border);border-radiu
     <button class="nav-btn" id="nav-orders" onclick="showTab('orders')"><i class="ti ti-truck-delivery"></i><span>طلبيات</span><span class="nav-badge" id="ord-badge" style="display:none">0</span></button>
     <button class="nav-btn" id="nav-msgs" onclick="showTab('msgs')"><i class="ti ti-message-circle"></i><span>رسائل</span><span class="nav-badge" id="msg-badge" style="display:none">0</span></button>
     <button class="nav-btn" id="nav-dash" onclick="showTab('dash')"><i class="ti ti-chart-bar"></i><span>لوحتي</span></button>
+    <button class="nav-btn" id="nav-supply-req" onclick="showTab('supply-req')" style="display:none"><i class="ti ti-truck-delivery"></i><span>طلب توريد</span><span class="nav-badge" id="supply-badge" style="display:none">0</span></button>
   </div>
 </div>
 
@@ -600,14 +601,32 @@ function doLogin(){
     document.getElementById('fixed-banner-wrap').style.display='block';
     document.getElementById('fixed-banner-text').textContent='منسق ثابت — '+rep.route+' 🏪';
     document.getElementById('fixed-extra-wrap').style.display='block';
+    // إظهار تاب طلب توريد للمنسق الثابت
+    document.getElementById('nav-supply-req').style.display='flex';
   }
   showScreen('s-main');
   startLocTracking();
   fetchMessages();
   fetchOrders();
   loadHolidays();
-  // إظهار مؤشر الحالة
+  loadPDBFromCloud(); // تحميل قاعدة الأصناف من السحابة
   updateOnlineStatus(true);
+}
+
+// ── تحميل قاعدة الأصناف من Supabase (لو الأدمن رفع شيت جديد) ──
+async function loadPDBFromCloud(){
+  try{
+    const res = await sbSelect('products_db', {key:'pdb'});
+    if(res && res[0] && res[0].value){
+      const cloudPDB = JSON.parse(res[0].value);
+      // حدّث الـ PDB المحلي
+      Object.assign(PDB, cloudPDB);
+      console.log('✅ PDB loaded from cloud');
+    }
+  }catch(e){
+    // لو مفيش جدول أو بيانات — يكمل بالـ PDB المدمج عادي
+    console.warn('Using built-in PDB');
+  }
 }
 
 function updateOnlineStatus(isOnline){
@@ -644,10 +663,11 @@ function showTab(tab){
   document.getElementById('tab-'+tab).classList.add('active');
   document.getElementById('nav-'+tab).classList.add('active');
   if(tab==='dash'){updateDash();loadHolidays();}
-  if(tab==='orders') renderOrders();
-  if(tab==='missing') renderMissing();
-  if(tab==='products'){renderProdList();checkExpiryAlerts();}
-  if(tab==='msgs') fetchMessages();
+  if(tab==='orders')      renderOrders();
+  if(tab==='missing')     renderMissing();
+  if(tab==='products')    {renderProdList();checkExpiryAlerts();}
+  if(tab==='msgs')        fetchMessages();
+  if(tab==='supply-req')  renderSentSupplyReqs();
 }
 
 function popBranches(route){
@@ -1491,6 +1511,155 @@ function showExpPopup(alerts){
 
 function closeExpPopup(){
   document.getElementById('exp-popup').style.display = 'none';
+}
+
+// ══════════════════════════════════════════════════════════════
+// طلب توريد — للمنسق الثابت فقط
+// ══════════════════════════════════════════════════════════════
+let supplyReqs = JSON.parse(localStorage.getItem('supply_reqs_'+((typeof cu!=='undefined'&&cu)?cu.name:''))||'[]');
+
+function srOnFea(){
+  const fea = document.getElementById('sr-fea').value;
+  ['sr-f2','sr-f3','sr-f4'].forEach(id=>document.getElementById(id).style.display='none');
+  if(!fea) return;
+  const cats = Object.keys(PDB[fea]||{});
+  const sel = document.getElementById('sr-cat');
+  sel.innerHTML = '<option value="">اختر</option>';
+  cats.forEach(c=>{const o=document.createElement('option');o.value=c;o.textContent=c;sel.appendChild(o);});
+  document.getElementById('sr-f2').style.display='block';
+}
+
+function srOnCat(){
+  const fea = document.getElementById('sr-fea').value;
+  const cat = document.getElementById('sr-cat').value;
+  ['sr-f3','sr-f4'].forEach(id=>document.getElementById(id).style.display='none');
+  if(!fea||!cat) return;
+  const grps = Object.keys((PDB[fea]||{})[cat]||{});
+  const sel = document.getElementById('sr-grp');
+  sel.innerHTML = '<option value="">اختر</option>';
+  grps.forEach(g=>{const o=document.createElement('option');o.value=g;o.textContent=g;sel.appendChild(o);});
+  document.getElementById('sr-f3').style.display='block';
+}
+
+function srOnGrp(){
+  const fea=document.getElementById('sr-fea').value;
+  const cat=document.getElementById('sr-cat').value;
+  const grp=document.getElementById('sr-grp').value;
+  document.getElementById('sr-f4').style.display='none';
+  if(!fea||!cat||!grp) return;
+  const prods=(((PDB[fea]||{})[cat]||{})[grp]||[]);
+  const sel=document.getElementById('sr-snf');
+  sel.innerHTML='<option value="">اختر الصنف</option>';
+  prods.forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;sel.appendChild(o);});
+  document.getElementById('sr-f4').style.display='block';
+}
+
+async function submitSupplyReq(){
+  const snf  = document.getElementById('sr-snf').value;
+  const qty  = document.getElementById('sr-qty').value;
+  const date = document.getElementById('sr-date').value;
+  if(!snf){alert('اختر الصنف');return;}
+  if(!qty||qty<1){alert('أدخل العدد المطلوب');return;}
+  if(!date){alert('اختر ميعاد التوريد');return;}
+
+  const req = {
+    id: Date.now(),
+    name: cu.name,
+    route: cu.route,
+    fea: document.getElementById('sr-fea').value,
+    cat: document.getElementById('sr-cat').value,
+    grp: document.getElementById('sr-grp').value,
+    snf, qty: parseInt(qty),
+    date,
+    note: document.getElementById('sr-note').value.trim(),
+    status: 'pending',
+    sentAt: new Date().toISOString()
+  };
+
+  // Save to Supabase
+  await sbInsert('supply_requests', req);
+
+  // Save locally
+  const key = 'supply_reqs_'+cu.name;
+  const local = JSON.parse(localStorage.getItem(key)||'[]');
+  local.unshift(req);
+  localStorage.setItem(key, JSON.stringify(local));
+
+  const ok = document.getElementById('sr-ok');
+  ok.textContent = '✓ تم إرسال طلب توريد "'+snf+'" بعدد '+qty;
+  ok.style.display='block';
+  setTimeout(()=>ok.style.display='none',4000);
+
+  // Reset form
+  document.getElementById('sr-fea').value='';
+  document.getElementById('sr-qty').value='';
+  document.getElementById('sr-date').value='';
+  document.getElementById('sr-note').value='';
+  ['sr-f2','sr-f3','sr-f4'].forEach(id=>document.getElementById(id).style.display='none');
+
+  renderSentSupplyReqs();
+  updateSupplyBadge();
+}
+
+async function renderSentSupplyReqs(){
+  const key = 'supply_reqs_'+(cu?.name||'');
+  let reqs = [];
+
+  // جيب من Supabase
+  try{
+    const remote = await sbSelect('supply_requests', {name: cu?.name||''}, {order:'created_at.desc', limit:20});
+    if(remote && remote.length) reqs = remote;
+    else {
+      // Fallback to localStorage
+      reqs = JSON.parse(localStorage.getItem(key)||'[]');
+    }
+  }catch(e){
+    reqs = JSON.parse(localStorage.getItem(key)||'[]');
+  }
+
+  const list = document.getElementById('sr-sent-list');
+  if(!reqs.length){
+    list.innerHTML='<div class="empty"><i class="ti ti-inbox"></i>لا توجد طلبيات بعد</div>';
+    return;
+  }
+
+  list.innerHTML = reqs.map(r=>{
+    const d = new Date(r.date||r.sentAt);
+    const today = new Date();today.setHours(0,0,0,0);
+    const diff = Math.ceil((d.setHours(0,0,0,0)-today.getTime())/86400000);
+    const tag = diff<0?'<span class="badge b-gray">انتهى الميعاد</span>':
+                diff===0?'<span class="badge b-red">اليوم!</span>':
+                diff===1?'<span class="badge b-orange">غداً</span>':
+                `<span class="badge b-blue">بعد ${diff} أيام</span>`;
+    const statusBadge = r.status==='done'?'<span class="badge b-green">تم التوريد ✓</span>':
+                        r.status==='cancelled'?'<span class="badge b-gray">ملغي</span>':
+                        '<span class="badge b-orange">قيد المعالجة</span>';
+    return `<div style="padding:10px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;background:${r.status==='done'?'#F0FFF4':'#fff'}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+        <div>
+          <div style="font-size:13px;font-weight:700">${r.snf||'—'}</div>
+          <div style="font-size:10px;color:var(--text2)">${r.fea||''} · ${r.cat||''}</div>
+        </div>
+        <div style="text-align:left">
+          <div style="font-size:18px;font-weight:900;color:var(--red)">${r.qty}</div>
+          <div style="font-size:9px;color:var(--text2)">وحدة</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        ${tag} ${statusBadge}
+        <span style="font-size:10px;color:var(--text2)">📅 ${r.date||''}</span>
+      </div>
+      ${r.note?`<div style="font-size:11px;color:var(--text2);margin-top:5px;padding:5px 8px;background:#f9f9f9;border-radius:6px">"${r.note}"</div>`:''}
+    </div>`;
+  }).join('');
+}
+
+function updateSupplyBadge(){
+  const key = 'supply_reqs_'+(cu?.name||'');
+  const reqs = JSON.parse(localStorage.getItem(key)||'[]');
+  const pending = reqs.filter(r=>r.status==='pending').length;
+  const b = document.getElementById('supply-badge');
+  if(b){b.textContent=pending;b.style.display=pending?'block':'none';}
 }
 
 function sendLocation(){
