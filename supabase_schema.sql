@@ -193,3 +193,40 @@ CREATE TABLE IF NOT EXISTS supply_requests (
 
 ALTER TABLE supply_requests ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "public_all" ON supply_requests FOR ALL USING (true) WITH CHECK (true);
+
+-- ══════════════════════════════════════════════════════════════
+-- التحديثات الأمنية — v2.1
+-- ══════════════════════════════════════════════════════════════
+
+-- ── جدول المستخدمين (بديل الباسوردات في الكود) ──────────────
+CREATE TABLE IF NOT EXISTS users (
+  id            BIGSERIAL PRIMARY KEY,
+  name          TEXT NOT NULL,
+  pass_hash     TEXT NOT NULL,
+  role          TEXT NOT NULL DEFAULT 'rep',
+  route         TEXT,
+  grp           TEXT,
+  user_type     TEXT DEFAULT 'متحرك',
+  level         TEXT DEFAULT 'rep',
+  groups        TEXT DEFAULT '',
+  status        TEXT DEFAULT 'active',
+  goal          INTEGER DEFAULT 0,
+  created_at    TIMESTAMPTZ DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "public_all" ON users FOR ALL USING (true) WITH CHECK (true);
+
+-- ── جدول قاعدة الأصناف (PDB) ─────────────────────────────────
+CREATE TABLE IF NOT EXISTS products_db (
+  id         BIGSERIAL PRIMARY KEY,
+  key        TEXT UNIQUE NOT NULL DEFAULT 'pdb',
+  value      TEXT NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE products_db ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "public_all" ON products_db FOR ALL USING (true) WITH CHECK (true);
+
+-- ✅ شغّل ده في Supabase SQL Editor بعد السكيما الأصلية
