@@ -463,6 +463,7 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
             </select>
             <input type="text" id="v-search" placeholder="ابحث عن منسق أو فرع..." oninput="loadVisits()" style="flex:1"/>
             <button class="btn btn-blue btn-sm" onclick="exportVisits()"><i class="ti ti-download"></i> تصدير</button>
+            <button class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C" onclick="clearAllRecords('visits','visits','الزيارات')"><i class="ti ti-trash"></i> مسح الكل</button>
           </div>
           <div class="card">
             <div class="card-title"><i class="ti ti-clipboard-list"></i> سجل الزيارات</div>
@@ -499,6 +500,7 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
               <option value="warning">تحذير (3-4 شهور)</option>
               <option value="ok">سليمة</option>
             </select>
+            <button class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C" onclick="clearAllRecords('products','products','الأصناف')"><i class="ti ti-trash"></i> مسح الكل</button>
           </div>
           <div class="card">
             <div class="card-title"><i class="ti ti-package"></i> سجل الأصناف وحالة الصلاحية</div>
@@ -534,7 +536,8 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
               <div class="card-title"><i class="ti ti-alert-triangle" style="color:var(--orange)"></i> أكثر أسباب الغياب</div>
               <div id="top-reasons"></div>
             </div>
-          </div>
+          
+            <button class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C" onclick="clearAllRecords('missing','missing','النواقص')"><i class="ti ti-trash"></i> مسح الكل</button></div>
           <div class="card">
             <div class="card-title"><i class="ti ti-list"></i> تفاصيل النواقص</div>
             <div class="table-wrap">
@@ -559,7 +562,8 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
               <option value="hyper">الهايبر</option>
             </select>
           </div>
-          <div class="stats-grid" id="att-stats"></div>
+          <div class="stats-grid" id="att-stats">
+            <button class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C" onclick="clearAllRecords('attendance','attendance','الحضور')"><i class="ti ti-trash"></i> مسح الكل</button></div>
           <div class="card">
             <div class="card-title"><i class="ti ti-clock"></i> سجل الحضور والانصراف</div>
             <div class="table-wrap">
@@ -1227,13 +1231,24 @@ async function loadAdminUsers(){
       }));
     } else {
       USERS_DB = {...USERS_DB_FALLBACK};
-      REPS = REPS_FALLBACK;
+      REPS = [...REPS_FALLBACK];
     }
   }catch(e){
     USERS_DB = {...USERS_DB_FALLBACK};
-    REPS = REPS_FALLBACK;
+    REPS = [...REPS_FALLBACK];
     console.warn('loadAdminUsers fallback used');
   }
+  // تطبيق التعديلات المحفوظة محلياً
+  applyRepOverrides();
+}
+
+function applyRepOverrides(){
+  const overrides=JSON.parse(localStorage.getItem('rep_overrides')||'{}');
+  if(!Object.keys(overrides).length) return;
+  Object.entries(overrides).forEach(([oldName, ov])=>{
+    const idx=REPS.findIndex(r=>r.name===oldName);
+    if(idx!==-1) REPS[idx]={...REPS[idx],...ov};
+  });
 }
 
 const GROUPS = {
@@ -1634,6 +1649,43 @@ function filterLocations(){
 // ══════════════════════════════════════════════════════════════
 // VISITS
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// حذف السجلات — صلاحية المدير
+// ══════════════════════════════════════════════════════════════
+async function deleteRecord(table, id, reloadFn){
+  if(!id){alert('لا يوجد ID لهذا السجل');return;}
+  if(!confirm('حذف هذا السجل؟ لا يمكن التراجع.'))return;
+  const ok = await sbDelete(table,{id});
+  if(ok){
+    await refreshAll();
+    if(reloadFn==='visits')     loadVisits();
+    if(reloadFn==='products')   loadProducts();
+    if(reloadFn==='missing')    loadMissing();
+    if(reloadFn==='attendance') loadAttendance();
+    if(reloadFn==='orders')     loadOrders();
+  } else {
+    alert('فشل الحذف — تحقق من الاتصال');
+  }
+}
+
+async function clearAllRecords(table, reloadFn, label){
+  if(!confirm(`⚠️ حذف كل سجلات "${label}"؟\nهذا الإجراء لا يمكن التراجع عنه!`))return;
+  if(!confirm(`تأكيد نهائي — هل أنت متأكد من حذف كل "${label}"؟`))return;
+  try{
+    await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=gte.0`,{
+      method:'DELETE',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    await refreshAll();
+    if(reloadFn==='visits')     loadVisits();
+    if(reloadFn==='products')   loadProducts();
+    if(reloadFn==='missing')    loadMissing();
+    if(reloadFn==='attendance') loadAttendance();
+    if(reloadFn==='orders')     loadOrders();
+    alert(`✓ تم مسح كل سجلات "${label}"`);
+  }catch(e){alert('فشل المسح');}
+}
+
 function loadVisits(){
   const dateVal=document.getElementById('v-date').value;
   const grp=document.getElementById('v-group').value;
@@ -1658,7 +1710,8 @@ function loadVisits(){
       <td><span class="badge ${(v.missing_count||0)>0?'b-red':'b-green'}">${v.missing_count||0}</span></td>
       <td>${spUtil}</td>
       <td><span class="badge b-purple">${v.points||0}</span></td>
-    </tr>`;
+    
+      <td><button onclick="deleteRecord('visits',${v.id},'visits')" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px">🗑</button></td></tr>`;
   }).join('')||'<tr><td colspan="11" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد زيارات</td></tr>';
 }
 
@@ -1729,7 +1782,8 @@ function loadProducts(){
       <td>${expBadge(st)}</td>
       <td>${rafa3Badge}</td>
       <td>${sh&&sh.diff<=2||st&&st.diff<=2?'<span class="badge b-red">تحذير</span>':'<span class="badge b-green">سليم</span>'}</td>
-    </tr>`;
+    
+      <td><button onclick="deleteRecord('products',${p.id},'products')" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px">🗑</button></td></tr>`;
   }).join('')||'<tr><td colspan="10" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات</td></tr>';
 }
 
@@ -1773,7 +1827,8 @@ function loadMissing(){
     <td><span class="badge b-orange">${m.reason||''}</span></td>
     <td style="font-size:11px;color:var(--text2)">${m.note||'—'}</td>
     <td style="font-size:11px">${m.created_at?new Date(m.created_at).toLocaleDateString('ar-EG'):'—'}</td>
-  </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد نواقص</td></tr>';
+  
+      <td><button onclick="deleteRecord('missing',${m.id},'missing')" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px">🗑</button></td></tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد نواقص</td></tr>';
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1803,7 +1858,8 @@ function loadAttendance(){
     <td><span class="badge b-red">${a.time_out||'—'}</span></td>
     <td><b>${a.hours||'—'}</b> ساعة</td>
     <td>${mapUrl(a.lat_in,a.lng_in)}</td>
-  </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات</td></tr>';
+  
+      <td><button onclick="deleteRecord('attendance',${a.id},'attendance')" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px">🗑</button></td></tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات</td></tr>';
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2053,18 +2109,20 @@ async function editUser(){
   const status=document.getElementById('eu-status')?document.getElementById('eu-status').value:'active';
   if(!name)return;
 
-  // تحديث في Supabase
+  // 1. حفظ في localStorage كـ override يبقى بعد الريفريش
+  const overrides=JSON.parse(localStorage.getItem('rep_overrides')||'{}');
+  overrides[oldName]={name,pass,route,group,type,goal,status};
+  if(oldName!==name) overrides[name]=overrides[oldName];
+  localStorage.setItem('rep_overrides',JSON.stringify(overrides));
+
+  // 2. تحديث في Supabase لو الجدول موجود
   try{
     const r=REPS.find(x=>x.name===oldName);
-    if(r && r.id){
-      await sbUpdate('users',{id:r.id},{name,pass_hash:pass,route,grp:group,user_type:type,goal,status});
-    } else {
-      // البحث بالاسم لو مفيش id
-      await sbUpdateByName('users',oldName,{name,pass_hash:pass,route,grp:group,user_type:type,goal,status});
-    }
-  }catch(e){console.warn('Supabase update failed, local only');}
+    if(r&&r.id) await sbUpdate('users',{id:r.id},{name,pass_hash:pass,route,grp:group,user_type:type,goal,status});
+    else         await sbUpdateByName('users',oldName,{name,pass_hash:pass,route,grp:group,user_type:type,goal,status});
+  }catch(e){console.warn('Supabase update failed, saved locally');}
 
-  // تحديث في REPS المحلي
+  // 3. تحديث في REPS المحلي
   const repIdx=REPS.findIndex(x=>x.name===oldName);
   if(repIdx!==-1) REPS[repIdx]={...REPS[repIdx],name,pass,route,group,type,goal,status};
 
