@@ -976,6 +976,17 @@ async function sbD(table,match){
   }catch(e){return false;}
 }
 
+async function sbUp(table,match,data){
+  try{
+    const q=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join('&');
+    const r=await fetch(`${SB_URL}/rest/v1/${table}?${q}`,{
+      method:'PATCH',
+      headers:{'apikey':SB_KEY,'Authorization':`Bearer ${SB_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'},
+      body:JSON.stringify(data)
+    });return r.ok;
+  }catch(e){return false;}
+}
+
 // ══════════════════════════════════════════════════════════════
 // AUTH
 // ══════════════════════════════════════════════════════════════
@@ -1039,7 +1050,7 @@ function showPanel(id, el){
 // REFRESH
 // ══════════════════════════════════════════════════════════════
 async function refreshAll(){
-  const[visits,products,missing,attendance,location,messages,holidays]=await Promise.all([
+  const[visits,products,missing,attendance,location,messages,holidays,usersData]=await Promise.all([
     sb('visits',{},{order:'created_at.desc'}),
     sb('products',{},{order:'created_at.desc'}),
     sb('missing',{},{order:'created_at.desc'}),
@@ -1047,11 +1058,20 @@ async function refreshAll(){
     sb('location'),
     sb('messages',{},{order:'created_at.desc'}),
     sb('holidays',{},{order:'date.asc'}),
+    sb('users',{status:'active'}).catch(()=>[]),
   ]);
   DB={visits,products,missing,attendance,location,messages,holidays};
+  // تحديث USERS_LIST من Supabase لو فيه بيانات
+  if(usersData && usersData.length){
+    USERS_LIST = usersData.map(u=>({
+      id:u.id, name:u.name, pass:u.pass_hash, role:u.role==='rep'?'منسق':(u.role==='supervisor'?'مشرف':'مدير'),
+      route:u.route||'', group:u.grp||'', type:u.user_type||'متحرك',
+      goal:u.goal||0, status:u.status||'active', groups:u.groups||''
+    }));
+    saveUsers();
+  }
   const now=new Date();
   document.getElementById('last-update').textContent='آخر تحديث: '+now.toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'});
-  // Refresh current panel
   const active=document.querySelector('.panel.active');
   if(active) showPanel(active.id.replace('panel-',''), null);
 }
@@ -1151,61 +1171,73 @@ function onRoleChange(){
   document.getElementById('nu-goal-wrap').style.display=show?'block':'none';
 }
 
-function addUser(){
+async function addUser(){
   const name=document.getElementById('nu-name').value.trim();
   const pass=document.getElementById('nu-pass').value.trim();
   if(!name||!pass){alert('أدخل الاسم والباسورد');return;}
+  const roleVal=document.getElementById('nu-role').value;
+  const grp=document.getElementById('nu-group').value;
   const user={
-    id:'U'+Date.now(), name, pass,
-    role:document.getElementById('nu-role').value,
+    name, pass_hash:pass,
+    role: roleVal==='rep'||roleVal==='rep_fixed'?'rep':'supervisor',
+    user_type: roleVal==='rep_fixed'?'ثابت':'متحرك',
     route:document.getElementById('nu-route').value.trim(),
-    group:document.getElementById('nu-group').value,
+    grp, groups:grp,
     goal:parseInt(document.getElementById('nu-goal').value)||1,
-    status:'active',
-    createdAt:new Date().toISOString(),
+    status:'active', level:'rep',
   };
-  USERS_LIST.push(user);
-  saveUsers();
-  showOk('nu-ok','✓ تم إضافة '+name);
+  try{
+    await sbI('users', user);
+    showOk('nu-ok','✓ تم إضافة '+name+' في Supabase');
+  }catch(e){
+    // fallback to localStorage
+    USERS_LIST.push({id:'U'+Date.now(),...user,pass:pass,group:grp});
+    saveUsers();
+    showOk('nu-ok','✓ تم الحفظ محلياً (تحقق من اتصال Supabase)');
+  }
   document.getElementById('nu-name').value='';document.getElementById('nu-pass').value='';
   document.getElementById('nu-route').value='';document.getElementById('nu-goal').value='';
-  loadUsers();
-  populateRepSelect();
+  await refreshAll();loadUsers();populateRepSelect();
 }
 
-function editUser(){
+async function editUser(){
   const idx=parseInt(document.getElementById('eu-idx').value);
-  USERS_LIST[idx]={
-    ...USERS_LIST[idx],
+  const u=USERS_LIST[idx];
+  const updated={
     name:document.getElementById('eu-name').value.trim(),
-    pass:document.getElementById('eu-pass').value.trim(),
+    pass_hash:document.getElementById('eu-pass').value.trim(),
     route:document.getElementById('eu-route').value.trim(),
-    group:document.getElementById('eu-group').value,
+    grp:document.getElementById('eu-group').value,
     goal:parseInt(document.getElementById('eu-goal').value)||1,
     status:document.getElementById('eu-status').value,
   };
+  try{
+    if(u.id) await sbUp('users',{id:u.id}, updated);
+  }catch(e){console.warn('Supabase update failed, local only');}
+  USERS_LIST[idx]={...USERS_LIST[idx],...updated,pass:updated.pass_hash,group:updated.grp};
   saveUsers();
   closeModal('modal-edit-user');
-  loadUsers();
-  populateRepSelect();
+  await refreshAll();loadUsers();populateRepSelect();
 }
 
 function openEditUser(idx){
   const u=USERS_LIST[idx];
   document.getElementById('eu-idx').value=idx;
   document.getElementById('eu-name').value=u.name;
-  document.getElementById('eu-pass').value=u.pass;
+  document.getElementById('eu-pass').value=u.pass||u.pass_hash||'';
   document.getElementById('eu-route').value=u.route||'';
-  document.getElementById('eu-group').value=u.group||'giza';
+  document.getElementById('eu-group').value=u.group||u.grp||'giza';
   document.getElementById('eu-goal').value=u.goal||1;
   document.getElementById('eu-status').value=u.status||'active';
   openModal('modal-edit-user');
 }
 
-function deleteUser(idx){
+async function deleteUser(idx){
   if(!confirm('حذف المستخدم؟ لا يمكن التراجع.'))return;
+  const u=USERS_LIST[idx];
+  try{if(u.id) await sbD('users',{id:u.id});}catch(e){console.warn('Supabase delete failed');}
   USERS_LIST.splice(idx,1);
-  saveUsers();loadUsers();populateRepSelect();
+  saveUsers();await refreshAll();loadUsers();populateRepSelect();
 }
 
 function toggleUserStatus(idx){

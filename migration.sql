@@ -1,15 +1,20 @@
 -- ══════════════════════════════════════════════════════════════
--- MIGRATION SCRIPT — نقل كل المستخدمين لجدول users
+-- MIGRATION SCRIPT — من الإكسيل الرسمي
 -- الطحان للتمور | منسق بلس v2.1
 -- شغّل ده في Supabase SQL Editor
 -- ══════════════════════════════════════════════════════════════
 
--- ── المنسقون (role = rep) ─────────────────────────────────────
+-- امسح القديم لو موجود عشان تبدأ نظيف
+DELETE FROM users WHERE role = 'rep';
+DELETE FROM users WHERE role = 'supervisor';
+
+-- ── المنسقون (40 منسق من الإكسيل) ───────────────────────────
 INSERT INTO users (name, pass_hash, role, route, grp, user_type, level, groups, status, goal) VALUES
 ('هاني طارق فتحى',              '1429', 'rep', 'خط سير 6اكتوبر',                              'giza',    'متحرك', 'rep', 'giza',    'active', 19),
 ('عبد الرحمن ياسر احمد',        '2150', 'rep', 'خط سير الشيخ زايد',                           'giza',    'متحرك', 'rep', 'giza',    'active', 19),
 ('يوسف عبد الرزاق محمد',        '1687', 'rep', 'خط سير حدائق الاهرام وحدائق اكتوبر',          'giza',    'متحرك', 'rep', 'giza',    'active', 20),
 ('عمرو محمد على',               '1676', 'rep', 'خط سير الهرم',                                'giza',    'متحرك', 'rep', 'giza',    'active', 14),
+('تحت التعيين',                 '1234', 'rep', 'خط سير فيصل',                                 'giza',    'متحرك', 'rep', 'giza',    'active', 0),
 ('احمد هيثم درويش',             '1944', 'rep', 'خط سير العمرانيه',                            'giza',    'متحرك', 'rep', 'giza',    'active', 13),
 ('محمد معتز محمد',              '2119', 'rep', 'خط سير الدقى',                                'giza',    'متحرك', 'rep', 'giza',    'active', 13),
 ('محمد عمر محمد',               '1591', 'rep', 'خط سير المهندسين',                            'giza',    'متحرك', 'rep', 'giza',    'active', 18),
@@ -23,9 +28,11 @@ INSERT INTO users (name, pass_hash, role, route, grp, user_type, level, groups, 
 ('احمد عبد المجيد انور',        '2240', 'rep', 'خط سير شبرا وقليوب',                           'cairo',   'متحرك', 'rep', 'cairo',   'active', 27),
 ('محمد سيد فهمي عبد الحميد',    '1606', 'rep', 'خط سير التجمع الخامس',                         'tajmuat', 'متحرك', 'rep', 'tajmuat', 'active', 11),
 ('محمود عبد الكريم',            '2323', 'rep', 'خط سير التجمع الثالث',                         'tajmuat', 'متحرك', 'rep', 'tajmuat', 'active', 15),
+('تحت التعيين',                 '4321', 'rep', 'خط سير التجمع الاول',                          'tajmuat', 'متحرك', 'rep', 'tajmuat', 'active', 0),
 ('اسلام رضا سعد',               '1969', 'rep', 'خط سير العبور والشروق',                        'tajmuat', 'متحرك', 'rep', 'tajmuat', 'active', 17),
 ('احمد صلاح سالم',              '2174', 'rep', 'خط سير الرحاب',                               'tajmuat', 'متحرك', 'rep', 'tajmuat', 'active', 6),
 ('محمد احمد احمد كامل',         '1332', 'rep', 'خط سير مدينتي',                               'tajmuat', 'متحرك', 'rep', 'tajmuat', 'active', 10),
+('تحت التعيين',                 '2341', 'rep', 'اوسكار - التجمع',                              'tajmuat', 'ثابت',  'rep', 'tajmuat', 'active', 0),
 ('حمزه محمود عبد الفتاح',       '2118', 'rep', 'اسواق فتح الله - الرحاب',                      'tajmuat', 'ثابت',  'rep', 'tajmuat', 'active', 2),
 ('محمود احمد محمد',             '2295', 'rep', 'كارفور C F C',                                 'hyper',   'ثابت',  'rep', 'hyper',   'active', 1),
 ('احمد فوزي محمد عبد الخالق',   '1402', 'rep', 'كارفور C F C',                                 'hyper',   'ثابت',  'rep', 'hyper',   'active', 1),
@@ -41,10 +48,10 @@ INSERT INTO users (name, pass_hash, role, route, grp, user_type, level, groups, 
 ('يوسف محمد محمود',             '2280', 'rep', 'كارفور الماظه',                                'hyper',   'ثابت',  'rep', 'hyper',   'active', 1),
 ('محمد اشرف سعد',               '1088', 'rep', 'هايبروان العاشر',                              'hyper',   'ثابت',  'rep', 'hyper',   'active', 1),
 ('محمد عماد محمد',              '2282', 'rep', 'كارفور العبور',                                'hyper',   'ثابت',  'rep', 'hyper',   'active', 1),
-('على احمد عبد البديع',         '1835', 'rep', 'مول مصر',                                      'hyper',   'ثابت',  'rep', 'hyper',   'active', 1)
-ON CONFLICT DO NOTHING;
+('على احمد عبد البديع',         '1835', 'rep', 'مول مصر',                                      'hyper',   'ثابت',  'rep', 'hyper',   'active', 1),
+('تحت التعيين',                 '1234', 'rep', 'جمله صلاح سالم',                               'hyper',   'ثابت',  'rep', 'hyper',   'active', 0);
 
--- ── المشرفون والمديرون (role = supervisor / manager) ──────────
+-- ── المشرفون والمديرون ────────────────────────────────────────
 INSERT INTO users (name, pass_hash, role, route, grp, user_type, level, groups, status, goal) VALUES
 ('احمد برغوت',               '1412', 'supervisor', NULL, NULL, 'مكتبي', 'gm',  'giza,cairo,south,tajmuat,hyper', 'active', 0),
 ('هيثم درويش',               '1980', 'supervisor', NULL, NULL, 'مكتبي', 'gm',  'giza,cairo,south,tajmuat,hyper', 'active', 0),
@@ -53,8 +60,7 @@ INSERT INTO users (name, pass_hash, role, route, grp, user_type, level, groups, 
 ('احمد علاء هنداوى',          '974',  'supervisor', NULL, NULL, 'مكتبي', 'sup', 'cairo',                          'active', 0),
 ('مصطفى مهدى يوسف',           '703',  'supervisor', NULL, NULL, 'مكتبي', 'sup', 'south',                          'active', 0),
 ('عمر احمد عبد العظيم',       '318',  'supervisor', NULL, NULL, 'مكتبي', 'sup', 'tajmuat',                        'active', 0),
-('عبد العظيم محمد عبد العظيم','775',  'supervisor', NULL, NULL, 'مكتبي', 'sup', 'hyper',                          'active', 0)
-ON CONFLICT DO NOTHING;
+('عبد العظيم محمد عبد العظيم','775',  'supervisor', NULL, NULL, 'مكتبي', 'sup', 'hyper',                          'active', 0);
 
 -- ✅ تحقق من النتيجة
-SELECT role, count(*) FROM users GROUP BY role;
+SELECT role, count(*) as العدد FROM users GROUP BY role ORDER BY role;
