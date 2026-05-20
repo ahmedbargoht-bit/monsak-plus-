@@ -677,27 +677,13 @@ async function doLogin(){
   const err=document.getElementById('l-err');
   if(!name){err.textContent='اختر اسمك';err.style.display='block';return;}
   if(!pass){err.textContent='أدخل الباسورد';err.style.display='block';return;}
+  // جيب البيانات المحدثة من Supabase أولاً
+  await loadRepsFromCloud();
   const rep=REPS.find(r=>r.name===name);
   if(!rep||rep.pass!==pass){err.style.display='block';return;}
   err.style.display='none';
 
-  // جيب البيانات المحدثة من Supabase لو موجودة
-  let freshRep = rep;
-  try{
-    const url=`${SUPABASE_URL}/rest/v1/users?select=*&name=eq.${encodeURIComponent(name)}&limit=1`;
-    const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    if(res.ok){
-      const data=await res.json();
-      if(Array.isArray(data)&&data.length){
-        const u=data[0];
-        freshRep={
-          name:u.name, route:u.route||rep.route, group:u.grp||rep.group,
-          type:u.user_type||rep.type, goal:u.goal||rep.goal||0
-        };
-      }
-    }
-  }catch(e){ /* يكمل بالبيانات المحلية */ }
-
+  const freshRep = REPS.find(r=>r.name===name) || rep;
   cu={name,route:freshRep.route,group:freshRep.group,coordType:freshRep.type,score:0};
   document.getElementById('top-user').textContent=name;
   document.getElementById('f-route-disp').textContent=freshRep.route;
@@ -732,6 +718,40 @@ async function loadPDBFromCloud(){
     // لو مفيش جدول أو بيانات — يكمل بالـ PDB المدمج عادي
     console.warn('Using built-in PDB');
   }
+}
+
+async function loadRepsFromCloud(){
+  // جيب بيانات المنسقين المحدثة من Supabase
+  try{
+    // أولاً: جرب جدول users
+    const url=`${SUPABASE_URL}/rest/v1/users?select=*&role=eq.rep&status=eq.active&limit=200`;
+    const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    if(res.ok){
+      const data=await res.json();
+      if(Array.isArray(data)&&data.length){
+        // حدّث REPS بالبيانات الجديدة
+        data.forEach(u=>{
+          const idx=REPS.findIndex(r=>r.name===u.name);
+          const updated={name:u.name,route:u.route||'',group:u.grp||'',type:u.user_type||'متحرك',pass:u.pass_hash||'',goal:u.goal||0};
+          if(idx!==-1) REPS[idx]={...REPS[idx],...updated};
+          else REPS.push(updated);
+        });
+        console.log('✅ REPS updated from Supabase users');
+        return;
+      }
+    }
+    // ثانياً: جرب products_db بـ key='reps'
+    const res2=await sbSelect('products_db',{key:'reps'});
+    if(res2&&res2[0]&&res2[0].value){
+      const cloudReps=JSON.parse(res2[0].value);
+      cloudReps.forEach(u=>{
+        const idx=REPS.findIndex(r=>r.name===u.name);
+        if(idx!==-1) REPS[idx]={...REPS[idx],...u};
+        else REPS.push(u);
+      });
+      console.log('✅ REPS updated from products_db');
+    }
+  }catch(e){ console.warn('Using built-in REPS'); }
 }
 
 function updateOnlineStatus(isOnline){
