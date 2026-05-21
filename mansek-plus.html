@@ -277,7 +277,7 @@ CREATE TABLE visits (
         <div class="gps-dot pulse" id="gpsDot"></div>
         <span id="gpsStatus">في انتظار إشارة GPS...</span>
     </div>
-    <button class="btn btn-checkin" id="btnCheckin" onclick="handleAction('checkin')" disabled>
+    <button class="btn btn-checkin" id="btnCheckin" onclick="handleAction('checkin')">
         📲 تسجيل دخول
     </button>
 </div>
@@ -345,6 +345,7 @@ function saveConfig() {
 
 /* ── 2. GPS ── */
 let lastPosition = null;
+const GPS_THRESHOLD = 200; // رفعنا الحد لـ 200م عشان يشتغل داخل المباني
 
 function startGPSWatch() {
     if (!navigator.geolocation) return setGPSStatus('GPS غير مدعوم', false);
@@ -352,15 +353,16 @@ function startGPSWatch() {
         (pos) => {
             lastPosition = pos;
             const acc  = Math.round(pos.coords.accuracy);
-            const good = acc <= 100;
-            setGPSStatus(`دقة الموقع: ${acc}م ${good ? '✔' : '— ضعيفة، تحرك للخارج'}`, good);
+            const good = acc <= GPS_THRESHOLD;
+            setGPSStatus(`دقة الموقع: ${acc}م ${good ? '✔' : '— ضعيفة جداً'}`, good);
             document.getElementById('btnCheckin').disabled = !good;
         },
         () => {
             setGPSStatus('تعذّر الحصول على الموقع — فعّل GPS', false);
-            document.getElementById('btnCheckin').disabled = true;
+            // لا نعطّل الزر تماماً — نسمح بالمتابعة بدون GPS
+            document.getElementById('btnCheckin').disabled = false;
         },
-        { enableHighAccuracy: true, maximumAge: 5000 }
+        { enableHighAccuracy: true, maximumAge: 10000 }
     );
 }
 
@@ -371,12 +373,13 @@ function setGPSStatus(msg, good) {
 }
 
 function getValidLocation() {
-    return new Promise((resolve, reject) => {
-        if (lastPosition && lastPosition.coords.accuracy <= 100) { resolve(lastPosition); return; }
+    return new Promise((resolve) => {
+        // نرجع الموقع المتاح حتى لو دقته أقل — لا نرفض
+        if (lastPosition) { resolve(lastPosition); return; }
         navigator.geolocation.getCurrentPosition(
-            (pos) => pos.coords.accuracy <= 100 ? resolve(pos) : reject(`دقة ضعيفة (${Math.round(pos.coords.accuracy)}م)`),
-            () => reject('يرجى تفعيل الـ GPS'),
-            { enableHighAccuracy: true, timeout: 12000 }
+            (pos) => resolve(pos),
+            () => resolve(null), // لو مفيش GPS نكمل بدونه
+            { enableHighAccuracy: true, timeout: 10000 }
         );
     });
 }
@@ -432,8 +435,8 @@ async function handleAction(type) {
     showLoader(true, 'جاري تحديد الموقع...');
     try {
         const pos      = await getValidLocation();
-        const lat      = pos.coords.latitude;
-        const lng      = pos.coords.longitude;
+        const lat      = pos?.coords?.latitude  || null;
+        const lng      = pos?.coords?.longitude || null;
         const accuracy = pos.coords.accuracy;
         const today    = new Date().toISOString().split('T')[0];
         const timeNow  = new Date().toLocaleTimeString('ar-EG');
