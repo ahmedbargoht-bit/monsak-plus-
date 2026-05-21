@@ -233,6 +233,16 @@ body{
 .group-pts{font-size:20px;font-weight:900}
 .group-visits{font-size:10px;color:rgba(255,255,255,.4);margin-top:1px}
 
+.gf-btn{
+  background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);
+  color:rgba(255,255,255,.6);border-radius:999px;padding:4px 12px;
+  font-size:11px;font-family:'Cairo',sans-serif;cursor:pointer;transition:all .2s;
+}
+.gf-btn.active,.gf-btn:hover{
+  background:rgba(255,199,44,.15);border-color:rgba(255,199,44,.4);
+  color:#FFC72C;
+}
+
 /* ── Ticker ───────────────────────────────────────────────── */
 .ticker{
   background:rgba(255,199,44,.08);
@@ -310,8 +320,17 @@ body{
     <!-- Leaderboard List -->
     <div class="lb-panel">
       <div class="lb-panel-header">
-        <span>🏅</span> ترتيب المنسقين — الإجمالي
+        <span>🏅</span> ترتيب المنسقين
         <span style="margin-right:auto;font-size:10px;color:rgba(255,255,255,.3)" id="lb-count"></span>
+      </div>
+      <!-- فلتر المجموعة -->
+      <div id="group-filter" style="display:flex;gap:6px;padding:8px 12px;flex-wrap:wrap;border-bottom:1px solid rgba(255,255,255,.06)">
+        <button class="gf-btn active" onclick="setFilter('all')" data-g="all">الكل</button>
+        <button class="gf-btn" onclick="setFilter('giza')" data-g="giza">🔵 الجيزة</button>
+        <button class="gf-btn" onclick="setFilter('cairo')" data-g="cairo">🟢 القاهرة</button>
+        <button class="gf-btn" onclick="setFilter('south')" data-g="south">🔴 جنوب</button>
+        <button class="gf-btn" onclick="setFilter('tajmuat')" data-g="tajmuat">🟡 التجمعات</button>
+        <button class="gf-btn" onclick="setFilter('hyper')" data-g="hyper">🟣 الهايبر</button>
       </div>
       <div class="lb-list" id="lb-list"></div>
     </div>
@@ -319,6 +338,14 @@ body{
     <!-- Groups -->
     <div class="groups-panel" id="groups-panel"></div>
 
+  </div>
+
+  <!-- Rep Details Modal -->
+  <div id="rep-modal" style="display:none;position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.7);backdrop-filter:blur(6px);align-items:center;justify-content:center">
+    <div style="background:#0D1B2A;border:1px solid rgba(255,255,255,.12);border-radius:20px;padding:24px;width:90%;max-width:420px;position:relative">
+      <button onclick="closeRepModal()" style="position:absolute;top:12px;left:12px;background:rgba(255,255,255,.08);border:none;color:#fff;border-radius:50%;width:32px;height:32px;cursor:pointer;font-size:16px">✕</button>
+      <div id="rep-modal-content"></div>
+    </div>
   </div>
 
   <!-- Ticker -->
@@ -366,10 +393,11 @@ async function sbSelect(table, params={}, opts={}){
 // DATA PROCESSING
 // ══════════════════════════════════════════════════════════════
 async function loadData(){
-  const [visits, missing, locs] = await Promise.all([
-    sbSelect('visits',  {}, {limit:2000}),
-    sbSelect('missing', {}, {limit:1000}),
-    sbSelect('location',{}, {limit:200}),
+  const [visits, missing, locs, att] = await Promise.all([
+    sbSelect('visits',     {}, {limit:2000}),
+    sbSelect('missing',    {}, {limit:1000}),
+    sbSelect('location',   {}, {limit:200}),
+    sbSelect('attendance', {}, {limit:500}),
   ]);
 
   const today = new Date().toLocaleDateString('ar-EG');
@@ -403,15 +431,137 @@ async function loadData(){
     if(v.name) groupStats[v.grp].reps.add(v.name);
   });
 
-  return {lb, todayVisits, todayMissing, online, groupStats, locs};
+  return {lb, todayVisits, todayMissing, online, groupStats, locs, visits, missing, att};
 }
 
 // ══════════════════════════════════════════════════════════════
-// RENDER
+// FILTER & REP DETAILS
 // ══════════════════════════════════════════════════════════════
+let currentFilter = 'all';
+let cachedLB = [];
+let cachedVisits = [];
+let cachedMissing = [];
+let cachedAtt = [];
+
+function setFilter(grp){
+  currentFilter = grp;
+  document.querySelectorAll('.gf-btn').forEach(b=>b.classList.toggle('active', b.dataset.g===grp));
+  renderList();
+}
+
+function renderList(){
+  const filtered = currentFilter==='all' ? cachedLB : cachedLB.filter(r=>r.group===currentFilter);
+  const max = filtered[0]?.score||1;
+  document.getElementById('lb-count').textContent = filtered.length + ' منسق';
+  document.getElementById('lb-list').innerHTML = filtered.map((r,i)=>{
+    const rankCls = i===0?'rank-1':i===1?'rank-2':i===2?'rank-3':'rank-n';
+    const rowCls  = i===0?'top1':i===1?'top2':i===2?'top3':'';
+    const gc      = GROUPS[r.group]?.color||'#005CBF';
+    const ini     = r.name.split(' ').map(w=>w[0]).join('').slice(0,2);
+    const pct     = Math.round(r.score/max*100);
+    const medal   = i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
+    return `<div class="lb-row ${rowCls} animate-in" style="animation-delay:${i*.04}s;cursor:pointer" onclick="showRepDetails('${r.name.replace(/'/g,"\\'")}')">
+      <div class="lb-rank ${rankCls}">${medal||i+1}</div>
+      <div class="lb-av" style="background:${gc}33;color:${gc}">${ini}</div>
+      <div class="lb-info">
+        <div class="lb-name">${r.name}</div>
+        <div class="lb-route">${r.route||''} · ${r.visits||0} زيارة</div>
+      </div>
+      <div class="lb-bar-wrap"><div class="lb-bar" style="width:${pct}%;background:${gc}"></div></div>
+      <div class="lb-pts" style="color:${i===0?'var(--gold)':i===1?'var(--silver)':i===2?'var(--bronze)':'rgba(255,255,255,.7)'}">${r.score}</div>
+    </div>`;
+  }).join('');
+}
+
+function showRepDetails(name){
+  const rep = cachedLB.find(r=>r.name===name);
+  if(!rep) return;
+  const gc = GROUPS[rep.group]?.color||'#005CBF';
+  const ini = rep.name.split(' ').map(w=>w[0]).join('').slice(0,2);
+  const rank = cachedLB.findIndex(r=>r.name===name)+1;
+
+  // زيارات المنسق
+  const repVisits = cachedVisits.filter(v=>v.name===name);
+  const today = new Date().toLocaleDateString('ar-EG');
+  const todayV = repVisits.filter(v=>v.date===today);
+
+  // حضور
+  const repAtt = cachedAtt.filter(a=>a.name===name);
+  const lastAtt = repAtt[0];
+
+  // نواقص
+  const repMiss = cachedMissing.filter(m=>m.name===name);
+
+  // آخر زيارة
+  const lastVisit = repVisits[0];
+
+  const modal = document.getElementById('rep-modal');
+  document.getElementById('rep-modal-content').innerHTML = `
+    <div style="text-align:center;margin-bottom:20px">
+      <div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,${gc}88,${gc});display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;color:#fff;margin:0 auto 12px">${ini}</div>
+      <div style="font-size:18px;font-weight:900;color:#fff">${rep.name}</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.4);margin-top:4px">${rep.route||''}</div>
+      <div style="display:inline-block;background:${gc}22;color:${gc};border-radius:999px;padding:3px 12px;font-size:11px;margin-top:6px">${GROUPS[rep.group]?.label||rep.group}</div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px">
+      <div style="background:rgba(255,255,255,.05);border-radius:12px;padding:12px;text-align:center">
+        <div style="font-size:22px;font-weight:900;color:${gc}">${rep.score}</div>
+        <div style="font-size:10px;color:rgba(255,255,255,.4)">نقطة</div>
+      </div>
+      <div style="background:rgba(255,255,255,.05);border-radius:12px;padding:12px;text-align:center">
+        <div style="font-size:22px;font-weight:900;color:#FFC72C">${rep.visits||0}</div>
+        <div style="font-size:10px;color:rgba(255,255,255,.4)">زيارة</div>
+      </div>
+      <div style="background:rgba(255,255,255,.05);border-radius:12px;padding:12px;text-align:center">
+        <div style="font-size:22px;font-weight:900;color:#D62828">${repMiss.length}</div>
+        <div style="font-size:10px;color:rgba(255,255,255,.4)">ناقص</div>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:rgba(255,255,255,.04);border-radius:10px">
+        <span style="font-size:12px;color:rgba(255,255,255,.5)">الترتيب العام</span>
+        <span style="font-size:14px;font-weight:700;color:#FFC72C">#${rank}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:rgba(255,255,255,.04);border-radius:10px">
+        <span style="font-size:12px;color:rgba(255,255,255,.5)">زيارات اليوم</span>
+        <span style="font-size:14px;font-weight:700;color:#1A7A4A">${todayV.length}</span>
+      </div>
+      ${lastVisit ? `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:rgba(255,255,255,.04);border-radius:10px">
+        <span style="font-size:12px;color:rgba(255,255,255,.5)">آخر زيارة</span>
+        <span style="font-size:12px;font-weight:600;color:#fff">${lastVisit.branch||''} — ${lastVisit.date||''}</span>
+      </div>` : ''}
+      ${lastAtt ? `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:rgba(255,255,255,.04);border-radius:10px">
+        <span style="font-size:12px;color:rgba(255,255,255,.5)">الحضور</span>
+        <span style="font-size:12px;font-weight:600;color:#fff">دخول ${lastAtt.time_in||''} — خروج ${lastAtt.time_out||'—'}</span>
+      </div>` : ''}
+    </div>
+  `;
+  modal.style.display='flex';
+}
+
+function closeRepModal(){
+  document.getElementById('rep-modal').style.display='none';
+}
+
+// إغلاق بالضغط برا
+document.getElementById('rep-modal').addEventListener('click', function(e){
+  if(e.target===this) closeRepModal();
+});
+
+
 async function render(){
   const data = await loadData();
-  const {lb, todayVisits, todayMissing, online, groupStats} = data;
+  const {lb, todayVisits, todayMissing, online, groupStats, visits, missing, att} = data;
+
+  // حفظ البيانات في الكاش للاستخدام في التفاصيل والفلتر
+  cachedLB = lb;
+  cachedVisits = visits;
+  cachedMissing = missing;
+  cachedAtt = att;
 
   // ── Stats ──────────────────────────────────────────────────
   document.getElementById('s-reps').textContent    = lb.length;
@@ -431,7 +581,7 @@ async function render(){
     const ini = r.name.split(' ').map(w=>w[0]).join('').slice(0,2);
     const gc  = GROUPS[r.group]?.color||'#005CBF';
     const realIdx = order.indexOf(r)===1?0:order.indexOf(r)===0?1:2;
-    return `<div class="podium-item ${podPos[i]}">
+    return `<div class="podium-item ${podPos[i]}" style="cursor:pointer" onclick="showRepDetails('${r.name.replace(/'/g, '\\'')}')">
       <div class="pod-avatar" style="background:linear-gradient(135deg,${gc}88,${gc})">
         ${crowns[i]?`<span class="pod-crown">${crowns[i]}</span>`:''}
         ${ini}
@@ -443,34 +593,15 @@ async function render(){
     </div>`;
   }).join('');
 
-  // ── Leaderboard List ───────────────────────────────────────
-  const max = lb[0]?.score||1;
-  document.getElementById('lb-count').textContent = lb.length + ' منسق';
-  document.getElementById('lb-list').innerHTML = lb.map((r,i)=>{
-    const rankCls = i===0?'rank-1':i===1?'rank-2':i===2?'rank-3':'rank-n';
-    const rowCls  = i===0?'top1':i===1?'top2':i===2?'top3':'';
-    const gc      = GROUPS[r.group]?.color||'#005CBF';
-    const ini     = r.name.split(' ').map(w=>w[0]).join('').slice(0,2);
-    const pct     = Math.round(r.score/max*100);
-    const medal   = i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
-    return `<div class="lb-row ${rowCls} animate-in" style="animation-delay:${i*.04}s">
-      <div class="lb-rank ${rankCls}">${medal||i+1}</div>
-      <div class="lb-av" style="background:${gc}33;color:${gc}">${ini}</div>
-      <div class="lb-info">
-        <div class="lb-name">${r.name}</div>
-        <div class="lb-route">${r.route||''} · ${r.visits||0} زيارة</div>
-      </div>
-      <div class="lb-bar-wrap"><div class="lb-bar" style="width:${pct}%;background:${gc}"></div></div>
-      <div class="lb-pts" style="color:${i===0?'var(--gold)':i===1?'var(--silver)':i===2?'var(--bronze)':'rgba(255,255,255,.7)'}">${r.score}</div>
-    </div>`;
-  }).join('');
+  // ── List ───────────────────────────────────────────────────
+  renderList();
 
   // ── Groups ─────────────────────────────────────────────────
   const maxGrpPts = Math.max(...Object.values(groupStats).map(g=>g.pts),1);
   document.getElementById('groups-panel').innerHTML = Object.entries(GROUPS).map(([gid,g])=>{
     const gs  = groupStats[gid]||{pts:0,visits:0,reps:new Set()};
     const pct = Math.round(gs.pts/maxGrpPts*100);
-    return `<div class="group-card">
+    return `<div class="group-card" style="cursor:pointer" onclick="setFilter('${gid}')">
       <div class="group-dot" style="background:${g.color};box-shadow:0 0 8px ${g.color}66"></div>
       <div class="group-info">
         <div class="group-name" style="color:${g.color}">${g.label}</div>
