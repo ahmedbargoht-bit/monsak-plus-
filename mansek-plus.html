@@ -350,25 +350,19 @@ const SB_KEY = 'sb_publishable_1MSr3avIfgV5chBV7gn2Pw_iqIrMFIp';
     if (!db) initDB(url, key);
 })();
 
-/* ── 2. GPS ── */
+/* ── 2. GPS — معطّل ── */
 let lastPosition = null;
-const GPS_THRESHOLD = 200; // رفعنا الحد لـ 200م عشان يشتغل داخل المباني
 
 function startGPSWatch() {
-    if (!navigator.geolocation) return setGPSStatus('GPS غير مدعوم', false);
+    // GPS اختياري — مش بيأثر على تسجيل الحضور
+    if (!navigator.geolocation) return;
     navigator.geolocation.watchPosition(
         (pos) => {
             lastPosition = pos;
-            const acc  = Math.round(pos.coords.accuracy);
-            const good = acc <= GPS_THRESHOLD;
-            setGPSStatus(`دقة الموقع: ${acc}م ${good ? '✔' : '— ضعيفة جداً'}`, good);
-            document.getElementById('btnCheckin').disabled = !good;
+            const acc = Math.round(pos.coords.accuracy);
+            setGPSStatus(`دقة الموقع: ${acc}م ✔`, true);
         },
-        () => {
-            setGPSStatus('تعذّر الحصول على الموقع — فعّل GPS', false);
-            // لا نعطّل الزر تماماً — نسمح بالمتابعة بدون GPS
-            document.getElementById('btnCheckin').disabled = false;
-        },
+        () => setGPSStatus('GPS غير متاح', false),
         { enableHighAccuracy: true, maximumAge: 10000 }
     );
 }
@@ -376,19 +370,11 @@ function startGPSWatch() {
 function setGPSStatus(msg, good) {
     document.getElementById('gpsStatus').textContent = msg;
     const dot = document.getElementById('gpsDot');
-    dot.className = 'gps-dot ' + (good === null ? 'pulse' : good ? 'good' : 'bad');
+    dot.className = 'gps-dot ' + (good ? 'good' : 'bad');
 }
 
 function getValidLocation() {
-    return new Promise((resolve) => {
-        // نرجع الموقع المتاح حتى لو دقته أقل — لا نرفض
-        if (lastPosition) { resolve(lastPosition); return; }
-        navigator.geolocation.getCurrentPosition(
-            (pos) => resolve(pos),
-            () => resolve(null), // لو مفيش GPS نكمل بدونه
-            { enableHighAccuracy: true, timeout: 10000 }
-        );
-    });
+    return Promise.resolve(lastPosition); // مش مطلوب للتسجيل
 }
 
 startGPSWatch();
@@ -439,14 +425,10 @@ async function updateHeaderUser(name) {
 
 async function handleAction(type) {
     if (!db) return showToast('أعدّ إعدادات Supabase أولاً', 'error');
-    showLoader(true, 'جاري تحديد الموقع...');
+    showLoader(true, 'جاري المعالجة...');
     try {
-        const pos      = await getValidLocation();
-        const lat      = pos?.coords?.latitude  || null;
-        const lng      = pos?.coords?.longitude || null;
-        const accuracy = pos.coords.accuracy;
-        const today    = new Date().toISOString().split('T')[0];
-        const timeNow  = new Date().toLocaleTimeString('ar-EG');
+        const today   = new Date().toISOString().split('T')[0];
+        const timeNow = new Date().toLocaleTimeString('ar-EG');
 
         if (type === 'checkin') {
             currentMansek = document.getElementById('mansekName').value.trim();
@@ -454,7 +436,7 @@ async function handleAction(type) {
             showLoader(true, 'جاري تسجيل الحضور...');
             const { error } = await db.from('attendance').insert({
                 name: currentMansek, date: today,
-                time_in: timeNow, in_lat: lat, in_lng: lng
+                time_in: timeNow
             });
             if (error) throw error.message;
             // ✅ حفظ الاسم في sessionStorage عشان يبقى بعد الريفريش
@@ -474,7 +456,7 @@ async function handleAction(type) {
                 mansek_name: currentMansek, branch,
                 qty: parseInt(qty, 10),
                 notes: document.getElementById('notes').value,
-                lat, lng, status: 'pending'
+                status: 'pending'
             });
             if (error) throw error.message;
             showToast('تم إرسال الزيارة بنجاح ✔', 'success');
@@ -484,7 +466,7 @@ async function handleAction(type) {
         else if (type === 'checkout') {
             showLoader(true, 'جاري تسجيل الانصراف...');
             const { error } = await db.from('attendance')
-                .update({ time_out: timeNow, out_lat: lat, out_lng: lng })
+                .update({ time_out: timeNow })
                 .eq('name', currentMansek).eq('date', today);
             if (error) throw error.message;
             // ✅ مسح الجلسة عند الانصراف
