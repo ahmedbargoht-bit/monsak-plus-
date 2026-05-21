@@ -235,6 +235,10 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
 /* ══ Highlight ══════════════════════════════════════════════ */
 .highlight{animation:highlight .5s ease}
 @keyframes highlight{0%,100%{background:transparent}50%{background:#FFF8E1}}
+
+/* ══ Schedule Table ═════════════════════════════════════════ */
+#schedule-table th,#schedule-table td{vertical-align:middle}
+#schedule-table tbody tr:hover td{filter:brightness(.97)}
 </style>
 </head>
 <body>
@@ -289,6 +293,9 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           </div>
           <div class="nav-item" onclick="showPanel('location')">
             <i class="ti ti-map-pin"></i> اللوكيشن المباشر
+          </div>
+          <div class="nav-item" onclick="showPanel('schedule')">
+            <i class="ti ti-calendar-week"></i> الجدول الأسبوعي
           </div>
         </div>
         <div class="nav-section">
@@ -456,8 +463,39 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           </div>
         </div>
 
+        <!-- ══ SCHEDULE — الجدول الأسبوعي ════════════════════ -->
+        <div id="panel-schedule" class="panel">
+          <div class="filter-bar">
+            <select id="sch-group" onchange="renderSchedule()">
+              <option value="all">كل المجموعات</option>
+              <option value="giza">الجيزة</option>
+              <option value="cairo">وسط القاهرة</option>
+              <option value="south">جنوب وشرق</option>
+              <option value="tajmuat">التجمعات</option>
+              <option value="hyper">الهايبر</option>
+            </select>
+            <input type="text" id="sch-search" placeholder="ابحث عن منسق أو فرع..." oninput="renderSchedule()" style="flex:1"/>
+            <button class="btn btn-ghost btn-sm" onclick="renderSchedule()"><i class="ti ti-refresh"></i> تحديث</button>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;align-items:center;font-size:11px">
+            <span style="font-weight:700;color:var(--text2)">الحالة:</span>
+            <span style="background:#E8F5E9;color:#1B5E20;padding:3px 10px;border-radius:999px">✅ حضر فعلياً</span>
+            <span style="background:#FFEBEE;color:#B71C1C;padding:3px 10px;border-radius:999px">❌ غائب</span>
+            <span style="background:#FFF3E0;color:#E65100;padding:3px 10px;border-radius:999px">⏳ مجدول</span>
+            <span style="background:#F5F5F5;color:#888;padding:3px 10px;border-radius:999px">— لا يوم عمل</span>
+          </div>
+          <div class="card" style="padding:0;overflow:hidden">
+            <div style="overflow-x:auto">
+              <table id="schedule-table" style="width:100%;border-collapse:collapse;font-size:11px;min-width:750px">
+                <thead id="schedule-thead"></thead>
+                <tbody id="schedule-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="stats-grid" id="sch-stats" style="margin-top:14px"></div>
+        </div>
+
         <!-- ══ VISITS ══════════════════════════════════════════ -->
-        <div id="panel-visits" class="panel">
           <div class="filter-bar">
             <input type="date" id="v-date" onchange="loadVisits()"/>
             <select id="v-group" onchange="loadVisits()">
@@ -1141,8 +1179,8 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
               <div id="upload-stats" style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap"></div>
               <div id="upload-table-wrap" style="overflow-x:auto;max-height:300px;overflow-y:auto"></div>
               <div style="display:flex;gap:8px;margin-top:12px">
-                <button class="btn btn-blue" onclick="uploadToSupabase()" id="upload-confirm-btn">
-                  <i class="ti ti-cloud-upload"></i> رفع للنظام
+                <button class="btn btn-blue" onclick="uploadToSupabaseV2()" id="upload-confirm-btn">
+                  <i class="ti ti-cloud-upload"></i> رفع للنظام (upsert)
                 </button>
                 <button class="btn btn-ghost" onclick="cancelUpload()">إلغاء</button>
               </div>
@@ -1638,7 +1676,6 @@ function setupApp(){
   if(CU.level!=='gm') document.getElementById('nav-admin-section').style.display='none';
   document.getElementById('cfg-url').value=SUPABASE_URL;
   document.getElementById('cfg-key').value=SUPABASE_KEY;
-  // تعبئة قوائم المنسقين
   const reps=getVisibleReps();
   ['goal-rep','msg-rep'].forEach(id=>{
     const sel=document.getElementById(id);
@@ -1646,7 +1683,6 @@ function setupApp(){
     sel.innerHTML='<option value="">اختر</option>';
     reps.forEach(r=>{const o=document.createElement('option');o.value=r.name;o.textContent=r.name;sel.appendChild(o);});
   });
-  // تعبئة خطوط السير
   const routeSel=document.getElementById('ord-route');
   if(routeSel){
     reps.forEach(r=>{const o=document.createElement('option');o.value=r.route;o.textContent=r.route+' — '+r.name;routeSel.appendChild(o);});
@@ -1655,7 +1691,31 @@ function setupApp(){
   document.getElementById('att-date').value=new Date().toISOString().slice(0,10);
   document.getElementById('mi-date').value=new Date().toISOString().slice(0,10);
   refreshAll();
-  refreshTimer=setInterval(refreshAll,2*60*1000);
+
+  // ✅ توفير الباقة: التحديث فقط عند العودة للصفحة (visibility/focus)
+  // بدلاً من setInterval الثابت — لا يحدّث لو المستخدم مبعدش النظر عن التبويب
+  let lastRefreshMs = Date.now();
+  const STALE_MS = 3 * 60 * 1000; // 3 دقائق كحد أدنى بين التحديثات
+
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState === 'visible' && CU) {
+      const elapsed = Date.now() - lastRefreshMs;
+      if(elapsed >= STALE_MS) {
+        refreshAll();
+        lastRefreshMs = Date.now();
+      }
+    }
+  });
+  window.addEventListener('focus', () => {
+    if(CU) {
+      const elapsed = Date.now() - lastRefreshMs;
+      if(elapsed >= STALE_MS) {
+        refreshAll();
+        lastRefreshMs = Date.now();
+      }
+    }
+  });
+  // لا يوجد setInterval هنا — التحديث يدوي أو عند الفوكس فقط
 }
 
 function logout(){
@@ -1699,6 +1759,7 @@ function renderCurrentPanel(){
     case 'dashboard': renderDashboard(); break;
     case 'leaderboard': renderLB(); break;
     case 'location': renderLocations(); break;
+    case 'schedule': renderSchedule(); break;
     case 'visits': loadVisits(); break;
     case 'products': loadProducts(); break;
     case 'missing': loadMissing(); break;
@@ -1728,7 +1789,7 @@ function updateBadges(){
 // ══════════════════════════════════════════════════════════════
 // NAV
 // ══════════════════════════════════════════════════════════════
-const PANEL_TITLES={dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',attendance:'الحضور والانصراف',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',branches:'الفروع والعملاء',settings:'الإعدادات'};
+const PANEL_TITLES={dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر',schedule:'الجدول الأسبوعي',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',attendance:'الحضور والانصراف',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',branches:'الفروع والعملاء',settings:'الإعدادات'};
 
 function showPanel(id){
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
@@ -1747,7 +1808,8 @@ function renderDashboard(){
   const todayStr=new Date().toISOString().slice(0,10);
   const {visits,missing,attendance,location}=cachedData;
   const visible=CU.groups;
-  const todayV=visits.filter(v=>v.date===today&&visible.includes(v.grp||''));
+  // ✅ KPIs تعتمد على الزيارات المعتمدة (approved) فقط
+  const todayV=visits.filter(v=>v.date===today&&visible.includes(v.grp||'')&&v.status==='approved');
   const todayM=missing.filter(m=>m.created_at?.startsWith(todayStr)&&visible.includes(m.grp||''));
   const todayA=attendance.filter(a=>a.date===today);
   const TEN=10*60*1000,nowMs=Date.now();
@@ -1812,10 +1874,33 @@ function renderDashboard(){
 // ══════════════════════════════════════════════════════════════
 function renderLB(){
   const filterGrp=document.getElementById('lb-filter-group')?.value||'all';
+  const filterPeriod=document.getElementById('lb-filter-period')?.value||'all';
   const {visits}=cachedData;
   const visible=CU.groups;
-  let data=visits.filter(v=>visible.includes(v.grp||''));
+  // ✅ فلترة approved فقط
+  let data=visits.filter(v=>visible.includes(v.grp||'') && v.status==='approved');
   if(filterGrp!=='all') data=data.filter(v=>v.grp===filterGrp);
+
+  // ✅ فلترة الفترة الزمنية
+  if(filterPeriod!=='all'){
+    const now=new Date(); now.setHours(0,0,0,0);
+    const todayStr=now.toISOString().slice(0,10);
+    if(filterPeriod==='today'){
+      data=data.filter(v=>v.date===new Date().toLocaleDateString('ar-EG'));
+    } else if(filterPeriod==='week'){
+      const weekAgo=new Date(now); weekAgo.setDate(weekAgo.getDate()-7);
+      data=data.filter(v=>{
+        const d=v.created_at?new Date(v.created_at):null;
+        return d&&d>=weekAgo;
+      });
+    } else if(filterPeriod==='month'){
+      const monthAgo=new Date(now); monthAgo.setMonth(monthAgo.getMonth()-1);
+      data=data.filter(v=>{
+        const d=v.created_at?new Date(v.created_at):null;
+        return d&&d>=monthAgo;
+      });
+    }
+  }
 
   const scores={},vc={},meta={};
   data.forEach(v=>{
@@ -2956,7 +3041,286 @@ function downloadTemplate(){
   XLSX.writeFile(wb, 'نموذج_رفع_البيانات.xlsx');
 }
 
-// ══ End Upload Section ══
+// ══════════════════════════════════════════════════════════════
+// WEEKLY SCHEDULE — الجدول الأسبوعي
+// ══════════════════════════════════════════════════════════════
+function renderSchedule(){
+  const grpFilter = document.getElementById('sch-group')?.value || 'all';
+  const search    = (document.getElementById('sch-search')?.value || '').toLowerCase();
+  const {attendance} = cachedData;
+
+  // بناء أيام الأسبوع الحالي (السبت → الجمعة)
+  const today = new Date(); today.setHours(0,0,0,0);
+  const dayOfWeek = today.getDay(); // 0=Sun
+  // ابدأ من السبت (6)
+  const startOffset = (dayOfWeek >= 6) ? dayOfWeek - 6 : dayOfWeek + 1;
+  const weekDays = [];
+  for(let i=0; i<7; i++){
+    const d = new Date(today);
+    d.setDate(today.getDate() - startOffset + i);
+    weekDays.push(d);
+  }
+
+  const DAY_NAMES = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+  const WORK_DAYS = [0,1,2,3,4]; // الأحد→الخميس عمل، الجمعة والسبت إجازة
+
+  // فلترة المنسقين
+  let reps = REPS.filter(r => CU.groups.includes(r.group));
+  if(grpFilter !== 'all') reps = reps.filter(r => r.group === grpFilter);
+  if(search) reps = reps.filter(r =>
+    r.name.toLowerCase().includes(search) ||
+    (r.route||'').toLowerCase().includes(search)
+  );
+
+  // بناء خريطة الحضور الفعلي: name+date → attendance record
+  const attMap = {};
+  attendance.forEach(a => { attMap[`${a.name}||${a.date}`] = a; });
+
+  // بناء الـ header
+  const headerCells = weekDays.map(d => {
+    const isToday = d.toDateString() === today.toDateString();
+    const isWeekend = !WORK_DAYS.includes(d.getDay());
+    const dayName = DAY_NAMES[d.getDay()];
+    const dateStr = d.toLocaleDateString('ar-EG',{month:'numeric',day:'numeric'});
+    return `<th style="padding:10px 8px;text-align:center;min-width:90px;
+      background:${isToday ? '#003049' : isWeekend ? '#f5f5f5' : '#1a3a5c'};
+      color:${isToday ? '#FFC72C' : isWeekend ? '#aaa' : '#fff'};
+      font-size:11px;border-left:1px solid rgba(255,255,255,.1)">
+      <div style="font-weight:700">${dayName}</div>
+      <div style="font-size:10px;opacity:.8">${dateStr}</div>
+      ${isToday ? '<div style="font-size:9px;background:#FFC72C;color:#003049;border-radius:4px;padding:1px 4px;margin-top:2px">اليوم</div>' : ''}
+    </th>`;
+  }).join('');
+
+  document.getElementById('schedule-thead').innerHTML =
+    `<tr><th style="padding:10px 12px;background:#003049;color:#fff;text-align:right;min-width:140px;position:sticky;right:0;z-index:2">المنسق</th>${headerCells}</tr>`;
+
+  // بناء صفوف المنسقين
+  let checkedIn = 0, absent = 0, scheduled = 0;
+
+  const rows = reps.map(rep => {
+    const gc = GROUPS[rep.group]?.color || '#005CBF';
+    const cells = weekDays.map(d => {
+      const isWeekend = !WORK_DAYS.includes(d.getDay());
+      const isFuture  = d > today;
+      const isPast    = d < today;
+      const isToday   = d.toDateString() === today.toDateString();
+
+      if(isWeekend) {
+        return `<td style="background:#fafafa;text-align:center;border:1px solid #f0f0f0;color:#ccc">—</td>`;
+      }
+
+      // تنسيق التاريخ للمطابقة — نجرب الصيغتين
+      const dateAr = d.toLocaleDateString('ar-EG'); // مثل: ١/١/٢٠٢٦
+      const dateIso = d.toISOString().slice(0,10);   // مثل: 2026-01-01
+      const attRecord = attMap[`${rep.name}||${dateAr}`] || attMap[`${rep.name}||${dateIso}`];
+
+      let bg, color, label, icon;
+
+      if(attRecord && attRecord.time_in) {
+        // حضر فعلياً
+        bg='#E8F5E9'; color='#1B5E20'; icon='✅';
+        const timeIn = attRecord.time_in || '';
+        label = `<div style="font-size:9px;font-weight:700">${timeIn}</div>`;
+        if(isToday || isPast) checkedIn++;
+      } else if(isFuture || isToday) {
+        // مجدول (لم يأت بعد أو اليوم ولم يسجل بعد)
+        bg='#FFF3E0'; color='#E65100'; icon='⏳';
+        label = `<div style="font-size:9px">مجدول</div>`;
+        if(!isFuture) scheduled++;
+      } else {
+        // ماضٍ ولم يسجل — غائب
+        bg='#FFEBEE'; color='#B71C1C'; icon='❌';
+        label = `<div style="font-size:9px">غائب</div>`;
+        absent++;
+      }
+
+      return `<td style="text-align:center;padding:6px 4px;background:${bg};
+        border:1px solid ${isToday ? '#003049' : '#f0f0f0'};
+        ${isToday ? 'border-top:2px solid #003049;border-bottom:2px solid #003049;' : ''}
+        color:${color}">
+        <div style="font-size:14px">${icon}</div>
+        ${label}
+      </td>`;
+    }).join('');
+
+    const ini = rep.name.split(' ').map(w=>w[0]).join('').slice(0,2);
+    return `<tr>
+      <td style="padding:8px 12px;border-bottom:1px solid #f0f0f0;background:#fff;position:sticky;right:0;z-index:1;white-space:nowrap">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div style="width:26px;height:26px;border-radius:6px;background:${gc}22;color:${gc};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">${ini}</div>
+          <div>
+            <div style="font-weight:700;font-size:12px">${rep.name}</div>
+            <div style="font-size:10px;color:#888">${rep.route||''}</div>
+          </div>
+        </div>
+      </td>
+      ${cells}
+    </tr>`;
+  }).join('') || `<tr><td colspan="${weekDays.length+1}" style="text-align:center;padding:2rem;color:#aaa">لا توجد بيانات</td></tr>`;
+
+  document.getElementById('schedule-tbody').innerHTML = rows;
+
+  // إحصائيات سريعة
+  const total = reps.length;
+  const attRate = total > 0 ? Math.round(checkedIn / (total * WORK_DAYS.length) * 100) : 0;
+  document.getElementById('sch-stats').innerHTML = `
+    <div class="stat-card green"><div class="stat-n">${checkedIn}</div><div class="stat-l">✅ حضروا هذا الأسبوع</div></div>
+    <div class="stat-card red"><div class="stat-n">${absent}</div><div class="stat-l">❌ مخالفات غياب</div></div>
+    <div class="stat-card orange"><div class="stat-n">${scheduled}</div><div class="stat-l">⏳ مجدول (اليوم)</div></div>
+    <div class="stat-card blue"><div class="stat-n">${attRate}%</div><div class="stat-l">نسبة الالتزام الأسبوعي</div></div>
+  `;
+}
+
+// ══════════════════════════════════════════════════════════════
+// EXCEL UPSERT — رفع branches و users بـ upsert (تحديث أو إضافة)
+// ══════════════════════════════════════════════════════════════
+async function sbUpsert(table, data, onConflict='name'){
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Prefer': `resolution=merge-duplicates,return=minimal`,
+        // Supabase upsert يحتاج on_conflict في الـ query string
+      },
+      body: JSON.stringify(data)
+    });
+    return r.ok;
+  }catch(e){ console.warn('upsert error',e); return false; }
+}
+
+// دالة upsert صحيحة لـ Supabase REST
+async function sbUpsertCorrect(table, rows, conflictCol='name'){
+  if(!rows.length) return true;
+  try{
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/${table}?on_conflict=${conflictCol}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Prefer': 'resolution=merge-duplicates,return=minimal',
+        },
+        body: JSON.stringify(rows)
+      }
+    );
+    return r.ok;
+  }catch(e){ console.warn('upsert error', e); return false; }
+}
+
+// ── رفع Excel الجديد مع upsert branches + users ──────────────
+async function uploadToSupabaseV2(){
+  if(!uploadedData.length) return;
+  const btn = document.getElementById('upload-confirm-btn');
+  btn.disabled = true; btn.textContent = 'جاري الرفع...';
+
+  const supGroups = {
+    'حمدى محمد ربيع':'giza','احمد علاء هنداوى':'cairo',
+    'مصطفى مهدى يوسف':'south','عمر احمد عبد العظيم':'tajmuat',
+    'عبد العظيم محمد عبد العظيم':'hyper'
+  };
+
+  try{
+    // ── 1. upsert جدول users ──────────────────────────────────
+    const usersBatch = uploadedData.map(r => ({
+      name:      r.name,
+      pass_hash: r.pass || '1234',
+      role:      'rep',
+      route:     r.route,
+      grp:       supGroups[r.sup] || r.group || 'giza',
+      groups:    supGroups[r.sup] || r.group || 'giza',
+      user_type: r.type || 'متحرك',
+      level:     'rep',
+      status:    'active',
+      goal:      1
+    }));
+
+    let usersOk = true;
+    for(let i=0; i<usersBatch.length; i+=20){
+      const ok = await sbUpsertCorrect('users', usersBatch.slice(i,i+20), 'name');
+      if(!ok) usersOk = false;
+    }
+
+    // ── 2. upsert جدول branches ──────────────────────────────
+    const branchRows = [];
+    uploadedData.forEach(r => {
+      const grp = supGroups[r.sup] || r.group || 'giza';
+      (r.branches||[]).forEach(b => {
+        branchRows.push({
+          branch_name:  b,
+          route:        r.route,
+          grp:          grp,
+          client_type:  'B',
+          status:       'active',
+          mansek_name:  r.name
+        });
+      });
+    });
+
+    let branchesOk = true;
+    if(branchRows.length){
+      for(let i=0; i<branchRows.length; i+=50){
+        const ok = await sbUpsertCorrect('branches', branchRows.slice(i,i+50), 'branch_name');
+        if(!ok) branchesOk = false;
+      }
+    }
+
+    // ── 3. حفظ branches_map في products_db ───────────────────
+    const newBranchesMap = {};
+    uploadedData.forEach(r=>{
+      if(r.route && r.branches && r.branches.length)
+        newBranchesMap[r.route] = r.branches;
+    });
+    const mapVal = JSON.stringify(newBranchesMap);
+
+    // محاولة PATCH أولاً ثم INSERT
+    const patchMap = await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.branches_map`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body: JSON.stringify({value: mapVal, updated_at: new Date().toISOString()})
+    });
+    if(!patchMap.ok) await sbInsert('products_db',{key:'branches_map',value:mapVal});
+
+    const repsForApp = uploadedData.map(r=>({
+      name:r.name, route:r.route,
+      group: supGroups[r.sup]||r.group||'giza',
+      type:r.type||'متحرك', pass:r.pass||'1234', goal:1, branches:r.branches||[]
+    }));
+    const patchReps = await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.reps`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body: JSON.stringify({value:JSON.stringify(repsForApp), updated_at:new Date().toISOString()})
+    });
+    if(!patchReps.ok) await sbInsert('products_db',{key:'reps',value:JSON.stringify(repsForApp)});
+
+    // ── 4. تحديث BRANCHES_MAP المحلي فوراً ──────────────────
+    Object.assign(BRANCHES_MAP, newBranchesMap);
+
+    const summary = [
+      `✓ تم رفع ${uploadedData.length} منسق (upsert) ${usersOk?'✅':'⚠️ مع أخطاء'}`,
+      branchRows.length ? `✓ تم رفع ${branchRows.length} فرع (upsert) ${branchesOk?'✅':'⚠️ مع أخطاء'}` : '',
+    ].filter(Boolean).join('\n');
+
+    document.getElementById('upload-ok').textContent = summary;
+    document.getElementById('upload-ok').style.display = 'block';
+    document.getElementById('upload-preview').style.display = 'none';
+    uploadedData = [];
+    await refreshAll();
+    await loadAdminUsers();
+    renderCurrentRepsTable();
+
+  }catch(err){
+    showUploadErr('خطأ في الرفع: ' + err.message);
+  }
+  btn.disabled=false; btn.innerHTML='<i class="ti ti-cloud-upload"></i> رفع للنظام';
+}
+
+
 const SB_URL = SUPABASE_URL;
 const SB_KEY = SUPABASE_KEY;
 
