@@ -787,7 +787,40 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
 
         <!-- ══ BRANCHES ════════════════════════════════════════ -->
         <div id="panel-branches" class="panel">
-          <div class="card">
+
+          <!-- إضافة فرع سريعة -->
+          <div class="card" style="border:2px solid #E3F2FD">
+            <div class="card-title"><i class="ti ti-plus"></i> إضافة فرع جديد لمنسق</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+              <div>
+                <label class="lbl" style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">اختر المنسق</label>
+                <select id="qb-rep" onchange="qbOnRepChange()" style="width:100%">
+                  <option value="">اختر المنسق</option>
+                </select>
+              </div>
+              <div>
+                <label class="lbl" style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">خط السير</label>
+                <input type="text" id="qb-route" readonly style="width:100%;background:#f5f5f5;color:#888"/>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end">
+              <div>
+                <label class="lbl" style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">اسم الفرع الجديد</label>
+                <input type="text" id="qb-branch" placeholder="مثال: كارفور المعادي"/>
+              </div>
+              <div>
+                <label class="lbl" style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">صنف العميل</label>
+                <select id="qb-type">
+                  <option value="B">B — متوسط</option>
+                  <option value="A">A — كبير</option>
+                  <option value="C">C — صغير</option>
+                </select>
+              </div>
+              <button class="btn btn-blue" onclick="quickAddBranch()"><i class="ti ti-plus"></i> إضافة</button>
+            </div>
+            <div id="qb-ok" style="display:none;background:#E8F5E9;color:#1A7A4A;padding:8px 12px;border-radius:8px;font-size:12px;margin-top:8px"></div>
+            <div id="qb-err" style="display:none;background:#FFEBEE;color:#B71C1C;padding:8px 12px;border-radius:8px;font-size:12px;margin-top:8px"></div>
+          </div>
             <div class="card-title">
               <i class="ti ti-building-store"></i> إدارة الفروع والعملاء
               <button class="btn btn-blue btn-sm" onclick="openModal('modal-add-branch')" style="margin-right:auto">
@@ -1672,7 +1705,7 @@ function renderCurrentPanel(){
     case 'attendance': loadAttendance(); break;
     case 'users': loadUsers(); break;
     case 'supervisors': loadSupervisors(); break;
-    case 'branches': loadBranches(); break;
+    case 'branches': loadBranches(); qbInitReps(); loadBranchesMap(); break;
     case 'messages': renderMessages(); break;
     case 'orders': renderOrders(); break;
     case 'settings': loadHolidays(); break;
@@ -2876,6 +2909,66 @@ const SB_KEY = SUPABASE_KEY;
 
 async function sbI(table,data){
   return sbInsert(table,data);
+}
+
+// ══ إضافة فرع سريعة ─────────────────────────────────────────
+function qbInitReps(){
+  const sel=document.getElementById('qb-rep');
+  if(!sel||sel.options.length>1) return;
+  sel.innerHTML='<option value="">اختر المنسق</option>';
+  REPS.filter(r=>CU.groups.includes(r.group)).forEach(r=>{
+    const o=document.createElement('option');
+    o.value=r.name;
+    o.textContent=r.name+' — '+(r.route||'');
+    o.dataset.route=r.route||'';
+    sel.appendChild(o);
+  });
+}
+
+function qbOnRepChange(){
+  const sel=document.getElementById('qb-rep');
+  const opt=sel.options[sel.selectedIndex];
+  document.getElementById('qb-route').value=opt?.dataset?.route||'';
+  document.getElementById('qb-ok').style.display='none';
+  document.getElementById('qb-err').style.display='none';
+}
+
+async function quickAddBranch(){
+  const repName=document.getElementById('qb-rep').value;
+  const route=document.getElementById('qb-route').value;
+  const branch=document.getElementById('qb-branch').value.trim();
+  const type=document.getElementById('qb-type').value;
+  const ok=document.getElementById('qb-ok');
+  const err=document.getElementById('qb-err');
+  ok.style.display='none';err.style.display='none';
+  if(!repName){err.textContent='اختر المنسق أولاً';err.style.display='block';return;}
+  if(!branch){err.textContent='أدخل اسم الفرع';err.style.display='block';return;}
+  const rep=REPS.find(r=>r.name===repName);
+  const grp=rep?.group||'giza';
+  try{
+    await sbInsert('branches',{branch_name:branch,route,grp,client_type:type,status:'active'});
+    if(!BRANCHES_MAP[route]) BRANCHES_MAP[route]=[];
+    if(!BRANCHES_MAP[route].includes(branch)) BRANCHES_MAP[route].push(branch);
+    // حفظ في products_db عشان التطبيقات تشوفه
+    const mapVal=JSON.stringify(BRANCHES_MAP);
+    await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.branches_map`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify({value:mapVal,updated_at:new Date().toISOString()})
+    });
+    await sbInsert('products_db',{key:'branches_map',value:mapVal});
+    ok.textContent=`✓ تم إضافة "${branch}" — سيظهر في تطبيق المنسق فوراً`;
+    ok.style.display='block';
+    document.getElementById('qb-branch').value='';
+    await refreshAll(); loadBranches();
+  }catch(e){err.textContent='خطأ: '+e.message;err.style.display='block';}
+}
+
+async function loadBranchesMap(){
+  try{
+    const res=await sb('products_db',{key:'branches_map'});
+    if(res&&res[0]&&res[0].value) Object.assign(BRANCHES_MAP,JSON.parse(res[0].value));
+  }catch(e){}
 }
 
 function renderPDBPanel(){
