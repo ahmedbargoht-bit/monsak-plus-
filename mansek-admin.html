@@ -326,6 +326,9 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           <div class="nav-item" onclick="showPanel('branches')">
             <i class="ti ti-building-store"></i> الفروع والعملاء
           </div>
+          <div class="nav-item" onclick="showPanel('upload')">
+            <i class="ti ti-upload"></i> رفع البيانات
+          </div>
           <div class="nav-item" onclick="showPanel('routes')">
             <i class="ti ti-route"></i> خطوط السير
           </div>
@@ -1074,7 +1077,55 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           </div>
         </div>
 
-                <!-- ══ SETTINGS ════════════════════════════════════════ -->
+                <!-- ══ UPLOAD DATA ══════════════════════════════════════ -->
+        <div id="panel-upload" class="panel">
+          <div class="card">
+            <div class="card-title"><i class="ti ti-upload"></i> رفع بيانات المنسقين والمشرفين من Excel</div>
+            <p style="font-size:12px;color:var(--text2);margin-bottom:16px">
+              ارفع ملف Excel فيه 4 أعمدة: <b>اسم المشرف</b> — <b>اسم المنسق</b> — <b>خط السير</b> — <b>فروع خط السير</b>
+            </p>
+
+            <!-- تحميل نموذج -->
+            <button class="btn btn-ghost btn-sm" onclick="downloadTemplate()" style="margin-bottom:16px">
+              <i class="ti ti-download"></i> تحميل نموذج Excel
+            </button>
+
+            <!-- رفع الملف -->
+            <div id="upload-drop-area" style="border:2px dashed var(--border);border-radius:12px;padding:32px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:16px"
+                 onclick="document.getElementById('excel-file-input').click()"
+                 ondragover="event.preventDefault();this.style.borderColor='var(--blue)'"
+                 ondrop="handleFileDrop(event)">
+              <i class="ti ti-file-spreadsheet" style="font-size:40px;color:var(--text2)"></i>
+              <div style="font-size:14px;font-weight:600;margin:8px 0">اسحب الملف هنا أو اضغط للاختيار</div>
+              <div style="font-size:11px;color:var(--text2)">ملفات .xlsx فقط</div>
+              <input type="file" id="excel-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleFileSelect(this)"/>
+            </div>
+
+            <!-- Preview -->
+            <div id="upload-preview" style="display:none">
+              <div class="card-title" style="margin-bottom:8px"><i class="ti ti-eye"></i> معاينة البيانات</div>
+              <div id="upload-stats" style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap"></div>
+              <div id="upload-table-wrap" style="overflow-x:auto;max-height:300px;overflow-y:auto"></div>
+              <div style="display:flex;gap:8px;margin-top:12px">
+                <button class="btn btn-blue" onclick="uploadToSupabase()" id="upload-confirm-btn">
+                  <i class="ti ti-cloud-upload"></i> رفع للنظام
+                </button>
+                <button class="btn btn-ghost" onclick="cancelUpload()">إلغاء</button>
+              </div>
+            </div>
+
+            <div id="upload-ok" style="display:none;background:#E8F5E9;color:#1A7A4A;padding:12px;border-radius:8px;font-size:13px;margin-top:8px"></div>
+            <div id="upload-err" style="display:none;background:#FFEBEE;color:#B71C1C;padding:12px;border-radius:8px;font-size:13px;margin-top:8px"></div>
+          </div>
+
+          <!-- جدول المنسقين الحاليين -->
+          <div class="card">
+            <div class="card-title"><i class="ti ti-users"></i> المنسقون الحاليون في النظام</div>
+            <div id="current-reps-table" style="overflow-x:auto"></div>
+          </div>
+        </div>
+
+        <!-- ══ SETTINGS ════════════════════════════════════════ -->
         <div id="panel-settings" class="panel">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
             <div class="card">
@@ -1624,6 +1675,7 @@ function renderCurrentPanel(){
     case 'messages': renderMessages(); break;
     case 'orders': renderOrders(); break;
     case 'settings': loadHolidays(); break;
+    case 'upload': loadUploadPanel(); break;
     case 'routes': loadRoutes(); break;
     case 'products-db': renderPDBPanel(); break;
     case 'holidays': loadHolidays(); break;
@@ -2584,8 +2636,240 @@ document.querySelectorAll('.modal-overlay').forEach(m=>{
 // Init goals panel
 renderGoals();
 
-// ══ من لوحة التحكم ══
-// Aliases عشان functions من لوحة التحكم تشتغل في admin
+// ══ رفع البيانات من Excel ══════════════════════════════════════
+let uploadedData = [];
+
+function loadUploadPanel(){
+  renderCurrentRepsTable();
+}
+
+function handleFileDrop(e){
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if(file) processExcelFile(file);
+}
+
+function handleFileSelect(input){
+  const file = input.files[0];
+  if(file) processExcelFile(file);
+}
+
+function processExcelFile(file){
+  if(!file.name.match(/\.(xlsx|xls)$/i)){
+    showUploadErr('الملف لازم يكون .xlsx أو .xls');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = function(e){
+    try{
+      const wb = XLSX.read(e.target.result, {type:'array'});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+      parseUploadedRows(rows);
+    }catch(err){
+      showUploadErr('خطأ في قراءة الملف: ' + err.message);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function parseUploadedRows(rows){
+  if(!rows.length){ showUploadErr('الملف فاضي'); return; }
+
+  // تحديد الأعمدة — السطر الأول headers
+  const headers = rows[0].map(h=>String(h).trim().toLowerCase());
+  console.log('Headers:', headers);
+
+  // البحث عن الأعمدة بالاسم المرن
+  const findCol = (keys) => {
+    for(let k of keys){
+      const idx = headers.findIndex(h=>h.includes(k));
+      if(idx !== -1) return idx;
+    }
+    return -1;
+  };
+
+  const colSup    = findCol(['مشرف','supervisor','sup']);
+  const colRep    = findCol(['منسق','rep','coordinator','اسم']);
+  const colRoute  = findCol(['خط','route','سير']);
+  const colPass   = findCol(['باسورد','pass','كلمة']);
+  const colGroup  = findCol(['مجموعة','group','grp']);
+  const colType   = findCol(['نوع','type','ثابت','متحرك']);
+  const colBranch = findCol(['فرع','branch']);
+
+  if(colRep === -1){ showUploadErr('مش لاقي عمود اسم المنسق — تأكد من وجود عمود "اسم المنسق"'); return; }
+
+  uploadedData = [];
+  const dataRows = rows.slice(1).filter(r => r[colRep]?.toString().trim());
+
+  dataRows.forEach(r => {
+    const name   = String(r[colRep]||'').trim();
+    const sup    = colSup>=0 ? String(r[colSup]||'').trim() : '';
+    const route  = colRoute>=0 ? String(r[colRoute]||'').trim() : '';
+    const pass   = colPass>=0 ? String(r[colPass]||'').trim() : '';
+    const group  = colGroup>=0 ? String(r[colGroup]||'').trim() : 'giza';
+    const type   = colType>=0 ? String(r[colType]||'').trim() : 'متحرك';
+    const branch = colBranch>=0 ? String(r[colBranch]||'').trim() : '';
+    if(name) uploadedData.push({name, sup, route, pass, group, type, branch});
+  });
+
+  if(!uploadedData.length){ showUploadErr('مفيش بيانات صالحة في الملف'); return; }
+
+  // إحصائيات
+  const sups = [...new Set(uploadedData.map(r=>r.sup).filter(Boolean))];
+  const routes = [...new Set(uploadedData.map(r=>r.route).filter(Boolean))];
+
+  document.getElementById('upload-stats').innerHTML = `
+    <span style="background:#E3F2FD;color:#1565C0;padding:4px 12px;border-radius:999px;font-size:12px">👤 ${uploadedData.length} منسق</span>
+    <span style="background:#F3E5F5;color:#6A1B9A;padding:4px 12px;border-radius:999px;font-size:12px">👔 ${sups.length} مشرف</span>
+    <span style="background:#E8F5E9;color:#1B5E20;padding:4px 12px;border-radius:999px;font-size:12px">🗺️ ${routes.length} خط سير</span>
+  `;
+
+  // جدول المعاينة
+  document.getElementById('upload-table-wrap').innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#f5f7fa">
+        <th style="padding:8px;border:1px solid #ddd;text-align:right">الاسم</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:right">المشرف</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:right">خط السير</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:right">النوع</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:right">الباسورد</th>
+      </tr></thead>
+      <tbody>
+        ${uploadedData.map(r=>`<tr>
+          <td style="padding:6px 8px;border:1px solid #ddd">${r.name}</td>
+          <td style="padding:6px 8px;border:1px solid #ddd;color:#666">${r.sup||'—'}</td>
+          <td style="padding:6px 8px;border:1px solid #ddd">${r.route||'—'}</td>
+          <td style="padding:6px 8px;border:1px solid #ddd"><span style="background:${r.type==='ثابت'?'#E8EAF6':'#E3F2FD'};padding:2px 8px;border-radius:999px">${r.type}</span></td>
+          <td style="padding:6px 8px;border:1px solid #ddd;font-family:monospace">${r.pass||'—'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+  `;
+
+  document.getElementById('upload-preview').style.display='block';
+  document.getElementById('upload-err').style.display='none';
+  document.getElementById('upload-ok').style.display='none';
+}
+
+async function uploadToSupabase(){
+  if(!uploadedData.length) return;
+  const btn = document.getElementById('upload-confirm-btn');
+  btn.disabled=true; btn.textContent='جاري الرفع...';
+
+  try{
+    // حذف القديم وإضافة الجديد
+    await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.rep`,{
+      method:'DELETE',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+
+    // تحديد المجموعة من اسم المشرف
+    const supGroups = {
+      'حمدى محمد ربيع':'giza','احمد علاء هنداوى':'cairo',
+      'مصطفى مهدى يوسف':'south','عمر احمد عبد العظيم':'tajmuat',
+      'عبد العظيم محمد عبد العظيم':'hyper'
+    };
+
+    const batch = uploadedData.map(r=>({
+      name: r.name,
+      pass_hash: r.pass || '1234',
+      role: 'rep',
+      route: r.route,
+      grp: supGroups[r.sup] || r.group || 'giza',
+      groups: supGroups[r.sup] || r.group || 'giza',
+      user_type: r.type || 'متحرك',
+      level: 'rep',
+      status: 'active',
+      goal: 1
+    }));
+
+    // رفع على دفعات 20
+    for(let i=0; i<batch.length; i+=20){
+      await sbInsert('users', batch.slice(i,i+20));
+    }
+
+    // حفظ في products_db عشان التطبيق يجيبها
+    const repsForApp = uploadedData.map(r=>({
+      name:r.name, route:r.route,
+      group: supGroups[r.sup]||r.group||'giza',
+      type:r.type||'متحرك', pass:r.pass||'1234', goal:1
+    }));
+    await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.reps`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify({value:JSON.stringify(repsForApp), updated_at:new Date().toISOString()})
+    });
+    // لو مش موجود — insert
+    await sbInsert('products_db',{key:'reps', value:JSON.stringify(repsForApp)});
+
+    document.getElementById('upload-ok').textContent = `✓ تم رفع ${uploadedData.length} منسق للنظام بنجاح — سيظهرون في التطبيق فوراً`;
+    document.getElementById('upload-ok').style.display='block';
+    document.getElementById('upload-preview').style.display='none';
+    uploadedData=[];
+    await refreshAll();
+    renderCurrentRepsTable();
+
+  }catch(err){
+    showUploadErr('خطأ في الرفع: ' + err.message);
+  }
+  btn.disabled=false; btn.innerHTML='<i class="ti ti-cloud-upload"></i> رفع للنظام';
+}
+
+function cancelUpload(){
+  uploadedData=[];
+  document.getElementById('upload-preview').style.display='none';
+  document.getElementById('excel-file-input').value='';
+}
+
+function showUploadErr(msg){
+  const el=document.getElementById('upload-err');
+  el.textContent=msg; el.style.display='block';
+  document.getElementById('upload-ok').style.display='none';
+}
+
+function renderCurrentRepsTable(){
+  const el=document.getElementById('current-reps-table');
+  if(!el) return;
+  const reps = REPS.filter(r=>CU.groups.includes(r.group||'giza'));
+  if(!reps.length){el.innerHTML='<div style="text-align:center;padding:2rem;color:var(--text2)">لا توجد بيانات</div>';return;}
+  el.innerHTML=`
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#f5f7fa">
+        <th style="padding:8px;border:1px solid #ddd;text-align:right">#</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:right">الاسم</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:right">خط السير</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:right">المجموعة</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:right">النوع</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:right">الباسورد</th>
+      </tr></thead>
+      <tbody>
+        ${reps.map((r,i)=>`<tr style="background:${i%2?'#fafafa':'#fff'}">
+          <td style="padding:6px 8px;border:1px solid #ddd;color:#999">${i+1}</td>
+          <td style="padding:6px 8px;border:1px solid #ddd;font-weight:600">${r.name}</td>
+          <td style="padding:6px 8px;border:1px solid #ddd">${r.route||'—'}</td>
+          <td style="padding:6px 8px;border:1px solid #ddd"><span style="background:${GROUPS[r.group]?.color||'#ccc'}22;color:${GROUPS[r.group]?.color||'#555'};padding:2px 8px;border-radius:999px">${GROUPS[r.group]?.label||r.group}</span></td>
+          <td style="padding:6px 8px;border:1px solid #ddd">${r.type||'متحرك'}</td>
+          <td style="padding:6px 8px;border:1px solid #ddd;font-family:monospace">${r.pass||'—'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function downloadTemplate(){
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([
+    ['اسم المشرف','اسم المنسق','خط السير','نوع المنسق','الباسورد','المجموعة'],
+    ['حمدى محمد ربيع','هاني طارق فتحى','خط سير 6اكتوبر','متحرك','1429','giza'],
+    ['عبد العظيم محمد عبد العظيم','محمود احمد محمد','كارفور C F C','ثابت','2295','hyper'],
+  ]);
+  ws['!cols'] = [{wch:25},{wch:25},{wch:35},{wch:12},{wch:10},{wch:10}];
+  XLSX.utils.book_append_sheet(wb, ws, 'بيانات المنسقين');
+  XLSX.writeFile(wb, 'نموذج_بيانات_المنسقين.xlsx');
+}
+
+// ══ End Upload Section ══
 const SB_URL = SUPABASE_URL;
 const SB_KEY = SUPABASE_KEY;
 
