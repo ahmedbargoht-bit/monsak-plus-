@@ -2944,18 +2944,21 @@ async function addSupervisor(){
   };
 
   try{
-    // تحقق أولاً هل موجود
-    const existing = await sb('users',{name, role:'supervisor'});
-    if(existing && existing.length > 0){
-      // موجود — حدّثه
-      await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(name)}&role=eq.supervisor`,{
+    // تحقق أولاً هل موجود بالاسم
+    const existing = await sb('users',{name});
+    const found = existing && existing.filter(u=>u.role==='supervisor'||u.level==='sup'||u.level==='dm'||u.level==='gm');
+    if(found && found.length > 0){
+      // موجود — حدّثه بـ PATCH
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(name)}`,{
         method:'PATCH',
         headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-        body: JSON.stringify({pass_hash:pass, level, groups, status:'active'})
+        body: JSON.stringify({pass_hash:pass, level, groups, status:'active', role:'supervisor'})
       });
+      if(!res.ok) throw new Error('PATCH failed');
     } else {
       // جديد — أضفه
-      await sbInsert('users', data);
+      const res = await sbInsert('users', data);
+      if(!res) throw new Error('INSERT failed');
     }
     SUPERVISORS = SUPERVISORS.filter(s=>s.name!==name);
     SUPERVISORS.push({id:null,name,pass,role,level,groups:groups.split(','),status:'active'});
@@ -3288,13 +3291,26 @@ async function uploadToSupabase(){
     (SUPERVISORS||[]).filter(s=>s.level==='sup'&&(s.groups||[]).includes('alex'))
       .forEach(s=>{ supGroups[s.name]='alex'; });
 
+    // دالة لتوحيد اسم المجموعة
+    const normalizeGrp = (grp) => {
+      if(!grp) return null;
+      const g = grp.toString().toLowerCase().trim();
+      if(g.includes('alex')||g==='alx'||g.includes('اسكندر')||g.includes('إسكندر')) return 'alex';
+      if(g==='giza'||g.includes('جيزة')||g.includes('جيزه')) return 'giza';
+      if(g==='cairo'||g.includes('قاهرة')||g.includes('قاهره')) return 'cairo';
+      if(g==='south'||g.includes('جنوب')) return 'south';
+      if(g==='tajmuat'||g.includes('تجمع')) return 'tajmuat';
+      if(g==='hyper'||g.includes('هايبر')||g.includes('hyper')) return 'hyper';
+      return g;
+    };
+
     const batch = uploadedData.map(r=>({
       name: r.name,
       pass_hash: r.pass || '1234',
       role: 'rep',
       route: r.route,
-      grp: supGroups[r.sup] || r.group || 'giza',
-      groups: supGroups[r.sup] || r.group || 'giza',
+      grp: supGroups[r.sup] || normalizeGrp(r.group) || 'giza',
+      groups: supGroups[r.sup] || normalizeGrp(r.group) || 'giza',
       user_type: r.type || 'متحرك',
       level: 'rep',
       status: 'active',
@@ -3309,7 +3325,7 @@ async function uploadToSupabase(){
     // حفظ في products_db عشان التطبيق يجيبها
     const repsForApp = uploadedData.map(r=>({
       name:r.name, route:r.route,
-      group: supGroups[r.sup]||r.group||'giza',
+      group: supGroups[r.sup]||normalizeGrp(r.group)||'giza',
       type:r.type||'متحرك', pass:r.pass||'1234', goal:1,
       branches:r.branches||[]
     }));
