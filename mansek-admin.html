@@ -2135,7 +2135,18 @@ function renderCurrentPanel(){
     case 'orders': renderOrders(); break;
     case 'settings': loadHolidays(); break;
     case 'upload': loadUploadPanel(); break;
-    case 'routes': loadRoutes(); break;
+    case 'routes':
+      // migration: لو في بيانات في localStorage انقلهم لـ Supabase
+      const localRoutes = localStorage.getItem('routes_list');
+      if(localRoutes){
+        const parsed = JSON.parse(localRoutes);
+        if(parsed.length && !ROUTES_LIST.length){
+          ROUTES_LIST = parsed;
+          saveRoutes();
+        }
+      }
+      loadRoutes();
+      break;
     case 'products-db': renderPDBPanel(); break;
     case 'holidays': loadHolidays(); break;
     case 'export-full': break;
@@ -3535,14 +3546,22 @@ function renderPDBPanel(){
   if(!tbody) return;
 }
 
-function loadRoutes(){
+async function loadRoutes(){
+  try{
+    const res = await sb('products_db',{key:'routes_list'});
+    if(res && res[0] && res[0].value){
+      ROUTES_LIST = JSON.parse(res[0].value);
+      try{ localStorage.setItem('routes_list', res[0].value); }catch(e){}
+    }
+  }catch(e){
+    ROUTES_LIST = JSON.parse(localStorage.getItem('routes_list')||'[]');
+  }
   const grp=document.getElementById('rt-group')?.value||'all';
   const search=(document.getElementById('rt-search')?.value||'').toLowerCase();
   let data=ROUTES_LIST;
   if(grp!=='all') data=data.filter(r=>r.group===grp);
   if(search) data=data.filter(r=>r.name.toLowerCase().includes(search));
-  const allRoutes=[...data];
-  document.getElementById('routes-tbody').innerHTML=allRoutes.map((r,i)=>`<tr>
+  document.getElementById('routes-tbody').innerHTML=data.map((r,i)=>`<tr>
     <td>${i+1}</td>
     <td><b>${r.name}</b></td>
     <td><span class="badge b-blue">${GROUPS[r.group]?.label||'—'}</span></td>
@@ -3550,23 +3569,30 @@ function loadRoutes(){
     <td><span class="badge b-navy">${(BRANCHES_MAP[r.name]||[]).length} فرع</span></td>
     <td><span class="badge ${r.status==='active'?'b-green':'b-gray'}">${r.status==='active'?'نشط':'موقوف'}</span></td>
     <td><button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="deleteRoute('${r.id}')"><i class="ti ti-trash"></i></button></td>
-  </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد خطوط سير</td></tr>';
+  </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد خطوط سير — أضف خط سير جديد</td></tr>';
 }
 
-function addRoute(){
+async function saveRoutes(){
+  try{
+    await sbUpsert('products_db',{key:'routes_list',value:JSON.stringify(ROUTES_LIST),updated_at:new Date().toISOString()},'key');
+    try{ localStorage.setItem('routes_list',JSON.stringify(ROUTES_LIST)); }catch(e){}
+  }catch(e){ console.warn('routes save failed',e); }
+}
+
+async function addRoute(){
   const name=document.getElementById('nr-name').value.trim();
   if(!name){alert('أدخل اسم خط السير');return;}
   const route={id:'R'+Date.now(),name,group:document.getElementById('nr-group').value,rep:document.getElementById('nr-rep').value,status:'active',createdAt:new Date().toISOString()};
   ROUTES_LIST.push(route);
-  localStorage.setItem('routes_list',JSON.stringify(ROUTES_LIST));
+  await saveRoutes();
   closeModal('modal-add-route');
   loadRoutes();
 }
 
-function deleteRoute(id){
+async function deleteRoute(id){
   if(!confirm('حذف خط السير؟'))return;
   ROUTES_LIST=ROUTES_LIST.filter(r=>r.id!==id);
-  localStorage.setItem('routes_list',JSON.stringify(ROUTES_LIST));
+  await saveRoutes();
   loadRoutes();
 }
 
