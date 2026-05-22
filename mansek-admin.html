@@ -1547,17 +1547,9 @@ async function loadAdminUsers(){
     console.warn('loadAdminUsers fallback used');
   }
   // تطبيق التعديلات المحفوظة محلياً
-  applyRepOverrides();
+  // التعديلات تتحفظ مباشرة في Supabase
 }
 
-function applyRepOverrides(){
-  const overrides=JSON.parse(localStorage.getItem('rep_overrides')||'{}');
-  if(!Object.keys(overrides).length) return;
-  Object.entries(overrides).forEach(([oldName, ov])=>{
-    const idx=REPS.findIndex(r=>r.name===oldName);
-    if(idx!==-1) REPS[idx]={...REPS[idx],...ov};
-  });
-}
 
 const GROUPS = {
   giza:    {label:'🔵 مجموعة الجيزة',      color:'#005CBF'},
@@ -1596,7 +1588,7 @@ const BRANCHES_MAP = {
 // ── State ──────────────────────────────────────────────────────
 let CU = null;
 let cachedData = {visits:[],missing:[],products:[],attendance:[],location:[],messages:[],orders:[]};
-let goals = JSON.parse(localStorage.getItem('goals')||'[]');
+let goals = [];
 let refreshTimer = null;
 
 // ✅ متغيرات ناقصة
@@ -2147,7 +2139,12 @@ function renderCurrentPanel(){
       }
       loadRoutes();
       break;
-    case 'products-db': renderPDBPanel(); break;
+    case 'goals':
+      sb('products_db',{key:'goals'}).then(res=>{
+        if(res&&res[0]&&res[0].value){ goals=JSON.parse(res[0].value); }
+        renderGoals();
+      }).catch(()=>renderGoals());
+      break;
     case 'holidays': loadHolidays(); break;
     case 'export-full': break;
     case 'activity': loadActivity(); break;
@@ -2584,7 +2581,7 @@ function addGoal(){
     createdBy: CU.name, createdAt: new Date().toISOString()
   };
   goals.push(goal);
-  localStorage.setItem('goals',JSON.stringify(goals));
+  sbUpsert('products_db',{key:'goals',value:JSON.stringify(goals),updated_at:new Date().toISOString()},'key');
   const ok=document.getElementById('goal-ok');ok.textContent='✓ تم إضافة الهدف';ok.style.display='block';setTimeout(()=>ok.style.display='none',3000);
   document.getElementById('goal-value').value='';document.getElementById('goal-desc').value='';
   renderGoals();
@@ -2627,7 +2624,7 @@ function renderGoals(){
 function deleteGoal(id){
   if(!confirm('حذف الهدف؟'))return;
   goals=goals.filter(g=>g.id!==id);
-  localStorage.setItem('goals',JSON.stringify(goals));
+  sbUpsert('products_db',{key:'goals',value:JSON.stringify(goals),updated_at:new Date().toISOString()},'key');
   renderGoals();
 }
 
@@ -2808,11 +2805,7 @@ async function editUser(){
   const status=document.getElementById('eu-status')?document.getElementById('eu-status').value:'active';
   if(!name)return;
 
-  // 1. حفظ في localStorage كـ override يبقى بعد الريفريش
-  const overrides=JSON.parse(localStorage.getItem('rep_overrides')||'{}');
-  overrides[oldName]={name,pass,route,group,type,goal,status};
-  if(oldName!==name) overrides[name]=overrides[oldName];
-  localStorage.setItem('rep_overrides',JSON.stringify(overrides));
+  // التحديث يتم مباشرة في Supabase
 
   // 2. تحديث في Supabase لو الجدول موجود
   try{
