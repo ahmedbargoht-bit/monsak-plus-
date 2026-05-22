@@ -1536,6 +1536,9 @@ let CU = null;
 let cachedData = {visits:[],missing:[],products:[],attendance:[],location:[],messages:[],orders:[]};
 let goals = JSON.parse(localStorage.getItem('goals')||'[]');
 let refreshTimer = null;
+let rtChannelsAdmin = [];
+let PDB = (()=>{ try{ const c=localStorage.getItem('pdb_cache'); return c?JSON.parse(c):{}; }catch(e){ return {}; } })();
+function startRealtimeAdmin(){}
 
 // ══════════════════════════════════════════════════════════════
 // SUPABASE HELPERS
@@ -3135,6 +3138,111 @@ function populateRepSelect(){
   });
 }
 
+</script>
+<!-- modal-add-route -->
+<div class="modal-overlay" id="modal-add-route">
+  <div class="modal" style="max-width:400px">
+    <div class="modal-title">إضافة خط سير <button class="modal-close" onclick="closeModal('modal-add-route')">✕</button></div>
+    <div class="form-fld"><label class="form-lbl">اسم خط السير</label><input type="text" id="nr-name" placeholder="خط سير ..."/></div>
+    <div class="form-fld"><label class="form-lbl">المجموعة</label>
+      <select id="nr-group">
+        <option value="giza">الجيزة</option><option value="cairo">وسط القاهرة</option>
+        <option value="south">جنوب وشرق</option><option value="tajmuat">التجمعات</option>
+        <option value="hyper">الهايبر</option>
+      </select>
+    </div>
+    <div class="form-fld"><label class="form-lbl">المنسق</label><select id="nr-rep"><option value="">بدون</option></select></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-add-route')">إلغاء</button>
+      <button class="btn btn-blue" onclick="addRoute()"><i class="ti ti-plus"></i> إضافة</button>
+    </div>
+  </div>
+</div>
+
+<!-- modal-add-product -->
+<div class="modal-overlay" id="modal-add-product">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-title">إضافة صنف جديد <button class="modal-close" onclick="closeModal('modal-add-product')">✕</button></div>
+    <div class="form-grid">
+      <div class="form-fld"><label class="form-lbl">الفئة</label><input type="text" id="np-fea" placeholder="الطحان"/></div>
+      <div class="form-fld"><label class="form-lbl">التصنيف</label><input type="text" id="np-cat" placeholder="تمر سعودى"/></div>
+    </div>
+    <div class="form-grid">
+      <div class="form-fld"><label class="form-lbl">المجموعة الفرعية</label><input type="text" id="np-grp" placeholder="تمر رطب"/></div>
+      <div class="form-fld"><label class="form-lbl">اسم الصنف</label><input type="text" id="np-snf" placeholder="علبة فينيل رطب"/></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-add-product')">إلغاء</button>
+      <button class="btn btn-blue" onclick="addProductToPDB()"><i class="ti ti-plus"></i> إضافة</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ══ uploadPDBFile ══════════════════════════════════════════════
+async function uploadPDBFile(input){
+  const file = input.files[0];
+  if(!file) return;
+  const statusEl = document.getElementById('pdb-upload-status');
+  statusEl.textContent='⏳ جاري قراءة الملف...'; statusEl.style.color='#F77F00';
+  try{
+    const buf  = await file.arrayBuffer();
+    const wb   = XLSX.read(buf,{type:'array'});
+    const ws   = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+    let headerIdx=-1, colMap={};
+    for(let i=0;i<rows.length;i++){
+      const r=rows[i].map(c=>(c||'').toString().trim());
+      if(r.includes('اسم الصنف')){ headerIdx=i; r.forEach((col,j)=>colMap[col]=j); break; }
+    }
+    if(headerIdx===-1){ statusEl.textContent='❌ مش لاقي عمود "اسم الصنف"'; statusEl.style.color='#B71C1C'; return; }
+    const pdb={}; let count=0;
+    for(let i=headerIdx+1;i<rows.length;i++){
+      const row=rows[i];
+      const fea=(row[colMap['الفئة']]||'').toString().trim();
+      const cat=(row[colMap['التصنيف']]||'').toString().trim();
+      const grp=(row[colMap['المجموعة الفرعية']]||'').toString().trim();
+      const snf=(row[colMap['اسم الصنف']]||'').toString().trim();
+      const active=(row[colMap['فعال']]||'').toString().trim();
+      if(!snf||active==='لا'||!fea||!cat) continue;
+      if(!pdb[fea]) pdb[fea]={};
+      if(!pdb[fea][cat]) pdb[fea][cat]={};
+      if(!pdb[fea][cat][grp]) pdb[fea][cat][grp]=[];
+      pdb[fea][cat][grp].push(snf); count++;
+    }
+    if(!count){ statusEl.textContent='❌ مفيش أصناف فعّالة'; statusEl.style.color='#B71C1C'; return; }
+    statusEl.textContent=`⏳ ${count} صنف — جاري الرفع...`;
+    const val=JSON.stringify(pdb);
+    await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.pdb`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify({value:val,updated_at:new Date().toISOString()})
+    });
+    try{ localStorage.setItem('pdb_cache',val); }catch(e){}
+    PDB=pdb;
+    statusEl.textContent=`✅ تم رفع ${count} صنف من ${Object.keys(pdb).length} فئة!`;
+    statusEl.style.color='#1A7A4A';
+    renderPDBPanel();
+  }catch(err){ statusEl.textContent='❌ خطأ: '+err.message; statusEl.style.color='#B71C1C'; }
+  input.value='';
+}
+
+// ══ addProductToPDB ════════════════════════════════════════════
+function addProductToPDB(){
+  const fea=document.getElementById('np-fea').value.trim();
+  const cat=document.getElementById('np-cat').value.trim();
+  const grp=document.getElementById('np-grp').value.trim();
+  const snf=document.getElementById('np-snf').value.trim();
+  if(!fea||!snf){ alert('الفئة واسم الصنف مطلوبان'); return; }
+  if(!PDB[fea]) PDB[fea]={};
+  if(!PDB[fea][cat]) PDB[fea][cat]={};
+  if(!PDB[fea][cat][grp]) PDB[fea][cat][grp]=[];
+  PDB[fea][cat][grp].push(snf);
+  try{ localStorage.setItem('pdb_cache',JSON.stringify(PDB)); }catch(e){}
+  saveProductsToSupabase(PDB);
+  closeModal('modal-add-product');
+  renderPDBPanel();
+}
 </script>
 </body>
 </html>
