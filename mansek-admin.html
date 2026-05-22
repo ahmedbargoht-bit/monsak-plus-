@@ -235,6 +235,20 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
 /* ══ Highlight ══════════════════════════════════════════════ */
 .highlight{animation:highlight .5s ease}
 @keyframes highlight{0%,100%{background:transparent}50%{background:#FFF8E1}}
+
+/* ══ Missing CSS classes ════════════════════════════════════ */
+.page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px}
+.page-header h2{font-size:18px;font-weight:700;color:var(--navy);margin:0}
+.page-header p{font-size:12px;color:var(--text2);margin:4px 0 0}
+.page-actions{display:flex;gap:8px;align-items:center}
+.tbl-wrap{overflow-x:auto;border-radius:10px;border:1px solid var(--border)}
+.tab-pills{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.tab-pill{padding:6px 14px;border-radius:999px;font-size:12px;font-weight:600;cursor:pointer;background:#f0f0f0;color:var(--text2);border:1.5px solid transparent;transition:all .2s}
+.tab-pill.on{background:var(--navy);color:#fff}
+.tab-pill:hover:not(.on){background:#e0e0e0}
+.btn-primary{background:var(--blue);color:#fff}.btn-primary:hover{background:#004AAA}
+.btn-purple{background:var(--purple);color:#fff}
+.b-navy{background:#E6F0FF;color:#003049}
 </style>
 </head>
 <body>
@@ -1536,9 +1550,267 @@ let CU = null;
 let cachedData = {visits:[],missing:[],products:[],attendance:[],location:[],messages:[],orders:[]};
 let goals = JSON.parse(localStorage.getItem('goals')||'[]');
 let refreshTimer = null;
+
+// ✅ متغيرات ناقصة
 let rtChannelsAdmin = [];
-let PDB = (()=>{ try{ const c=localStorage.getItem('pdb_cache'); return c?JSON.parse(c):{}; }catch(e){ return {}; } })();
+let PDB        = (()=>{ try{ const c=localStorage.getItem('pdb_cache'); return c?JSON.parse(c):{}; }catch(e){ return {}; } })();
+
+// ✅ تحميل PDB من Supabase وتحديث الـ cache
+async function loadPDBFromSupabase(){
+  try{
+    const res = await sb('products_db',{key:'pdb'});
+    if(res && res[0] && res[0].value){
+      const fresh = JSON.parse(res[0].value);
+      PDB = fresh;
+      try{ localStorage.setItem('pdb_cache', res[0].value); }catch(e){}
+    }
+  }catch(e){ console.warn('PDB load from Supabase failed, using cache'); }
+}
+let ROUTES_LIST      = JSON.parse(localStorage.getItem('routes_list')||'[]');
+let USERS_LIST       = [];
+let BRANCHES_DATA_LOCAL = {};
+let DB = { visits:[], missing:[], products:[], attendance:[], location:[], messages:[], orders:[] };
+const SB_URL = 'https://tneeosrbxedexsrigapg.supabase.co';
+const SB_KEY = 'sb_publishable_1MSr3avIfgV5chBV7gn2Pw_iqIrMFIp';
+
+// ✅ دوال ناقصة
 function startRealtimeAdmin(){}
+
+function renderAdminEditReps(){
+  const grp    = document.getElementById('er-group-filter')?.value||'all';
+  const type   = document.getElementById('er-type-filter')?.value||'all';
+  const search = (document.getElementById('er-search-admin')?.value||'').toLowerCase();
+  const tbody  = document.getElementById('admin-reps-tbody');
+  if(!tbody) return;
+  let reps = getVisibleReps ? getVisibleReps() : REPS||[];
+  if(grp!=='all')   reps = reps.filter(r=>r.group===grp);
+  if(type!=='all')  reps = reps.filter(r=>r.type===type);
+  if(search)        reps = reps.filter(r=>r.name.toLowerCase().includes(search)||r.route.toLowerCase().includes(search));
+  const scores={};
+  (cachedData.visits||[]).forEach(v=>{ scores[v.name]=(scores[v.name]||0)+(+v.points||0); });
+  tbody.innerHTML = reps.map((r,i)=>`<tr>
+    <td>${i+1}</td>
+    <td><b>${r.name}</b></td>
+    <td style="font-size:11px">${r.route||'—'}</td>
+    <td><span class="badge b-blue">${GROUPS[r.group]?.label||r.group}</span></td>
+    <td><span class="badge b-gray">${r.type||'متحرك'}</span></td>
+    <td style="font-weight:700;color:var(--blue)">${scores[r.name]||0}</td>
+    <td><button class="btn btn-xs btn-blue" onclick="editAdminRep('${r.name}')"><i class="ti ti-edit"></i></button></td>
+  </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد بيانات</td></tr>';
+}
+
+let _editingRep = null;
+function editAdminRep(name){
+  _editingRep = (REPS||[]).find(r=>r.name===name);
+  if(!_editingRep) return;
+  const panel = document.getElementById('admin-edit-form');
+  if(panel){
+    panel.style.display='block';
+    const ni=document.getElementById('aef-name'); if(ni) ni.value=_editingRep.name;
+    const ri=document.getElementById('aef-route'); if(ri) ri.value=_editingRep.route||'';
+    const gi=document.getElementById('aef-goal'); if(gi) gi.value=_editingRep.goal||0;
+  }
+}
+
+async function saveAdminRepEdit(){
+  if(!_editingRep) return;
+  const name  = document.getElementById('aef-name')?.value||_editingRep.name;
+  const route = document.getElementById('aef-route')?.value||_editingRep.route;
+  const goal  = +document.getElementById('aef-goal')?.value||_editingRep.goal;
+  await sbUpdate('users',{name:_editingRep.name},{name,route,goal});
+  cancelAdminRepEdit();
+  await loadAdminUsers();
+  renderAdminEditReps();
+}
+
+function cancelAdminRepEdit(){
+  _editingRep=null;
+  const panel=document.getElementById('admin-edit-form');
+  if(panel) panel.style.display='none';
+}
+
+async function loadSupplyOrders(){
+  const status = document.getElementById('so-status')?.value||'all';
+  const grp    = document.getElementById('so-group')?.value||'all';
+  const search = (document.getElementById('so-search')?.value||'').toLowerCase();
+  const tbody  = document.getElementById('supply-orders-tbody');
+  if(!tbody) return;
+  let data = await sb('supply_requests',{},{order:'created_at.desc'});
+  if(status!=='all') data=data.filter(d=>d.status===status);
+  if(grp!=='all')    data=data.filter(d=>d.grp===grp);
+  if(search)         data=data.filter(d=>(d.snf||'').toLowerCase().includes(search)||(d.name||'').toLowerCase().includes(search));
+  tbody.innerHTML = data.map((d,i)=>`<tr>
+    <td>${i+1}</td>
+    <td><b>${d.name||'—'}</b></td>
+    <td style="font-size:11px">${d.route||'—'}</td>
+    <td>${d.snf||'—'}</td>
+    <td>${d.fea||'—'}</td>
+    <td>${d.qty||1}</td>
+    <td>${d.date||'—'}</td>
+    <td>${d.note||'—'}</td>
+    <td><span class="badge ${d.status==='approved'?'b-green':d.status==='rejected'?'b-red':'b-orange'}">${d.status==='approved'?'معتمد':d.status==='rejected'?'مرفوض':'معلق'}</span></td>
+    <td>
+      ${d.status==='pending'?`<button class="btn btn-xs btn-green" onclick="approveSupply(${d.id})">اعتماد</button>
+      <button class="btn btn-xs btn-red" onclick="rejectSupply(${d.id})">رفض</button>`:'—'}
+    </td>
+  </tr>`).join('')||'<tr><td colspan="10" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد طلبيات</td></tr>';
+}
+
+async function approveSupply(id){ await sbUpdate('supply_requests',{id},{status:'approved'}); loadSupplyOrders(); }
+async function rejectSupply(id){  await sbUpdate('supply_requests',{id},{status:'rejected'}); loadSupplyOrders(); }
+
+function exportAdvanced(type){
+  let data, cols, name;
+  if(type==='visits'){
+    data = cachedData.visits;
+    cols = ['name','route','branch','date','time_in','time_out','client_type','display_type','sku_on','sku_stock','missing_count','points'];
+    name = 'الزيارات';
+  } else if(type==='attendance'){
+    data = cachedData.attendance;
+    cols = ['name','route','date','time_in','time_out','hours','lat_in','lng_in'];
+    name = 'الحضور';
+  } else if(type==='products'){
+    data = cachedData.products;
+    cols = ['name','route','branch','fea','cat','snf','shelf_qty','stock_qty','date_shelf','months_shelf'];
+    name = 'الأصناف';
+  } else if(type==='missing'){
+    data = cachedData.missing;
+    cols = ['name','route','branch','fea','snf','reason','note'];
+    name = 'النواقص';
+  } else if(type==='leaderboard'){
+    const scores={};
+    cachedData.visits.forEach(v=>scores[v.name]=(scores[v.name]||0)+(+v.points||0));
+    data = Object.entries(scores).sort((a,b)=>b[1]-a[1]).map(([n,p],i)=>({rank:i+1,name:n,points:p}));
+    cols = ['rank','name','points'];
+    name = 'الليدربورد';
+  }
+  if(!data?.length){ alert('لا توجد بيانات'); return; }
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(data.map(r=>Object.fromEntries(cols.map(c=>[c,r[c]||'']))));
+  ws['!cols'] = cols.map(()=>({wch:18}));
+  XLSX.utils.book_append_sheet(wb,ws,name);
+  XLSX.writeFile(wb, name+'_'+new Date().toLocaleDateString('ar-EG').replace(/\//g,'-')+'.xlsx');
+}
+
+function exportAll(){
+  ['visits','attendance','products','missing','leaderboard'].forEach(t=>exportAdvanced(t));
+}
+
+// ✅ PDB functions
+let _pdbFeaFilter = 'all';
+
+function filterProdDB(fea, el){
+  _pdbFeaFilter = fea;
+  document.querySelectorAll('.tab-pill').forEach(t=>t.classList.remove('on'));
+  if(el) el.classList.add('on');
+  renderProdDB();
+}
+
+function renderProdDB(){
+  const tbody  = document.getElementById('pdb-tbody');
+  if(!tbody) return;
+  const catF   = document.getElementById('pdb-cat')?.value||'all';
+  const search = (document.getElementById('pdb-search')?.value||'').toLowerCase();
+  const rows=[];
+  let idx=1;
+  Object.entries(PDB||{}).forEach(([fea,cats])=>{
+    if(_pdbFeaFilter!=='all' && fea!==_pdbFeaFilter) return;
+    Object.entries(cats||{}).forEach(([cat,grps])=>{
+      if(catF!=='all' && cat!==catF) return;
+      Object.entries(grps||{}).forEach(([grp,prods])=>{
+        (prods||[]).forEach(snf=>{
+          if(search && !snf.toLowerCase().includes(search) && !cat.toLowerCase().includes(search)) return;
+          rows.push({idx:idx++,snf,fea,cat,grp});
+        });
+      });
+    });
+  });
+  if(!rows.length){
+    tbody.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:2rem;color:#aaa">${Object.keys(PDB||{}).length?'لا توجد نتائج':'لم يتم رفع قاعدة الأصناف بعد — استخدم زرار رفع شيت Excel'}</td></tr>`;
+    return;
+  }
+  tbody.innerHTML=rows.map(r=>`<tr>
+    <td style="color:var(--text2)">${r.idx}</td>
+    <td style="font-weight:600">${r.snf}</td>
+    <td><span class="badge b-blue">${r.fea}</span></td>
+    <td style="font-size:11px">${r.cat}</td>
+    <td style="font-size:11px;color:var(--text2)">${r.grp||'—'}</td>
+    <td><button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="deleteProdFromPDB('${r.fea}','${r.cat}','${r.grp}','${r.snf.replace(/'/g,"\\'")}')"><i class="ti ti-trash"></i></button></td>
+  </tr>`).join('');
+}
+
+function renderPDBPanel(){ renderProdDB(); }
+
+function deleteProdFromPDB(fea,cat,grp,snf){
+  if(!PDB[fea]?.[cat]?.[grp]) return;
+  PDB[fea][cat][grp]=PDB[fea][cat][grp].filter(s=>s!==snf);
+  try{ localStorage.setItem('pdb_cache',JSON.stringify(PDB)); }catch(e){}
+  saveProductsToSupabase(PDB);
+  renderProdDB();
+}
+
+function addProductToPDB(){
+  const fea=document.getElementById('np-fea')?.value.trim();
+  const cat=document.getElementById('np-cat')?.value.trim();
+  const grp=document.getElementById('np-grp')?.value.trim()||'';
+  const snf=document.getElementById('np-snf')?.value.trim();
+  if(!fea||!snf){ alert('الفئة واسم الصنف مطلوبان'); return; }
+  if(!PDB[fea]) PDB[fea]={};
+  if(!PDB[fea][cat]) PDB[fea][cat]={};
+  if(!PDB[fea][cat][grp]) PDB[fea][cat][grp]=[];
+  PDB[fea][cat][grp].push(snf);
+  try{ localStorage.setItem('pdb_cache',JSON.stringify(PDB)); }catch(e){}
+  saveProductsToSupabase(PDB);
+  closeModal('modal-add-product');
+  renderProdDB();
+}
+
+async function uploadPDBFile(input){
+  const file=input.files[0]; if(!file) return;
+  const statusEl=document.getElementById('pdb-upload-status');
+  statusEl.textContent='⏳ جاري قراءة الملف...'; statusEl.style.color='#F77F00';
+  try{
+    const buf=await file.arrayBuffer();
+    const wb=XLSX.read(buf,{type:'array'});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+    let headerIdx=-1, colMap={};
+    for(let i=0;i<rows.length;i++){
+      const r=rows[i].map(c=>(c||'').toString().trim());
+      if(r.includes('اسم الصنف')){ headerIdx=i; r.forEach((col,j)=>colMap[col]=j); break; }
+    }
+    if(headerIdx===-1){ statusEl.textContent='❌ مش لاقي عمود "اسم الصنف"'; statusEl.style.color='#B71C1C'; return; }
+    const pdb={}; let count=0;
+    for(let i=headerIdx+1;i<rows.length;i++){
+      const row=rows[i];
+      const fea=(row[colMap['الفئة']]||'').toString().trim();
+      const cat=(row[colMap['التصنيف']]||'').toString().trim();
+      const grp=(row[colMap['المجموعة الفرعية']]||'').toString().trim();
+      const snf=(row[colMap['اسم الصنف']]||'').toString().trim();
+      const active=(row[colMap['فعال']]||'').toString().trim();
+      if(!snf||active==='لا'||!fea||!cat) continue;
+      if(!pdb[fea]) pdb[fea]={};
+      if(!pdb[fea][cat]) pdb[fea][cat]={};
+      if(!pdb[fea][cat][grp]) pdb[fea][cat][grp]=[];
+      pdb[fea][cat][grp].push(snf); count++;
+    }
+    if(!count){ statusEl.textContent='❌ مفيش أصناف فعّالة'; statusEl.style.color='#B71C1C'; return; }
+    statusEl.textContent=`⏳ ${count} صنف — جاري الرفع...`;
+    const val=JSON.stringify(pdb);
+    const patch=await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.pdb`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify({value:val,updated_at:new Date().toISOString()})
+    });
+    if(!patch.ok) await sbInsert('products_db',{key:'pdb',value:val});
+    try{ localStorage.setItem('pdb_cache',val); }catch(e){}
+    PDB=pdb;
+    statusEl.textContent=`✅ تم رفع ${count} صنف من ${Object.keys(pdb).length} فئة!`;
+    statusEl.style.color='#1A7A4A';
+    renderProdDB();
+  }catch(err){ statusEl.textContent='❌ خطأ: '+err.message; statusEl.style.color='#B71C1C'; console.error(err); }
+  input.value='';
+}
 
 // ══════════════════════════════════════════════════════════════
 // SUPABASE HELPERS
@@ -1626,6 +1898,7 @@ async function doLogin(){
   err.style.display='none';
   CU={name:'admin', uid:'admin', level:'gm', groups:['giza','cairo','south','tajmuat','hyper']};
   await loadAdminUsers();
+  await loadPDBFromSupabase();
   setupApp();
   startRealtimeAdmin();
   if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-login"></i> دخول';}
@@ -3027,84 +3300,46 @@ async function loadBranchesMap(){
   }catch(e){}
 }
 
-function renderPDBPanel(){ renderProdDB(); }
-
-let _pdbFeaFilter = 'all';
-
-function filterProdDB(fea, el){
-  _pdbFeaFilter = fea;
-  document.querySelectorAll('.tab-pill').forEach(t=>t.classList.remove('on'));
-  if(el) el.classList.add('on');
-  renderProdDB();
-}
-
-function renderProdDB(){
-  const tbody  = document.getElementById('pdb-tbody');
-  if(!tbody) return;
-  const catF   = document.getElementById('pdb-cat')?.value    || 'all';
-  const search = (document.getElementById('pdb-search')?.value || '').toLowerCase();
-
-  const rows = [];
-  let idx = 1;
-  Object.entries(PDB||{}).forEach(([fea, cats])=>{
-    if(_pdbFeaFilter !== 'all' && fea !== _pdbFeaFilter) return;
-    Object.entries(cats||{}).forEach(([cat, grps])=>{
-      if(catF !== 'all' && cat !== catF) return;
-      Object.entries(grps||{}).forEach(([grp, prods])=>{
-        (prods||[]).forEach(snf=>{
-          if(search && !snf.toLowerCase().includes(search) && !cat.toLowerCase().includes(search)) return;
-          rows.push({idx:idx++, snf, fea, cat, grp});
-        });
+function renderPDBPanel(){
+  // PDB من قاعدة الأصناف المدمجة
+  const el = document.getElementById('panel-products-db');
+  if(!el) return;
+  const feas = Object.keys(PDB||{});
+  let html = `<div class="card"><div class="card-title"><i class="ti ti-package"></i> قاعدة الأصناف — ${feas.length} فئة</div>`;
+  feas.forEach(fea=>{
+    const cats = Object.keys(PDB[fea]||{});
+    html += `<details style="margin-bottom:8px"><summary style="cursor:pointer;padding:8px;background:#f5f7fa;border-radius:8px;font-weight:600">${fea} (${cats.length} قسم)</summary>`;
+    cats.forEach(cat=>{
+      const grps = Object.keys(PDB[fea][cat]||{});
+      html += `<div style="padding:6px 12px;font-size:12px;color:#666">${cat}: `;
+      grps.forEach(grp=>{
+        const prods = (PDB[fea][cat][grp]||[]).length;
+        html += `<span style="margin:2px;padding:2px 8px;background:#e8eaf6;border-radius:999px;font-size:11px">${grp} (${prods})</span>`;
       });
+      html += '</div>';
     });
+    html += '</details>';
   });
-
-  if(!rows.length){
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:2rem;color:#aaa">${Object.keys(PDB||{}).length?'لا توجد نتائج':'لم يتم رفع قاعدة الأصناف بعد'}</td></tr>`;
-    return;
-  }
-
-  tbody.innerHTML = rows.map(r=>`<tr>
-    <td style="color:var(--text2)">${r.idx}</td>
-    <td style="font-weight:600">${r.snf}</td>
-    <td><span class="badge b-blue">${r.fea}</span></td>
-    <td style="font-size:11px;color:var(--text2)">${r.cat}</td>
-    <td style="font-size:11px;color:var(--text2)">${r.grp||'—'}</td>
-    <td><button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="deleteProdFromPDB('${r.fea}','${r.cat}','${r.grp}','${r.snf}')"><i class="ti ti-trash"></i></button></td>
-  </tr>`).join('');
-}
-
-function deleteProdFromPDB(fea,cat,grp,snf){
-  if(!PDB[fea]?.[cat]?.[grp]) return;
-  PDB[fea][cat][grp] = PDB[fea][cat][grp].filter(s=>s!==snf);
-  try{ localStorage.setItem('pdb_cache',JSON.stringify(PDB)); }catch(e){}
-  saveProductsToSupabase(PDB);
-  renderProdDB();
+  html += '</div>';
+  el.innerHTML = html;
 }
 
 function loadRoutes(){
-  const grp=document.getElementById('rt-group').value;
-  const search=document.getElementById('rt-search').value.toLowerCase();
+  const grp=document.getElementById('rt-group')?.value||'all';
+  const search=(document.getElementById('rt-search')?.value||'').toLowerCase();
   let data=ROUTES_LIST;
   if(grp!=='all') data=data.filter(r=>r.group===grp);
   if(search) data=data.filter(r=>r.name.toLowerCase().includes(search));
-
-  // Also show built-in routes
-  const builtIn=Object.keys(BRANCHES_DATA_LOCAL);
-  const allRoutes=[...data,...builtIn.filter(r=>!data.some(d=>d.name===r)).map(r=>{
-    const grpId=Object.entries(GROUPS).find(([,g])=>g)||['giza'];
-    return{id:'builtin',name:r,group:'builtin',rep:'—',status:'active',builtin:true};
-  })];
-
+  const allRoutes=[...data];
   document.getElementById('routes-tbody').innerHTML=allRoutes.map((r,i)=>`<tr>
     <td>${i+1}</td>
-    <td><b>${r.name}</b> ${r.builtin?'<span class="badge b-gray" style="font-size:9px">مدمج</span>':''}</td>
-    <td><span class="badge b-blue" style="font-size:10px">${GROUPS[r.group]?.label||'—'}</span></td>
+    <td><b>${r.name}</b></td>
+    <td><span class="badge b-blue">${GROUPS[r.group]?.label||'—'}</span></td>
     <td style="font-size:11px">${r.rep||'—'}</td>
-    <td><span class="badge b-navy">${BRANCHES_DATA_LOCAL[r.name]?.length||0} فرع</span></td>
+    <td><span class="badge b-navy">${(BRANCHES_MAP[r.name]||[]).length} فرع</span></td>
     <td><span class="badge ${r.status==='active'?'b-green':'b-gray'}">${r.status==='active'?'نشط':'موقوف'}</span></td>
-    <td>${r.builtin?'<span style="font-size:10px;color:#aaa">مدمج</span>':`<button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="deleteRoute('${r.id}')"><i class="ti ti-trash"></i></button>`}</td>
-  </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد خطوط سير مضافة</td></tr>';
+    <td><button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="deleteRoute('${r.id}')"><i class="ti ti-trash"></i></button></td>
+  </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد خطوط سير</td></tr>';
 }
 
 function addRoute(){
@@ -3126,22 +3361,18 @@ function deleteRoute(id){
 
 async function saveProductsToSupabase(pdb){
   try{
-    // Save as a single JSON record in a settings-like approach
-    // First try to delete existing pdb record
-    await fetch(`${SB_URL}/rest/v1/products_db?key=eq.pdb`, {
-      method:'DELETE',
-      headers:{'apikey':SB_KEY,'Authorization':`Bearer ${SB_KEY}`}
+    const val = JSON.stringify(pdb);
+    const patch = await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.pdb`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify({value:val, updated_at:new Date().toISOString()})
     });
-    // Insert new
-    await sbI('products_db', {key:'pdb', value: JSON.stringify(pdb), updated_at: new Date().toISOString()});
-  }catch(e){
-    // Table might not exist yet — data is saved in localStorage
-    console.warn('Supabase save skipped:', e);
-  }
+    if(!patch.ok) await sbInsert('products_db',{key:'pdb',value:val});
+  }catch(e){ console.warn('Supabase save skipped:',e); }
 }
 
 function loadActivity(){
-  const rows=[...DB.visits.slice(0,20),...DB.missing.slice(0,10),...DB.attendance.slice(0,10)]
+  const rows=[...cachedData.visits.slice(0,20),...cachedData.missing.slice(0,10),...cachedData.attendance.slice(0,10)]
     .sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).slice(0,50);
   document.getElementById('activity-tbody').innerHTML=rows.map((r,i)=>{
     const type=r.branch?'زيارة':r.time_in?'حضور':'ناقص';
@@ -3151,7 +3382,7 @@ function loadActivity(){
 }
 
 function exportTable(type){
-  const data=DB[type==='visits'?'visits':type==='products'?'products':type==='missing'?'missing':'attendance'];
+  const data=cachedData[type==='visits'?'visits':type==='products'?'products':type==='missing'?'missing':'attendance'];
   if(!data?.length){alert('لا توجد بيانات');return;}
   const wb=XLSX.utils.book_new();
   const ws=XLSX.utils.json_to_sheet(data);
@@ -3170,17 +3401,13 @@ function populateRepSelect(){
 }
 
 </script>
-<!-- modal-add-route -->
+<!-- ══ modal-add-route ══ -->
 <div class="modal-overlay" id="modal-add-route">
   <div class="modal" style="max-width:400px">
     <div class="modal-title">إضافة خط سير <button class="modal-close" onclick="closeModal('modal-add-route')">✕</button></div>
     <div class="form-fld"><label class="form-lbl">اسم خط السير</label><input type="text" id="nr-name" placeholder="خط سير ..."/></div>
     <div class="form-fld"><label class="form-lbl">المجموعة</label>
-      <select id="nr-group">
-        <option value="giza">الجيزة</option><option value="cairo">وسط القاهرة</option>
-        <option value="south">جنوب وشرق</option><option value="tajmuat">التجمعات</option>
-        <option value="hyper">الهايبر</option>
-      </select>
+      <select id="nr-group"><option value="giza">الجيزة</option><option value="cairo">وسط القاهرة</option><option value="south">جنوب وشرق</option><option value="tajmuat">التجمعات</option><option value="hyper">الهايبر</option></select>
     </div>
     <div class="form-fld"><label class="form-lbl">المنسق</label><select id="nr-rep"><option value="">بدون</option></select></div>
     <div class="modal-footer">
@@ -3190,7 +3417,7 @@ function populateRepSelect(){
   </div>
 </div>
 
-<!-- modal-add-product -->
+<!-- ══ modal-add-product ══ -->
 <div class="modal-overlay" id="modal-add-product">
   <div class="modal" style="max-width:440px">
     <div class="modal-title">إضافة صنف جديد <button class="modal-close" onclick="closeModal('modal-add-product')">✕</button></div>
@@ -3209,71 +3436,5 @@ function populateRepSelect(){
   </div>
 </div>
 
-<script>
-// ══ uploadPDBFile ══════════════════════════════════════════════
-async function uploadPDBFile(input){
-  const file = input.files[0];
-  if(!file) return;
-  const statusEl = document.getElementById('pdb-upload-status');
-  statusEl.textContent='⏳ جاري قراءة الملف...'; statusEl.style.color='#F77F00';
-  try{
-    const buf  = await file.arrayBuffer();
-    const wb   = XLSX.read(buf,{type:'array'});
-    const ws   = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
-    let headerIdx=-1, colMap={};
-    for(let i=0;i<rows.length;i++){
-      const r=rows[i].map(c=>(c||'').toString().trim());
-      if(r.includes('اسم الصنف')){ headerIdx=i; r.forEach((col,j)=>colMap[col]=j); break; }
-    }
-    if(headerIdx===-1){ statusEl.textContent='❌ مش لاقي عمود "اسم الصنف"'; statusEl.style.color='#B71C1C'; return; }
-    const pdb={}; let count=0;
-    for(let i=headerIdx+1;i<rows.length;i++){
-      const row=rows[i];
-      const fea=(row[colMap['الفئة']]||'').toString().trim();
-      const cat=(row[colMap['التصنيف']]||'').toString().trim();
-      const grp=(row[colMap['المجموعة الفرعية']]||'').toString().trim();
-      const snf=(row[colMap['اسم الصنف']]||'').toString().trim();
-      const active=(row[colMap['فعال']]||'').toString().trim();
-      if(!snf||active==='لا'||!fea||!cat) continue;
-      if(!pdb[fea]) pdb[fea]={};
-      if(!pdb[fea][cat]) pdb[fea][cat]={};
-      if(!pdb[fea][cat][grp]) pdb[fea][cat][grp]=[];
-      pdb[fea][cat][grp].push(snf); count++;
-    }
-    if(!count){ statusEl.textContent='❌ مفيش أصناف فعّالة'; statusEl.style.color='#B71C1C'; return; }
-    statusEl.textContent=`⏳ ${count} صنف — جاري الرفع...`;
-    const val=JSON.stringify(pdb);
-    await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.pdb`,{
-      method:'PATCH',
-      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body:JSON.stringify({value:val,updated_at:new Date().toISOString()})
-    });
-    try{ localStorage.setItem('pdb_cache',val); }catch(e){}
-    PDB=pdb;
-    statusEl.textContent=`✅ تم رفع ${count} صنف من ${Object.keys(pdb).length} فئة!`;
-    statusEl.style.color='#1A7A4A';
-    renderPDBPanel();
-  }catch(err){ statusEl.textContent='❌ خطأ: '+err.message; statusEl.style.color='#B71C1C'; }
-  input.value='';
-}
-
-// ══ addProductToPDB ════════════════════════════════════════════
-function addProductToPDB(){
-  const fea=document.getElementById('np-fea').value.trim();
-  const cat=document.getElementById('np-cat').value.trim();
-  const grp=document.getElementById('np-grp').value.trim();
-  const snf=document.getElementById('np-snf').value.trim();
-  if(!fea||!snf){ alert('الفئة واسم الصنف مطلوبان'); return; }
-  if(!PDB[fea]) PDB[fea]={};
-  if(!PDB[fea][cat]) PDB[fea][cat]={};
-  if(!PDB[fea][cat][grp]) PDB[fea][cat][grp]=[];
-  PDB[fea][cat][grp].push(snf);
-  try{ localStorage.setItem('pdb_cache',JSON.stringify(PDB)); }catch(e){}
-  saveProductsToSupabase(PDB);
-  closeModal('modal-add-product');
-  renderPDBPanel();
-}
-</script>
 </body>
 </html>
