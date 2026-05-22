@@ -324,6 +324,21 @@ textarea{width:100%;padding:8px 12px;border:1px solid var(--border);border-radiu
         <div class="fixed-banner"><i class="ti ti-building-store"></i><span id="fixed-banner-text">منسق ثابت</span></div>
       </div>
 
+      <!-- ── عداد الشيفت (الثابت فقط — يظهر بعد تسجيل الحضور) ── -->
+      <div id="shift-timer-card" style="display:none" class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div class="card-title" style="margin-bottom:0"><i class="ti ti-clock-hour-4"></i> الوقت المتبقي من الشيفت</div>
+          <div id="shift-status-badge" style="font-size:11px;padding:2px 10px;border-radius:999px;background:#FFF8E1;color:#5D4037;border:1px solid #FFC72C">8 ساعات</div>
+        </div>
+        <div style="text-align:center;padding:8px 0">
+          <div id="shift-countdown" style="font-size:36px;font-weight:800;color:#003A80;font-family:monospace;letter-spacing:2px">08:00:00</div>
+          <div id="shift-sub" style="font-size:11px;color:#aaa;margin-top:4px">يبدأ العداد من وقت تسجيل الحضور</div>
+        </div>
+        <div style="height:6px;background:#f0f0f0;border-radius:999px;overflow:hidden;margin-top:4px">
+          <div id="shift-progress-bar" style="height:100%;width:100%;background:linear-gradient(90deg,#003A80,#0066CC);border-radius:999px;transition:width 1s linear"></div>
+        </div>
+      </div>
+
       <!-- ── الخطوة 1: اختيار الفرع وتصنيف العميل ── -->
       <div class="card" id="step1-card">
         <div class="card-title"><i class="ti ti-map-pin"></i> الخطوة 1 — اختيار الفرع</div>
@@ -441,9 +456,10 @@ textarea{width:100%;padding:8px 12px;border:1px solid var(--border);border-radiu
 
       <!-- ── زر الحفظ — يظهر بس لما الخطوات تكتمل ── -->
       <div id="entry-ok" class="aok"></div>
-      <button class="btn btn-blue" id="save-visit-btn" onclick="saveVisit()" style="display:none;margin-bottom:16px">
+      <button class="btn btn-blue" id="save-visit-btn" onclick="saveVisit()" style="display:none;margin-bottom:10px">
         <i class="ti ti-device-floppy"></i> حفظ وإضافة النقاط
       </button>
+
     </div>
 
     <!-- أصناف -->
@@ -837,6 +853,156 @@ function onNameChange(){
 // الأسماء مدمجة في HTML مباشرة — لا حاجة لتعبئة ديناميكية
 
 
+// ══════════════════════════════════════════════════════════════
+// SHIFT TIMER — عداد الشيفت للمنسق الثابت
+// ══════════════════════════════════════════════════════════════
+const SHIFT_HOURS = 8;
+let shiftTimerInterval = null;
+
+function startShiftTimer(checkInTime){
+  // احفظ وقت الحضور في localStorage عشان يفضل بعد إعادة الفتح
+  localStorage.setItem('shift_checkin_'+cu?.name, checkInTime);
+  localStorage.setItem('shift_date_'+cu?.name, new Date().toDateString());
+  showShiftTimer(checkInTime);
+}
+
+function restoreShiftTimer(){
+  const savedDate = localStorage.getItem('shift_date_'+cu?.name);
+  const savedTime = localStorage.getItem('shift_checkin_'+cu?.name);
+  if(savedDate === new Date().toDateString() && savedTime){
+    // الحضور كان النهارده — استعد العداد
+    attIn = {time: savedTime, lat:'', lng:''};
+    document.getElementById('att-in-time').textContent = savedTime;
+    document.getElementById('btn-in').classList.add('in');
+    showShiftTimer(savedTime);
+  }
+}
+
+function showShiftTimer(checkInTime){
+  const card = document.getElementById('shift-timer-card');
+  if(!card) return;
+  card.style.display = 'block';
+
+  if(shiftTimerInterval) clearInterval(shiftTimerInterval);
+
+  shiftTimerInterval = setInterval(()=>{
+    const now = new Date();
+    const [h,m] = checkInTime.split(':').map(Number);
+    const checkIn = new Date(now);
+    checkIn.setHours(h, m, 0, 0);
+    const elapsed = Math.max(0, (now - checkIn) / 1000); // بالثواني
+    const total = SHIFT_HOURS * 3600;
+    const remaining = Math.max(0, total - elapsed);
+
+    const rh = Math.floor(remaining / 3600);
+    const rm = Math.floor((remaining % 3600) / 60);
+    const rs = Math.floor(remaining % 60);
+    const display = `${String(rh).padStart(2,'0')}:${String(rm).padStart(2,'0')}:${String(rs).padStart(2,'0')}`;
+
+    const cdEl = document.getElementById('shift-countdown');
+    const barEl = document.getElementById('shift-progress-bar');
+    const subEl = document.getElementById('shift-sub');
+    const badgeEl = document.getElementById('shift-status-badge');
+    const dashCard = document.getElementById('dash-checkout-card');
+
+    if(cdEl) cdEl.textContent = display;
+    if(barEl) barEl.style.width = Math.round((remaining/total)*100)+'%';
+
+    if(remaining <= 0){
+      // اكتمل الشيفت
+      if(cdEl){ cdEl.textContent = '00:00:00'; cdEl.style.color='#1A7A4A'; }
+      if(barEl){ barEl.style.background='linear-gradient(90deg,#1A7A4A,#27AE60)'; barEl.style.width='100%'; }
+      if(subEl) subEl.textContent = '✅ اكتمل الشيفت — يمكنك تسجيل الانصراف';
+      if(badgeEl){ badgeEl.textContent='اكتمل ✅'; badgeEl.style.background='#E8F5E9'; badgeEl.style.color='#1A7A4A'; }
+      // اظهر زر الانصراف في لوحتي
+      if(dashCard) dashCard.style.display = 'block';
+      clearInterval(shiftTimerInterval);
+    } else {
+      const hrsLeft = (remaining/3600).toFixed(1);
+      if(subEl) subEl.textContent = 'تسجيل الحضور: '+checkInTime+' — متبقي '+hrsLeft+' ساعة';
+      if(badgeEl) badgeEl.textContent = hrsLeft+' ساعة متبقية';
+      // إخفاء زر الانصراف في لوحتي حتى اكتمال الشيفت
+      if(dashCard) dashCard.style.display = 'none';
+    }
+  }, 1000);
+}
+
+function checkoutFromBranch(){
+  const btn = document.getElementById('checkout-branch-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="ti ti-loader spin"></i> جاري التسجيل...';
+  const now = new Date();
+  const t = now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
+
+  const done = (lat,lng) => {
+    attOut = {time:t, lat, lng};
+    document.getElementById('att-out-time').textContent = t;
+    btn.style.display = 'none';
+    document.getElementById('send-final-btn').style.display = 'flex';
+    document.getElementById('send-status').style.display = 'block';
+    document.getElementById('send-status').textContent = 'سجّلت الانصراف الساعة '+t+' — اضغط إرسال لإرسال كل البيانات';
+  };
+
+  navigator.geolocation
+    ? navigator.geolocation.getCurrentPosition(
+        p => done(p.coords.latitude.toFixed(4), p.coords.longitude.toFixed(4)),
+        () => done('',''),
+        {timeout:8000, enableHighAccuracy:true}
+      )
+    : done('','');
+}
+
+async function sendFinalData(){
+  const btn = document.getElementById('send-final-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="ti ti-loader spin"></i> جاري الإرسال...';
+  const statusEl = document.getElementById('send-status');
+
+  try{
+    // إرسال بيانات الحضور والانصراف
+    if(attIn){
+      await apiPost({
+        action:'saveAttendance',
+        name:cu.name, route:cu.route, group:cu.group,
+        type:'full',
+        timeIn: attIn.time, timeOut: attOut?.time||'--',
+        lat: attIn.lat, lng: attIn.lng,
+        latOut: attOut?.lat||'', lngOut: attOut?.lng||''
+      });
+    }
+
+    // إرسال كل الزيارات المحفوظة (لو فيه زيارات لم ترسل)
+    for(const v of visits){
+      if(!v._sent){
+        await apiPost({...v, action:'saveVisit'});
+        v._sent = true;
+      }
+    }
+
+    // مسح بيانات الشيفت من localStorage
+    localStorage.removeItem('shift_checkin_'+cu?.name);
+    localStorage.removeItem('shift_date_'+cu?.name);
+
+    statusEl.textContent = '✅ تم إرسال جميع البيانات بنجاح!';
+    statusEl.style.color = '#1A7A4A';
+    btn.innerHTML = '<i class="ti ti-circle-check"></i> تم الإرسال';
+
+    // تحديث لوحتي
+    updateDash();
+
+    // إظهار زر الانصراف من لوحتي (لو لسه ما انصرفش)
+    if(attIn && !attOut){
+      const dashCard = document.getElementById('dash-checkout-card');
+      if(dashCard) dashCard.style.display = 'block';
+    }
+  }catch(e){
+    statusEl.textContent = '❌ حدث خطأ — حاول مرة أخرى';
+    statusEl.style.color = '#C0392B';
+    btn.disabled = false;
+    btn.innerHTML = '<i class="ti ti-send"></i> إرسال جميع البيانات الآن';
+  }
+}
+
 async function doLogin(){
   const name=document.getElementById('l-name').value;
   const pass=document.getElementById('l-pass').value;
@@ -859,6 +1025,8 @@ async function doLogin(){
     document.getElementById('fixed-banner-wrap').style.display='block';
     document.getElementById('fixed-banner-text').textContent='منسق ثابت — '+freshRep.route+' 🏪';
     document.getElementById('fixed-extra-wrap').style.display='block';
+    // استعادة العداد لو كان شغّال
+    restoreShiftTimer();
   }
   // إظهار تاب طلب توريد لكل المنسقين
   document.getElementById('nav-supply-req').style.display='flex';
@@ -1051,11 +1219,20 @@ function recordAtt(type){
   if(type==='out'&&!attIn){aw.textContent='سجل الحضور أولاً';aw.style.display='block';setTimeout(()=>aw.style.display='none',3000);return;}
   const now=new Date();
   const t=now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
-  document.getElementById('att-'+type+'-time').textContent=t;
+  document.getElementById('att-in-time').textContent=t;
   const done=(lat,lng,loc)=>{
-    document.getElementById('att-'+type+'-loc').textContent=loc;
-    if(type==='in'){attIn={time:t,lat,lng,loc};document.getElementById('btn-in').classList.add('in');}
-    else{attOut={time:t,lat,lng,loc};document.getElementById('btn-out').classList.add('out');}
+    document.getElementById('att-in-loc').textContent=loc||'';
+    if(type==='in'){
+      attIn={time:t,lat,lng,loc};
+      document.getElementById('btn-in').classList.add('in');
+      // المنسق الثابت — شغّل العداد
+      if(cu?.coordType==='ثابت'){
+        startShiftTimer(t);
+        // أظهر كارد الانصراف من الفرع
+        const coCard = document.getElementById('checkout-branch-card');
+        if(coCard) coCard.style.display = 'block';
+      }
+    }
     apiPost({action:'saveAttendance',name:cu.name,route:cu.route,group:cu.group,type,time:t,lat,lng});
     checkEntryReady();
   };
@@ -1161,9 +1338,17 @@ async function saveVisit(){
   showOverlay(false);
   const ok=document.getElementById('entry-ok');
   ok.textContent='✓ تم حفظ "'+branch+'" وإضافة '+e.points+' نقطة!';
+  ok.style.background=''; ok.style.color='';
   ok.style.display='block';
   setTimeout(()=>ok.style.display='none',3000);
-  // ── إعادة تعيين كل بيانات الزيارة ──────────────────────────
+
+  // المنسق الثابت — البيانات تفضل ظاهرة، مش بيتعمل reset
+  if(cu?.coordType === 'ثابت'){
+    // بس نحدث زر الحفظ
+    document.getElementById('save-visit-btn').style.display='none';
+    return;
+  }
+  // المنسق المتحرك — reset عادي
   resetVisitData();
 }
 
@@ -1606,26 +1791,56 @@ function recordAttFromDash(){
   if(attOut){alert('سبق وسجّلت الانصراف الساعة '+attOut.time);return;}
   const btn=document.getElementById('dash-checkout-btn');
   btn.disabled=true;
-  btn.innerHTML='<i class="ti ti-loader spin"></i> جاري التسجيل...';
+  btn.innerHTML='<i class="ti ti-loader spin"></i> جاري التسجيل والإرسال...';
   const now=new Date();
   const t=now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
-  const done=(lat,lng)=>{
+
+  const done=async(lat,lng)=>{
     attOut={time:t,lat,lng};
-    apiPost({action:'saveAttendance',name:cu.name,route:cu.route,group:cu.group,type:'out',time:t,lat,lng});
-    // حدّث العنصر المخفي في إدخال
     const elTime=document.getElementById('att-out-time');
     if(elTime) elTime.textContent=t;
+
+    try{
+      // 1. إرسال الانصراف
+      await apiPost({
+        action:'saveAttendance',
+        name:cu.name, route:cu.route, group:cu.group,
+        type:'out', time:t, lat, lng
+      });
+
+      // 2. إرسال أي زيارات لم تُرسل بعد
+      for(const v of visits){
+        if(!v._sent){
+          await apiPost({...v, action:'saveVisit'});
+          v._sent = true;
+        }
+      }
+
+      // 3. مسح بيانات الشيفت من localStorage
+      if(cu?.coordType==='ثابت'){
+        localStorage.removeItem('shift_checkin_'+cu.name);
+        localStorage.removeItem('shift_date_'+cu.name);
+        if(shiftTimerInterval) clearInterval(shiftTimerInterval);
+      }
+
+      btn.disabled=false;
+      btn.innerHTML='<i class="ti ti-circle-check"></i> تم الإرسال ✅';
+      btn.style.background='#1A7A4A';
+    }catch(e){
+      btn.disabled=false;
+      btn.innerHTML='<i class="ti ti-logout"></i> تسجيل الانصراف الآن';
+      alert('حدث خطأ في الإرسال — حاول مرة أخرى');
+    }
     updateDash();
-    btn.disabled=false;
-    btn.innerHTML='<i class="ti ti-logout"></i> تسجيل الانصراف الآن';
   };
-  if(navigator.geolocation){
-    navigator.geolocation.getCurrentPosition(
-      p=>done(p.coords.latitude.toFixed(4),p.coords.longitude.toFixed(4)),
-      ()=>done('',''),
-      {timeout:8000,enableHighAccuracy:true}
-    );
-  } else { done('',''); }
+
+  navigator.geolocation
+    ? navigator.geolocation.getCurrentPosition(
+        p=>done(p.coords.latitude.toFixed(4),p.coords.longitude.toFixed(4)),
+        ()=>done('',''),
+        {timeout:8000,enableHighAccuracy:true}
+      )
+    : done('','');
 }
 
 function updateDash(){
