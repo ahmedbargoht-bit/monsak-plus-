@@ -1006,16 +1006,23 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
               <div style="flex:1;min-width:200px">
                 <div style="font-size:13px;font-weight:700;color:#1B5E20;margin-bottom:2px">📤 رفع قاعدة الأصناف من Excel</div>
-                <div style="font-size:11px;color:#388E3C">ارفع الشيت وهينزل على كل المنسقين فوراً</div>
+                <div style="font-size:11px;color:#388E3C">ارفع الشيت وهينزل على كل المنسقين فوراً — ثابت ومتحرك</div>
               </div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                 <input type="file" id="pdb-file-input" accept=".xlsx,.xls" style="display:none" onchange="uploadPDBFile(this)"/>
                 <button class="btn btn-green btn-sm" onclick="document.getElementById('pdb-file-input').click()">
                   <i class="ti ti-upload"></i> رفع شيت Excel
                 </button>
+                <button class="btn btn-sm" id="pdb-pull-btn" onclick="pullPDBToApp()" style="background:#003A80;color:#fff;border:none">
+                  <i class="ti ti-refresh"></i> سحب الأصناف للتطبيق
+                </button>
                 <a href="#" id="pdb-download-link" style="display:none"></a>
                 <span id="pdb-upload-status" style="font-size:12px;color:#1B5E20;font-weight:600"></span>
               </div>
+            </div>
+            <!-- شريط حالة آخر تحديث -->
+            <div id="pdb-last-update" style="font-size:11px;color:#888;margin-top:8px;display:none">
+              <i class="ti ti-clock"></i> <span id="pdb-update-time"></span>
             </div>
           </div>
 
@@ -1763,6 +1770,47 @@ function addProductToPDB(){
   renderProdDB();
 }
 
+async function pullPDBToApp(){
+  const btn = document.getElementById('pdb-pull-btn');
+  const statusEl = document.getElementById('pdb-upload-status');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="ti ti-loader spin"></i> جاري السحب...';
+  try{
+    // جيب أحدث نسخة من Supabase
+    const res = await sb('products_db', {key:'pdb'});
+    if(!res || !res[0] || !res[0].value){
+      statusEl.textContent = '❌ مفيش أصناف مرفوعة بعد — ارفع شيت Excel أولاً';
+      statusEl.style.color = '#B71C1C';
+      btn.disabled = false;
+      btn.innerHTML = '<i class="ti ti-refresh"></i> سحب الأصناف للتطبيق';
+      return;
+    }
+    // تأكيد إن الـ upsert شغّال (يحدّث updated_at عشان التطبيق يحس بالتغيير)
+    await sbUpsert('products_db', {
+      key: 'pdb',
+      value: res[0].value,
+      updated_at: new Date().toISOString()
+    }, 'key');
+
+    // حدّث PDB محلياً في اللوحة
+    try{ PDB = JSON.parse(res[0].value); }catch(e){}
+    renderProdDB();
+
+    // اظهر وقت آخر تحديث
+    const now = new Date().toLocaleTimeString('ar-EG');
+    document.getElementById('pdb-last-update').style.display = 'block';
+    document.getElementById('pdb-update-time').textContent = 'آخر تحديث للتطبيق: '+now+' — سيظهر على كل المنسقين عند فتح التطبيق';
+
+    statusEl.textContent = '✅ تم سحب الأصناف — التطبيق محدّث!';
+    statusEl.style.color = '#1A7A4A';
+  }catch(e){
+    statusEl.textContent = '❌ خطأ في السحب: '+e.message;
+    statusEl.style.color = '#B71C1C';
+  }
+  btn.disabled = false;
+  btn.innerHTML = '<i class="ti ti-refresh"></i> سحب الأصناف للتطبيق';
+}
+
 async function uploadPDBFile(input){
   const file=input.files[0]; if(!file) return;
   const statusEl=document.getElementById('pdb-upload-status');
@@ -1800,6 +1848,10 @@ async function uploadPDBFile(input){
     PDB=pdb;
     statusEl.textContent=`✅ تم رفع ${count} صنف من ${Object.keys(pdb).length} فئة!`;
     statusEl.style.color='#1A7A4A';
+    // اظهر وقت آخر تحديث
+    const now = new Date().toLocaleTimeString('ar-EG');
+    document.getElementById('pdb-last-update').style.display='block';
+    document.getElementById('pdb-update-time').textContent='آخر رفع: '+now+' — ينزل على التطبيق فوراً عند الفتح';
     renderProdDB();
   }catch(err){ statusEl.textContent='❌ خطأ: '+err.message; statusEl.style.color='#B71C1C'; console.error(err); }
   input.value='';
@@ -3280,27 +3332,11 @@ async function loadBranchesMap(){
 }
 
 function renderPDBPanel(){
-  // PDB من قاعدة الأصناف المدمجة
-  const el = document.getElementById('panel-products-db');
-  if(!el) return;
-  const feas = Object.keys(PDB||{});
-  let html = `<div class="card"><div class="card-title"><i class="ti ti-package"></i> قاعدة الأصناف — ${feas.length} فئة</div>`;
-  feas.forEach(fea=>{
-    const cats = Object.keys(PDB[fea]||{});
-    html += `<details style="margin-bottom:8px"><summary style="cursor:pointer;padding:8px;background:#f5f7fa;border-radius:8px;font-weight:600">${fea} (${cats.length} قسم)</summary>`;
-    cats.forEach(cat=>{
-      const grps = Object.keys(PDB[fea][cat]||{});
-      html += `<div style="padding:6px 12px;font-size:12px;color:#666">${cat}: `;
-      grps.forEach(grp=>{
-        const prods = (PDB[fea][cat][grp]||[]).length;
-        html += `<span style="margin:2px;padding:2px 8px;background:#e8eaf6;border-radius:999px;font-size:11px">${grp} (${prods})</span>`;
-      });
-      html += '</div>';
-    });
-    html += '</details>';
-  });
-  html += '</div>';
-  el.innerHTML = html;
+  // بيحدّث بس جدول الأصناف — مش بيمسح الـ panel كله
+  renderProdDB();
+  // لو الجدول مش موجود (أول مرة) — اعرض ملخص الفئات
+  const tbody = document.getElementById('pdb-tbody');
+  if(!tbody) return;
 }
 
 function loadRoutes(){
