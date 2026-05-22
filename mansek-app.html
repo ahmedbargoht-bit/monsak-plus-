@@ -3,8 +3,13 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
-<meta name="theme-color" content="#003049"/>
+<meta name="theme-color" content="#3A0800"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="منسق بلس"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<link rel="manifest" href="manifest-mansek.json"/>
+<link rel="apple-touch-icon" href="icon-192.png"/>
 <title>منسق بلس | الطحان للتمور</title>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css"/>
@@ -201,6 +206,13 @@ textarea{width:100%;padding:8px 12px;border:1px solid var(--border);border-radiu
 </style>
 </head>
 <body>
+
+<!-- ══ Offline Banner ══ -->
+<div id="offline-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:#B71C1C;color:#fff;padding:8px 16px;font-family:'Cairo',sans-serif;font-size:12px;font-weight:700;align-items:center;gap:8px;justify-content:center">
+  <i class="ti ti-wifi-off" style="font-size:16px"></i>
+  أنت offline — البيانات تُحفظ محلياً وستُرفع تلقائياً لما يرجع النت
+  <span id="offline-badge" style="display:none;background:rgba(255,255,255,.2);padding:2px 8px;border-radius:999px;font-size:11px"></span>
+</div>
 
 <div class="saving-overlay" id="overlay">
   <div class="saving-box"><i class="ti ti-loader spin"></i>جاري الحفظ...</div>
@@ -1995,6 +2007,160 @@ function sendLocation(){
   }, {enableHighAccuracy:true, timeout:8000});
 }
 
+</script>
+<script>
+// ══════════════════════════════════════════════════════════════
+// PWA — Service Worker Registration
+// ══════════════════════════════════════════════════════════════
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('./sw-mansek.js')
+    .then(reg => {
+      console.log('SW registered');
+      // لما يرجع النت — sync تلقائي
+      if('SyncManager' in window){
+        navigator.serviceWorker.ready.then(r => r.sync.register('sync-queue'));
+      }
+    }).catch(e => console.warn('SW error:', e));
+
+  // استقبال رسائل من SW
+  navigator.serviceWorker.addEventListener('message', e => {
+    if(e.data?.type === 'SYNC_DONE' && e.data.count > 0){
+      showOfflineBanner(false);
+      showToastPWA(`✅ تم رفع ${e.data.count} عملية محفوظة offline`);
+    }
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
+// OFFLINE QUEUE — IndexedDB
+// ══════════════════════════════════════════════════════════════
+const OQ_DB_NAME  = 'mansek-offline';
+const OQ_STORE    = 'offline-queue';
+let   oqDB        = null;
+let   isOnlineNow = navigator.onLine;
+
+// فتح الـ DB
+function openOQDB(){
+  return new Promise((res, rej) => {
+    if(oqDB){ res(oqDB); return; }
+    const req = indexedDB.open(OQ_DB_NAME, 1);
+    req.onupgradeneeded = e => {
+      const db = e.target.result;
+      if(!db.objectStoreNames.contains(OQ_STORE)){
+        const s = db.createObjectStore(OQ_STORE, {keyPath:'id', autoIncrement:true});
+        s.createIndex('savedAt','savedAt');
+      }
+    };
+    req.onsuccess = e => { oqDB = e.target.result; res(oqDB); };
+    req.onerror   = e => rej(e.target.error);
+  });
+}
+
+// حفظ عملية في الـ Queue
+async function saveToOQ(action, table, data){
+  const db    = await openOQDB();
+  const tx    = db.transaction(OQ_STORE,'readwrite');
+  const store = tx.objectStore(OQ_STORE);
+  store.add({action, table, data, savedAt: Date.now()});
+  updateQueueBadge();
+}
+
+// رفع كل العمليات المحفوظة
+async function flushOQ(){
+  if(!navigator.onLine) return;
+  const db    = await openOQDB();
+  const tx    = db.transaction(OQ_STORE,'readwrite');
+  const store = tx.objectStore(OQ_STORE);
+  const items = await new Promise((res,rej)=>{const r=store.getAll();r.onsuccess=e=>res(e.target.result||[]);r.onerror=e=>rej(e)});
+
+  if(!items.length) return;
+  let done = 0;
+  for(const item of items){
+    try{
+      let ok = false;
+      if(item.action === 'insert') ok = await sbInsert(item.table, item.data);
+      if(item.action === 'upsert') ok = await sbUpsert(item.table, item.data, 'name');
+      if(item.action === 'update') ok = await sbUpdate(item.table, item.data.match, item.data.values);
+      if(ok !== false){ store.delete(item.id); done++; }
+    }catch(e){}
+  }
+  updateQueueBadge();
+  if(done > 0) showToastPWA(`✅ تم رفع ${done} عملية كانت محفوظة offline`);
+}
+
+// عداد الـ Queue
+async function updateQueueBadge(){
+  try{
+    const db    = await openOQDB();
+    const tx    = db.transaction(OQ_STORE,'readonly');
+    const store = tx.objectStore(OQ_STORE);
+    const count = await new Promise(res=>{const r=store.count();r.onsuccess=e=>res(e.target.result);});
+    const badge = document.getElementById('offline-badge');
+    if(badge){
+      badge.textContent = count > 0 ? `${count} عملية offline` : '';
+      badge.style.display = count > 0 ? 'block' : 'none';
+    }
+  }catch(e){}
+}
+
+// ══════════════════════════════════════════════════════════════
+// OFFLINE WRAPPER — يلف sbInsert لو مفيش نت
+// ══════════════════════════════════════════════════════════════
+const _origSbInsert = sbInsert;
+sbInsert = async function(table, data){
+  if(!navigator.onLine){
+    await saveToOQ('insert', table, data);
+    showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
+    return {offline: true};
+  }
+  try{
+    const res = await _origSbInsert(table, data);
+    return res;
+  }catch(e){
+    await saveToOQ('insert', table, data);
+    showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
+    return {offline: true};
+  }
+};
+
+// ══════════════════════════════════════════════════════════════
+// مراقبة حالة الإنترنت
+// ══════════════════════════════════════════════════════════════
+window.addEventListener('online', () => {
+  isOnlineNow = true;
+  showOfflineBanner(false);
+  flushOQ();
+  // إبلاغ SW بالـ sync
+  if(navigator.serviceWorker.controller){
+    navigator.serviceWorker.controller.postMessage('FLUSH_QUEUE');
+  }
+});
+
+window.addEventListener('offline', () => {
+  isOnlineNow = false;
+  showOfflineBanner(true);
+});
+
+function showOfflineBanner(show){
+  const b = document.getElementById('offline-banner');
+  if(b) b.style.display = show ? 'flex' : 'none';
+}
+
+function showToastPWA(msg){
+  // استخدم toast الموجود لو ممكن
+  const el = document.getElementById('overlay-msg');
+  if(el){ el.textContent = msg; }
+  // fallback
+  else { console.log(msg); }
+}
+
+// تحقق عند البداية
+window.addEventListener('DOMContentLoaded', () => {
+  if(!navigator.onLine) showOfflineBanner(true);
+  updateQueueBadge();
+  // flush أي بيانات قديمة محفوظة
+  setTimeout(flushOQ, 3000);
+});
 </script>
 </body>
 </html>
