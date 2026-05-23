@@ -861,10 +861,10 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
               <option value="alex">الإسكندرية</option>
               </select>
               <select id="br-type" onchange="loadBranches()">
-                <option value="all">كل الأصناف</option>
-                <option value="A">A — كبير</option>
-                <option value="B">B — متوسط</option>
-                <option value="C">C — صغير</option>
+                <option value="all">كل الحالات</option>
+                <option value="active">🟢 نشط</option>
+                <option value="suspended">🟡 متوقف</option>
+                <option value="closed">🔴 تم الغلق</option>
               </select>
               <input type="text" id="br-search" placeholder="ابحث عن فرع..." oninput="loadBranches()" style="flex:1"/>
             </div>
@@ -3024,33 +3024,73 @@ async function deleteSup(idx){
 // ══════════════════════════════════════════════════════════════
 // BRANCHES
 // ══════════════════════════════════════════════════════════════
-function loadBranches(){
-  const grp=document.getElementById('br-group').value;
-  const type=document.getElementById('br-type').value;
-  const search=document.getElementById('br-search').value.toLowerCase();
+async function loadBranches(){
+  const grp    = document.getElementById('br-group')?.value||'all';
+  const type   = document.getElementById('br-type')?.value||'all';
+  const search = (document.getElementById('br-search')?.value||'').toLowerCase();
 
-  // دمج الفروع المدمجة + الفروع من Supabase
-  const builtIn=[];
-  Object.entries(BRANCHES_MAP).forEach(([route,branches])=>{
-    const rep=REPS.find(r=>r.route===route);
-    if(rep&&CU.groups.includes(rep.group)){
-      branches.forEach(b=>builtIn.push({branch_name:b,route,grp:rep.group,client_type:'B',source:'مدمج'}));
+  // جيب الفروع من Supabase
+  let data = [];
+  try{
+    const res = await sb('branches',{},{limit:2000});
+    if(res && res.length) data = res;
+    else {
+      // fallback من BRANCHES_MAP
+      Object.entries(BRANCHES_MAP).forEach(([route,branches])=>{
+        const rep=REPS.find(r=>r.route===route);
+        if(rep){
+          (Array.isArray(branches)?branches:[]).forEach(b=>{
+            data.push({branch_name:b, route, grp:rep.group, client_type:'A — كبير', status:'active', rep_name:rep.name});
+          });
+        }
+      });
     }
-  });
-  const fromDB=cachedData.location.filter(()=>false); // placeholder
-  let data=builtIn;
-  if(grp!=='all') data=data.filter(b=>b.grp===grp);
-  if(type!=='all') data=data.filter(b=>b.client_type===type);
-  if(search) data=data.filter(b=>b.branch_name.toLowerCase().includes(search)||b.route.toLowerCase().includes(search));
+  }catch(e){ console.warn('branches load failed',e); }
 
-  document.getElementById('branches-table').innerHTML=data.map(b=>`<tr>
-    <td><b>${b.branch_name}</b></td>
-    <td style="font-size:11px">${b.route}</td>
-    <td><span class="badge" style="background:${GROUPS[b.grp]?.color||'#ccc'}22;color:${GROUPS[b.grp]?.color||'#555'}">${GROUPS[b.grp]?.label||b.grp}</span></td>
-    <td><span class="badge b-blue">${b.client_type}</span></td>
-    <td><span class="badge b-green">نشط</span></td>
-    <td><span class="badge b-gray" style="font-size:9px">${b.source||'Supabase'}</span></td>
-  </tr>`).join('')||'<tr><td colspan="6" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات</td></tr>';
+  // فلتر
+  if(grp!=='all')  data=data.filter(b=>b.grp===grp);
+  if(type!=='all') data=data.filter(b=>b.status===type);
+  if(search)       data=data.filter(b=>(b.branch_name||'').toLowerCase().includes(search)||(b.route||'').toLowerCase().includes(search));
+
+  const statusLabel = {
+    active: '<span class="badge b-green">نشط</span>',
+    suspended: '<span class="badge" style="background:#FFF3E0;color:#E65100">متوقف</span>',
+    closed: '<span class="badge" style="background:#FFEBEE;color:#B71C1C">تم الغلق</span>'
+  };
+
+  document.getElementById('branches-table').innerHTML = data.map(b=>`<tr>
+    <td><b>${b.branch_name||'—'}</b></td>
+    <td style="font-size:11px">${b.route||'—'}</td>
+    <td><span class="badge" style="background:${GROUPS[b.grp]?.color||'#ccc'}22;color:${GROUPS[b.grp]?.color||'#555'}">${GROUPS[b.grp]?.label||b.grp||'—'}</span></td>
+    <td style="font-size:11px">${b.rep_name||'—'}</td>
+    <td>${statusLabel[b.status]||statusLabel.active}</td>
+    <td>
+      <button onclick="toggleBranchStatus('${b.id}','${b.status}')" class="btn btn-xs" style="background:#f5f5f5;color:#333">
+        <i class="ti ti-refresh"></i>
+      </button>
+    </td>
+  </tr>`).join('')||'<tr><td colspan="6" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات — ارفع شيت البيانات أولاً</td></tr>';
+}
+
+async function toggleBranchStatus(id, currentStatus){
+  const next = currentStatus==='active'?'suspended':currentStatus==='suspended'?'closed':'active';
+  await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body: JSON.stringify({status:next})
+  });
+  loadBranches();
+  // حدّث branches_map في products_db عشان التطبيق يتحدث
+  rebuildBranchesMap();
+}
+
+async function rebuildBranchesMap(){
+  try{
+    const all = await sb('branches',{status:'active'},{limit:2000});
+    const map = {};
+    (all||[]).forEach(b=>{ if(!map[b.route]) map[b.route]=[]; map[b.route].push(b.branch_name); });
+    await sbUpsert('products_db',{key:'branches_map',value:JSON.stringify(map),updated_at:new Date().toISOString()},'key');
+  }catch(e){ console.warn('rebuildBranchesMap failed',e); }
 }
 
 async function addBranch(){
@@ -3186,13 +3226,14 @@ function parseUploadedRows(rows){
     return -1;
   };
 
-  // أسماء الأعمدة بالظبط زي النموذج
+  // أسماء الأعمدة بالظبط زي النموذج الجديد
   const colSup    = findCol(['اسم المشرف']);
   const colRep    = findCol(['اسم المنسق']);
   const colRoute  = findCol(['خط السير', 'خط سير']);
-  const colBranch = findCol(['اسم الفرع', 'فرع']);
+  const colBranch = findCol(['اسم العميل', 'اسم الفرع', 'فرع', 'عميل']);
+  const colStatus = findCol(['حالة العميل', 'حالة', 'status']);
   const colType   = findCol(['نوع المنسق', 'نوع']);
-  const colPass   = findCol(['الباسورد', 'باسورد']);
+  const colPass   = findCol(['باسورد المنسق', 'الباسورد', 'باسورد']);
   const colGroup  = findCol(['المجموعة', 'مجموعة']);
 
   console.log('Columns detected:', {colSup, colRep, colRoute, colBranch, colType, colPass, colGroup});
@@ -3206,13 +3247,14 @@ function parseUploadedRows(rows){
   let lastSup='', lastRep='', lastRoute='', lastPass='', lastGroup='', lastType='';
 
   dataRows.forEach(r => {
-    const rawRep   = colRep>=0    ? String(r[colRep]||'').trim()    : '';
-    const rawSup   = colSup>=0    ? String(r[colSup]||'').trim()    : '';
-    const rawRoute = colRoute>=0  ? String(r[colRoute]||'').trim()  : '';
-    const rawPass  = colPass>=0   ? String(r[colPass]||'').trim()   : '';
-    const rawGroup = colGroup>=0  ? String(r[colGroup]||'').trim()  : '';
-    const rawType  = colType>=0   ? String(r[colType]||'').trim()   : '';
-    const branch   = colBranch>=0 ? String(r[colBranch]||'').trim() : '';
+    const rawRep    = colRep>=0    ? String(r[colRep]||'').trim()    : '';
+    const rawSup    = colSup>=0    ? String(r[colSup]||'').trim()    : '';
+    const rawRoute  = colRoute>=0  ? String(r[colRoute]||'').trim()  : '';
+    const rawPass   = colPass>=0   ? String(r[colPass]||'').trim()   : '';
+    const rawGroup  = colGroup>=0  ? String(r[colGroup]||'').trim()  : '';
+    const rawType   = colType>=0   ? String(r[colType]||'').trim()   : '';
+    const branch    = colBranch>=0 ? String(r[colBranch]||'').trim() : '';
+    const brStatus  = colStatus>=0 ? String(r[colStatus]||'نشط').trim() : 'نشط';
 
     // ورث القيم الفاضية من الصف السابق (خلايا مدمجة)
     const name  = rawRep   || lastRep;
@@ -3235,9 +3277,11 @@ function parseUploadedRows(rows){
     // لو نفس المنسق موجود — أضف الفرع للموجود
     const existing = uploadedData.find(u=>u.name===name && u.route===route);
     if(existing){
-      if(branch && !existing.branches.includes(branch)) existing.branches.push(branch);
+      if(branch && !existing.branches.find(b=>b.name===branch)){
+        existing.branches.push({name:branch, status:brStatus});
+      }
     } else {
-      uploadedData.push({name, sup, route, pass, group, type, branches: branch?[branch]:[]});
+      uploadedData.push({name, sup, route, pass, group, type, branches: branch?[{name:branch, status:brStatus}]:[]});
     }
   });
 
@@ -3358,20 +3402,63 @@ async function uploadToSupabase(){
       name:r.name, route:r.route,
       group: supGroups[r.sup]||normalizeGrp(r.group)||'giza',
       type:r.type||'متحرك', pass:r.pass||'1234', goal:1,
-      branches:r.branches||[]
+      branches: (r.branches||[]).filter(b=>b.status==='نشط').map(b=>b.name)
     }));
-    // حفظ خريطة الفروع
+
+    // branches_map للتطبيق — الفروع النشطة فقط
     const newBranchesMap = {};
     uploadedData.forEach(r=>{
-      if(r.route && r.branches && r.branches.length)
-        newBranchesMap[r.route] = r.branches;
+      if(r.route && r.branches && r.branches.length){
+        const activeBranches = r.branches.filter(b=>b.status==='نشط').map(b=>b.name);
+        if(activeBranches.length) newBranchesMap[r.route] = activeBranches;
+      }
     });
-    // upsert branches_map — يحدّث لو موجود أو يضيف لو مش موجود (بدون تكرار)
+
+    // حفظ كل الفروع بحالاتها في جدول branches في Supabase
+    const allBranches = [];
+    uploadedData.forEach(r=>{
+      const grp = supGroups[r.sup]||normalizeGrp(r.group)||'giza';
+      (r.branches||[]).forEach(b=>{
+        allBranches.push({
+          branch_name: b.name,
+          route: r.route,
+          grp,
+          rep_name: r.name,
+          client_type: 'A — كبير',
+          status: b.status==='نشط' ? 'active' : b.status==='متوقف' ? 'suspended' : 'closed'
+        });
+      });
+    });
+
+    // حذف الفروع القديمة وإضافة الجديدة
+    if(allBranches.length){
+      await fetch(`${SUPABASE_URL}/rest/v1/branches?grp=in.(${[...new Set(allBranches.map(b=>b.grp))].map(g=>`"${g}"`).join(',')})`,{
+        method:'DELETE',
+        headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'}
+      });
+      for(let i=0;i<allBranches.length;i+=50){
+        await fetch(`${SUPABASE_URL}/rest/v1/branches`,{
+          method:'POST',
+          headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+          body:JSON.stringify(allBranches.slice(i,i+50))
+        });
+      }
+    }
+
+    // upsert branches_map و reps في products_db
     await sbUpsert('products_db', {key:'branches_map', value:JSON.stringify(newBranchesMap), updated_at:new Date().toISOString()}, 'key');
-    // upsert reps
     await sbUpsert('products_db', {key:'reps', value:JSON.stringify(repsForApp), updated_at:new Date().toISOString()}, 'key');
 
-    document.getElementById('upload-ok').textContent = `✓ تم رفع ${uploadedData.length} منسق للنظام بنجاح — سيظهرون في التطبيق فوراً`;
+    const totalBranches = allBranches.length;
+    const activeBranches = allBranches.filter(b=>b.status==='active').length;
+    const suspendedBranches = allBranches.filter(b=>b.status==='suspended').length;
+    const closedBranches = allBranches.filter(b=>b.status==='closed').length;
+
+    document.getElementById('upload-ok').innerHTML = `
+      ✓ تم رفع ${uploadedData.length} منسق و ${totalBranches} فرع للنظام بنجاح<br>
+      <span style="font-size:11px;opacity:.8">
+        🟢 نشط: ${activeBranches} &nbsp;|&nbsp; 🟡 متوقف: ${suspendedBranches} &nbsp;|&nbsp; 🔴 مغلق: ${closedBranches}
+      </span>`;
     document.getElementById('upload-ok').style.display='block';
     document.getElementById('upload-preview').style.display='none';
     uploadedData=[];
