@@ -147,7 +147,12 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 .btn-confirm-red{background:var(--red);color:#fff}
 .modal-err{color:var(--red);font-size:12px;text-align:center;display:none;margin-bottom:8px}
 
-/* ── Loading ── */
+/* ── Chips ── */
+.chip{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;border-radius:999px;
+  font-size:11px;font-weight:600;cursor:pointer;border:1.5px solid var(--border);
+  background:#fff;color:var(--text);transition:.15s;user-select:none}
+.chip:hover{border-color:var(--navy);color:var(--navy)}
+.chip.selected{background:var(--navy);color:#fff;border-color:var(--navy)}
 .loading{text-align:center;padding:2rem;color:var(--text2);font-size:13px}
 .spinner{display:inline-block;width:24px;height:24px;border:3px solid var(--border);
   border-top-color:var(--navy);border-radius:50%;animation:spin .7s linear infinite;margin-bottom:8px}
@@ -359,17 +364,37 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 <div class="modal-overlay" id="modal-plan-item">
   <div class="modal-sheet">
     <div class="modal-title">إضافة زيارة للخطة</div>
-    <div id="modal-plan-day" style="font-size:12px;color:var(--text2);text-align:center;margin-bottom:12px"></div>
-    <select class="modal-inp" id="pi-rep" onchange="onPiRepChange()">
-      <option value="">اختر المنسق...</option>
-    </select>
-    <select class="modal-inp" id="pi-route" onchange="onPiRouteChange()" style="display:none">
-      <option value="">اختر خط السير...</option>
-    </select>
-    <select class="modal-inp" id="pi-branch">
-      <option value="">اختر الفرع...</option>
-    </select>
-    <input type="text" class="modal-inp" id="pi-goal" placeholder="الهدف من الزيارة (اختياري)"/>
+    <div id="modal-plan-day" style="font-size:12px;color:var(--text2);text-align:center;margin-bottom:16px"></div>
+
+    <!-- Step 1: خطوط السير -->
+    <div style="margin-bottom:12px">
+      <div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px">1. خطوط السير</div>
+      <div id="pi-routes-list" style="display:flex;flex-wrap:wrap;gap:6px;max-height:140px;overflow-y:auto;
+        padding:8px;border:1.5px solid var(--border);border-radius:10px;background:#f8f9fd">
+        <div style="color:var(--text2);font-size:12px">جاري التحميل...</div>
+      </div>
+    </div>
+
+    <!-- Step 2: الفروع -->
+    <div style="margin-bottom:12px" id="pi-branches-wrap">
+      <div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px">2. الفروع المستهدفة</div>
+      <div id="pi-branches-list" style="display:flex;flex-wrap:wrap;gap:6px;max-height:140px;overflow-y:auto;
+        padding:8px;border:1.5px solid var(--border);border-radius:10px;background:#f8f9fd">
+        <div style="color:var(--text2);font-size:12px">اختر خط السير أولاً</div>
+      </div>
+    </div>
+
+    <!-- Step 3: المنسق -->
+    <div style="margin-bottom:12px">
+      <div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px">3. المنسق المسؤول</div>
+      <select class="modal-inp" id="pi-rep" style="margin-bottom:0">
+        <option value="">اختر المنسق...</option>
+      </select>
+    </div>
+
+    <!-- الهدف -->
+    <input type="text" class="modal-inp" id="pi-goal" placeholder="الهدف من الزيارة (اختياري)" style="margin-bottom:0"/>
+
     <div class="modal-btns">
       <button class="btn-modal btn-cancel" onclick="closePlanItemModal()">إلغاء</button>
       <button class="btn-modal btn-confirm" onclick="addPlanItem()">إضافة</button>
@@ -1034,86 +1059,74 @@ async function approvePlan(){
   showToast('✅ تم اعتماد خطة الأسبوع');
 }
 
+let _allBranchesCache = []; // cache للفروع
+
 async function openPlanItemModal(date, dayName){
   if(!currentPlan){ showToast('أنشئ خطة أولاً'); return; }
   _addingDay = {date, dayName};
   document.getElementById('modal-plan-day').textContent = dayName + ' — ' + date;
-
-  document.getElementById('pi-route').style.display='none';
-  document.getElementById('pi-route').innerHTML='<option value="">اختر خط السير...</option>';
-  document.getElementById('pi-branch').innerHTML='<option value="">اختر الفرع...</option>';
   document.getElementById('pi-goal').value = '';
-
-  const repSel = document.getElementById('pi-rep');
-  repSel.innerHTML = '<option value="">جاري التحميل...</option>';
+  document.getElementById('pi-rep').innerHTML = '<option value="">اختر المنسق...</option>';
+  document.getElementById('pi-branches-list').innerHTML = '<div style="color:var(--text2);font-size:12px">اختر خط السير أولاً</div>';
   document.getElementById('modal-plan-item').classList.add('open');
 
-  // جيب المنسقين من Supabase
-  let allReps = [];
-  console.log('cu.groups:', cu.groups);
+  // جيب كل الفروع لمجموعات المشرف
+  const routesList = document.getElementById('pi-routes-list');
+  routesList.innerHTML = '<div style="color:var(--text2);font-size:12px">جاري التحميل...</div>';
+
+  _allBranchesCache = [];
   for(const grp of cu.groups){
-    const url = `${SUPABASE_URL}/rest/v1/users?select=*&role=eq.rep&grp=eq.${encodeURIComponent(grp)}&limit=200`;
-    console.log('fetching:', url);
-    const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    const data = await res.json();
-    console.log('reps for', grp, ':', data?.length||0);
-    if(Array.isArray(data)) allReps.push(...data);
+    const data = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=*&grp=eq.${encodeURIComponent(grp)}&status=eq.active&limit=500`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const json = await data.json();
+    if(Array.isArray(json)) _allBranchesCache.push(...json);
+  }
+
+  // استخرج خطوط السير الفريدة
+  const routes = [...new Set(_allBranchesCache.map(b=>b.route).filter(Boolean))].sort();
+
+  routesList.innerHTML = routes.map(r=>`
+    <div class="chip" data-route="${r}" onclick="toggleRouteChip(this,'${r.replace(/'/g,"\\'")}')">
+      ${r}
+    </div>`).join('') || '<div style="color:var(--text2);font-size:12px">لا توجد خطوط سير</div>';
+
+  // جيب المنسقين
+  let allReps = [];
+  for(const grp of cu.groups){
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/users?select=*&role=eq.rep&grp=eq.${encodeURIComponent(grp)}&limit=200`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const json = await res.json();
+    if(Array.isArray(json)) allReps.push(...json);
   }
   allReps.sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
-
+  const repSel = document.getElementById('pi-rep');
   repSel.innerHTML = '<option value="">اختر المنسق...</option>';
-  if(!allReps.length){
-    repSel.innerHTML = '<option value="">لا يوجد منسقون في مجموعتك</option>';
-  } else {
-    allReps.forEach(r=>{
-      const o=document.createElement('option');
-      o.value=r.name;
-      o.textContent=r.name;
-      repSel.appendChild(o);
-    });
-  }
-}
-
-async function onPiRepChange(){
-  const repName = document.getElementById('pi-rep').value;
-  const routeSel = document.getElementById('pi-route');
-  const branchSel = document.getElementById('pi-branch');
-
-  routeSel.style.display='none';
-  routeSel.innerHTML='<option value="">اختر خط السير...</option>';
-  branchSel.innerHTML='<option value="">اختر الفرع...</option>';
-
-  if(!repName) return;
-
-  // جيب كل الفروع للمنسق من Supabase
-  const data = await sbGet('branches',{rep_name:repName, status:'active'});
-  if(!Array.isArray(data)||!data.length) return;
-
-  // جمّع خطوط السير الفريدة
-  const routes = [...new Set(data.map(b=>b.route).filter(Boolean))];
-
-  if(routes.length > 1){
-    // أكتر من خط سير — اعرض القايمة
-    routeSel.style.display='block';
-    routes.forEach(r=>{const o=document.createElement('option');o.value=r;o.textContent=r;routeSel.appendChild(o);});
-  } else {
-    // خط سير واحد — اعرض الفروع مباشرة
-    routeSel.style.display='none';
-    data.forEach(b=>{const o=document.createElement('option');o.value=b.branch_name;o.textContent=b.branch_name;branchSel.appendChild(o);});
-  }
-}
-
-async function onPiRouteChange(){
-  const repName = document.getElementById('pi-rep').value;
-  const route   = document.getElementById('pi-route').value;
-  const branchSel = document.getElementById('pi-branch');
-  branchSel.innerHTML='<option value="">اختر الفرع...</option>';
-  if(!route) return;
-
-  const data = await sbGet('branches',{rep_name:repName, route:route, status:'active'});
-  if(Array.isArray(data)) data.forEach(b=>{
-    const o=document.createElement('option');o.value=b.branch_name;o.textContent=b.branch_name;branchSel.appendChild(o);
+  allReps.forEach(r=>{
+    const o=document.createElement('option');
+    o.value=r.name; o.textContent=r.name;
+    repSel.appendChild(o);
   });
+}
+
+function toggleRouteChip(el, route){
+  el.classList.toggle('selected');
+  updateBranchesFromSelectedRoutes();
+}
+
+function updateBranchesFromSelectedRoutes(){
+  const selectedRoutes = [...document.querySelectorAll('#pi-routes-list .chip.selected')].map(c=>c.dataset.route);
+  const branchesList = document.getElementById('pi-branches-list');
+
+  if(!selectedRoutes.length){
+    branchesList.innerHTML = '<div style="color:var(--text2);font-size:12px">اختر خط السير أولاً</div>';
+    return;
+  }
+
+  const branches = _allBranchesCache.filter(b=>selectedRoutes.includes(b.route));
+  branchesList.innerHTML = branches.map(b=>`
+    <div class="chip" data-branch="${b.branch_name}" onclick="this.classList.toggle('selected')">
+      ${b.branch_name}
+    </div>`).join('') || '<div style="color:var(--text2);font-size:12px">لا توجد فروع</div>';
 }
 
 function closePlanItemModal(){
@@ -1123,35 +1136,49 @@ function closePlanItemModal(){
 
 async function addPlanItem(){
   const rep    = document.getElementById('pi-rep').value;
-  const branch = document.getElementById('pi-branch').value;
   const goal   = document.getElementById('pi-goal').value.trim();
-  if(!rep||!branch){ showToast('اختر المنسق والفرع'); return; }
+  const selectedRoutes  = [...document.querySelectorAll('#pi-routes-list .chip.selected')].map(c=>c.dataset.route);
+  const selectedBranches = [...document.querySelectorAll('#pi-branches-list .chip.selected')].map(c=>c.dataset.branch);
 
-  const grp = (await sbGet('users',{name:rep,role:'rep'}))?.[0]?.grp || cu.groups[0];
+  if(!selectedRoutes.length){ showToast('اختر خط السير أولاً'); return; }
+  if(!selectedBranches.length){ showToast('اختر فرع واحد على الأقل'); return; }
+  if(!rep){ showToast('اختر المنسق'); return; }
 
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items`,{
-    method:'POST',
-    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=representation'},
-    body: JSON.stringify({
-      plan_id: currentPlan.id,
-      day_name: _addingDay.dayName,
-      day_date: _addingDay.date,
-      rep_name: rep,
-      branch_name: branch,
-      target_goal: goal,
-      grp,
-      status:'pending'
-    })
-  });
+  const grp = _allBranchesCache.find(b=>selectedRoutes.includes(b.route))?.grp || cu.groups[0];
+  const route = selectedRoutes.join('، ');
 
-  if(res.ok){
-    const item = (await res.json())[0];
-    planItems.push(item);
-    closePlanItemModal();
-    renderPlan();
-    showToast('✅ تمت إضافة الزيارة للخطة');
+  // أضف زيارة لكل فرع محدد
+  let addedCount = 0;
+  for(const branch of selectedBranches){
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=representation'},
+      body: JSON.stringify({
+        plan_id: currentPlan.id,
+        day_name: _addingDay.dayName,
+        day_date: _addingDay.date,
+        rep_name: rep,
+        branch_name: branch,
+        target_goal: goal,
+        grp,
+        status:'pending',
+        route
+      })
+    });
+    if(res.ok){
+      const item = (await res.json())[0];
+      if(item) planItems.push(item);
+      addedCount++;
+    }
   }
+
+  closePlanItemModal();
+  renderPlan();
+  showToast(`✅ تمت إضافة ${addedCount} زيارة للخطة`);
 }
+
+async function onPiRepChange(){}
+async function onPiRouteChange(){}
 
 async function removePlanItem(itemId){
   await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items?id=eq.${itemId}`,{
