@@ -236,6 +236,9 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     <div class="tab" onclick="showTab('logs')" id="tab-logs">
       <i class="ti ti-history"></i>السجل
     </div>
+    <div class="tab" onclick="showTab('plan')" id="tab-plan">
+      <i class="ti ti-calendar-week"></i>الخطة
+    </div>
   </div>
 
   <!-- Content -->
@@ -300,6 +303,39 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       <div id="logs-list"></div>
     </div>
 
+    <!-- Weekly Plan -->
+    <div class="screen" id="screen-plan">
+      <!-- إنشاء خطة جديدة أو عرض الحالية -->
+      <div id="plan-header" class="card" style="margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div class="card-title" style="margin-bottom:0"><i class="ti ti-calendar-week"></i> خطة الأسبوع</div>
+          <button onclick="createNewPlan()" id="btn-new-plan" 
+            style="background:var(--navy);color:#fff;border:none;border-radius:8px;padding:7px 14px;font-size:12px;font-family:Cairo,sans-serif;cursor:pointer">
+            + خطة جديدة
+          </button>
+        </div>
+        <div id="plan-status-bar"></div>
+      </div>
+
+      <!-- أيام الأسبوع -->
+      <div id="plan-days"></div>
+
+      <!-- زر الاعتماد -->
+      <div id="plan-approve-wrap" style="display:none;margin-top:12px">
+        <button onclick="approvePlan()" 
+          style="width:100%;padding:14px;background:var(--green);color:#fff;border:none;border-radius:12px;
+          font-size:15px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
+          <i class="ti ti-check"></i> اعتماد الخطة وتفعيل الأسبوع
+        </button>
+      </div>
+
+      <!-- نسبة الإنجاز -->
+      <div id="plan-execution" style="display:none" class="card">
+        <div class="card-title"><i class="ti ti-chart-bar"></i> نسبة التنفيذ</div>
+        <div id="plan-exec-content"></div>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -315,6 +351,25 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     <div class="modal-btns">
       <button class="btn-modal btn-cancel" onclick="closePtsModal()">إلغاء</button>
       <button class="btn-modal btn-confirm" id="modal-pts-btn" onclick="confirmPtsAction()">تأكيد</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Modal: إضافة زيارة للخطة ══════════════════════════════ -->
+<div class="modal-overlay" id="modal-plan-item">
+  <div class="modal-sheet">
+    <div class="modal-title">إضافة زيارة للخطة</div>
+    <div id="modal-plan-day" style="font-size:12px;color:var(--text2);text-align:center;margin-bottom:12px"></div>
+    <select class="modal-inp" id="pi-rep">
+      <option value="">اختر المنسق...</option>
+    </select>
+    <select class="modal-inp" id="pi-branch">
+      <option value="">اختر الفرع...</option>
+    </select>
+    <input type="text" class="modal-inp" id="pi-goal" placeholder="الهدف من الزيارة (اختياري)"/>
+    <div class="modal-btns">
+      <button class="btn-modal btn-cancel" onclick="closePlanItemModal()">إلغاء</button>
+      <button class="btn-modal btn-confirm" onclick="addPlanItem()">إضافة</button>
     </div>
   </div>
 </div>
@@ -385,8 +440,8 @@ async function sbPost(table, data){
 // LOGIN
 // ══════════════════════════════════════════════════════════════
 async function loadSupervisors(){
-  const data = await sbGet('users',{},{filter:'role=eq.supervisor&limit=100',order:'name.asc'});
-  SUPERVISORS = Array.isArray(data) ? data.filter(u=>u.role==='supervisor') : [];
+  const data = await sbGet('users',{role:'supervisor'},{order:'name.asc',limit:100});
+  SUPERVISORS = Array.isArray(data) ? data : [];
   const sel = document.getElementById('l-sup');
   sel.innerHTML = '<option value="">اختر اسمك...</option>';
   SUPERVISORS.forEach(s=>{
@@ -481,6 +536,7 @@ async function loadAllData(){
   renderVisits();
   renderAttendance();
   renderLogs();
+  loadCurrentPlan();
 }
 
 async function refreshData(){
@@ -814,6 +870,311 @@ function showToast(msg){
 // ══════════════════════════════════════════════════════════════
 // INIT
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// WEEKLY PLAN
+// ══════════════════════════════════════════════════════════════
+let currentPlan = null;
+let planItems = [];
+let _addingDay = null;
+
+const DAYS = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+
+function getWeekDates(){
+  const today = new Date();
+  const day = today.getDay();
+  const sunday = new Date(today);
+  sunday.setDate(today.getDate() - day);
+  const dates = [];
+  for(let i=0; i<7; i++){
+    const d = new Date(sunday);
+    d.setDate(sunday.getDate()+i);
+    dates.push({
+      name: DAYS[i],
+      date: d.toISOString().slice(0,10),
+      label: d.toLocaleDateString('ar-EG',{weekday:'long',month:'short',day:'numeric'})
+    });
+  }
+  return dates;
+}
+
+async function loadCurrentPlan(){
+  const weekStart = getWeekDates()[0].date;
+  const data = await sbGet('weekly_plans',{supervisor_name:cu.name, week_start:weekStart});
+  if(data && data.length){
+    currentPlan = data[0];
+    const items = await sbGet('weekly_plan_items',{plan_id:currentPlan.id},{order:'day_date.asc'});
+    planItems = Array.isArray(items) ? items : [];
+  } else {
+    currentPlan = null;
+    planItems = [];
+  }
+  renderPlan();
+  loadExecutionStats();
+}
+
+function renderPlan(){
+  const weekDates = getWeekDates();
+  const statusBar = document.getElementById('plan-status-bar');
+  const approveWrap = document.getElementById('plan-approve-wrap');
+
+  if(!currentPlan){
+    statusBar.innerHTML = '<span style="font-size:12px;color:var(--text2)">لا توجد خطة لهذا الأسبوع — أنشئ خطة جديدة</span>';
+    document.getElementById('plan-days').innerHTML = '';
+    approveWrap.style.display='none';
+    return;
+  }
+
+  const statusClr = currentPlan.status==='approved'?'var(--green)':currentPlan.status==='closed'?'#888':'var(--orange)';
+  const statusTxt = currentPlan.status==='approved'?'✅ معتمدة':currentPlan.status==='closed'?'🔒 مغلقة':'⏳ مسودة';
+  statusBar.innerHTML = `<span style="font-size:12px;font-weight:600;color:${statusClr}">${statusTxt}</span>
+    <span style="font-size:11px;color:var(--text2);margin-right:8px">${currentPlan.week_start} ← ${currentPlan.week_end}</span>`;
+
+  // أيام الأسبوع
+  document.getElementById('plan-days').innerHTML = weekDates.map(d=>{
+    const dayItems = planItems.filter(i=>i.day_date===d.date);
+    const isDone = dayItems.every(i=>i.status==='done');
+    const hasItems = dayItems.length > 0;
+    return`<div class="card" style="margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div>
+          <div style="font-size:13px;font-weight:700">${d.name}</div>
+          <div style="font-size:11px;color:var(--text2)">${d.label}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          ${hasItems?`<span class="badge ${isDone?'b-green':'b-orange'}">${dayItems.filter(i=>i.status==='done').length}/${dayItems.length}</span>`:''}
+          ${currentPlan.status!=='approved'?`<button onclick="openPlanItemModal('${d.date}','${d.name}')"
+            style="background:var(--navy);color:#fff;border:none;border-radius:6px;padding:5px 10px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">
+            + زيارة</button>`:''}
+        </div>
+      </div>
+      ${dayItems.length ? dayItems.map(item=>`
+        <div style="display:flex;align-items:center;gap:8px;padding:8px;background:#f8f9fd;border-radius:8px;margin-bottom:4px">
+          <div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${item.status==='done'?'var(--green)':item.status==='missed'?'var(--red)':'#ddd'}"></div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12px;font-weight:600">${item.rep_name}</div>
+            <div style="font-size:11px;color:var(--text2)">${item.branch_name}${item.target_goal?' · '+item.target_goal:''}</div>
+          </div>
+          <span class="badge ${item.status==='done'?'b-green':item.status==='missed'?'b-red':'b-gray'}">
+            ${item.status==='done'?'✅ منجز':item.status==='missed'?'❌ فائت':'⏳ مجدول'}
+          </span>
+          ${currentPlan.status!=='approved'?`<button onclick="removePlanItem(${item.id})"
+            style="background:#FFEBEE;color:var(--red);border:none;border-radius:4px;padding:3px 6px;font-size:10px;cursor:pointer">✕</button>`:''}
+        </div>`).join('')
+      : `<div style="font-size:11px;color:var(--text2);text-align:center;padding:8px">لا توجد زيارات مجدولة</div>`}
+    </div>`;
+  }).join('');
+
+  // زر الاعتماد — بس لو مسودة وفيها زيارات
+  approveWrap.style.display = (currentPlan.status==='draft' && planItems.length>0) ? 'block' : 'none';
+}
+
+async function createNewPlan(){
+  if(currentPlan && currentPlan.status==='approved'){
+    showToast('⚠️ الخطة الحالية معتمدة — لا يمكن إنشاء خطة جديدة');
+    return;
+  }
+  const dates = getWeekDates();
+  const weekStart = dates[0].date;
+  const weekEnd   = dates[6].date;
+
+  // لو في مسودة موجودة امسحها
+  if(currentPlan){
+    await fetch(`${SUPABASE_URL}/rest/v1/weekly_plans?id=eq.${currentPlan.id}`,{
+      method:'DELETE',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+  }
+
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/weekly_plans`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=representation'},
+    body: JSON.stringify({
+      supervisor_name: cu.name,
+      supervisor_grp: cu.groups[0]||'',
+      week_start: weekStart,
+      week_end: weekEnd,
+      status:'draft'
+    })
+  });
+
+  if(res.ok){
+    const data = await res.json();
+    currentPlan = Array.isArray(data) ? data[0] : data;
+    planItems = [];
+    renderPlan();
+    showToast('✅ تم إنشاء خطة الأسبوع');
+  }
+}
+
+async function approvePlan(){
+  if(!currentPlan) return;
+  if(planItems.length===0){ showToast('⚠️ أضف زيارات للخطة أولاً'); return; }
+
+  await sbPatch('weekly_plans', `id=eq.${currentPlan.id}`, {
+    status:'approved',
+    approved_at: new Date().toISOString()
+  });
+
+  // إنشاء سجل التنفيذ
+  await sbPost('supervisor_execution',{
+    supervisor_name: cu.name,
+    plan_id: currentPlan.id,
+    week_start: currentPlan.week_start,
+    total_planned: planItems.length,
+    total_done: 0,
+    execution_pts: 0
+  });
+
+  currentPlan.status = 'approved';
+  renderPlan();
+  showToast('✅ تم اعتماد خطة الأسبوع');
+}
+
+// Modal إضافة زيارة
+function openPlanItemModal(date, dayName){
+  if(!currentPlan){ showToast('أنشئ خطة أولاً'); return; }
+  _addingDay = {date, dayName};
+  document.getElementById('modal-plan-day').textContent = dayName + ' — ' + date;
+
+  // قايمة المنسقين
+  const repSel = document.getElementById('pi-rep');
+  repSel.innerHTML = '<option value="">اختر المنسق...</option>';
+  repNames.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;repSel.appendChild(o);});
+  repSel.onchange = () => loadBranchesForRep(repSel.value);
+
+  document.getElementById('pi-branch').innerHTML = '<option value="">اختر الفرع...</option>';
+  document.getElementById('pi-goal').value = '';
+  document.getElementById('modal-plan-item').classList.add('open');
+}
+
+async function loadBranchesForRep(repName){
+  if(!repName) return;
+  const data = await sbGet('branches',{rep_name:repName, status:'active'});
+  const sel = document.getElementById('pi-branch');
+  sel.innerHTML = '<option value="">اختر الفرع...</option>';
+  if(Array.isArray(data)) data.forEach(b=>{
+    const o=document.createElement('option');o.value=b.branch_name;o.textContent=b.branch_name;sel.appendChild(o);
+  });
+}
+
+function closePlanItemModal(){
+  document.getElementById('modal-plan-item').classList.remove('open');
+  _addingDay = null;
+}
+
+async function addPlanItem(){
+  const rep    = document.getElementById('pi-rep').value;
+  const branch = document.getElementById('pi-branch').value;
+  const goal   = document.getElementById('pi-goal').value.trim();
+  if(!rep||!branch){ showToast('اختر المنسق والفرع'); return; }
+
+  const grp = (await sbGet('users',{name:rep,role:'rep'}))?.[0]?.grp || cu.groups[0];
+
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=representation'},
+    body: JSON.stringify({
+      plan_id: currentPlan.id,
+      day_name: _addingDay.dayName,
+      day_date: _addingDay.date,
+      rep_name: rep,
+      branch_name: branch,
+      target_goal: goal,
+      grp,
+      status:'pending'
+    })
+  });
+
+  if(res.ok){
+    const item = (await res.json())[0];
+    planItems.push(item);
+    closePlanItemModal();
+    renderPlan();
+    showToast('✅ تمت إضافة الزيارة للخطة');
+  }
+}
+
+async function removePlanItem(itemId){
+  await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items?id=eq.${itemId}`,{
+    method:'DELETE',
+    headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+  });
+  planItems = planItems.filter(i=>i.id!==itemId);
+  renderPlan();
+}
+
+// احتساب نقاط التنفيذ
+async function calcExecutionPoints(){
+  if(!currentPlan) return;
+
+  const visits = cachedVisits;
+  let done = 0;
+  let checkinPts=0, shelfPts=0, missingPts=0, checkoutPts=0;
+
+  for(const item of planItems){
+    const match = visits.find(v=>
+      v.name===item.rep_name &&
+      v.branch===item.branch_name &&
+      v.date===new Date(item.day_date).toLocaleDateString('ar-EG')
+    );
+    if(match){
+      done++;
+      if(match.att_in)    checkinPts  += 5;
+      if(match.shelf)     shelfPts    += 10;
+      if(match.missing)   missingPts  += 5;
+      if(match.att_out)   checkoutPts += 5;
+
+      // حدّث حالة البند
+      if(item.status!=='done'){
+        await sbPatch('weekly_plan_items',`id=eq.${item.id}`,{status:'done',visit_id:match.id});
+        item.status = 'done';
+      }
+    }
+  }
+
+  const execPts = done*10 + checkinPts + shelfPts + missingPts + checkoutPts;
+
+  await sbPatch('supervisor_execution',`plan_id=eq.${currentPlan.id}`,{
+    total_done: done,
+    execution_pts: execPts,
+    checkin_pts: checkinPts,
+    shelf_pts: shelfPts,
+    missing_pts: missingPts,
+    checkout_pts: checkoutPts,
+    updated_at: new Date().toISOString()
+  });
+
+  return {done, total:planItems.length, execPts, checkinPts, shelfPts, missingPts, checkoutPts};
+}
+
+async function loadExecutionStats(){
+  if(!currentPlan || currentPlan.status!=='approved'){
+    document.getElementById('plan-execution').style.display='none';
+    return;
+  }
+  const stats = await calcExecutionPoints();
+  if(!stats) return;
+
+  const pct = stats.total>0 ? Math.round(stats.done/stats.total*100) : 0;
+  document.getElementById('plan-execution').style.display='block';
+  document.getElementById('plan-exec-content').innerHTML=`
+    <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+      <span style="font-size:13px;font-weight:700">نسبة الإنجاز</span>
+      <span style="font-size:20px;font-weight:900;color:${pct>=80?'var(--green)':pct>=50?'var(--orange)':'var(--red)'}">${pct}%</span>
+    </div>
+    <div style="background:var(--border);border-radius:999px;height:12px;overflow:hidden;margin-bottom:12px">
+      <div style="height:100%;border-radius:999px;background:${pct>=80?'var(--green)':pct>=50?'var(--orange)':'var(--red)'};width:${pct}%;transition:width .5s"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
+      <div class="stat"><div class="stat-n" style="font-size:18px">${stats.done}/${stats.total}</div><div class="stat-l">زيارات منجزة</div></div>
+      <div class="stat"><div class="stat-n" style="font-size:18px;color:var(--gold)">${stats.execPts}</div><div class="stat-l">نقاط التنفيذ</div></div>
+      <div class="stat"><div class="stat-n" style="font-size:16px">${stats.checkinPts}</div><div class="stat-l">نقاط الحضور</div></div>
+      <div class="stat"><div class="stat-n" style="font-size:16px">${stats.shelfPts}</div><div class="stat-l">نقاط الرف</div></div>
+    </div>`;
+
+  renderPlan();
+}
+
 window.addEventListener('DOMContentLoaded', ()=>{
   loadSupervisors();
 });
