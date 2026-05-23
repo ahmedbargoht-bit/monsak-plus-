@@ -1202,6 +1202,16 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
               </tbody>
             </table>
           </div>
+
+          <!-- تغييرات الخطة الطارئة -->
+          <div class="card" style="margin-top:16px;border:1.5px solid #FFE0B2">
+            <div class="card-title" style="color:#E65100">
+              <i class="ti ti-alert-triangle"></i> تغييرات خطط طارئة — بانتظار المراجعة
+            </div>
+            <div id="deviations-list">
+              <div style="text-align:center;padding:1rem;color:var(--text2)">جاري التحميل...</div>
+            </div>
+          </div>
         </div>
 
         <!-- ══ Modal: تفاصيل خطة المشرف ══════════════════════════ -->
@@ -3898,63 +3908,63 @@ async function loadSupMonitor(){
   if(!tbody) return;
   tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text2)">جاري التحميل...</td></tr>';
 
-  const sups = (await sb('users',{role:'supervisor'}))||[];
-  const today = new Date();
-  const sunday = new Date(today); sunday.setDate(today.getDate()-today.getDay());
-  const weekStart = sunday.toISOString().slice(0,10);
-  const plans = (await sb('weekly_plans',{week_start:weekStart}))||[];
-  const execData = (await sb('supervisor_execution',{week_start:weekStart}))||[];
 
-  const plansMap={}, execMap={};
-  plans.forEach(p=>{ plansMap[p.supervisor_name]=p; });
-  execData.forEach(e=>{ execMap[e.supervisor_name]=e; });
+async function loadDeviations(){
+  const devEl = document.getElementById('deviations-list');
+  if(!devEl) return;
 
-  const withPlan  = sups.filter(s=>plansMap[s.name]?.status==='approved').length;
-  const withDraft = sups.filter(s=>plansMap[s.name]?.status==='draft').length;
-  const withNone  = sups.length - withPlan - withDraft;
-
-  document.getElementById('smon-total').textContent  = sups.length;
-  document.getElementById('smon-planned').textContent = withPlan;
-  document.getElementById('smon-draft').textContent   = withDraft;
-  document.getElementById('smon-none').textContent    = withNone;
-
-  tbody.innerHTML = sups.map((s,i)=>{
-    const plan = plansMap[s.name];
-    const exec = execMap[s.name];
-    const grps = (s.groups||'').split(',').map(g=>GROUPS[g.trim()]?.label||g.trim()).join('، ');
-
-    let planBadge = '<span style="background:#FFEBEE;color:#B71C1C;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600">لم يضع خطة</span>';
-    if(plan?.status==='approved') planBadge = '<span style="background:#E8F5E9;color:#1A7A4A;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600">✅ معتمدة</span>';
-    else if(plan?.status==='draft') planBadge = '<span style="background:#FFF3E0;color:#E65100;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600">⏳ مسودة</span>';
-
-    let execHtml = '<span style="color:#ccc;font-size:12px">—</span>';
-    if(exec){
-      const pct = exec.total_planned>0 ? Math.round(exec.total_done/exec.total_planned*100) : 0;
-      const clr = pct>=80?'#1A7A4A':pct>=50?'#E65100':'#B71C1C';
-      execHtml = `<div style="min-width:100px">
-        <div style="display:flex;justify-content:space-between;margin-bottom:3px">
-          <span style="font-size:11px;color:#666">${exec.total_done}/${exec.total_planned}</span>
-          <span style="font-size:12px;font-weight:700;color:${clr}">${pct}%</span>
-        </div>
-        <div style="background:#eee;border-radius:999px;height:6px;overflow:hidden">
-          <div style="height:100%;border-radius:999px;background:${clr};width:${pct}%"></div>
-        </div>
-      </div>`;
+  const devs = await sbGet ? null : null;
+  // جيب الانحرافات المعلقة
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_deviations?status=eq.pending&order=created_at.desc&limit=50`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const data = await res.json();
+    if(!Array.isArray(data)||!data.length){
+      devEl.innerHTML='<div style="text-align:center;padding:1rem;color:var(--text2);font-size:12px">لا توجد تغييرات معلقة ✅</div>';
+      return;
     }
+    devEl.innerHTML = data.map(d=>`
+      <div style="padding:12px;border-radius:10px;margin-bottom:8px;
+        background:#FFF8E1;border:1.5px solid #FFE0B2;border-right:4px solid #E65100">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+          <div>
+            <div style="font-size:13px;font-weight:700;color:#E65100">⚠️ ${d.supervisor_name}</div>
+            <div style="font-size:11px;color:#666">${d.day_name} — ${d.day_date}</div>
+          </div>
+          <div style="display:flex;gap:6px">
+            <button onclick="approveDeviation(${d.id},'approved')"
+              style="background:#E8F5E9;color:#1A7A4A;border:none;border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:inherit">
+              ✅ قبول
+            </button>
+            <button onclick="approveDeviation(${d.id},'rejected')"
+              style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:inherit">
+              ❌ رفض
+            </button>
+          </div>
+        </div>
+        ${d.original_routes?`<div style="font-size:11px;color:#555;margin-bottom:4px">📋 الخطة الأصلية: ${d.original_routes}</div>`:''}
+        ${d.actual_routes?`<div style="font-size:11px;color:#555;margin-bottom:4px">🛣️ التنفيذ الفعلي: ${d.actual_routes}</div>`:''}
+        <div style="font-size:11px;color:#333;background:#fff;padding:8px;border-radius:6px;margin-top:6px">
+          💬 ${d.reason}
+        </div>
+        <div style="font-size:10px;color:#888;margin-top:4px">
+          ${new Date(d.created_at).toLocaleString('ar-EG')}
+        </div>
+      </div>`).join('');
+  }catch(e){
+    devEl.innerHTML='<div style="color:#B71C1C;font-size:12px">فشل التحميل</div>';
+  }
+}
 
-    return`<tr style="background:${i%2?'#fafafa':'#fff'};border-bottom:1px solid #f0f0f0">
-      <td style="padding:12px;font-weight:600;font-size:13px">${s.name}</td>
-      <td style="padding:12px;font-size:11px;color:#666">${grps||'—'}</td>
-      <td style="padding:12px;text-align:center">${planBadge}</td>
-      <td style="padding:12px;text-align:center">${execHtml}</td>
-      <td style="padding:12px;text-align:center;font-size:16px;font-weight:900;color:var(--navy)">${exec?.execution_pts||0}</td>
-      <td style="padding:12px;text-align:center">
-        ${plan?`<button onclick="viewSupPlan('${s.name.replace(/'/g,"\\'")}','${plan.id}')"
-          style="background:#E3F2FD;color:#1565C0;border:none;border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:inherit">
-          <i class="ti ti-eye"></i> عرض</button>`:'<span style="color:#ccc;font-size:11px">—</span>'}
-      </td>
-    </tr>`;
-  }).join('');
+async function approveDeviation(id, status){
+  await fetch(`${SUPABASE_URL}/rest/v1/plan_deviations?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body: JSON.stringify({status, reviewed_by:'admin', reviewed_at:new Date().toISOString()})
+  });
+  loadDeviations();
+  showOk('nu-ok', status==='approved'?'✅ تم قبول التغيير':'❌ تم رفض التغيير');
 }
 
 async function viewSupPlan(supName, planId){

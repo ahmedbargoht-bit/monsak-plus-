@@ -187,8 +187,12 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 <div id="s-login">
   <div class="login-box">
     <div class="login-logo">
-      <div style="width:80px;height:80px;border-radius:50%;background:var(--navy);
-        display:flex;align-items:center;justify-content:center;margin:0 auto;font-size:32px">👔</div>
+      <img src="https://ahmedbargoht-bit.github.io/monsak-plus-/icon-192.png" 
+        alt="الطحان للتمور" 
+        style="width:90px;height:90px;border-radius:50%;object-fit:cover;display:block;margin:0 auto;box-shadow:0 4px 16px rgba(0,0,0,.15)"
+        onerror="this.style.display='none';document.getElementById('logo-fallback').style.display='flex'"/>
+      <div id="logo-fallback" style="display:none;width:90px;height:90px;border-radius:50%;background:var(--navy);
+        align-items:center;justify-content:center;margin:0 auto;font-size:36px">👔</div>
     </div>
     <div class="login-title">المشرف بلس</div>
     <div class="login-sub">الطحان للتمور — نظام إشراف المنسقين</div>
@@ -243,6 +247,9 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     </div>
     <div class="tab" onclick="showTab('plan')" id="tab-plan">
       <i class="ti ti-calendar-week"></i>الخطة
+    </div>
+    <div class="tab" onclick="showTab('daily')" id="tab-daily">
+      <i class="ti ti-clipboard-check"></i>اليومي
     </div>
   </div>
 
@@ -341,6 +348,19 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       </div>
     </div>
 
+    <!-- Daily Execution -->
+    <div class="screen" id="screen-daily">
+      <div class="card" style="background:#E3F2FD;border:1px solid #BBDEFB;margin-bottom:12px">
+        <div style="font-size:12px;color:#1565C0;font-weight:600">
+          <i class="ti ti-info-circle"></i>
+          سجّل ما نفذته فعلياً اليوم — وأي انحراف عن الخطة يجب توثيقه
+        </div>
+      </div>
+
+      <!-- أيام الأسبوع -->
+      <div id="daily-days"></div>
+    </div>
+
   </div>
 </div>
 
@@ -398,6 +418,30 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     <div class="modal-btns">
       <button class="btn-modal btn-cancel" onclick="closePlanItemModal()">إلغاء</button>
       <button class="btn-modal btn-confirm" onclick="addPlanItem()">إضافة</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Modal: تغيير خط السير الطارئ ══════════════════════════ -->
+<div class="modal-overlay" id="modal-deviation">
+  <div class="modal-sheet">
+    <div class="modal-title" style="color:#E65100">⚠️ تغيير خطة اليوم</div>
+    <div id="modal-dev-day" style="font-size:12px;color:var(--text2);text-align:center;margin-bottom:12px"></div>
+    <div style="background:#FFF3E0;border:1px solid #FFE0B2;border-radius:8px;padding:10px;margin-bottom:12px;font-size:11px;color:#E65100">
+      سيتم تعليق نقاط الالتزام بالخطة لحين مراجعة الإدارة
+    </div>
+    <div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px">خطوط السير الفعلية اليوم</div>
+    <div id="modal-dev-actual-routes" style="display:flex;flex-wrap:wrap;gap:6px;padding:8px;
+      border:1.5px solid var(--border);border-radius:10px;background:#f8f9fd;margin-bottom:12px;max-height:120px;overflow-y:auto">
+    </div>
+    <textarea class="modal-inp modal-textarea" id="modal-dev-reason"
+      placeholder="ملاحظة تحدي اليوم (إجباري — اكتب سبب التغيير بالتفصيل)"></textarea>
+    <div class="modal-err" id="modal-dev-err"></div>
+    <div class="modal-btns">
+      <button class="btn-modal btn-cancel" onclick="closeDeviationModal()">إلغاء</button>
+      <button class="btn-modal" style="background:#E65100;color:#fff" onclick="confirmDeviation()">
+        تأكيد التغيير
+      </button>
     </div>
   </div>
 </div>
@@ -580,6 +624,7 @@ function showTab(tab){
   document.getElementById('tab-'+tab).classList.add('active');
   document.getElementById('screen-'+tab).classList.add('active');
   if(tab==='plan') loadCurrentPlan();
+  if(tab==='daily') loadDailyExecution();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1259,6 +1304,159 @@ async function loadExecutionStats(){
     </div>`;
 
   renderPlan();
+}
+
+// ══════════════════════════════════════════════════════════════
+// DAILY EXECUTION
+// ══════════════════════════════════════════════════════════════
+let cachedDeviations = [];
+let _deviationDay = null;
+
+async function loadDailyExecution(){
+  if(!currentPlan){ 
+    document.getElementById('daily-days').innerHTML='<div class="empty">لا توجد خطة معتمدة لهذا الأسبوع</div>';
+    return;
+  }
+
+  // جيب الانحرافات المسجلة
+  const devs = await sbGet('plan_deviations',{supervisor_name:cu.name});
+  cachedDeviations = Array.isArray(devs)?devs:[];
+
+  const weekDates = getWeekDates();
+  const today = new Date().toISOString().slice(0,10);
+
+  document.getElementById('daily-days').innerHTML = weekDates.map(d=>{
+    const dayItems = planItems.filter(i=>i.day_date===d.date);
+    const isToday = d.date===today;
+    const deviation = cachedDeviations.find(dv=>dv.day_date===d.date);
+    const done = dayItems.filter(i=>i.status==='done').length;
+    const total = dayItems.length;
+    const isPast = d.date < today;
+
+    let statusBadge = '';
+    if(deviation){
+      statusBadge = `<span style="background:#FFF3E0;color:#E65100;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:600">
+        ⚠️ تغيير طارئ</span>`;
+    } else if(done===total && total>0){
+      statusBadge = `<span style="background:#E8F5E9;color:#1A7A4A;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:600">✅ مكتمل</span>`;
+    } else if(isPast && total>0){
+      statusBadge = `<span style="background:#FFEBEE;color:#B71C1C;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:600">⚠️ غير مكتمل</span>`;
+    }
+
+    return`<div class="card" style="margin-bottom:10px;${isToday?'border:2px solid var(--navy)':''}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div>
+          <div style="font-size:13px;font-weight:700">${d.name} ${isToday?'← اليوم':''}</div>
+          <div style="font-size:11px;color:var(--text2)">${d.label}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          ${statusBadge}
+          <span style="font-size:11px;color:var(--text2)">${done}/${total}</span>
+        </div>
+      </div>
+
+      ${deviation?`
+        <div style="background:#FFF3E0;border-radius:8px;padding:10px;margin-bottom:8px;font-size:11px">
+          <div style="font-weight:700;color:#E65100;margin-bottom:4px">⚠️ تغيير طارئ مسجل</div>
+          <div style="color:#555">الخطوط الفعلية: ${deviation.actual_routes||'—'}</div>
+          <div style="color:#555;margin-top:4px">السبب: ${deviation.reason}</div>
+          <div style="color:#888;margin-top:4px;font-size:10px">
+            ${deviation.status==='pending'?'⏳ بانتظار مراجعة الإدارة':deviation.status==='approved'?'✅ تمت المراجعة':''}
+          </div>
+        </div>`:''}
+
+      ${dayItems.length?dayItems.map(item=>`
+        <div style="display:flex;align-items:center;gap:8px;padding:8px;background:#f8f9fd;border-radius:8px;margin-bottom:4px">
+          <div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;
+            background:${item.status==='done'?'var(--green)':item.status==='missed'?'var(--red)':'#ddd'}"></div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12px;font-weight:600">${item.rep_name}</div>
+            <div style="font-size:11px;color:var(--text2)">${item.branch_name}</div>
+          </div>
+          <span class="badge ${item.status==='done'?'b-green':item.status==='missed'?'b-red':'b-gray'}">
+            ${item.status==='done'?'✅':item.status==='missed'?'❌':'⏳'}
+          </span>
+        </div>`).join(''):`<div style="font-size:11px;color:var(--text2);text-align:center;padding:8px">لا توجد زيارات مجدولة</div>`}
+
+      ${(isToday || isPast) && !deviation && currentPlan?.status==='approved'?`
+        <button onclick="openDeviationModal('${d.date}','${d.name}')"
+          style="width:100%;margin-top:8px;padding:10px;background:#FFF3E0;color:#E65100;
+          border:1.5px solid #FFE0B2;border-radius:8px;font-size:12px;font-weight:600;
+          font-family:Cairo,sans-serif;cursor:pointer">
+          ⚠️ تم تغيير خطة اليوم
+        </button>`:''}
+    </div>`;
+  }).join('');
+}
+
+// ══ Deviation Modal ═══════════════════════════════════════════
+async function openDeviationModal(date, dayName){
+  _deviationDay = {date, dayName};
+  document.getElementById('modal-dev-day').textContent = dayName + ' — ' + date;
+  document.getElementById('modal-dev-reason').value = '';
+  document.getElementById('modal-dev-err').style.display='none';
+
+  // جيب كل الفروع لمجموعات المشرف عشان يختار الخطوط الفعلية
+  const routesDiv = document.getElementById('modal-dev-actual-routes');
+  routesDiv.innerHTML = '<div style="color:var(--text2);font-size:12px">جاري التحميل...</div>';
+  document.getElementById('modal-deviation').classList.add('open');
+
+  let allRoutes = [];
+  for(const grp of cu.groups){
+    const data = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=route&grp=eq.${encodeURIComponent(grp)}&status=eq.active`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const json = await data.json();
+    if(Array.isArray(json)) json.forEach(b=>{ if(b.route && !allRoutes.includes(b.route)) allRoutes.push(b.route); });
+  }
+  allRoutes.sort();
+
+  routesDiv.innerHTML = allRoutes.map(r=>`
+    <div class="chip" data-route="${r}" onclick="this.classList.toggle('selected')">${r}</div>
+  `).join('') || '<div style="color:var(--text2);font-size:12px">لا توجد خطوط سير</div>';
+}
+
+function closeDeviationModal(){
+  document.getElementById('modal-deviation').classList.remove('open');
+  _deviationDay = null;
+}
+
+async function confirmDeviation(){
+  const reason = document.getElementById('modal-dev-reason').value.trim();
+  const err = document.getElementById('modal-dev-err');
+  const actualRoutes = [...document.querySelectorAll('#modal-dev-actual-routes .chip.selected')].map(c=>c.dataset.route);
+
+  if(reason.length < 10){ err.textContent='اكتب سبب واضح (10 أحرف على الأقل)'; err.style.display='block'; return; }
+
+  // الخطوط الأصلية لليوم ده من الخطة
+  const originalItems = planItems.filter(i=>i.day_date===_deviationDay.date);
+  const originalRoutes = [...new Set(originalItems.map(i=>i.route).filter(Boolean))].join('، ');
+
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_deviations`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body: JSON.stringify({
+      supervisor_name: cu.name,
+      plan_id: currentPlan?.id||null,
+      day_date: _deviationDay.date,
+      day_name: _deviationDay.dayName,
+      original_routes: originalRoutes,
+      actual_routes: actualRoutes.join('، '),
+      reason,
+      status: 'pending',
+      pts_suspended: 10 // نقاط معلقة لحين المراجعة
+    })
+  });
+
+  if(res.ok){
+    closeDeviationModal();
+    // reload
+    const devs = await sbGet('plan_deviations',{supervisor_name:cu.name});
+    cachedDeviations = Array.isArray(devs)?devs:[];
+    loadDailyExecution();
+    showToast('✅ تم توثيق تغيير الخطة — بانتظار مراجعة الإدارة');
+  } else {
+    err.textContent='فشل الحفظ — حاول تاني'; err.style.display='block';
+  }
 }
 
 window.addEventListener('DOMContentLoaded', ()=>{
