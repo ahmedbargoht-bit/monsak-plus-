@@ -359,6 +359,9 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           <div class="nav-item" onclick="showPanel('activity')">
             <i class="ti ti-activity"></i> سجل النشاط
           </div>
+          <div class="nav-item" onclick="showPanel('sup-monitor')">
+            <i class="ti ti-eye"></i> متابعة المشرفين
+          </div>
           <div class="nav-item" onclick="showPanel('settings')">
             <i class="ti ti-settings"></i> الإعدادات
           </div>
@@ -1149,6 +1152,66 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
               <thead><tr><th>#</th><th>المستخدم</th><th>النشاط</th><th>التفاصيل</th><th>التاريخ والوقت</th></tr></thead>
               <tbody id="activity-tbody"></tbody>
             </table>
+          </div>
+        </div>
+
+        <!-- ══ SUPERVISOR MONITOR ══════════════════════════════════ -->
+        <div id="panel-sup-monitor" class="panel">
+          <div class="page-header">
+            <div><h2>متابعة المشرفين</h2><p>خطط العمل الأسبوعية ونسب التنفيذ</p></div>
+            <button class="btn btn-blue btn-sm" onclick="loadSupMonitor()"><i class="ti ti-refresh"></i> تحديث</button>
+          </div>
+
+          <!-- إحصائيات سريعة -->
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px" id="sup-mon-stats">
+            <div class="card" style="text-align:center;padding:12px">
+              <div style="font-size:24px;font-weight:900;color:var(--navy)" id="smon-total">—</div>
+              <div style="font-size:11px;color:var(--text2)">إجمالي المشرفين</div>
+            </div>
+            <div class="card" style="text-align:center;padding:12px">
+              <div style="font-size:24px;font-weight:900;color:#1A7A4A" id="smon-planned">—</div>
+              <div style="font-size:11px;color:var(--text2)">وضعوا خطة</div>
+            </div>
+            <div class="card" style="text-align:center;padding:12px">
+              <div style="font-size:24px;font-weight:900;color:#F77F00" id="smon-draft">—</div>
+              <div style="font-size:11px;color:var(--text2)">خطة مسودة</div>
+            </div>
+            <div class="card" style="text-align:center;padding:12px">
+              <div style="font-size:24px;font-weight:900;color:#B71C1C" id="smon-none">—</div>
+              <div style="font-size:11px;color:var(--text2)">لم يضعوا خطة</div>
+            </div>
+          </div>
+
+          <!-- جدول المشرفين -->
+          <div class="card" style="padding:0;overflow:hidden">
+            <table style="width:100%;border-collapse:collapse">
+              <thead>
+                <tr style="background:#f5f7fa">
+                  <th style="padding:12px;text-align:right;font-size:12px">المشرف</th>
+                  <th style="padding:12px;text-align:right;font-size:12px">المجموعة</th>
+                  <th style="padding:12px;text-align:center;font-size:12px">حالة الخطة</th>
+                  <th style="padding:12px;text-align:center;font-size:12px">التنفيذ</th>
+                  <th style="padding:12px;text-align:center;font-size:12px">نقاط التنفيذ</th>
+                  <th style="padding:12px;text-align:center;font-size:12px">تفاصيل</th>
+                </tr>
+              </thead>
+              <tbody id="sup-monitor-tbody">
+                <tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text2)">
+                  <i class="ti ti-loader spin"></i> جاري التحميل...
+                </td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ══ Modal: تفاصيل خطة المشرف ══════════════════════════ -->
+        <div class="modal-overlay" id="modal-sup-plan">
+          <div style="background:#fff;border-radius:16px;padding:24px;width:min(600px,95vw);max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+              <div style="font-size:16px;font-weight:700" id="sup-plan-modal-title">تفاصيل الخطة</div>
+              <button onclick="closeModal('modal-sup-plan')" style="background:none;border:none;font-size:20px;cursor:pointer;color:#999">✕</button>
+            </div>
+            <div id="sup-plan-modal-content"></div>
           </div>
         </div>
 
@@ -2164,6 +2227,7 @@ function renderCurrentPanel(){
     case 'holidays': loadHolidays(); break;
     case 'export-full': break;
     case 'activity': loadActivity(); break;
+    case 'sup-monitor': loadSupMonitor(); break;
   }
 }
 
@@ -3824,6 +3888,101 @@ async function saveProductsToSupabase(pdb){
     const val = JSON.stringify(pdb);
     await sbUpsert('products_db',{key:'pdb',value:val,updated_at:new Date().toISOString()},'key');
   }catch(e){ console.warn('Supabase save skipped:',e); }
+}
+
+// ══════════════════════════════════════════════════════════════
+// SUPERVISOR MONITOR
+// ══════════════════════════════════════════════════════════════
+async function loadSupMonitor(){
+  const tbody = document.getElementById('sup-monitor-tbody');
+  if(!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text2)">جاري التحميل...</td></tr>';
+
+  const sups = (await sb('users',{role:'supervisor'}))||[];
+  const today = new Date();
+  const sunday = new Date(today); sunday.setDate(today.getDate()-today.getDay());
+  const weekStart = sunday.toISOString().slice(0,10);
+  const plans = (await sb('weekly_plans',{week_start:weekStart}))||[];
+  const execData = (await sb('supervisor_execution',{week_start:weekStart}))||[];
+
+  const plansMap={}, execMap={};
+  plans.forEach(p=>{ plansMap[p.supervisor_name]=p; });
+  execData.forEach(e=>{ execMap[e.supervisor_name]=e; });
+
+  const withPlan  = sups.filter(s=>plansMap[s.name]?.status==='approved').length;
+  const withDraft = sups.filter(s=>plansMap[s.name]?.status==='draft').length;
+  const withNone  = sups.length - withPlan - withDraft;
+
+  document.getElementById('smon-total').textContent  = sups.length;
+  document.getElementById('smon-planned').textContent = withPlan;
+  document.getElementById('smon-draft').textContent   = withDraft;
+  document.getElementById('smon-none').textContent    = withNone;
+
+  tbody.innerHTML = sups.map((s,i)=>{
+    const plan = plansMap[s.name];
+    const exec = execMap[s.name];
+    const grps = (s.groups||'').split(',').map(g=>GROUPS[g.trim()]?.label||g.trim()).join('، ');
+
+    let planBadge = '<span style="background:#FFEBEE;color:#B71C1C;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600">لم يضع خطة</span>';
+    if(plan?.status==='approved') planBadge = '<span style="background:#E8F5E9;color:#1A7A4A;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600">✅ معتمدة</span>';
+    else if(plan?.status==='draft') planBadge = '<span style="background:#FFF3E0;color:#E65100;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600">⏳ مسودة</span>';
+
+    let execHtml = '<span style="color:#ccc;font-size:12px">—</span>';
+    if(exec){
+      const pct = exec.total_planned>0 ? Math.round(exec.total_done/exec.total_planned*100) : 0;
+      const clr = pct>=80?'#1A7A4A':pct>=50?'#E65100':'#B71C1C';
+      execHtml = `<div style="min-width:100px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+          <span style="font-size:11px;color:#666">${exec.total_done}/${exec.total_planned}</span>
+          <span style="font-size:12px;font-weight:700;color:${clr}">${pct}%</span>
+        </div>
+        <div style="background:#eee;border-radius:999px;height:6px;overflow:hidden">
+          <div style="height:100%;border-radius:999px;background:${clr};width:${pct}%"></div>
+        </div>
+      </div>`;
+    }
+
+    return`<tr style="background:${i%2?'#fafafa':'#fff'};border-bottom:1px solid #f0f0f0">
+      <td style="padding:12px;font-weight:600;font-size:13px">${s.name}</td>
+      <td style="padding:12px;font-size:11px;color:#666">${grps||'—'}</td>
+      <td style="padding:12px;text-align:center">${planBadge}</td>
+      <td style="padding:12px;text-align:center">${execHtml}</td>
+      <td style="padding:12px;text-align:center;font-size:16px;font-weight:900;color:var(--navy)">${exec?.execution_pts||0}</td>
+      <td style="padding:12px;text-align:center">
+        ${plan?`<button onclick="viewSupPlan('${s.name.replace(/'/g,"\\'")}','${plan.id}')"
+          style="background:#E3F2FD;color:#1565C0;border:none;border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:inherit">
+          <i class="ti ti-eye"></i> عرض</button>`:'<span style="color:#ccc;font-size:11px">—</span>'}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function viewSupPlan(supName, planId){
+  document.getElementById('sup-plan-modal-title').textContent = 'خطة الأسبوع — '+supName;
+  document.getElementById('sup-plan-modal-content').innerHTML = '<div style="text-align:center;padding:1rem;color:#999">جاري التحميل...</div>';
+  openModal('modal-sup-plan');
+
+  const items = (await sb('weekly_plan_items',{plan_id:planId}))||[];
+  if(!items.length){ document.getElementById('sup-plan-modal-content').innerHTML='<div style="text-align:center;padding:1rem;color:#999">لا توجد تفاصيل</div>'; return; }
+
+  const byDay={};
+  items.forEach(item=>{ if(!byDay[item.day_name]) byDay[item.day_name]=[]; byDay[item.day_name].push(item); });
+
+  const sBg={done:'#E8F5E9',missed:'#FFEBEE',pending:'#f5f5f5'};
+  const sTx={done:'#1A7A4A ✅',missed:'#B71C1C ❌',pending:'#666 ⏳'};
+
+  document.getElementById('sup-plan-modal-content').innerHTML = Object.entries(byDay).map(([day,dayItems])=>`
+    <div style="margin-bottom:16px">
+      <div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid #eee">${day}</div>
+      ${dayItems.map(item=>`
+        <div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:8px;margin-bottom:4px;background:${sBg[item.status]||'#f5f5f5'}">
+          <div style="flex:1">
+            <div style="font-size:12px;font-weight:600">${item.rep_name}</div>
+            <div style="font-size:11px;color:#666">${item.branch_name}${item.target_goal?' · '+item.target_goal:''}</div>
+          </div>
+          <span style="font-size:11px;font-weight:600;color:${(sTx[item.status]||'#666 ').split(' ')[0]}">${(sTx[item.status]||'— ').split(' ')[1]||'—'}</span>
+        </div>`).join('')}
+    </div>`).join('');
 }
 
 function loadActivity(){
