@@ -3908,12 +3908,71 @@ async function loadSupMonitor(){
   if(!tbody) return;
   tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text2)">جاري التحميل...</td></tr>';
 
+  const sups = (await sb('users',{role:'supervisor'}))||[];
+  const today = new Date();
+  const sunday = new Date(today); sunday.setDate(today.getDate()-today.getDay());
+  const weekStart = sunday.toISOString().slice(0,10);
+  const plans = (await sb('weekly_plans',{week_start:weekStart}))||[];
+  const execData = (await sb('supervisor_execution',{week_start:weekStart}))||[];
+
+  const plansMap={}, execMap={};
+  plans.forEach(p=>{ plansMap[p.supervisor_name]=p; });
+  execData.forEach(e=>{ execMap[e.supervisor_name]=e; });
+
+  const withPlan  = sups.filter(s=>plansMap[s.name]?.status==='approved').length;
+  const withDraft = sups.filter(s=>plansMap[s.name]?.status==='draft').length;
+  const withNone  = sups.length - withPlan - withDraft;
+
+  document.getElementById('smon-total').textContent  = sups.length;
+  document.getElementById('smon-planned').textContent = withPlan;
+  document.getElementById('smon-draft').textContent   = withDraft;
+  document.getElementById('smon-none').textContent    = withNone;
+
+  tbody.innerHTML = sups.map((s,i)=>{
+    const plan = plansMap[s.name];
+    const exec = execMap[s.name];
+    const grps = (s.groups||'').split(',').map(g=>GROUPS[g.trim()]?.label||g.trim()).join('، ');
+
+    let planBadge = '<span style="background:#FFEBEE;color:#B71C1C;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600">لم يضع خطة</span>';
+    if(plan?.status==='approved') planBadge = '<span style="background:#E8F5E9;color:#1A7A4A;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600">✅ معتمدة</span>';
+    else if(plan?.status==='draft') planBadge = '<span style="background:#FFF3E0;color:#E65100;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600">⏳ مسودة</span>';
+
+    let execHtml = '<span style="color:#ccc;font-size:12px">—</span>';
+    if(exec){
+      const pct = exec.total_planned>0 ? Math.round(exec.total_done/exec.total_planned*100) : 0;
+      const clr = pct>=80?'#1A7A4A':pct>=50?'#E65100':'#B71C1C';
+      execHtml = `<div style="min-width:100px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+          <span style="font-size:11px;color:#666">${exec.total_done}/${exec.total_planned}</span>
+          <span style="font-size:12px;font-weight:700;color:${clr}">${pct}%</span>
+        </div>
+        <div style="background:#eee;border-radius:999px;height:6px;overflow:hidden">
+          <div style="height:100%;border-radius:999px;background:${clr};width:${pct}%"></div>
+        </div>
+      </div>`;
+    }
+
+    return`<tr style="background:${i%2?'#fafafa':'#fff'};border-bottom:1px solid #f0f0f0">
+      <td style="padding:12px;font-weight:600;font-size:13px">${s.name}</td>
+      <td style="padding:12px;font-size:11px;color:#666">${grps||'—'}</td>
+      <td style="padding:12px;text-align:center">${planBadge}</td>
+      <td style="padding:12px;text-align:center">${execHtml}</td>
+      <td style="padding:12px;text-align:center;font-size:16px;font-weight:900;color:var(--navy)">${exec?.execution_pts||0}</td>
+      <td style="padding:12px;text-align:center">
+        ${plan?`<button onclick="viewSupPlan('${s.name.replace(/'/g,"\\'")}','${plan.id}')"
+          style="background:#E3F2FD;color:#1565C0;border:none;border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:inherit">
+          <i class="ti ti-eye"></i> عرض</button>`:'<span style="color:#ccc;font-size:11px">—</span>'}
+      </td>
+    </tr>`;
+  }).join('');
+
+  await loadDeviations();
+}
 
 async function loadDeviations(){
   const devEl = document.getElementById('deviations-list');
   if(!devEl) return;
 
-  const devs = await sbGet ? null : null;
   // جيب الانحرافات المعلقة
   try{
     const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_deviations?status=eq.pending&order=created_at.desc&limit=50`,{
@@ -4061,7 +4120,6 @@ function populateRepSelect(){
   });
 }
 
-</script>
 <!-- ══ modal-add-route ══ -->
 <div class="modal-overlay" id="modal-add-route">
   <div class="modal" style="max-width:400px">
@@ -4117,7 +4175,6 @@ function populateRepSelect(){
   </div>
 </div>
 
-<script>
 // ══ Secure Delete — دوال معزولة تماماً ══════════════════════════
 let _sdCallback = null;
 
