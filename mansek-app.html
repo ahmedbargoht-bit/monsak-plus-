@@ -985,10 +985,15 @@ async function doLogin(){
   fetchMessages();
   fetchOrders();
   loadHolidays();
-  // تحميل الأصناف والفروع وبعدين render
   loadPDBFromCloud().then(()=>{ renderProdList(); });
   loadBranchesMapFromCloud().then(()=>{ popBranches(freshRep.route); });
   updateOnlineStatus(true);
+  // حفظ بيانات الجلسة عشان تفضل بعد الـ refresh
+  try{
+    sessionStorage.setItem('cu_session', JSON.stringify({
+      name, route:freshRep.route, group:freshRep.group, coordType:repType
+    }));
+  }catch(e){}
 }
 
 // ── تحميل قاعدة الأصناف من Supabase (لو الأدمن رفع شيت جديد) ──
@@ -1096,6 +1101,8 @@ function updateOnlineStatus(isOnline){
 
 function logout(){
   if(locInterval) clearInterval(locInterval);
+  if(shiftTimerInterval) clearInterval(shiftTimerInterval);
+  try{ sessionStorage.removeItem('cu_session'); }catch(e){}
   cu=null;attIn=null;attOut=null;visits=[];products=[];missing=[];selectedReason=null;
   document.getElementById('l-name').value='';
   document.getElementById('l-pass').value='';
@@ -1350,9 +1357,16 @@ async function saveVisit(){
   ok.style.display='block';
   setTimeout(()=>ok.style.display='none',3000);
 
+  // أظهر كارت الانصراف في لوحتي بعد الحفظ
+  if(attIn && !attOut){
+    const dashCard = document.getElementById('dash-checkout-card');
+    if(dashCard) dashCard.style.display='block';
+    const summary = document.getElementById('dash-att-summary');
+    if(summary) summary.textContent='سجّلت حضور الساعة '+attIn.time+' — اضغط لتسجيل الانصراف';
+  }
+
   // المنسق الثابت — البيانات تفضل ظاهرة، مش بيتعمل reset
   if(cu?.coordType === 'ثابت'){
-    // بس نحدث زر الحفظ
     document.getElementById('save-visit-btn').style.display='none';
     return;
   }
@@ -1361,36 +1375,16 @@ async function saveVisit(){
 }
 
 function resetVisitData(){
-  // فرع ونوع العميل
-  document.getElementById('f-branch').value='';
-  document.getElementById('f-ctype').value='';
-  // إخفاء الخطوات
-  document.getElementById('step2-card').style.display='none';
+  // للمتحرك — نمسح بس الأصناف والنواقص ونوع العرض ونفضل الفرع والحضور
+  // فرع ونوع العميل — نفضلهم ظاهرين
+  // إخفاء خطوة العرض والحفظ بس
   document.getElementById('step3-card').style.display='none';
   document.getElementById('save-visit-btn').style.display='none';
-  // إعادة تعيين الحضور
-  attIn=null; attOut=null;
-  document.getElementById('att-in-time').textContent='--:--';
-  document.getElementById('att-out-time').textContent='--:--';
-  document.getElementById('att-in-loc').textContent='';
-  document.getElementById('att-out-loc').textContent='';
-  document.getElementById('btn-in').classList.remove('in');
-  document.getElementById('btn-out').classList.remove('out');
   // نوع العرض
-  ['stand','podium','fridge','shelf'].forEach(t=>{
-    const el=document.getElementById('dt-'+t);
-    if(el) el.checked=false;
-  });
-  // إعادة تعيين مهام KPI للثابت
-  [1,2,3,4,5,6,7].forEach(i=>{
-    const el=document.getElementById('kpi-'+i);
-    if(el) el.checked=false;
-  });
-  calcKpiScore();
+  ['stand','podium','fridge','shelf'].forEach(t=>{\n    const el=document.getElementById('dt-'+t);\n    if(el) el.checked=false;\n  });
   document.getElementById('shelf-extra').style.display='none';
   document.getElementById('f-shelf-total').value='';
   document.getElementById('f-shelf-taken').value='';
-
   // إعادة تعيين الأصناف
   products=[];
   updateProdBadge();
@@ -2603,17 +2597,39 @@ window.addEventListener('DOMContentLoaded', () => {
   if(!navigator.onLine) showOfflineBanner(true);
   updateQueueBadge();
   setTimeout(flushOQ, 3000);
-  // تحميل المنسقين من Supabase
+  // استعادة الجلسة لو الصفحة اتفتحت من جديد (refresh)
+  try{
+    const saved = sessionStorage.getItem('cu_session');
+    if(saved){
+      const s = JSON.parse(saved);
+      cu = {name:s.name, route:s.route, group:s.group, coordType:s.coordType, score:0};
+      document.getElementById('top-user').textContent = s.name;
+      showScreen('s-main');
+      loadPDBFromCloud().then(()=>{ renderProdList(); });
+      loadBranchesMapFromCloud().then(()=>{ popBranches(s.route); });
+      startLocTracking();
+      fetchMessages();
+      fetchOrders();
+      loadHolidays();
+      if(s.coordType==='ثابت'){
+        document.getElementById('fixed-banner-wrap').style.display='block';
+        document.getElementById('fixed-banner-text').textContent='منسق ثابت — '+s.route+' 🏪';
+        document.getElementById('fixed-extra-wrap').style.display='block';
+        restoreShiftTimer();
+      }
+      loadRepsFromCloud();
+      return;
+    }
+  }catch(e){}
+  // مفيش جلسة — حمّل قايمة المنسقين
   loadRepsFromCloud().then(()=>{
     const sel = document.getElementById('l-name');
     if(sel && sel.options.length <= 1) updateLoginList();
   });
-  // fallback — لو بعد 16 ثانية القايمة لسه فاضية
   setTimeout(()=>{
     const sel = document.getElementById('l-name');
     if(sel && (sel.options[0]?.text === 'جاري التحميل...' || sel.options.length <= 1)){
       sel.innerHTML = '<option value="">⚠️ تعذر التحميل</option>';
-      // أضف زرار إعادة المحاولة
       const retryBtn = document.getElementById('retry-load-btn');
       if(retryBtn) retryBtn.style.display = 'block';
     }
