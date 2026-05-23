@@ -996,37 +996,48 @@ async function loadBranchesMapFromCloud(){
 }
 
 async function loadRepsFromCloud(){
-  // جيب بيانات المنسقين المحدثة من Supabase
   try{
+    // timeout بعد 8 ثواني عشان مش يفضل "جاري التحميل" للأبد
+    const controller = new AbortController();
+    const timeout = setTimeout(()=>controller.abort(), 8000);
+
     // أولاً: جرب جدول users
-    const url=`${SUPABASE_URL}/rest/v1/users?select=*&role=eq.rep&status=eq.active&limit=200`;
-    const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const url=`${SUPABASE_URL}/rest/v1/users?select=*&role=eq.rep&status=eq.active&limit=300`;
+    const res=await fetch(url,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`},
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
     if(res.ok){
       const data=await res.json();
       if(Array.isArray(data)&&data.length){
-        // حدّث REPS بالبيانات الجديدة
+        // استبدال كامل
+        REPS.length=0;
         data.forEach(u=>{
-          const idx=REPS.findIndex(r=>r.name===u.name);
-          const updated={name:u.name,route:u.route||'',group:u.grp||'',type:u.user_type||'متحرك',pass:u.pass_hash||'',goal:u.goal||0};
-          if(idx!==-1) REPS[idx]={...REPS[idx],...updated};
-          else REPS.push(updated);
+          REPS.push({name:u.name,route:u.route||'',group:u.grp||'',type:u.user_type||'متحرك',pass:u.pass_hash||'',goal:u.goal||0,coordType:u.user_type||'متحرك'});
         });
-        console.log('✅ REPS updated from Supabase users');
+        console.log('✅ REPS loaded from Supabase:', REPS.length);
+        updateLoginList();
         return;
       }
     }
-    // ثانياً: جرب products_db بـ key='reps'
+
+    // ثانياً: جرب products_db
     const res2=await sbSelect('products_db',{key:'reps'});
     if(res2&&res2[0]&&res2[0].value){
       const cloudReps=JSON.parse(res2[0].value);
-      cloudReps.forEach(u=>{
-        const idx=REPS.findIndex(r=>r.name===u.name);
-        if(idx!==-1) REPS[idx]={...REPS[idx],...u};
-        else REPS.push(u);
-      });
-      console.log('✅ REPS updated from products_db');
+      if(Array.isArray(cloudReps)&&cloudReps.length){
+        REPS.length=0;
+        cloudReps.forEach(u=>REPS.push({...u, coordType:u.type||'متحرك'}));
+        console.log('✅ REPS loaded from products_db:', REPS.length);
+      }
     }
-  }catch(e){ console.warn('Using built-in REPS'); }
+  }catch(e){
+    console.warn('loadRepsFromCloud failed:', e.message);
+  }
+  // دايماً حدّث القايمة — حتى لو فارغة
+  updateLoginList();
 }
 
 function updateOnlineStatus(isOnline){
@@ -2525,11 +2536,18 @@ window.addEventListener('DOMContentLoaded', () => {
   if(!navigator.onLine) showOfflineBanner(true);
   updateQueueBadge();
   setTimeout(flushOQ, 3000);
-  // تحميل المنسقين والفروع من Supabase عند فتح التطبيق
+  // تحميل المنسقين من Supabase
   loadRepsFromCloud().then(()=>{
     const sel = document.getElementById('l-name');
     if(sel && sel.options.length <= 1) updateLoginList();
   });
+  // fallback — لو بعد 10 ثواني القايمة فاضية
+  setTimeout(()=>{
+    const sel = document.getElementById('l-name');
+    if(sel && sel.options[0]?.text === 'جاري التحميل...'){
+      sel.innerHTML = '<option value="">تعذر التحميل — تحقق من الاتصال</option>';
+    }
+  }, 10000);
 });
 </script>
 </body>
