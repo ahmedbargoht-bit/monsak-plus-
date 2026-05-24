@@ -1182,44 +1182,68 @@ function closePlanItemModal(){
 async function addPlanItem(){
   const rep    = document.getElementById('pi-rep').value;
   const goal   = document.getElementById('pi-goal').value.trim();
-  const selectedRoutes  = [...document.querySelectorAll('#pi-routes-list .chip.selected')].map(c=>c.dataset.route);
+  const selectedRoutes   = [...document.querySelectorAll('#pi-routes-list .chip.selected')].map(c=>c.dataset.route);
   const selectedBranches = [...document.querySelectorAll('#pi-branches-list .chip.selected')].map(c=>c.dataset.branch);
 
-  if(!selectedRoutes.length){ showToast('اختر خط السير أولاً'); return; }
-  if(!selectedBranches.length){ showToast('اختر فرع واحد على الأقل'); return; }
-  if(!rep){ showToast('اختر المنسق'); return; }
+  if(!selectedRoutes.length){ showToast('⚠️ اختر خط السير أولاً'); return; }
+  if(!selectedBranches.length){ showToast('⚠️ اختر فرع واحد على الأقل'); return; }
+  if(!rep){ showToast('⚠️ اختر المنسق'); return; }
+  if(!currentPlan){ showToast('⚠️ أنشئ خطة أولاً'); return; }
 
-  const grp = _allBranchesCache.find(b=>selectedRoutes.includes(b.route))?.grp || cu.groups[0];
+  const grp   = _allBranchesCache.find(b=>selectedRoutes.includes(b.route))?.grp || cu.groups[0];
   const route = selectedRoutes.join('، ');
 
   // أضف زيارة لكل فرع محدد
   let addedCount = 0;
+  let failCount  = 0;
+
   for(const branch of selectedBranches){
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=representation'},
-      body: JSON.stringify({
-        plan_id: currentPlan.id,
-        day_name: _addingDay.dayName,
-        day_date: _addingDay.date,
-        rep_name: rep,
-        branch_name: branch,
-        target_goal: goal,
-        grp,
-        status:'pending',
-        route
-      })
-    });
-    if(res.ok){
-      const item = (await res.json())[0];
-      if(item) planItems.push(item);
-      addedCount++;
+    try{
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items`,{
+        method:'POST',
+        headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=representation'},
+        body: JSON.stringify({
+          plan_id:   currentPlan.id,
+          day_name:  _addingDay.dayName,
+          day_date:  _addingDay.date,
+          rep_name:  rep,
+          branch_name: branch,
+          target_goal: goal,
+          grp,
+          status: 'pending',
+          route
+        })
+      });
+      if(res.ok){
+        const data = await res.json();
+        const item = Array.isArray(data) ? data[0] : data;
+        if(item) planItems.push(item);
+        addedCount++;
+      } else {
+        const errText = await res.text();
+        console.error('addPlanItem error:', res.status, errText);
+        failCount++;
+      }
+    }catch(e){
+      console.error('addPlanItem exception:', e);
+      failCount++;
     }
   }
 
   closePlanItemModal();
-  renderPlan();
-  showToast(`✅ تمت إضافة ${addedCount} زيارة للخطة`);
+
+  if(addedCount > 0){
+    showToast(`✅ تمت إضافة ${addedCount} زيارة للخطة`);
+    // حدّث تاب الخطة واليومي
+    renderPlan();
+    // لو تاب اليومي مفتوح — حدّثه
+    if(document.getElementById('screen-daily').classList.contains('active')){
+      loadDailyExecution();
+    }
+  }
+  if(failCount > 0){
+    showToast(`❌ فشل حفظ ${failCount} زيارة — تحقق من الاتصال`);
+  }
 }
 
 async function onPiRepChange(){}
@@ -1313,35 +1337,37 @@ let cachedDeviations = [];
 let _deviationDay = null;
 
 async function loadDailyExecution(){
-  if(!currentPlan){ 
-    document.getElementById('daily-days').innerHTML='<div class="empty">لا توجد خطة معتمدة لهذا الأسبوع</div>';
+  const container = document.getElementById('daily-days');
+
+  if(!currentPlan){
+    container.innerHTML='<div class="empty">لا توجد خطة معتمدة لهذا الأسبوع</div>';
     return;
   }
 
-  // جيب الانحرافات المسجلة
+  // جيب بيانات محدثة من Supabase
+  try{
+    const freshItems = await sbGet('weekly_plan_items',{plan_id:currentPlan.id},{order:'day_date.asc'});
+    if(Array.isArray(freshItems) && freshItems.length) planItems = freshItems;
+  }catch(e){ console.warn('loadDailyExecution fetch error:', e); }
+
   const devs = await sbGet('plan_deviations',{supervisor_name:cu.name});
   cachedDeviations = Array.isArray(devs)?devs:[];
 
   const weekDates = getWeekDates();
   const today = new Date().toISOString().slice(0,10);
 
-  document.getElementById('daily-days').innerHTML = weekDates.map(d=>{
+  container.innerHTML = weekDates.map(d=>{
     const dayItems = planItems.filter(i=>i.day_date===d.date);
-    const isToday = d.date===today;
-    const deviation = cachedDeviations.find(dv=>dv.day_date===d.date);
-    const done = dayItems.filter(i=>i.status==='done').length;
-    const total = dayItems.length;
-    const isPast = d.date < today;
+    const isToday  = d.date===today;
+    const deviation= cachedDeviations.find(dv=>dv.day_date===d.date);
+    const done     = dayItems.filter(i=>i.status==='done').length;
+    const total    = dayItems.length;
+    const isPast   = d.date < today;
 
     let statusBadge = '';
-    if(deviation){
-      statusBadge = `<span style="background:#FFF3E0;color:#E65100;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:600">
-        ⚠️ تغيير طارئ</span>`;
-    } else if(done===total && total>0){
-      statusBadge = `<span style="background:#E8F5E9;color:#1A7A4A;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:600">✅ مكتمل</span>`;
-    } else if(isPast && total>0){
-      statusBadge = `<span style="background:#FFEBEE;color:#B71C1C;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:600">⚠️ غير مكتمل</span>`;
-    }
+    if(deviation) statusBadge = `<span style="background:#FFF3E0;color:#E65100;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:600">⚠️ تغيير طارئ</span>`;
+    else if(done===total && total>0) statusBadge = `<span style="background:#E8F5E9;color:#1A7A4A;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:600">✅ مكتمل</span>`;
+    else if(isPast && total>0) statusBadge = `<span style="background:#FFEBEE;color:#B71C1C;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:600">⚠️ غير مكتمل</span>`;
 
     return`<div class="card" style="margin-bottom:10px;${isToday?'border:2px solid var(--navy)':''}">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -1361,22 +1387,29 @@ async function loadDailyExecution(){
           <div style="color:#555">الخطوط الفعلية: ${deviation.actual_routes||'—'}</div>
           <div style="color:#555;margin-top:4px">السبب: ${deviation.reason}</div>
           <div style="color:#888;margin-top:4px;font-size:10px">
-            ${deviation.status==='pending'?'⏳ بانتظار مراجعة الإدارة':deviation.status==='approved'?'✅ تمت المراجعة':''}
+            ${deviation.status==='pending'?'⏳ بانتظار مراجعة الإدارة':'✅ تمت المراجعة'}
           </div>
         </div>`:''}
 
-      ${dayItems.length?dayItems.map(item=>`
-        <div style="display:flex;align-items:center;gap:8px;padding:8px;background:#f8f9fd;border-radius:8px;margin-bottom:4px">
-          <div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;
-            background:${item.status==='done'?'var(--green)':item.status==='missed'?'var(--red)':'#ddd'}"></div>
+      ${dayItems.length ? dayItems.map(item=>`
+        <div style="display:flex;align-items:center;gap:8px;padding:10px;
+          background:${item.status==='done'?'#E8F5E9':item.status==='missed'?'#FFEBEE':'#f8f9fd'};
+          border-radius:8px;margin-bottom:6px;cursor:pointer"
+          onclick="toggleVisitStatus(${item.id},'${item.status}')">
+          <div style="width:32px;height:32px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+            background:${item.status==='done'?'var(--green)':item.status==='missed'?'var(--red)':'#ddd'};color:#fff;font-size:14px">
+            ${item.status==='done'?'✓':item.status==='missed'?'✗':'⏳'}
+          </div>
           <div style="flex:1;min-width:0">
-            <div style="font-size:12px;font-weight:600">${item.rep_name}</div>
+            <div style="font-size:12px;font-weight:700">${item.rep_name}</div>
             <div style="font-size:11px;color:var(--text2)">${item.branch_name}</div>
+            ${item.route?`<div style="font-size:10px;color:#999">🛣️ ${item.route}</div>`:''}
           </div>
           <span class="badge ${item.status==='done'?'b-green':item.status==='missed'?'b-red':'b-gray'}">
-            ${item.status==='done'?'✅':item.status==='missed'?'❌':'⏳'}
+            ${item.status==='done'?'✅ منجز':item.status==='missed'?'❌ فائت':'⏳ اضغط للتحديث'}
           </span>
-        </div>`).join(''):`<div style="font-size:11px;color:var(--text2);text-align:center;padding:8px">لا توجد زيارات مجدولة</div>`}
+        </div>`).join('')
+      : `<div style="font-size:11px;color:var(--text2);text-align:center;padding:8px">لا توجد زيارات مجدولة</div>`}
 
       ${(isToday || isPast) && !deviation && currentPlan?.status==='approved'?`
         <button onclick="openDeviationModal('${d.date}','${d.name}')"
@@ -1387,6 +1420,40 @@ async function loadDailyExecution(){
         </button>`:''}
     </div>`;
   }).join('');
+}
+
+async function toggleVisitStatus(itemId, currentStatus){
+  // دورة الحالات: pending → done → missed → pending
+  const next = currentStatus==='pending'?'done':currentStatus==='done'?'missed':'pending';
+  const icon = next==='done'?'✅ تم التنفيذ':next==='missed'?'❌ فائت':'⏳ مجدول';
+
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items?id=eq.${itemId}`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body: JSON.stringify({status:next})
+    });
+
+    if(res.ok){
+      // حدّث المحلي
+      const idx = planItems.findIndex(i=>i.id===itemId);
+      if(idx!==-1) planItems[idx].status = next;
+
+      // لو تم التنفيذ — احسب النقاط
+      if(next==='done') await calcExecutionPoints();
+
+      showToast(`${icon}`);
+      loadDailyExecution();
+
+      // حدّث تاب الخطة لو مفتوح
+      if(document.getElementById('screen-plan').classList.contains('active')) renderPlan();
+    } else {
+      showToast('❌ فشل تحديث الحالة — تحقق من الاتصال');
+    }
+  }catch(e){
+    showToast('❌ خطأ في الاتصال');
+    console.error('toggleVisitStatus error:', e);
+  }
 }
 
 // ══ Deviation Modal ═══════════════════════════════════════════
