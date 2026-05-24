@@ -992,6 +992,7 @@ async function doLogin(){
   showScreen('s-main');
   startLocTracking();
   fetchMessages();
+  fetchAssignments();
   fetchOrders();
   loadHolidays();
   loadPDBFromCloud().then(()=>{ renderProdList(); });
@@ -1110,6 +1111,7 @@ function updateOnlineStatus(isOnline){
 
 function logout(){
   if(locInterval) clearInterval(locInterval);
+  if(window._notifInterval) clearInterval(window._notifInterval);
   if(shiftTimerInterval) clearInterval(shiftTimerInterval);
   try{ sessionStorage.removeItem('cu_session'); }catch(e){}
   cu=null;attIn=null;attOut=null;visits=[];products=[];missing=[];selectedReason=null;
@@ -1244,7 +1246,11 @@ function showOverlay(v){
 // ── Location ───────────────────────────────────────────────────
 function startLocTracking(){
   sendLocation();
-  locInterval=setInterval(()=>{sendLocation();fetchMessages();fetchOrders();},2*60*1000);
+  // تتبع الموقع كل دقيقتين (أثقل)
+  locInterval=setInterval(()=>{sendLocation();},2*60*1000);
+  // تنبيهات الرسائل والتوجيهات والطلبيات كل 30 ثانية (شبه فوري)
+  if(window._notifInterval) clearInterval(window._notifInterval);
+  window._notifInterval=setInterval(()=>{fetchMessages();fetchAssignments();fetchOrders();},30*1000);
 }
 
 // ── Attendance ─────────────────────────────────────────────────
@@ -2146,10 +2152,13 @@ async function fetchMessages(){
     b.textContent = unread; b.style.display = unread ? 'block' : 'none';
 
     // popup للرسائل الجديدة العاجلة من المشرف
+    // ملاحظة: رسالة التوجيه (تبدأ بـ 📋 توجيه) لها تنبيهها الخاص عبر fetchAssignments
+    // فنتجاهلها هنا لتفادي ظهور تنبيهين متزامنين
     const newUrgent = messages.filter(m=>
       m.type==='urgent' &&
       !prev.includes(m.id) &&
-      !(m.read_by||'').includes(cu.name)
+      !(m.read_by||'').includes(cu.name) &&
+      !(m.message||'').trimStart().startsWith('📋 توجيه')
     );
     newUrgent.forEach(m => showFieldSupportPopup(m));
   }catch(e){}
@@ -2200,6 +2209,8 @@ async function confirmFsMsg(msgId, popupEl){
   setTimeout(()=>popupEl?.remove(), 300);
 }
 
+let _seenAssignments = null; // مجموعة معرّفات التوجيهات التي سبق عرضها
+
 async function fetchAssignments(){
   if(!cu) return;
   try{
@@ -2209,10 +2220,22 @@ async function fetchAssignments(){
     const data = await res.json();
     if(!Array.isArray(data)||!data.length){
       document.getElementById('assignments-card').style.display='none';
+      if(_seenAssignments===null) _seenAssignments=new Set();
       return;
     }
 
-    const pending = data.filter(a=>a.status==='pending').length;
+    // اكتشاف التوجيهات الجديدة (بحالة pending) منذ آخر فحص
+    const pendingNow = data.filter(a=>a.status==='pending');
+    if(_seenAssignments===null){
+      // أول تحميل بعد الدخول: سجّل الموجود دون إزعاج
+      _seenAssignments = new Set(data.map(a=>a.id));
+    } else {
+      const fresh = pendingNow.filter(a=>!_seenAssignments.has(a.id));
+      fresh.forEach(a=>{ _seenAssignments.add(a.id); notifyNewAssignment(a); });
+      data.forEach(a=>_seenAssignments.add(a.id));
+    }
+
+    const pending = pendingNow.length;
     document.getElementById('assignments-card').style.display='block';
     document.getElementById('asgn-badge').textContent = pending>0?`${pending} جديد`:'';
 
@@ -2261,6 +2284,51 @@ async function confirmAssignment(id, btn){
     showToast('✅ تم تأكيد استلام التوجيه');
     fetchAssignments();
   }catch(e){ showToast('❌ فشل التأكيد'); }
+}
+
+// تنبيه منبثق + اهتزاز عند وصول توجيه جديد
+function notifyNewAssignment(a){
+  // اهتزاز إن كان مدعوماً
+  try{ if(navigator.vibrate) navigator.vibrate([200,100,200]); }catch(e){}
+
+  const visitDate = a.visit_date ? new Date(a.visit_date) : null;
+  const dateAr = visitDate ? new Intl.DateTimeFormat('ar-EG',{weekday:'long',day:'2-digit',month:'long'}).format(visitDate) : '';
+  const timeAr = (a.visit_time||'').replace(/(\d+):(\d+)/,(m,h,mn)=>{
+    const h12 = +h>=12?(+h===12?12:+h-12):+h===0?12:+h;
+    return `${h12}:${mn} ${+h>=12?'م':'ص'}`;
+  });
+
+  const old = document.getElementById('asgn-popup');
+  if(old) old.remove();
+
+  const popup = document.createElement('div');
+  popup.id = 'asgn-popup';
+  popup.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%);
+    width:min(360px,92vw);background:#1565C0;color:#fff;border-radius:16px;
+    padding:16px;z-index:9998;box-shadow:0 8px 32px rgba(0,0,0,.4);
+    animation:fadeIn .3s ease;font-family:Cairo,sans-serif;direction:rtl`;
+  popup.innerHTML = `
+    <div style="display:flex;align-items:flex-start;gap:10px">
+      <div style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.18);
+        display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0">📋</div>
+      <div style="flex:1">
+        <div style="font-size:12px;font-weight:700;color:#fff;margin-bottom:4px">
+          توجيه جديد من ${a.supervisor_name||'المشرف'}
+        </div>
+        <div style="font-size:13px;font-weight:700;margin-bottom:2px">📍 ${a.branch_name||''}</div>
+        <div style="font-size:11px;opacity:.9">${dateAr}${timeAr?' · '+timeAr:''}</div>
+        ${a.note?`<div style="font-size:11px;opacity:.85;margin-top:4px;font-style:italic">📝 ${a.note}</div>`:''}
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button onclick="confirmAssignment(${a.id});this.closest('#asgn-popup').remove()"
+            style="flex:1;padding:8px;background:#fff;color:#1565C0;border:none;border-radius:8px;
+            font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">✅ تأكيد الاستلام</button>
+          <button onclick="this.closest('#asgn-popup').remove()"
+            style="padding:8px 12px;background:rgba(255,255,255,.2);color:#fff;border:none;border-radius:8px;
+            font-size:12px;font-weight:600;font-family:Cairo,sans-serif;cursor:pointer">لاحقاً</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(popup);
 }
 
 async function fetchOrders(){

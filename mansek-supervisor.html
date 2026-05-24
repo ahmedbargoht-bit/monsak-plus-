@@ -609,7 +609,8 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
             <div>
               <div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px">تاريخ الزيارة</div>
-              <input type="date" id="asgn-date" class="filter-select" style="width:100%"/>
+              <input type="date" id="asgn-date" class="filter-select" style="width:100%" onchange="onAsgnDateChange()"/>
+              <div id="asgn-day-label" style="font-size:11px;font-weight:700;color:var(--navy);margin-top:5px;min-height:16px"></div>
             </div>
             <div>
               <div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px">وقت الوصول</div>
@@ -2621,7 +2622,81 @@ function switchFsMode(mode){
   document.getElementById('fs-tab-support').style.color     = isSupport?'#fff':'var(--text)';
   document.getElementById('fs-tab-assign').style.background  = !isSupport?'var(--navy)':'#fff';
   document.getElementById('fs-tab-assign').style.color      = !isSupport?'#fff':'var(--text)';
-  if(!isSupport) loadAssignmentHistory();
+
+  // في وضع التوجيه: اعرض كل الفروع المتاحة + سجل التوجيهات
+  if(isSupport){
+    // ارجع لسلوك "بدء الدعم": الفروع تتبع المنسق وخط السير
+    onFsRepChange();
+  } else {
+    fillAllBranches();
+    loadAssignmentHistory();
+  }
+}
+
+// عرض جميع الفروع المتاحة في مجموعات المشرف (وضع التوجيه)
+function fillAllBranches(){
+  const branchSel = document.getElementById('fs-branch');
+  const routeSel  = document.getElementById('fs-route');
+  if(!branchSel) return;
+
+  // أزل التكرار (نفس اسم الفرع + نفس خط السير يُحسب مرة واحدة)
+  const seen = new Set();
+  const branches = _fsAllBranches.filter(b=>{
+    if(!b.branch_name) return false;
+    const key = (b.route||'') + '||' + b.branch_name;
+    if(seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+
+  // جمّع الفروع تحت كل خط سير
+  const byRoute = {};            // route -> [branch_name,...]
+  const noRoute = [];            // فروع بدون خط سير
+  branches.forEach(b=>{
+    if(b.route){ (byRoute[b.route] = byRoute[b.route] || []).push(b.branch_name); }
+    else noRoute.push(b.branch_name);
+  });
+
+  // رتّب خطوط السير أبجدياً، والفروع داخل كل خط أبجدياً
+  const routes = Object.keys(byRoute).sort((a,b)=>a.localeCompare(b,'ar'));
+
+  branchSel.innerHTML = '<option value="">اختر الفرع...</option>';
+  routes.forEach(r=>{
+    const g = document.createElement('optgroup');
+    g.label = '🛣️ ' + r;
+    byRoute[r].sort((a,b)=>a.localeCompare(b,'ar')).forEach(name=>{
+      const o = document.createElement('option');
+      o.value = name; o.textContent = name;
+      g.appendChild(o);
+    });
+    branchSel.appendChild(g);
+  });
+  if(noRoute.length){
+    const g = document.createElement('optgroup');
+    g.label = 'بدون خط سير';
+    noRoute.sort((a,b)=>a.localeCompare(b,'ar')).forEach(name=>{
+      const o = document.createElement('option');
+      o.value = name; o.textContent = name;
+      g.appendChild(o);
+    });
+    branchSel.appendChild(g);
+  }
+
+  // خط السير اختياري في وضع التوجيه: يُستخدم لتضييق القائمة فقط
+  if(routeSel){
+    routeSel.innerHTML = '<option value="">كل خطوط السير (اختياري)</option>';
+    routes.forEach(r=>{ const o=document.createElement('option');o.value=r;o.textContent=r;routeSel.appendChild(o); });
+  }
+}
+
+// عرض اسم اليوم بالعربية فور اختيار التاريخ
+function onAsgnDateChange(){
+  const date = document.getElementById('asgn-date').value;
+  const lbl  = document.getElementById('asgn-day-label');
+  if(!lbl) return;
+  if(!date){ lbl.textContent=''; return; }
+  const d = new Date(date);
+  const day = new Intl.DateTimeFormat('ar-EG',{weekday:'long'}).format(d);
+  lbl.textContent = '📅 ' + day;
 }
 
 async function sendAssignment(){
@@ -2762,6 +2837,7 @@ async function initFieldSupport(){
   reps.forEach(r=>{ const o=document.createElement('option');o.value=r.name;o.textContent=r.name;repSel.appendChild(o); });
 
   // جيب كل الفروع
+  _fsAllBranches = [];
   for(const grp of cu.groups){
     const res = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,rep_name,grp&grp=eq.${encodeURIComponent(grp)}&status=eq.active&limit=500`,{
       headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
@@ -2782,7 +2858,19 @@ async function initFieldSupport(){
   loadFsHistory();
 }
 
+// هل نحن في وضع "توجيه مأمورية"؟
+function _isAssignMode(){
+  const el = document.getElementById('fs-mode-assign');
+  return el && el.style.display !== 'none';
+}
+
 async function onFsRepChange(){
+  // في وضع التوجيه: اختيار المنسق لا يقيّد الفروع — كل الفروع تبقى متاحة
+  if(_isAssignMode()){
+    fillAllBranches();
+    return;
+  }
+
   const repName = document.getElementById('fs-rep').value;
   const routeSel = document.getElementById('fs-route');
   const branchSel = document.getElementById('fs-branch');
@@ -2802,9 +2890,23 @@ async function onFsRepChange(){
 }
 
 function onFsRouteChange(){
-  const repName  = document.getElementById('fs-rep').value;
   const route    = document.getElementById('fs-route').value;
   const branchSel= document.getElementById('fs-branch');
+
+  // في وضع التوجيه: خط السير اختياري ويضيّق فقط — بدون قيد المنسق
+  if(_isAssignMode()){
+    if(!route){ fillAllBranches(); return; }
+    const seen = new Set();
+    const branches = _fsAllBranches
+      .filter(b=>b.route===route && b.branch_name && !seen.has(b.branch_name) && seen.add(b.branch_name))
+      .sort((a,b)=>(a.branch_name||'').localeCompare(b.branch_name||'','ar'));
+    branchSel.innerHTML = '<option value="">اختر الفرع...</option>';
+    branches.forEach(b=>{ const o=document.createElement('option');o.value=b.branch_name;o.textContent=b.branch_name;branchSel.appendChild(o); });
+    if(branches.length===1) branchSel.value=branches[0].branch_name;
+    return;
+  }
+
+  const repName  = document.getElementById('fs-rep').value;
   branchSel.innerHTML = '<option value="">اختر الفرع...</option>';
   if(!route) return;
   const branches = _fsAllBranches.filter(b=>b.rep_name===repName && b.route===route);
