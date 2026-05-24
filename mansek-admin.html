@@ -705,8 +705,46 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
               <button class="btn btn-navy" onclick="sendOrder()"><i class="ti ti-send"></i> إرسال الإشعار</button>
             </div>
             <div class="card">
-              <div class="card-title"><i class="ti ti-list"></i> الإشعارات المرسلة</div>
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <div class="card-title" style="margin-bottom:0"><i class="ti ti-list"></i> الطلبيات</div>
+                <div style="display:flex;gap:4px">
+                  <button onclick="setOrderFilter('all')" id="ord-f-all"
+                    style="padding:4px 10px;border-radius:6px;font-size:11px;border:1.5px solid var(--navy);background:var(--navy);color:#fff;cursor:pointer;font-family:Cairo,sans-serif">
+                    الكل
+                  </button>
+                  <button onclick="setOrderFilter('pending_supervisor')" id="ord-f-pending"
+                    style="padding:4px 10px;border-radius:6px;font-size:11px;border:1.5px solid var(--border);background:#fff;color:var(--text);cursor:pointer;font-family:Cairo,sans-serif">
+                    معلقة
+                  </button>
+                  <button onclick="setOrderFilter('approved')" id="ord-f-approved"
+                    style="padding:4px 10px;border-radius:6px;font-size:11px;border:1.5px solid var(--border);background:#fff;color:var(--text);cursor:pointer;font-family:Cairo,sans-serif">
+                    معتمدة
+                  </button>
+                  <button onclick="setOrderFilter('rejected')" id="ord-f-rejected"
+                    style="padding:4px 10px;border-radius:6px;font-size:11px;border:1.5px solid var(--border);background:#fff;color:var(--text);cursor:pointer;font-family:Cairo,sans-serif">
+                    مرفوضة
+                  </button>
+                </div>
+              </div>
+              <!-- إحصائيات سريعة -->
+              <div style="display:flex;gap:8px;margin-bottom:12px">
+                <div style="flex:1;background:#FFF3E0;border-radius:8px;padding:8px;text-align:center">
+                  <div style="font-size:18px;font-weight:900;color:#E65100" id="ord-count-pending">0</div>
+                  <div style="font-size:10px;color:#666">معلقة</div>
+                </div>
+                <div style="flex:1;background:#E8F5E9;border-radius:8px;padding:8px;text-align:center">
+                  <div style="font-size:18px;font-weight:900;color:#1A7A4A" id="ord-count-approved">0</div>
+                  <div style="font-size:10px;color:#666">معتمدة</div>
+                </div>
+                <div style="flex:1;background:#FFEBEE;border-radius:8px;padding:8px;text-align:center">
+                  <div style="font-size:18px;font-weight:900;color:#B71C1C" id="ord-count-rejected">0</div>
+                  <div style="font-size:10px;color:#666">مرفوضة</div>
+                </div>
+              </div>
               <div id="orders-list"></div>
+              <div style="font-size:10px;color:var(--text2);text-align:center;margin-top:8px">
+                🔄 يتحدث كل 30 ثانية تلقائياً
+              </div>
             </div>
           </div>
         </div>
@@ -2280,7 +2318,7 @@ function renderCurrentPanel(){
     case 'supervisors': loadSupervisors(); break;
     case 'branches': loadBranches(); qbInitReps(); loadBranchesMap(); break;
     case 'messages': renderMessages(); break;
-    case 'orders': renderOrders(); break;
+    case 'orders': loadOrders(); break;
     case 'settings': loadHolidays(); break;
     case 'upload': loadUploadPanel(); break;
     case 'routes':
@@ -2815,30 +2853,116 @@ async function sendOrder(){
   renderOrders();
 }
 
+let _orderFilter = 'all';
+let _ordersPolling = null;
+
+function setOrderFilter(filter){
+  _orderFilter = filter;
+  ['all','pending','approved','rejected'].forEach(f=>{
+    const btn = document.getElementById('ord-f-'+f);
+    if(!btn) return;
+    const isActive = (f==='all'&&filter==='all') || (f==='pending'&&filter==='pending_supervisor') || f===filter;
+    btn.style.background = isActive?'var(--navy)':'#fff';
+    btn.style.color = isActive?'#fff':'var(--text)';
+    btn.style.borderColor = isActive?'var(--navy)':'var(--border)';
+  });
+  renderOrders();
+}
+
 function renderOrders(){
-  const {orders}=cachedData;
-  const today=new Date();today.setHours(0,0,0,0);
-  document.getElementById('orders-list').innerHTML=orders.slice(0,20).map(o=>{
-    const d=new Date(o.arrival_date);d.setHours(0,0,0,0);
-    const diff=Math.round((d-today)/86400000);
-    const tag=diff<0?'<span class="badge b-gray">انتهى</span>':diff===0?'<span class="badge b-red">اليوم</span>':diff===1?'<span class="badge b-orange">غداً</span>':`<span class="badge b-blue">بعد ${diff} أيام</span>`;
-    const statusBadge=o.status==='done'?'<span class="badge b-green">تم ✓</span>':'<span class="badge b-orange">معلق</span>';
-    return`<div style="padding:10px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px">
-      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
-        <b style="font-size:12px">${o.to_name||o.to_route}</b>
-        ${statusBadge}
+  const {orders} = cachedData;
+  const today = new Date(); today.setHours(0,0,0,0);
+
+  const pending  = orders.filter(o=>o.status==='pending_supervisor'||o.status==='pending').length;
+  const approved = orders.filter(o=>o.status==='approved'||o.status==='done').length;
+  const rejected = orders.filter(o=>o.status==='rejected').length;
+
+  const upd = (id,v)=>{ const e=document.getElementById(id); if(e) e.textContent=v; };
+  upd('ord-count-pending', pending);
+  upd('ord-count-approved', approved);
+  upd('ord-count-rejected', rejected);
+
+  let filtered = orders;
+  if(_orderFilter==='pending_supervisor') filtered = orders.filter(o=>o.status==='pending_supervisor'||o.status==='pending');
+  else if(_orderFilter==='approved')      filtered = orders.filter(o=>o.status==='approved'||o.status==='done');
+  else if(_orderFilter==='rejected')      filtered = orders.filter(o=>o.status==='rejected');
+
+  const statusConfig = {
+    pending_supervisor: {label:'⏳ بانتظار المشرف', bg:'#FFF3E0', color:'#E65100'},
+    pending:            {label:'⏳ معلق',            bg:'#FFF3E0', color:'#E65100'},
+    approved:           {label:'✅ معتمد',           bg:'#E8F5E9', color:'#1A7A4A'},
+    done:               {label:'✅ تم',              bg:'#E8F5E9', color:'#1A7A4A'},
+    rejected:           {label:'❌ مرفوض',           bg:'#FFEBEE', color:'#B71C1C'},
+  };
+
+  document.getElementById('orders-list').innerHTML = filtered.slice(0,30).map(o=>{
+    const d = new Date(o.arrival_date||o.created_at||new Date()); d.setHours(0,0,0,0);
+    const diff = Math.round((d-today)/86400000);
+    const tag = diff<0?'<span class="badge b-gray">انتهى</span>':
+                diff===0?'<span class="badge b-red">اليوم</span>':
+                diff===1?'<span class="badge b-orange">غداً</span>':
+                `<span class="badge b-blue">بعد ${diff} أيام</span>`;
+    const sc = statusConfig[o.status]||{label:'—', bg:'#f5f5f5', color:'#666'};
+    const isPending = o.status==='pending_supervisor'||o.status==='pending';
+
+    return`<div style="padding:10px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;
+      border-right:3px solid ${sc.color};background:${isPending?'#FFFDE7':'#fff'}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+        <b style="font-size:12px">${o.to_name||o.to_route||'—'}</b>
+        <span style="background:${sc.bg};color:${sc.color};padding:2px 8px;border-radius:999px;font-size:10px;font-weight:600">
+          ${sc.label}
+        </span>
       </div>
       <div style="font-size:11px;color:var(--text2)">📍 ${o.branch||'الكل'} · ${tag}</div>
-      ${o.note?`<div style="font-size:11px;color:var(--text2);margin-top:3px">${o.note}</div>`:''}
-      ${o.status==='pending'?`<button class="btn btn-ghost btn-xs" style="margin-top:6px" onclick="markOrderDone(${o.id})"><i class="ti ti-check"></i> تم</button>`:''}
+      ${o.note?`<div style="font-size:11px;color:var(--text2);margin-top:3px">📝 ${o.note}</div>`:''}
+      ${o.reject_reason?`<div style="font-size:11px;color:#B71C1C;margin-top:3px">سبب الرفض: ${o.reject_reason}</div>`:''}
+      <div style="display:flex;gap:6px;margin-top:8px">
+        ${isPending?`
+          <button class="btn btn-ghost btn-xs" style="background:#E8F5E9;color:#1A7A4A;border-color:#C8E6C9"
+            onclick="updateOrderStatus(${o.id},'approved')"><i class="ti ti-check"></i> اعتماد</button>
+          <button class="btn btn-ghost btn-xs" style="background:#FFEBEE;color:#B71C1C;border-color:#FFCDD2"
+            onclick="rejectOrder(${o.id})"><i class="ti ti-x"></i> رفض</button>`:''}
+      </div>
     </div>`;
   }).join('')||'<div style="color:var(--text2);font-size:12px;text-align:center;padding:1rem">لا توجد طلبيات</div>';
 }
 
-async function markOrderDone(id){
-  await sbUpdate('orders',{id},{status:'done'});
-  await refreshAll();renderOrders();
+async function updateOrderStatus(id, status){
+  await fetch(`${SUPABASE_URL}/rest/v1/orders?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body: JSON.stringify({status})
+  });
+  const idx = cachedData.orders.findIndex(o=>o.id===id);
+  if(idx!==-1) cachedData.orders[idx].status = status;
+  renderOrders();
 }
+
+async function rejectOrder(id){
+  const reason = prompt('سبب الرفض:');
+  if(!reason) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/orders?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body: JSON.stringify({status:'rejected', reject_reason:reason})
+  });
+  const idx = cachedData.orders.findIndex(o=>o.id===id);
+  if(idx!==-1){ cachedData.orders[idx].status='rejected'; cachedData.orders[idx].reject_reason=reason; }
+  renderOrders();
+}
+
+async function markOrderDone(id){ await updateOrderStatus(id,'done'); }
+
+function startOrdersPolling(){
+  if(_ordersPolling) return;
+  _ordersPolling = setInterval(async()=>{
+    if(!document.getElementById('panel-orders')?.classList.contains('active')) return;
+    const res = await sb('orders',{},{order:'created_at.desc'});
+    if(Array.isArray(res)){ cachedData.orders=res; renderOrders(); }
+  }, 30000);
+}
+
+function loadOrders(){ renderOrders(); startOrdersPolling(); }
 
 // ══════════════════════════════════════════════════════════════
 // MESSAGES
