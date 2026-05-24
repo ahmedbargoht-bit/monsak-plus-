@@ -2675,6 +2675,367 @@ function filterLocations(){
 // ══════════════════════════════════════════════════════════════
 // حذف السجلات — صلاحية المدير
 // ══════════════════════════════════════════════════════════════
+
+async function deleteRecord(table, id, reloadFn) {
+  secureDelete("تنبيه أمان: حذف هذا السجل سيؤدي لحذف جميع النقاط المرتبطة به من رصيد المنسق نهائياً. هل أنت متأكد؟", async () => {
+    try {
+      if (table === 'visits') {
+        await sb.from('point_logs').delete().eq('visit_id', id);
+      } else if (table === 'field_support_logs') {
+        await sb.from('point_logs').delete().eq('support_log_id', id);
+      } else if (table === 'supply_requests') {
+        await sb.from('point_logs').delete().eq('order_id', id);
+      }
+      const { error } = await sb.from(table).delete().eq('id', id);
+      if (error) throw error;
+      showToast("تم الحذف وتصحيح سجل النقاط بنجاح ✅");
+      if (reloadFn) reloadFn(); 
+      if (typeof refreshAll === 'function') refreshAll(); 
+    } catch (e) {
+      console.error("Delete Error:", e);
+      showToast("حدث خطأ: " + e.message, "error");
+    }
+  });
+}
+
+
+async function doLogin(){
+  const pass=document.getElementById('l-pass').value;
+  const err=document.getElementById('l-err');
+  const btn=document.querySelector('#login-screen .btn-blue');
+  if(!pass){err.style.display='block';return;}
+
+  // تحقق من الباسورد — محلي أو من Supabase أو override
+  let adminPass = localStorage.getItem('admin_pass_override') || ADMIN_PASS;
+  try{
+    const data = await sb('users',{name:'admin',role:'admin'});
+    if(data && data[0]) adminPass = data[0].pass_hash || adminPass;
+  }catch(e){}
+
+  if(pass !== adminPass){
+    err.style.display='block';
+    if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-login"></i> دخول';}
+    return;
+  }
+
+  err.style.display='none';
+  CU={name:'admin', uid:'admin', level:'gm', groups:['giza','cairo','south','tajmuat','hyper']};
+  await loadAdminUsers();
+  await loadPDBFromSupabase();
+  setupApp();
+  startRealtimeAdmin();
+  if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-login"></i> دخول';}
+}
+
+function setupApp(){
+  document.getElementById('login-screen').style.display='none';
+  document.getElementById('app').style.display='block';
+  const ini=CU.name.split(' ').map(w=>w[0]).join('').slice(0,2);
+  document.getElementById('sb-av').textContent=ini;
+  document.getElementById('sb-name').textContent=CU.name;
+  document.getElementById('sb-role').textContent=CU.role;
+  if(CU.level!=='gm') document.getElementById('nav-admin-section').style.display='none';
+  document.getElementById('cfg-url').value=SUPABASE_URL;
+  document.getElementById('cfg-key').value=SUPABASE_KEY;
+  // تعبئة قوائم المنسقين
+  const reps=getVisibleReps();
+  ['goal-rep','msg-rep'].forEach(id=>{
+    const sel=document.getElementById(id);
+    if(!sel)return;
+    sel.innerHTML='<option value="">اختر</option>';
+    reps.forEach(r=>{const o=document.createElement('option');o.value=r.name;o.textContent=r.name;sel.appendChild(o);});
+  });
+  // تعبئة خطوط السير
+  const routeSel=document.getElementById('ord-route');
+  if(routeSel){
+    reps.forEach(r=>{const o=document.createElement('option');o.value=r.route;o.textContent=r.route+' — '+r.name;routeSel.appendChild(o);});
+  }
+  document.getElementById('v-date').value=new Date().toISOString().slice(0,10);
+  document.getElementById('att-date').value=new Date().toISOString().slice(0,10);
+  document.getElementById('mi-date').value=new Date().toISOString().slice(0,10);
+  refreshAll();
+  refreshTimer=setInterval(refreshAll,2*60*1000);
+}
+
+function logout(){
+  if(refreshTimer)clearInterval(refreshTimer);
+  rtChannelsAdmin.forEach(c=>{try{c.close();}catch(e){}});rtChannelsAdmin=[];
+  CU=null;
+  document.getElementById('app').style.display='none';
+  document.getElementById('login-screen').style.display='flex';
+}
+
+function getVisibleReps(){
+  // الأدمين (gm) يشوف كل المنسقين بدون فلتر
+  if(CU.level === 'gm') return REPS;
+  return REPS.filter(r=>CU.groups.includes(r.group));
+}
+
+// ══════════════════════════════════════════════════════════════
+// REFRESH ALL DATA
+// ══════════════════════════════════════════════════════════════
+async function refreshAll(){
+  document.getElementById('last-update').textContent='جاري التحديث...';
+  const [visits,missing,products,attendance,location,messages,orders] = await Promise.all([
+    sb('visits',{},{order:'created_at.desc'}),
+    sb('missing',{},{order:'created_at.desc'}),
+    sb('products',{},{order:'created_at.desc'}),
+    sb('attendance',{},{order:'created_at.desc'}),
+    sb('location'),
+    sb('messages',{},{order:'created_at.desc'}),
+    sb('orders',{},{order:'created_at.desc'}),
+  ]);
+  cachedData={visits,missing,products,attendance,location,messages,orders};
+  const now=new Date();
+  document.getElementById('last-update').textContent='آخر تحديث: '+now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
+  renderCurrentPanel();
+  updateBadges();
+}
+
+function renderCurrentPanel(){
+  const active=document.querySelector('.panel.active');
+  if(!active)return;
+  const id=active.id.replace('panel-','');
+  switch(id){
+    case 'dashboard': renderDashboard(); break;
+    case 'leaderboard': renderLB(); break;
+    case 'location': renderLocations(); break;
+    case 'visits': loadVisits(); break;
+    case 'products': loadProducts(); break;
+    case 'missing': loadMissing(); break;
+    case 'attendance': loadAttendance(); break;
+    case 'users': loadAdminUsers().then(()=>loadUsers()); break;
+    case 'supervisors': loadSupervisors(); break;
+    case 'branches': loadBranches(); qbInitReps(); loadBranchesMap(); break;
+    case 'messages': renderMessages(); break;
+    case 'orders': loadOrders(); break;
+    case 'settings': loadHolidays(); break;
+    case 'upload': loadUploadPanel(); break;
+    case 'routes':
+      // migration: لو في بيانات في localStorage انقلهم لـ Supabase
+      const localRoutes = localStorage.getItem('routes_list');
+      if(localRoutes){
+        const parsed = JSON.parse(localRoutes);
+        if(parsed.length && !ROUTES_LIST.length){
+          ROUTES_LIST = parsed;
+          saveRoutes();
+        }
+      }
+      loadRoutes();
+      break;
+    case 'goals':
+      sb('products_db',{key:'goals'}).then(res=>{
+        if(res&&res[0]&&res[0].value){ goals=JSON.parse(res[0].value); }
+        renderGoals();
+      }).catch(()=>renderGoals());
+      break;
+    case 'holidays': loadHolidays(); break;
+    case 'export-full': break;
+    case 'activity': loadActivity(); break;
+    case 'sup-monitor': loadSupMonitor(); break;
+    case 'field-monitor': loadFieldMonitor(); break;
+    case 'field-support-report': loadFieldSupportReport(); break;
+  }
+}
+
+function updateBadges(){
+  const today=new Date().toLocaleDateString('ar-EG');
+  const todayMiss=cachedData.missing.filter(m=>m.created_at?.startsWith(new Date().toISOString().slice(0,10))).length;
+  const b=document.getElementById('nav-miss-badge');
+  b.textContent=todayMiss;b.style.display=todayMiss?'':'none';
+}
+
+// ══════════════════════════════════════════════════════════════
+// NAV
+// ══════════════════════════════════════════════════════════════
+const PANEL_TITLES={dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',attendance:'الحضور والانصراف',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',branches:'الفروع والعملاء',settings:'الإعدادات'};
+
+function showPanel(id){
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  document.getElementById('panel-'+id)?.classList.add('active');
+  document.querySelector(`.nav-item[onclick="showPanel('${id}')"]`)?.classList.add('active');
+  document.getElementById('topbar-title').textContent=PANEL_TITLES[id]||id;
+  renderCurrentPanel();
+}
+
+// ══════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════
+function renderDashboard(){
+  const today=new Date().toLocaleDateString('ar-EG');
+  const todayStr=new Date().toISOString().slice(0,10);
+  const {visits,missing,attendance,location}=cachedData;
+  // الأدمين يشوف كل المجموعات بما فيها alex
+  const visible = CU.level==='gm' ? Object.keys(GROUPS) : CU.groups;
+  const todayV=visits.filter(v=>v.date===today&&visible.includes(v.grp||''));
+  const todayM=missing.filter(m=>m.created_at?.startsWith(todayStr)&&visible.includes(m.grp||''));
+  const todayA=attendance.filter(a=>a.date===today);
+  const TEN=10*60*1000,nowMs=Date.now();
+  const online=location.filter(l=>visible.includes(l.grp||'')&&(nowMs-new Date(l.updated_at).getTime())<TEN).length;
+  const totalPts=todayV.reduce((s,v)=>s+(+v.points||0),0);
+
+  document.getElementById('dash-stats').innerHTML=`
+    <div class="stat-card blue"><div class="stat-n">${todayV.length}</div><div class="stat-l">زيارة اليوم</div></div>
+    <div class="stat-card green"><div class="stat-n">${totalPts}</div><div class="stat-l">نقاط اليوم</div></div>
+    <div class="stat-card orange"><div class="stat-n">${todayA.filter(a=>a.time_in).length}</div><div class="stat-l">حضروا اليوم</div></div>
+    <div class="stat-card red"><div class="stat-n">${todayM.length}</div><div class="stat-l">نواقص اليوم</div></div>
+    <div class="stat-card purple"><div class="stat-n">${online}</div><div class="stat-l">متصل الآن</div></div>
+    <div class="stat-card yellow"><div class="stat-n">${cachedData.orders.filter(o=>o.status==='pending').length}</div><div class="stat-l">طلبيات معلقة</div></div>
+  `;
+
+  // Groups
+  const maxPts=Math.max(...visible.map(g=>todayV.filter(v=>v.grp===g).reduce((s,v)=>s+(+v.points||0),0)),1);
+  document.getElementById('dash-groups').innerHTML=visible.map(gid=>{
+    const g=GROUPS[gid];
+    const gv=todayV.filter(v=>v.grp===gid);
+    const pts=gv.reduce((s,v)=>s+(+v.points||0),0);
+    const pct=Math.round(pts/maxPts*100);
+    return`<div style="margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <span style="font-size:12px;font-weight:600">${g.label}</span>
+        <span style="font-size:11px;color:var(--text2)">${gv.length} زيارة · ${pts} نقطة</span>
+      </div>
+      <div style="background:#f0f0f0;border-radius:999px;height:8px;overflow:hidden">
+        <div style="height:100%;border-radius:999px;background:${g.color};width:${pct}%;transition:width .5s"></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Activity
+  const recent=visits.slice(0,15);
+  document.getElementById('dash-activity').innerHTML=recent.map(v=>`
+    <div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #f5f5f5">
+      <div style="width:8px;height:8px;border-radius:50%;background:${GROUPS[v.grp]?.color||'#ccc'};flex-shrink:0"></div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v.name}</div>
+        <div style="font-size:10px;color:var(--text2)">${v.branch||''}</div>
+      </div>
+      <span class="badge b-blue">${v.points||0} نقطة</span>
+    </div>`).join('') || '<div style="color:var(--text2);font-size:12px;text-align:center;padding:1rem">لا توجد زيارات</div>';
+
+  // Missing
+  const todayMiss=missing.filter(m=>m.created_at?.startsWith(new Date().toISOString().slice(0,10)));
+  document.getElementById('dash-missing').innerHTML=todayMiss.length?`
+    <div class="table-wrap"><table>
+      <thead><tr><th>المنسق</th><th>الفرع</th><th>الصنف</th><th>السبب</th><th>إجراء</th></tr></thead>
+      <tbody>${todayMiss.map(m=>`<tr>
+        <td>${m.name}</td><td>${m.branch||'—'}</td>
+        <td style="font-weight:600">${m.snf||''}</td>
+        <td><span class="badge b-orange">${m.reason||''}</span></td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+  `:'<div style="color:var(--text2);font-size:12px;text-align:center;padding:1rem">لا توجد نواقص اليوم ✅</div>';
+}
+
+// ══════════════════════════════════════════════════════════════
+// LEADERBOARD
+// ══════════════════════════════════════════════════════════════
+function renderLB(){
+  const filterGrp=document.getElementById('lb-filter-group')?.value||'all';
+  const {visits}=cachedData;
+  const visible=CU.groups;
+  let data=visits.filter(v=>visible.includes(v.grp||''));
+  if(filterGrp!=='all') data=data.filter(v=>v.grp===filterGrp);
+
+  const scores={},vc={},meta={};
+  data.forEach(v=>{
+    scores[v.name]=(scores[v.name]||0)+(+v.points||0);
+    vc[v.name]=(vc[v.name]||0)+1;
+    if(!meta[v.name])meta[v.name]={route:v.route||'',group:v.grp||''};
+  });
+  const lb=Object.entries(scores).map(([name,score])=>({name,score,visits:vc[name],...meta[name]})).sort((a,b)=>b.score-a.score);
+  const max=lb[0]?.score||1;
+
+  document.getElementById('lb-date').textContent=new Date().toLocaleDateString('ar-EG',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+
+  // Top 3
+  const top3=lb.slice(0,3);
+  const order=[top3[1],top3[0],top3[2]].filter(Boolean);
+  const pos=['lb-pos-2','lb-pos-1','lb-pos-3'],nums=['2','1','3'];
+  document.getElementById('lb-top3').innerHTML=order.map((r,i)=>{
+    const ini=r.name.split(' ').map(w=>w[0]).join('').slice(0,2);
+    const gc=GROUPS[r.group]?.color||'#005CBF';
+    return`<div class="lb-pos ${pos[i]}">
+      <div class="lb-av-big" style="border-color:${pos[i]==='lb-pos-1'?'#FFD700':pos[i]==='lb-pos-2'?'#C0C0C0':'#CD7F32'};background:linear-gradient(135deg,${gc}88,${gc})">${ini}</div>
+      <div class="lb-pos-name">${r.name}</div>
+      <div class="lb-pos-pts">${r.score} نقطة</div>
+      <div class="lb-block">${nums[i]}</div>
+    </div>`;
+  }).join('');
+
+  // Rows
+  const rowCls=['top1','top2','top3'];
+  document.getElementById('lb-rows').innerHTML=lb.map((r,i)=>{
+    const gc=GROUPS[r.group]?.color||'#005CBF';
+    const ini=r.name.split(' ').map(w=>w[0]).join('').slice(0,2);
+    const pct=Math.round(r.score/max*100);
+    const medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
+    return`<div class="lb-row-item ${rowCls[i]||'others'}">
+      <div class="lb-rank-badge" style="background:${i<3?'transparent':'rgba(255,255,255,.05)'};color:${i===0?'#FFD700':i===1?'#C0C0C0':i===2?'#CD7F32':'rgba(255,255,255,.4)'}">${medal||i+1}</div>
+      <div style="width:28px;height:28px;border-radius:6px;background:${gc}33;color:${gc};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">${ini}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name}</div>
+        <div style="font-size:10px;color:rgba(255,255,255,.35)">${r.route||''} · ${r.visits} زيارة</div>
+      </div>
+      <div class="lb-bar-bg"><div class="lb-bar-fill" style="width:${pct}%;background:${gc}"></div></div>
+      <div class="lb-pts-badge" style="color:${i===0?'#FFD700':i===1?'#C0C0C0':i===2?'#CD7F32':'rgba(255,255,255,.7)'}">${r.score}</div>
+    </div>`;
+  }).join('');
+}
+
+// ══════════════════════════════════════════════════════════════
+// LOCATION
+// ══════════════════════════════════════════════════════════════
+function renderLocations(){
+  filterLocations();
+  const {location}=cachedData;
+  const visible=CU.groups;
+  const TEN=10*60*1000,nowMs=Date.now();
+  const locs=location.filter(l=>visible.includes(l.grp||''));
+  const online=locs.filter(l=>(nowMs-new Date(l.updated_at).getTime())<TEN).length;
+  document.getElementById('loc-stats').innerHTML=`
+    <div class="stat-card green"><div class="stat-n">${online}</div><div class="stat-l">متصل الآن</div></div>
+    <div class="stat-card red"><div class="stat-n">${locs.length-online}</div><div class="stat-l">غير متصل</div></div>
+    <div class="stat-card blue"><div class="stat-n">${locs.length}</div><div class="stat-l">إجمالي</div></div>
+    <div class="stat-card yellow"><div class="stat-n">${locs.length?Math.round(online/locs.length*100):0}%</div><div class="stat-l">نسبة التغطية</div></div>
+  `;
+  filterLocations();
+}
+
+function filterLocations(){
+  const {location}=cachedData;
+  const visible=CU.groups;
+  const grp=document.getElementById('loc-filter-group')?.value||'all';
+  const status=document.getElementById('loc-filter-status')?.value||'all';
+  const TEN=10*60*1000,nowMs=Date.now();
+  let locs=location.filter(l=>visible.includes(l.grp||''));
+  if(grp!=='all') locs=locs.filter(l=>l.grp===grp);
+  locs=locs.map(l=>({...l,active:(nowMs-new Date(l.updated_at).getTime())<TEN}));
+  if(status==='online') locs=locs.filter(l=>l.active);
+  if(status==='offline') locs=locs.filter(l=>!l.active);
+
+  document.getElementById('loc-table').innerHTML=locs.map(l=>{
+    const gc=GROUPS[l.grp]?.color||'#ccc';
+    const url=l.lat&&l.lng?`https://maps.google.com/?q=${l.lat},${l.lng}`:'#';
+    const upd=l.updated_at?new Date(l.updated_at).toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'}):'—';
+    return`<tr>
+      <td><b>${l.name}</b></td>
+      <td><span class="badge" style="background:${gc}22;color:${gc}">${GROUPS[l.grp]?.label||l.grp}</span></td>
+      <td style="font-size:11px">${l.route||'—'}</td>
+      <td>${l.lat?`<a href="${url}" target="_blank" style="color:var(--blue);font-size:11px">📍 ${l.lat}, ${l.lng}</a>`:'—'}</td>
+      <td style="font-size:11px">${upd}</td>
+      <td><span class="badge ${l.active?'b-green':'b-gray'}">${l.active?'● متصل':'○ غير متصل'}</span></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات</td></tr>';
+}
+
+// ══════════════════════════════════════════════════════════════
+// VISITS
+// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// حذف السجلات — صلاحية المدير
+// ══════════════════════════════════════════════════════════════
 async function deleteRecord(table, id, reloadFn) {
   secureDelete("تنبيه أمان: حذف هذا السجل سيؤدي لحذف جميع النقاط المرتبطة به من رصيد المنسق نهائياً. هل أنت متأكد؟", async () => {
     try {
