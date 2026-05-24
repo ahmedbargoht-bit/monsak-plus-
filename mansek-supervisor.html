@@ -4,6 +4,26 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
 <title>المشرف بلس | الطحان للتمور</title>
+
+<!-- PWA Meta Tags -->
+<meta name="theme-color" content="#1a2744"/>
+<meta name="application-name" content="المشرف بلس"/>
+<meta name="description" content="نظام إشراف المنسقين الميدانيين — الطحان للتمور"/>
+
+<!-- iOS PWA -->
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="المشرف بلس"/>
+<link rel="apple-touch-icon" href="https://ahmedbargoht-bit.github.io/monsak-plus-/icon-192.png"/>
+<link rel="apple-touch-startup-image" href="https://ahmedbargoht-bit.github.io/monsak-plus-/icon-512.png"/>
+
+<!-- Android PWA -->
+<link rel="manifest" href="manifest-supervisor.json"/>
+<link rel="icon" type="image/png" sizes="192x192" href="https://ahmedbargoht-bit.github.io/monsak-plus-/icon-192.png"/>
+
+<!-- Splash Screen Color -->
+<meta name="msapplication-TileColor" content="#1a2744"/>
+<meta name="msapplication-TileImage" content="https://ahmedbargoht-bit.github.io/monsak-plus-/icon-192.png"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css"/>
@@ -223,6 +243,10 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       <div class="topbar-sup" id="top-sup-name"></div>
     </div>
     <div class="topbar-actions">
+      <button class="btn-icon" id="btn-install" style="display:none;background:#c9a84c;color:#1a2744"
+        onclick="installPWA()" title="تثبيت التطبيق">
+        <i class="ti ti-download"></i>
+      </button>
       <button class="btn-icon" onclick="refreshData()" title="تحديث"><i class="ti ti-refresh"></i></button>
       <button class="btn-icon" onclick="logout()" title="خروج"><i class="ti ti-logout"></i></button>
     </div>
@@ -891,7 +915,16 @@ function showTab(tab){
     document.getElementById('res-date').value = new Date().toISOString().slice(0,10);
     renderVisitResults();
   }
-  if(tab==='sup-orders') loadSupOrders();
+  if(tab==='sup-orders'){
+    loadSupOrders();
+    // polling كل 30 ثانية
+    if(window._supOrdersPolling) clearInterval(window._supOrdersPolling);
+    window._supOrdersPolling = setInterval(()=>{
+      if(document.getElementById('screen-sup-orders')?.classList.contains('active'))
+        loadSupOrders();
+      else clearInterval(window._supOrdersPolling);
+    }, 30000);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2060,34 +2093,38 @@ let _supOrderFilter = 'pending';
 let _approvingOrderId = null;
 
 async function loadSupOrders(){
-  // جيب الطلبيات الخاصة بمجموعات المشرف
+  // جيب طلبيات التوريد من supply_requests بمجموعات المشرف
   let allOrders = [];
-  for(const grp of cu.groups){
-    const data = await sbGet('orders',{grp},{order:'created_at.desc',limit:100});
-    if(Array.isArray(data)) allOrders.push(...data);
-  }
-  // لو مفيش grp field — جيب كل الطلبيات المعلقة
-  if(!allOrders.length){
-    const data = await fetch(`${SUPABASE_URL}/rest/v1/orders?select=*&order=created_at.desc&limit=200`,{
-      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
-    });
-    const json = await data.json();
-    if(Array.isArray(json)) allOrders = json;
-  }
+  try{
+    for(const grp of cu.groups){
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?select=*&grp=eq.${encodeURIComponent(grp)}&order=created_at.desc&limit=200`,{
+        headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+      });
+      const data = await res.json();
+      if(Array.isArray(data)) allOrders.push(...data);
+    }
+    // لو مفيش grp — جيب الكل
+    if(!allOrders.length){
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?select=*&order=created_at.desc&limit=300`,{
+        headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+      });
+      const data = await res.json();
+      if(Array.isArray(data)) allOrders = data;
+    }
+  }catch(e){ console.error('loadSupOrders error:', e); }
+
   _supOrders = allOrders;
 
-  // تحديث الـ badge
+  // badge
   const pending = _supOrders.filter(o=>o.status==='pending_supervisor'||o.status==='pending').length;
   const badge = document.getElementById('orders-badge');
-  if(badge){ badge.style.display = pending>0?'inline':'none'; badge.textContent=pending; }
+  if(badge){ badge.style.display=pending>0?'inline':'none'; badge.textContent=pending; }
 
-  // ملء خطوط السير
+  // ملء خطوط السير من بيانات الطلبيات
   const routeSel = document.getElementById('sup-ord-route');
   if(routeSel && routeSel.options.length<=1){
-    const routes = [...new Set(_supOrders.map(o=>o.to_route||o.to_name).filter(Boolean))];
-    // أضف من ROUTES_LIST لو موجود
-    const allRoutes = [...new Set([...routes])].sort();
-    allRoutes.forEach(r=>{ const o=document.createElement('option');o.value=r;o.textContent=r;routeSel.appendChild(o); });
+    const routes = [...new Set(_supOrders.map(o=>o.route||o.to_route||o.to_name).filter(Boolean))].sort();
+    routes.forEach(r=>{ const o=document.createElement('option');o.value=r;o.textContent=r;routeSel.appendChild(o); });
   }
 
   renderSupOrders();
@@ -2131,13 +2168,21 @@ function renderSupOrders(){
     const isApproved= o.status==='approved'||o.status==='done';
     const isSup     = o.deal_source==='supervisor';
     const statusClr = isPending?'#E65100':isApproved?'#1A7A4A':'#B71C1C';
-    const statusTxt = isPending?'⏳ معلقة':isApproved?'✅ معتمدة':'❌ مرفوضة';
+    const statusTxt = isPending?'⏳ بانتظار الاعتماد':isApproved?'✅ معتمدة':'❌ مرفوضة';
+
+    // حقول supply_requests
+    const repName  = o.name||o.to_name||'—';
+    const itemName = o.snf||o.to_route||'—';
+    const route    = o.route||o.to_route||'';
+    const qty      = o.qty?` · ${o.qty} وحدة`:'';
+    const dateStr  = o.date||o.arrival_date||o.created_at?.slice(0,10)||'';
 
     return`<div class="card" style="margin-bottom:10px;border-right:3px solid ${statusClr}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
         <div>
-          <div style="font-size:13px;font-weight:700">${o.to_name||o.to_route||'—'}</div>
-          <div style="font-size:11px;color:var(--text2)">${o.branch||''} · ${o.arrival_date||''}</div>
+          <div style="font-size:13px;font-weight:700">${repName}</div>
+          <div style="font-size:11px;color:var(--text2)">${itemName}${qty}</div>
+          <div style="font-size:10px;color:var(--text2)">${route} · ${dateStr}</div>
         </div>
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
           <span style="background:${statusClr}22;color:${statusClr};padding:2px 8px;border-radius:999px;font-size:10px;font-weight:600">
@@ -2150,7 +2195,7 @@ function renderSupOrders(){
       ${o.reject_reason?`<div style="font-size:11px;color:#B71C1C;margin-bottom:8px">سبب الرفض: ${o.reject_reason}</div>`:''}
       ${isPending?`
         <div style="display:flex;gap:8px">
-          <button onclick="openApproveOrderModal(${o.id},'${(o.to_name||o.to_route||'').replace(/'/g,"\\'")}','${(o.branch||'').replace(/'/g,"\\'")}')"
+          <button onclick="openApproveOrderModal(${o.id},'${repName.replace(/'/g,"\\'")}'  ,'${itemName.replace(/'/g,"\\'")}')"
             style="flex:1;padding:10px;background:var(--green);color:#fff;border:none;border-radius:8px;
             font-size:12px;font-weight:600;font-family:Cairo,sans-serif;cursor:pointer">
             ✅ اعتماد
@@ -2186,32 +2231,30 @@ function highlightDealSource(){
 async function confirmOrderApproval(){
   if(!_approvingOrderId) return;
   const dealSource = document.getElementById('deal-sup').checked ? 'supervisor' : 'rep';
-
+  const err = document.getElementById('mao-err');
   try{
-    await fetch(`${SUPABASE_URL}/rest/v1/orders?id=eq.${_approvingOrderId}`,{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${_approvingOrderId}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
       body: JSON.stringify({status:'approved', deal_source:dealSource})
     });
-
-    // حدّث المحلي
+    if(!res.ok) throw new Error('failed');
     const idx = _supOrders.findIndex(o=>o.id===_approvingOrderId);
     if(idx!==-1){ _supOrders[idx].status='approved'; _supOrders[idx].deal_source=dealSource; }
-
     document.getElementById('modal-approve-order').classList.remove('open');
-    showToast(dealSource==='supervisor'?'✅ تم الاعتماد — اتفاق المشرف':'✅ تم الاعتماد — عمل المنسق');
+    showToast(dealSource==='supervisor'?'✅ تم الاعتماد — 👔 اتفاق المشرف':'✅ تم الاعتماد — عمل المنسق');
     renderSupOrders();
     _approvingOrderId = null;
   }catch(e){
-    document.getElementById('mao-err').textContent='❌ فشل الحفظ';
-    document.getElementById('mao-err').style.display='block';
+    err.textContent='❌ فشل الحفظ — تحقق من الاتصال';
+    err.style.display='block';
   }
 }
 
 async function rejectSupOrder(orderId){
   const reason = prompt('سبب الرفض:');
   if(!reason) return;
-  await fetch(`${SUPABASE_URL}/rest/v1/orders?id=eq.${orderId}`,{
+  await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${orderId}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body: JSON.stringify({status:'rejected', reject_reason:reason})
@@ -2231,21 +2274,23 @@ async function sendSupOrder(){
   if(!date){  showToast('⚠️ حدد يوم الوصول'); return; }
 
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/orders`,{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/supply_requests`,{
       method:'POST',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
       body: JSON.stringify({
-        to_name: route, to_route: route,
-        arrival_date: date, note,
-        status: 'pending_supervisor',
-        deal_source: 'supervisor',  // بتنسيق المشرف تلقائياً
-        from_name: cu.name,
-        grp: cu.groups[0]||''
+        name:    cu.name,
+        route:   route,
+        snf:     'ميعاد طلبية من المشرف',
+        date:    date,
+        note:    note,
+        status:  'pending_supervisor',
+        deal_source: 'supervisor',
+        grp:     cu.groups[0]||''
       })
     });
     if(res.ok){
       document.getElementById('sup-ord-note').value='';
-      showToast('✅ تم إرسال الميعاد للمنسق');
+      showToast('✅ تم إرسال الميعاد للمنسق — 👔 بتنسيق المشرف');
       await loadSupOrders();
     } else {
       showToast('❌ فشل الإرسال');
@@ -2253,6 +2298,45 @@ async function sendSupOrder(){
   }catch(e){
     showToast('❌ خطأ في الاتصال');
   }
+}
+
+// ══════════════════════════════════════════════════════════════
+// PWA — تسجيل Service Worker وزرار التثبيت
+// ══════════════════════════════════════════════════════════════
+let _deferredInstallPrompt = null;
+
+// تسجيل Service Worker
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=>{
+    navigator.serviceWorker.register('sw-supervisor.js')
+      .then(reg=>console.log('SW registered:', reg.scope))
+      .catch(err=>console.log('SW error:', err));
+  });
+}
+
+// اكتشاف إمكانية التثبيت
+window.addEventListener('beforeinstallprompt', (e)=>{
+  e.preventDefault();
+  _deferredInstallPrompt = e;
+  const btn = document.getElementById('btn-install');
+  if(btn) btn.style.display='flex';
+});
+
+// بعد التثبيت
+window.addEventListener('appinstalled', ()=>{
+  _deferredInstallPrompt = null;
+  const btn = document.getElementById('btn-install');
+  if(btn) btn.style.display='none';
+  showToast('✅ تم تثبيت التطبيق بنجاح!');
+});
+
+function installPWA(){
+  if(!_deferredInstallPrompt) return;
+  _deferredInstallPrompt.prompt();
+  _deferredInstallPrompt.userChoice.then(choice=>{
+    if(choice.outcome==='accepted') showToast('✅ جاري تثبيت التطبيق...');
+    _deferredInstallPrompt = null;
+  });
 }
 
 window.addEventListener('DOMContentLoaded', ()=>{
