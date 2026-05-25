@@ -361,6 +361,9 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     <div class="tab" onclick="showTab('field-support')" id="tab-field-support">
       <i class="ti ti-shield-check"></i>دعم الميدان
     </div>
+    <div class="tab" onclick="showTab('settings')" id="tab-settings">
+      <i class="ti ti-settings"></i>الإعدادات
+    </div>
   </div>
 
   <!-- Content -->
@@ -683,6 +686,46 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
         <div class="card-title"><i class="ti ti-history"></i> آخر جلسات الدعم</div>
         <div id="fs-history"><div class="empty">لا توجد جلسات بعد</div></div>
       </div>
+    </div>
+
+    <!-- ══ الإعدادات ════════════════════════════════════════════ -->
+    <div class="screen" id="screen-settings">
+
+      <!-- تغيير الباسورد -->
+      <div class="card">
+        <div class="card-title"><i class="ti ti-key"></i> تغيير كلمة المرور</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:14px">
+          غيّر كلمة المرور الخاصة بدخولك للتطبيق.
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">كلمة المرور الحالية</label>
+          <input type="password" class="modal-inp" id="set-cur-pass" placeholder="أدخل كلمة المرور الحالية"/>
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">كلمة المرور الجديدة</label>
+          <input type="password" class="modal-inp" id="set-new-pass" placeholder="على الأقل 4 خانات"/>
+        </div>
+        <div style="margin-bottom:14px">
+          <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">تأكيد كلمة المرور الجديدة</label>
+          <input type="password" class="modal-inp" id="set-new-pass2" placeholder="أعد كتابة كلمة المرور الجديدة"/>
+        </div>
+        <div id="set-pass-msg" style="font-size:12px;margin-bottom:10px;display:none"></div>
+        <button class="btn-login" style="margin:0" onclick="changeMyPassword()">
+          <i class="ti ti-device-floppy"></i> حفظ كلمة المرور
+        </button>
+      </div>
+
+      <!-- إدارة منسقي المجموعة -->
+      <div class="card" style="margin-top:12px">
+        <div class="card-title"><i class="ti ti-users"></i> إدارة منسقي مجموعتي</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:14px">
+          يمكنك إيقاف منسق مؤقتاً (لن يستطيع الدخول للتطبيق) أو إعادة تفعيله.
+        </div>
+        <div id="set-reps-list">
+          <div class="empty">جاري تحميل المنسقين...</div>
+        </div>
+      </div>
+
     </div>
 
   </div>
@@ -1167,6 +1210,116 @@ function _stopBlockWatch(){
 }
 
 // ══════════════════════════════════════════════════════════════
+// الإعدادات — تغيير الباسورد + إدارة منسقي المجموعة
+// ══════════════════════════════════════════════════════════════
+function _setPassMsg(text, ok){
+  const el = document.getElementById('set-pass-msg');
+  if(!el) return;
+  el.style.display='block';
+  el.textContent=text;
+  el.style.color = ok ? 'var(--green)' : 'var(--red)';
+}
+
+// تغيير كلمة مرور المشرف الحالي
+async function changeMyPassword(){
+  const cur  = document.getElementById('set-cur-pass').value;
+  const np1  = document.getElementById('set-new-pass').value;
+  const np2  = document.getElementById('set-new-pass2').value;
+
+  if(!cur || !np1 || !np2){ _setPassMsg('املأ كل الحقول', false); return; }
+  if(cur !== cu.pass){ _setPassMsg('كلمة المرور الحالية غير صحيحة', false); return; }
+  if(np1.length < 4){ _setPassMsg('كلمة المرور الجديدة قصيرة جداً (4 خانات على الأقل)', false); return; }
+  if(np1 !== np2){ _setPassMsg('كلمتا المرور الجديدتان غير متطابقتين', false); return; }
+  if(np1 === cur){ _setPassMsg('كلمة المرور الجديدة مطابقة للحالية', false); return; }
+
+  // حدّث في Supabase
+  const filter = cu.id ? `id=eq.${cu.id}` : `name=eq.${encodeURIComponent(cu.name)}&role=eq.supervisor`;
+  const ok = await sbPatch('users', filter, { pass_hash: np1 });
+  if(ok){
+    cu.pass = np1;   // حدّث الجلسة الحالية
+    _setPassMsg('✓ تم تغيير كلمة المرور بنجاح', true);
+    document.getElementById('set-cur-pass').value='';
+    document.getElementById('set-new-pass').value='';
+    document.getElementById('set-new-pass2').value='';
+  }else{
+    _setPassMsg('تعذّر الحفظ — تحقق من الاتصال', false);
+  }
+}
+
+// جلب منسقي مجموعة المشرف فقط وعرضهم مع زر إيقاف/تفعيل
+async function loadMyReps(){
+  const box = document.getElementById('set-reps-list');
+  if(!box) return;
+  box.innerHTML = '<div class="empty">جاري تحميل المنسقين...</div>';
+
+  let reps = [];
+  try{
+    for(const grp of (cu.groups||[])){
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/users?select=*&role=eq.rep&grp=eq.${encodeURIComponent(grp)}&limit=200`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+      const json = await res.json();
+      if(Array.isArray(json)) reps.push(...json);
+    }
+  }catch(e){
+    box.innerHTML = '<div class="empty">تعذّر تحميل المنسقين — تحقق من الاتصال</div>';
+    return;
+  }
+
+  // أزل التكرار (لو منسق في أكثر من مجموعة) واترتيب
+  const seen = new Set();
+  reps = reps.filter(r=>{ const k=r.id||r.name; if(seen.has(k)) return false; seen.add(k); return true; });
+  reps.sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
+
+  if(!reps.length){
+    box.innerHTML = '<div class="empty">لا يوجد منسقون في مجموعتك</div>';
+    return;
+  }
+
+  box.innerHTML = reps.map(r=>{
+    const active = (r.status||'active')==='active';
+    const badge = active
+      ? '<span style="background:#E8F5E9;color:var(--green);padding:2px 10px;border-radius:999px;font-size:11px;font-weight:600">نشط</span>'
+      : '<span style="background:#FFEBEE;color:var(--red);padding:2px 10px;border-radius:999px;font-size:11px;font-weight:600">موقوف</span>';
+    const btnLabel = active ? 'إيقاف' : 'تفعيل';
+    const btnStyle = active
+      ? 'background:#FFF3E0;color:var(--orange);border:1px solid #FFE0B2'
+      : 'background:#E8F5E9;color:var(--green);border:1px solid #C8E6C9';
+    const rid = (r.id!=null) ? `'${r.id}'` : 'null';
+    return `<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)">
+      <div style="${active?'':'opacity:.6'}">
+        <div style="font-weight:700;font-size:13px">${r.name||'—'}</div>
+        <div style="font-size:11px;color:var(--text2)">${r.route||r.grp||''}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        ${badge}
+        <button onclick="toggleRepStatus(${rid},'${(r.name||'').replace(/'/g,"\\'")}',${active})"
+          style="${btnStyle};border-radius:8px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit">
+          ${btnLabel}</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// إيقاف/تفعيل منسق (مؤقت — يضبط status)
+async function toggleRepStatus(id, name, isActive){
+  const newStatus = isActive ? 'inactive' : 'active';
+  const action = isActive ? 'إيقاف' : 'تفعيل';
+  if(!confirm(`${action} المنسق "${name}"؟${isActive?'\nلن يستطيع الدخول للتطبيق حتى تعيد تفعيله.':''}`)) return;
+
+  const filter = (id!=null && id!=='null')
+    ? `id=eq.${id}`
+    : `name=eq.${encodeURIComponent(name)}&role=eq.rep`;
+  const ok = await sbPatch('users', filter, { status: newStatus });
+  if(ok){
+    showToast(isActive ? `تم إيقاف "${name}"` : `تم تفعيل "${name}"`);
+    loadMyReps();   // أعد تحميل القائمة
+  }else{
+    showToast('تعذّر تغيير الحالة — تحقق من الاتصال');
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════
 // DATA LOADING
 // ══════════════════════════════════════════════════════════════
 async function loadAllData(){
@@ -1239,6 +1392,7 @@ function showTab(tab){
     }, 30000);
   }
   if(tab==='field-support') initFieldSupport();
+  if(tab==='settings') loadMyReps();
 }
 
 // ══════════════════════════════════════════════════════════════
