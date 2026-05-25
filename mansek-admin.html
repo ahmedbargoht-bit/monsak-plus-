@@ -2013,32 +2013,92 @@ async function rejectSupplyAdmin(id){
 async function approveSupply(id){ await sbUpdate('supply_requests',{id},{status:'approved'}); loadSupplyOrders(); }
 async function rejectSupply(id){  await sbUpdate('supply_requests',{id},{status:'rejected'}); loadSupplyOrders(); }
 
+// تحويل أي صيغة تاريخ (ISO أو عربية ٢٥/٥/٢٠٢٦ أو created_at) إلى كائن Date للمقارنة
+function _parseAnyDate(val){
+  if(!val) return null;
+  // ISO أو created_at: 2026-05-25 أو 2026-05-25T...
+  if(/^\d{4}-\d{2}-\d{2}/.test(val)){
+    const d = new Date(val.slice(0,10)+'T00:00:00');
+    return isNaN(d) ? null : d;
+  }
+  // عربية: ٢٥/٥/٢٠٢٦ أو 25/5/2026 (يوم/شهر/سنة)
+  // نحوّل الأرقام العربية للاتينية أولاً
+  const latin = String(val).replace(/[٠-٩]/g, d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d));
+  const m = latin.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if(m){
+    const d = new Date(+m[3], +m[2]-1, +m[1]);
+    return isNaN(d) ? null : d;
+  }
+  const fallback = new Date(val);
+  return isNaN(fallback) ? null : fallback;
+}
+
+// فلترة صفوف حسب مدى التاريخ (from/to شاملان) + المجموعة
+function _filterExportRows(rows, dateField, fromVal, toVal, grpVal){
+  let out = rows;
+  // فلتر المجموعة
+  if(grpVal && grpVal!=='all'){
+    out = out.filter(r => (r.grp||r.group||'') === grpVal);
+  }
+  // فلتر التاريخ
+  const from = fromVal ? _parseAnyDate(fromVal) : null;
+  const to   = toVal   ? _parseAnyDate(toVal)   : null;
+  if(from || to){
+    out = out.filter(r=>{
+      const d = _parseAnyDate(r[dateField] || r.date || r.created_at);
+      if(!d) return false;                  // صف بلا تاريخ صالح يُستبعد عند وجود فلتر
+      if(from && d < from) return false;
+      if(to){
+        // نجعل "إلى" شاملاً لكامل اليوم
+        const toEnd = new Date(to); toEnd.setHours(23,59,59,999);
+        if(d > toEnd) return false;
+      }
+      return true;
+    });
+  }
+  return out;
+}
+
 function exportAdvanced(type){
-  let data, cols, name;
+  let data, cols, name, dateField, fromId, toId, grpId;
   if(type==='visits'){
     data = cachedData.visits;
     cols = ['name','route','branch','date','time_in','time_out','client_type','display_type','sku_on','sku_stock','missing_count','points'];
-    name = 'الزيارات';
+    name = 'الزيارات'; dateField='date'; fromId='ex-v-from'; toId='ex-v-to'; grpId='ex-v-group';
   } else if(type==='attendance'){
     data = cachedData.attendance;
     cols = ['name','route','date','time_in','time_out','hours','lat_in','lng_in'];
-    name = 'الحضور';
+    name = 'الحضور'; dateField='date'; fromId='ex-a-from'; toId='ex-a-to'; grpId='ex-a-group';
   } else if(type==='products'){
     data = cachedData.products;
     cols = ['name','route','branch','fea','cat','snf','shelf_qty','stock_qty','date_shelf','months_shelf'];
-    name = 'الأصناف';
+    name = 'الأصناف'; dateField='created_at'; fromId=null; toId=null; grpId='ex-p-group';
   } else if(type==='missing'){
     data = cachedData.missing;
     cols = ['name','route','branch','fea','snf','reason','note'];
-    name = 'النواقص';
+    name = 'النواقص'; dateField='created_at'; fromId='ex-m-from'; toId='ex-m-to'; grpId=null;
   } else if(type==='leaderboard'){
+    // الليدربورد: نطبّق فلتر التاريخ على الزيارات قبل حساب النقاط
+    let base = cachedData.visits;
+    const lbFrom = document.getElementById('ex-v-from')?.value;
+    const lbTo   = document.getElementById('ex-v-to')?.value;
+    base = _filterExportRows(base, 'date', lbFrom, lbTo, 'all');
     const scores={};
-    cachedData.visits.forEach(v=>scores[v.name]=(scores[v.name]||0)+(+v.points||0));
+    base.forEach(v=>scores[v.name]=(scores[v.name]||0)+(+v.points||0));
     data = Object.entries(scores).sort((a,b)=>b[1]-a[1]).map(([n,p],i)=>({rank:i+1,name:n,points:p}));
     cols = ['rank','name','points'];
     name = 'الليدربورد';
   }
-  if(!data?.length){ alert('لا توجد بيانات'); return; }
+
+  // طبّق الفلترة (ما عدا الليدربورد الذي فُلتر أعلاه)
+  if(type!=='leaderboard'){
+    const fromVal = fromId ? document.getElementById(fromId)?.value : null;
+    const toVal   = toId   ? document.getElementById(toId)?.value   : null;
+    const grpVal  = grpId  ? document.getElementById(grpId)?.value  : null;
+    data = _filterExportRows(data, dateField, fromVal, toVal, grpVal);
+  }
+
+  if(!data?.length){ alert('لا توجد بيانات ضمن الفلتر المحدد'); return; }
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.json_to_sheet(data.map(r=>Object.fromEntries(cols.map(c=>[c,r[c]||'']))));
   ws['!cols'] = cols.map(()=>({wch:18}));
