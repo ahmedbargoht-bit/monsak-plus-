@@ -365,6 +365,10 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     <div class="tab" onclick="showTab('settings')" id="tab-settings">
       <i class="ti ti-settings"></i>الإعدادات
     </div>
+    <div class="tab" onclick="showTab('exceptions')" id="tab-exceptions" style="position:relative">
+      <i class="ti ti-clock-exclamation"></i>الاستثناءات
+      <span id="exc-badge" style="display:none;position:absolute;top:4px;right:calc(50% - 14px);background:#D62828;color:#fff;border-radius:999px;font-size:9px;padding:1px 5px;font-weight:700;min-width:16px;text-align:center"></span>
+    </div>
   </div>
 
   <!-- Content -->
@@ -791,10 +795,29 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
         </div>
       </div>
 
+    </div><!-- end screen-settings -->
+
+    <!-- ══ Exceptions ════════════════════════════════════════════ -->
+    <div class="screen" id="screen-exceptions">
+      <div class="card" style="margin-bottom:10px">
+        <div class="card-title"><i class="ti ti-clock-exclamation"></i> طلبات استثناء الانصراف</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">طلبات المنسقين الثابتين للانصراف قبل انتهاء الشيفت</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <select id="exc-filter" onchange="loadExceptions()" class="filter-select" style="flex:1">
+            <option value="pending">⏳ معلّقة</option>
+            <option value="approved">✅ موافق عليها</option>
+            <option value="rejected">❌ مرفوضة</option>
+            <option value="all">الكل</option>
+          </select>
+          <button onclick="loadExceptions()" style="padding:8px 12px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
+            <i class="ti ti-refresh"></i>
+          </button>
+        </div>
+        <div id="exc-list"><div class="empty">جاري التحميل...</div></div>
+      </div>
     </div>
 
-  </div>
-</div>
+  </div><!-- end content -->
 
 <!-- ══ Modal: تعديل/حذف نقاط ══════════════════════════════════ -->
 <div class="modal-overlay" id="modal-pts">
@@ -1216,6 +1239,7 @@ async function doLogin(){
   await loadAllData();
   showTab('dashboard');
   _startBlockWatch();   // ابدأ مراقبة الطرد الفوري
+  startExcPolling();    // مراقبة طلبات الاستثناء
 }
 
 function logout(){
@@ -1444,6 +1468,7 @@ function showTab(tab){
   if(tab==='plan') loadCurrentPlan();
   if(tab==='daily') loadDailyExecution();
   if(tab==='visits') rrInit();
+  if(tab==='exceptions') loadExceptions();
   if(tab==='results'){
     document.getElementById('res-date').value = new Date().toISOString().slice(0,10);
     renderVisitResults();
@@ -3474,6 +3499,124 @@ async function loadFsHistory(){
   }catch(e){ el.innerHTML='<div class="empty">تعذر التحميل</div>'; }
 }
 
+// ══════════════════════════════════════════════════════════════
+// CHECKOUT EXCEPTIONS — طلبات الاستثناء في تطبيق المشرف
+// ══════════════════════════════════════════════════════════════
+
+async function loadExceptions(){
+  const filter = document.getElementById('exc-filter')?.value || 'pending';
+  const list   = document.getElementById('exc-list');
+  if(!list) return;
+  list.innerHTML = '<div class="empty"><div class="spinner"></div><br>جاري التحميل...</div>';
+
+  try{
+    const grpFilter = (cu.groups||[]).map(g=>`rep_group=eq.${g}`).join(',');
+    let url = `${SUPABASE_URL}/rest/v1/checkout_exceptions?or=(${grpFilter})&order=created_at.desc&limit=100`;
+    if(filter !== 'all') url += `&status=eq.${filter}`;
+
+    const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const data = await res.json();
+
+    if(!Array.isArray(data) || !data.length){
+      list.innerHTML = '<div class="empty">لا توجد طلبات</div>';
+      updateExcBadge(0);
+      return;
+    }
+
+    const pending = data.filter(d=>d.status==='pending');
+    updateExcBadge(pending.length);
+
+    list.innerHTML = data.map(r=>{
+      const statusColor = r.status==='approved'?'#1A7A4A': r.status==='rejected'?'#C0392B':'#F0A500';
+      const statusLabel = r.status==='approved'?'✅ موافق': r.status==='rejected'?'❌ مرفوض':'⏳ معلّق';
+      const mapUrl = r.lat&&r.lng ? `https://maps.google.com/?q=${r.lat},${r.lng}` : null;
+      const createdAt = r.created_at ? new Date(r.created_at).toLocaleString('ar-EG',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}) : '';
+
+      return `<div style="background:#f9f9fb;border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+          <div>
+            <div style="font-weight:700;font-size:13px">${r.rep_name}</div>
+            <div style="font-size:11px;color:var(--text2)">${r.rep_route||''} · ${createdAt}</div>
+          </div>
+          <span style="background:${statusColor}22;color:${statusColor};border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700">${statusLabel}</span>
+        </div>
+        <div style="font-size:12px;margin-bottom:6px"><b>السبب:</b> ${r.reason||'—'}</div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:8px">
+          وقت الانصراف المطلوب: <b>${r.checkout_time||'—'}</b>
+          ${mapUrl ? `· <a href="${mapUrl}" target="_blank" style="color:var(--navy)">📍 الموقع</a>` : ''}
+        </div>
+        ${r.status==='pending' ? `
+        <div style="margin-bottom:8px">
+          <textarea id="exc-note-${r.id}" placeholder="ملاحظة (اختياري)..."
+            style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:8px;font-size:11px;font-family:Cairo,sans-serif;resize:none;min-height:40px"></textarea>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button onclick="resolveException(${r.id},'approved')" style="flex:1;padding:9px;background:linear-gradient(135deg,#0F5E38,#1A7A4A);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
+            ✅ موافقة
+          </button>
+          <button onclick="resolveException(${r.id},'rejected')" style="flex:1;padding:9px;background:linear-gradient(135deg,#8B1A1A,#C0392B);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
+            ❌ رفض
+          </button>
+        </div>` : r.supervisor_note ? `<div style="font-size:11px;color:var(--text2)">ملاحظة المشرف: ${r.supervisor_note}</div>` : ''}
+      </div>`;
+    }).join('');
+
+  }catch(e){
+    list.innerHTML = '<div class="empty">تعذر التحميل</div>';
+  }
+}
+
+async function resolveException(id, status){
+  const note = document.getElementById(`exc-note-${id}`)?.value || '';
+  const label = status==='approved' ? 'الموافقة' : 'الرفض';
+  if(!confirm(`تأكيد ${label} على طلب الاستثناء؟`)) return;
+
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{
+        'Content-Type':'application/json',
+        'apikey':SUPABASE_KEY,
+        'Authorization':`Bearer ${SUPABASE_KEY}`,
+        'Prefer':'return=minimal'
+      },
+      body: JSON.stringify({
+        status,
+        supervisor: cu.name,
+        supervisor_note: note,
+        updated_at: new Date().toISOString()
+      })
+    });
+    if(res.ok){
+      showToast(status==='approved' ? '✅ تمت الموافقة' : '❌ تم الرفض');
+      loadExceptions();
+    }
+  }catch(e){
+    showToast('تعذر الإجراء — حاول مرة أخرى');
+  }
+}
+
+function updateExcBadge(count){
+  const badge = document.getElementById('exc-badge');
+  if(!badge) return;
+  badge.textContent = count;
+  badge.style.display = count > 0 ? 'block' : 'none';
+}
+
+// polling للطلبات المعلّقة كل 30 ثانية
+function startExcPolling(){
+  setInterval(async()=>{
+    try{
+      const grpFilter = (cu.groups||[]).map(g=>`rep_group=eq.${g}`).join(',');
+      const url = `${SUPABASE_URL}/rest/v1/checkout_exceptions?or=(${grpFilter})&status=eq.pending&select=id`;
+      const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+      const data = await res.json();
+      updateExcBadge(Array.isArray(data)?data.length:0);
+    }catch(e){}
+  }, 30000);
+}
+
+// ══════════════════════════════════════════════════════════════
 window.addEventListener('DOMContentLoaded', ()=>{
   loadSupervisors();
 });

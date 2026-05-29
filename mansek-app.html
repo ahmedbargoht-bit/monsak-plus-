@@ -576,6 +576,55 @@ textarea{width:100%;padding:8px 12px;border:1px solid var(--border);border-radiu
         </button>
       </div>
 
+      <!-- طلب استثناء انصراف — للمنسق الثابت فقط -->
+      <div id="exception-checkout-card" class="card" style="display:none;border:2px solid #F0A500;margin-top:8px">
+        <div class="card-title" style="color:#B97D41"><i class="ti ti-clock-exclamation"></i> طلب استثناء انصراف مبكر</div>
+        <div style="font-size:11px;color:#8B4020;margin-bottom:10px">الشيفت لم يكتمل بعد — يمكنك طلب استثناء من المشرف</div>
+
+        <!-- حالة الطلب المعلّق -->
+        <div id="exception-pending-msg" style="display:none;background:#FFF8E1;border:1px solid #F0A500;border-radius:8px;padding:10px;margin-bottom:10px;font-size:12px;text-align:center">
+          <i class="ti ti-clock"></i> <b>طلبك قيد المراجعة...</b><br/>
+          <span style="color:#8B4020;font-size:11px">في انتظار موافقة المشرف</span>
+          <div id="exception-check-timer" style="font-size:10px;color:#aaa;margin-top:4px"></div>
+        </div>
+
+        <!-- فورم الطلب -->
+        <div id="exception-form">
+          <div style="margin-bottom:10px">
+            <div style="font-size:11px;font-weight:600;color:#8B4020;margin-bottom:4px">سبب الطلب</div>
+            <select id="exc-reason" style="width:100%;padding:9px 12px;border:1px solid #E8D5B0;border-radius:8px;font-size:13px;background:#FFFBF5;font-family:Cairo,sans-serif">
+              <option value="">اختر السبب...</option>
+              <option value="ظروف صحية">ظروف صحية</option>
+              <option value="ظروف عائلية طارئة">ظروف عائلية طارئة</option>
+              <option value="موعد رسمي">موعد رسمي</option>
+              <option value="انتهاء العمل المطلوب">انتهاء العمل المطلوب</option>
+              <option value="أخرى">أخرى</option>
+            </select>
+          </div>
+          <div style="margin-bottom:10px">
+            <div style="font-size:11px;font-weight:600;color:#8B4020;margin-bottom:4px">تفاصيل إضافية (اختياري)</div>
+            <textarea id="exc-note" placeholder="أضف أي تفاصيل..." style="width:100%;padding:8px 12px;border:1px solid #E8D5B0;border-radius:8px;font-size:12px;background:#FFFBF5;resize:none;min-height:50px;font-family:Cairo,sans-serif"></textarea>
+          </div>
+          <button class="btn btn-navy" onclick="sendCheckoutException()" id="exc-send-btn" style="width:100%">
+            <i class="ti ti-send"></i> إرسال طلب الاستثناء للمشرف
+          </button>
+        </div>
+
+        <!-- تمّت الموافقة -->
+        <div id="exception-approved-msg" style="display:none;background:#E8F5E9;border:1px solid #1A7A4A;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:20px">✅</div>
+          <div style="font-weight:700;color:#1A7A4A;margin:4px 0">تمت الموافقة!</div>
+          <div style="font-size:11px;color:#666" id="exc-approved-note"></div>
+        </div>
+
+        <!-- رُفض الطلب -->
+        <div id="exception-rejected-msg" style="display:none;background:#FFEBEE;border:1px solid #C0392B;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:20px">❌</div>
+          <div style="font-weight:700;color:#C0392B;margin:4px 0">تم رفض الطلب</div>
+          <div style="font-size:11px;color:#666" id="exc-rejected-note"></div>
+        </div>
+      </div>
+
       <!-- ملخص اليوم بعد الانصراف -->
       <div id="dash-done-card" class="card" style="display:none;border:1.5px solid #1A7A4A">
         <div class="card-title" style="color:#1A7A4A"><i class="ti ti-circle-check"></i> أحسنت — يوم كامل</div>
@@ -852,6 +901,8 @@ function showShiftTimer(checkInTime){
       if(badgeEl) badgeEl.textContent = hrsLeft+' ساعة متبقية';
       // إخفاء زر الانصراف في لوحتي حتى اكتمال الشيفت
       if(dashCard) dashCard.style.display = 'none';
+      // إظهار كارد طلب الاستثناء للمنسق الثابت
+      showExceptionCard();
     }
   }, 1000);
 }
@@ -2828,6 +2879,164 @@ function showToastPWA(msg){
   else { console.log(msg); }
 }
 
+// ══════════════════════════════════════════════════════════════
+// CHECKOUT EXCEPTION — طلب استثناء الانصراف
+// ══════════════════════════════════════════════════════════════
+let _excPollInterval = null;
+let _excId = null;
+
+// إظهار كارد الاستثناء للمنسق الثابت لما الشيفت لسه ماخلصش
+function showExceptionCard(){
+  if(cu?.coordType !== 'ثابت') return;
+  if(attOut) return; // اتنصرف بالفعل
+  const card = document.getElementById('exception-checkout-card');
+  if(card) card.style.display = 'block';
+  // لو في طلب معلّق من قبل، تابعه
+  const savedId = sessionStorage.getItem('exc_id_'+cu?.name);
+  if(savedId){ _excId = savedId; checkExceptionStatus(); startExcPoll(); }
+}
+
+async function sendCheckoutException(){
+  const reason = document.getElementById('exc-reason').value;
+  if(!reason){ alert('اختر سبب الطلب أولاً'); return; }
+  const note   = document.getElementById('exc-note').value;
+  const btn    = document.getElementById('exc-send-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="ti ti-loader"></i> جاري الإرسال...';
+
+  const getLoc = () => new Promise(res => {
+    navigator.geolocation
+      ? navigator.geolocation.getCurrentPosition(
+          p => res({lat: p.coords.latitude.toFixed(4), lng: p.coords.longitude.toFixed(4)}),
+          () => res({lat:'', lng:''}), {timeout:6000, enableHighAccuracy:true})
+      : res({lat:'', lng:''});
+  });
+
+  const {lat, lng} = await getLoc();
+  const now = new Date();
+  const t = now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
+
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions`, {
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify({
+        rep_name:  cu.name,
+        rep_route: cu.route,
+        rep_group: cu.group,
+        reason:    reason + (note ? ' — ' + note : ''),
+        status:    'pending',
+        lat, lng,
+        checkout_time: t
+      })
+    });
+    const data = await res.json();
+    if(data && data[0]){
+      _excId = data[0].id;
+      sessionStorage.setItem('exc_id_'+cu.name, _excId);
+      // إظهار حالة الانتظار
+      document.getElementById('exception-form').style.display = 'none';
+      document.getElementById('exception-pending-msg').style.display = 'block';
+      startExcPoll();
+    } else {
+      alert('حدث خطأ — حاول مرة أخرى');
+      btn.disabled = false;
+      btn.innerHTML = '<i class="ti ti-send"></i> إرسال طلب الاستثناء للمشرف';
+    }
+  }catch(e){
+    alert('تعذر الإرسال — تحقق من الاتصال');
+    btn.disabled = false;
+    btn.innerHTML = '<i class="ti ti-send"></i> إرسال طلب الاستثناء للمشرف';
+  }
+}
+
+function startExcPoll(){
+  if(_excPollInterval) clearInterval(_excPollInterval);
+  let secs = 0;
+  _excPollInterval = setInterval(async()=>{
+    secs += 15;
+    const el = document.getElementById('exception-check-timer');
+    if(el) el.textContent = `آخر تحقق منذ ${secs} ثانية`;
+    await checkExceptionStatus();
+  }, 15000);
+}
+
+async function checkExceptionStatus(){
+  if(!_excId) return;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions?id=eq.${_excId}&select=*`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const data = await res.json();
+    if(!data || !data[0]) return;
+    const rec = data[0];
+
+    if(rec.status === 'approved'){
+      clearInterval(_excPollInterval);
+      sessionStorage.removeItem('exc_id_'+cu?.name);
+      // تنفيذ الانصراف تلقائياً
+      await applyApprovedCheckout(rec);
+    } else if(rec.status === 'rejected'){
+      clearInterval(_excPollInterval);
+      sessionStorage.removeItem('exc_id_'+cu?.name);
+      document.getElementById('exception-pending-msg').style.display = 'none';
+      document.getElementById('exception-rejected-msg').style.display = 'block';
+      const noteEl = document.getElementById('exc-rejected-note');
+      if(noteEl) noteEl.textContent = rec.supervisor_note ? `ملاحظة المشرف: ${rec.supervisor_note}` : '';
+      // إعادة الفورم بعد 5 ثواني
+      setTimeout(()=>{
+        document.getElementById('exception-rejected-msg').style.display = 'none';
+        document.getElementById('exception-form').style.display = 'block';
+        document.getElementById('exc-send-btn').disabled = false;
+        document.getElementById('exc-send-btn').innerHTML = '<i class="ti ti-send"></i> إرسال طلب الاستثناء للمشرف';
+      }, 5000);
+    }
+  }catch(e){}
+}
+
+async function applyApprovedCheckout(rec){
+  const t = rec.checkout_time || new Date().toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'});
+  attOut = {time: t, lat: rec.lat||'', lng: rec.lng||''};
+
+  // وقف عداد الشيفت
+  if(shiftTimerInterval) clearInterval(shiftTimerInterval);
+  localStorage.removeItem('shift_checkin_'+cu?.name);
+  localStorage.removeItem('shift_date_'+cu?.name);
+
+  // إرسال الانصراف لـ Supabase
+  await apiPost({
+    action:'saveAttendance',
+    name:cu.name, route:cu.route, group:cu.group,
+    type:'out', time:t, lat:rec.lat||'', lng:rec.lng||''
+  });
+
+  // تحديث الـ UI
+  document.getElementById('exception-pending-msg').style.display = 'none';
+  document.getElementById('exception-approved-msg').style.display = 'block';
+  const noteEl = document.getElementById('exc-approved-note');
+  if(noteEl) noteEl.textContent = rec.supervisor_note
+    ? `ملاحظة المشرف: ${rec.supervisor_note}`
+    : `تم تسجيل انصرافك الساعة ${t}`;
+
+  // إظهار كارد "يوم كامل"
+  document.getElementById('dash-checkout-card').style.display = 'none';
+  const doneCard = document.getElementById('dash-done-card');
+  if(doneCard){
+    doneCard.style.display = 'block';
+    const inEl  = document.getElementById('dash-in-time');
+    const outEl = document.getElementById('dash-out-time');
+    if(inEl)  inEl.textContent  = attIn?.time||'--:--';
+    if(outEl) outEl.textContent = t;
+  }
+  updateDash();
+}
+
+// ══════════════════════════════════════════════════════════════
 // تحقق عند البداية
 window.addEventListener('DOMContentLoaded', () => {
   if(!navigator.onLine) showOfflineBanner(true);

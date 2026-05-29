@@ -320,6 +320,10 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           <div class="nav-item" onclick="showPanel('attendance')">
             <i class="ti ti-clock"></i> الحضور والانصراف
           </div>
+          <div class="nav-item" onclick="showPanel('checkout-exceptions')">
+            <i class="ti ti-clock-exclamation"></i> استثناءات الانصراف
+            <span class="nav-badge" id="nav-exc-badge" style="display:none"></span>
+          </div>
         </div>
         <div class="nav-section" id="nav-admin-section">
           <div class="nav-section-label">الإدارة</div>
@@ -1677,6 +1681,46 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
         </div>
         <!-- ══ END PANEL ══════════════════════════════════════════ -->
 
+        <!-- ══ PANEL: استثناءات الانصراف ══════════════════════ -->
+        <div id="panel-checkout-exceptions" class="panel">
+          <div class="page-header">
+            <div><h2>استثناءات الانصراف</h2><p>طلبات انصراف مبكر من المنسقين الثابتين</p></div>
+          </div>
+          <div class="filter-bar" style="margin-bottom:12px">
+            <select id="admin-exc-filter" onchange="adminLoadExceptions()">
+              <option value="pending">⏳ معلّقة</option>
+              <option value="approved">✅ موافق عليها</option>
+              <option value="rejected">❌ مرفوضة</option>
+              <option value="all">الكل</option>
+            </select>
+            <select id="admin-exc-grp" onchange="adminLoadExceptions()">
+              <option value="all">كل المجموعات</option>
+              <option value="giza">الجيزة</option>
+              <option value="cairo">القاهرة</option>
+              <option value="south">جنوب وشرق</option>
+              <option value="tajmuat">التجمعات</option>
+              <option value="hyper">الهايبر</option>
+              <option value="alex">الإسكندرية</option>
+            </select>
+            <input type="date" id="admin-exc-date" onchange="adminLoadExceptions()"/>
+            <button class="btn btn-ghost btn-sm" onclick="adminLoadExceptions()"><i class="ti ti-refresh"></i> تحديث</button>
+          </div>
+          <div id="admin-exc-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px"></div>
+          <div class="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th><th>المنسق</th><th>خط السير</th><th>المجموعة</th>
+                  <th>السبب</th><th>وقت الطلب</th><th>وقت الانصراف</th>
+                  <th>الموقع</th><th>الحالة</th><th>المشرف</th><th>ملاحظة المشرف</th>
+                </tr>
+              </thead>
+              <tbody id="admin-exc-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <!-- ══ END PANEL ══════════════════════════════════════ -->
+
       </div><!-- /content -->
     </div><!-- /main -->
   </div><!-- /layout -->
@@ -2645,6 +2689,82 @@ function rrStyleHeader(ws, firstRow){
 
 let _pdbFeaFilter = 'all';
 
+// ══════════════════════════════════════════════════════════════
+// CHECKOUT EXCEPTIONS — لوحة الإدارة
+// ══════════════════════════════════════════════════════════════
+
+async function adminLoadExceptions(){
+  const filter  = document.getElementById('admin-exc-filter')?.value||'pending';
+  const grp     = document.getElementById('admin-exc-grp')?.value||'all';
+  const dateVal = document.getElementById('admin-exc-date')?.value||'';
+  const tbody   = document.getElementById('admin-exc-tbody');
+  const stats   = document.getElementById('admin-exc-stats');
+  if(!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:1rem">جاري التحميل...</td></tr>';
+
+  try{
+    const url = `${SUPABASE_URL}/rest/v1/checkout_exceptions?order=created_at.desc&limit=500`;
+    const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    let data = await res.json();
+    if(!Array.isArray(data)) data = [];
+
+    if(filter!=='all') data = data.filter(d=>d.status===filter);
+    if(grp!=='all')    data = data.filter(d=>d.rep_group===grp);
+    if(dateVal)        data = data.filter(d=>(d.created_at||'').startsWith(dateVal));
+
+    const pending  = data.filter(d=>d.status==='pending').length;
+    const approved = data.filter(d=>d.status==='approved').length;
+    const rejected = data.filter(d=>d.status==='rejected').length;
+    if(stats) stats.innerHTML = `
+      <div class="stat-card orange"><div class="stat-n">${pending}</div><div class="stat-l">معلّق</div></div>
+      <div class="stat-card green"><div class="stat-n">${approved}</div><div class="stat-l">موافق</div></div>
+      <div class="stat-card red"><div class="stat-n">${rejected}</div><div class="stat-l">مرفوض</div></div>
+    `;
+    const badge = document.getElementById('nav-exc-badge');
+    if(badge){ badge.textContent=pending; badge.style.display=pending?'':'none'; }
+
+    if(!data.length){
+      tbody.innerHTML='<tr><td colspan="11" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد طلبات</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.map((d,i)=>{
+      const sc = d.status==='approved'?'b-green':d.status==='rejected'?'b-red':'b-orange';
+      const sl = d.status==='approved'?'✅ موافق':d.status==='rejected'?'❌ مرفوض':'⏳ معلّق';
+      const mapUrl = d.lat&&d.lng?`<a href="https://maps.google.com/?q=${d.lat},${d.lng}" target="_blank" style="color:var(--blue);font-size:10px">📍 خريطة</a>`:'—';
+      const createdAt = d.created_at?new Date(d.created_at).toLocaleString('ar-EG',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}):'';
+      return `<tr>
+        <td>${i+1}</td>
+        <td><b>${d.rep_name||'—'}</b></td>
+        <td style="font-size:11px">${d.rep_route||'—'}</td>
+        <td><span class="badge" style="background:${GROUPS[d.rep_group]?.color||'#ccc'}22;color:${GROUPS[d.rep_group]?.color||'#555'}">${GROUPS[d.rep_group]?.label||d.rep_group||'—'}</span></td>
+        <td style="font-size:11px;max-width:160px">${d.reason||'—'}</td>
+        <td style="font-size:11px">${createdAt}</td>
+        <td><b>${d.checkout_time||'—'}</b></td>
+        <td>${mapUrl}</td>
+        <td><span class="badge ${sc}">${sl}</span></td>
+        <td style="font-size:11px">${d.supervisor||'—'}</td>
+        <td style="font-size:11px">${d.supervisor_note||'—'}</td>
+      </tr>`;
+    }).join('');
+  }catch(e){
+    tbody.innerHTML='<tr><td colspan="11" style="text-align:center;padding:1rem;color:var(--red)">تعذر التحميل</td></tr>';
+  }
+}
+
+// badge polling كل دقيقة
+setInterval(async()=>{
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions?status=eq.pending&select=id`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const data = await res.json();
+    const count = Array.isArray(data)?data.length:0;
+    const badge = document.getElementById('nav-exc-badge');
+    if(badge){ badge.textContent=count; badge.style.display=count?'':'none'; }
+  }catch(e){}
+}, 60000);
+
+// ══════════════════════════════════════════════════════════════
 function filterProdDB(fea, el){
   _pdbFeaFilter = fea;
   document.querySelectorAll('.tab-pill').forEach(t=>t.classList.remove('on'));
@@ -3066,6 +3186,7 @@ function renderCurrentPanel(){
     case 'export-full': break;
     case 'activity': loadActivity(); break;
     case 'rep-report': rrInit(); break;
+    case 'checkout-exceptions': adminLoadExceptions(); break;
     case 'sup-monitor': loadSupMonitor(); break;
     case 'field-monitor': loadFieldMonitor(); break;
     case 'field-support-report': loadFieldSupportReport(); break;
@@ -3082,7 +3203,7 @@ function updateBadges(){
 // ══════════════════════════════════════════════════════════════
 // NAV
 // ══════════════════════════════════════════════════════════════
-const PANEL_TITLES={dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',attendance:'الحضور والانصراف',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',branches:'الفروع والعملاء',settings:'الإعدادات','rep-report':'تقرير المنسق التفصيلي'};
+const PANEL_TITLES={dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',attendance:'الحضور والانصراف',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',branches:'الفروع والعملاء',settings:'الإعدادات','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف'};
 
 function showPanel(id){
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
