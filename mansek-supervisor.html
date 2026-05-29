@@ -369,6 +369,10 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       <i class="ti ti-clock-exclamation"></i>الاستثناءات
       <span id="exc-badge" style="display:none;position:absolute;top:4px;right:calc(50% - 14px);background:#D62828;color:#fff;border-radius:999px;font-size:9px;padding:1px 5px;font-weight:700;min-width:16px;text-align:center"></span>
     </div>
+    <div class="tab" onclick="showTab('expiry')" id="tab-expiry" style="position:relative">
+      <i class="ti ti-alert-circle"></i>الصلاحية
+      <span id="expiry-badge" style="display:none;position:absolute;top:4px;right:calc(50% - 14px);background:#E65100;color:#fff;border-radius:999px;font-size:9px;padding:1px 5px;font-weight:700;min-width:16px;text-align:center"></span>
+    </div>
   </div>
 
   <!-- Content -->
@@ -818,6 +822,27 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       </div>
     </div>
 
+    <!-- ══ Expiry Alerts ══════════════════════════════════════ -->
+    <div class="screen" id="screen-expiry">
+      <div class="card" style="margin-bottom:10px">
+        <div class="card-title"><i class="ti ti-alert-circle" style="color:#E65100"></i> تنبيهات الصلاحية</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">أصناف مجموعتك التي تحتاج متابعة</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <select id="exp-filter-sup" onchange="supLoadExpiry()" class="filter-select" style="flex:1">
+            <option value="all">كل الحالات</option>
+            <option value="expired">🔴 منتهية</option>
+            <option value="critical">🟠 حرجة (شهر أو 2)</option>
+            <option value="warning">🟡 تحذير (3 شهور)</option>
+          </select>
+          <button onclick="supLoadExpiry()" style="padding:8px 12px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
+            <i class="ti ti-refresh"></i>
+          </button>
+        </div>
+        <div id="sup-expiry-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px"></div>
+        <div id="sup-expiry-list"><div class="empty">جاري التحميل...</div></div>
+      </div>
+    </div>
+
   </div><!-- end content -->
 
 <!-- ══ Modal: تعديل/حذف نقاط ══════════════════════════════════ -->
@@ -1241,6 +1266,7 @@ async function doLogin(){
   showTab('dashboard');
   _startBlockWatch();   // ابدأ مراقبة الطرد الفوري
   startExcPolling();    // مراقبة طلبات الاستثناء
+  supCheckExpiryBadge(); // تحقق من الصلاحية
 }
 
 function logout(){
@@ -1470,6 +1496,7 @@ function showTab(tab){
   if(tab==='daily') loadDailyExecution();
   if(tab==='visits') rrInit();
   if(tab==='exceptions') loadExceptions();
+  if(tab==='expiry') supLoadExpiry();
   if(tab==='results'){
     document.getElementById('res-date').value = new Date().toISOString().slice(0,10);
     renderVisitResults();
@@ -3637,6 +3664,142 @@ function startExcPolling(){
       updateExcBadge(Array.isArray(data)?data.length:0);
     }catch(e){}
   }, 30000);
+}
+
+// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// EXPIRY ALERTS — تنبيهات الصلاحية في تطبيق المشرف
+// ══════════════════════════════════════════════════════════════
+
+function supCalcExpMonths(dateStr, monthsStr){
+  if(!dateStr || !monthsStr) return null;
+  const prod = new Date(dateStr+'-01');
+  const months = parseInt(monthsStr)||10;
+  const exp = new Date(prod); exp.setMonth(exp.getMonth()+months);
+  const today = new Date(); today.setDate(1); today.setHours(0,0,0,0);
+  const diff = (exp.getFullYear()-today.getFullYear())*12+(exp.getMonth()-today.getMonth());
+  const expLabel = exp.toLocaleDateString('ar-EG',{month:'long',year:'numeric'});
+  return {diff, expLabel};
+}
+
+async function supLoadExpiry(){
+  const list  = document.getElementById('sup-expiry-list');
+  const stats = document.getElementById('sup-expiry-stats');
+  const filter = document.getElementById('exp-filter-sup')?.value||'all';
+  if(!list) return;
+  list.innerHTML = '<div class="empty"><div class="spinner"></div><br>جاري التحميل...</div>';
+
+  try{
+    // جيب أحدث أصناف المجموعة
+    const grps = (cu.groups||[]).join(',');
+    const url = `${SUPABASE_URL}/rest/v1/products?rep_group=in.(${grps})&select=*&order=created_at.desc&limit=1000`;
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps})&select=*&order=created_at.desc&limit=1000`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    let data = await res.json();
+    if(!Array.isArray(data)) data = [];
+
+    // أحدث تسجيل لكل صنف لكل منسق
+    const latest = {};
+    data.forEach(p=>{
+      const key = `${p.name}__${p.snf}`;
+      if(!latest[key]) latest[key] = p;
+    });
+
+    // حساب الحالة
+    const alerts = [];
+    Object.values(latest).forEach(p=>{
+      const sh = supCalcExpMonths(p.date_shelf, p.months_shelf);
+      const st = supCalcExpMonths(p.date_stock, p.months_stock);
+      const worst = Math.min(sh?.diff??99, st?.diff??99);
+      if(worst > 3) return; // مش محتاج تنبيه
+      alerts.push({
+        ...p,
+        shelfDiff: sh?.diff??null, shelfExp: sh?.expLabel||'',
+        stockDiff: st?.diff??null, stockExp: st?.expLabel||'',
+        worst
+      });
+    });
+
+    // فلترة
+    let filtered = [...alerts];
+    if(filter==='expired')  filtered = filtered.filter(a=>a.worst<0);
+    if(filter==='critical') filtered = filtered.filter(a=>a.worst>=0&&a.worst<=2);
+    if(filter==='warning')  filtered = filtered.filter(a=>a.worst===3);
+
+    filtered.sort((a,b)=>a.worst-b.worst);
+
+    // إحصائيات
+    const expired  = alerts.filter(a=>a.worst<0).length;
+    const critical = alerts.filter(a=>a.worst>=0&&a.worst<=2).length;
+    const warning  = alerts.filter(a=>a.worst===3).length;
+
+    // badge
+    const badge = document.getElementById('expiry-badge');
+    const total = expired+critical;
+    if(badge){ badge.textContent=total; badge.style.display=total?'':'none'; }
+
+    if(stats) stats.innerHTML = `
+      <div style="text-align:center;padding:8px;background:#FFEBEE;border-radius:8px;border:1px solid #FFCDD2">
+        <div style="font-size:18px;font-weight:700;color:#B71C1C">${expired}</div>
+        <div style="font-size:10px;color:#B71C1C">🔴 منتهية</div>
+      </div>
+      <div style="text-align:center;padding:8px;background:#FFF3E0;border-radius:8px;border:1px solid #FFE0B2">
+        <div style="font-size:18px;font-weight:700;color:#E65100">${critical}</div>
+        <div style="font-size:10px;color:#E65100">🟠 حرجة</div>
+      </div>
+      <div style="text-align:center;padding:8px;background:#FFF8E1;border-radius:8px;border:1px solid #FFF9C4">
+        <div style="font-size:18px;font-weight:700;color:#F57F17">${warning}</div>
+        <div style="font-size:10px;color:#F57F17">🟡 تحذير</div>
+      </div>`;
+
+    if(!filtered.length){
+      list.innerHTML='<div class="empty">✅ لا توجد تنبيهات للفلتر المحدد</div>';
+      return;
+    }
+
+    list.innerHTML = filtered.map(p=>{
+      const getBadge = diff => diff==null?'—': diff<0?`<span style="color:#B71C1C;font-weight:700">🔴 منتهية</span>`:
+        diff<=2?`<span style="color:#E65100;font-weight:700">🟠 بعد ${diff} شهر</span>`:
+        `<span style="color:#F57F17;font-weight:700">🟡 بعد ${diff} شهر</span>`;
+      return `<div style="background:#f9f9fb;border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px;border-right:4px solid ${p.worst<0?'#B71C1C':p.worst<=2?'#E65100':'#F57F17'}">
+        <div style="font-weight:700;font-size:13px;margin-bottom:4px">${p.snf}</div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:6px">
+          ${p.name} · ${p.branch||'—'} · ${p.fea||''}
+        </div>
+        <div style="display:flex;gap:12px;font-size:11px">
+          <div>رف: ${getBadge(p.shelfDiff)} <span style="color:#aaa">${p.shelfExp}</span></div>
+          <div>مخزن: ${getBadge(p.stockDiff)} <span style="color:#aaa">${p.stockExp}</span></div>
+        </div>
+      </div>`;
+    }).join('');
+
+  }catch(e){
+    list.innerHTML=`<div class="empty">تعذر التحميل: ${e.message}</div>`;
+  }
+}
+
+// تحقق تلقائي عند الدخول
+function supCheckExpiryBadge(){
+  setTimeout(async()=>{
+    try{
+      const grps = (cu.groups||[]).join(',');
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps})&select=name,snf,date_shelf,months_shelf,date_stock,months_stock&order=created_at.desc&limit=1000`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+      const data = await res.json();
+      if(!Array.isArray(data)) return;
+      const latest = {};
+      data.forEach(p=>{ const k=`${p.name}__${p.snf}`; if(!latest[k]) latest[k]=p; });
+      let count = 0;
+      Object.values(latest).forEach(p=>{
+        const sh = supCalcExpMonths(p.date_shelf,p.months_shelf);
+        const st = supCalcExpMonths(p.date_stock,p.months_stock);
+        const worst = Math.min(sh?.diff??99, st?.diff??99);
+        if(worst<=2) count++;
+      });
+      const badge = document.getElementById('expiry-badge');
+      if(badge){ badge.textContent=count; badge.style.display=count?'':'none'; }
+    }catch(e){}
+  }, 5000);
 }
 
 // ══════════════════════════════════════════════════════════════

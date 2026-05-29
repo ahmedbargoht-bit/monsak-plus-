@@ -324,6 +324,10 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           <div class="nav-item" onclick="showPanel('attendance')">
             <i class="ti ti-clock"></i> الحضور والانصراف
           </div>
+          <div class="nav-item" onclick="showPanel('expiry-alert')" style="position:relative">
+            <i class="ti ti-alert-circle" style="color:#E65100"></i> تنبيهات الصلاحية
+            <span class="nav-badge" id="nav-expiry-badge" style="display:none;background:#E65100"></span>
+          </div>
           <div class="nav-item" onclick="showPanel('attendance-export')">
             <i class="ti ti-file-spreadsheet"></i> كشف الحضور والمرتبات
           </div>
@@ -1694,6 +1698,47 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
         </div>
         <!-- ══ END PANEL ══════════════════════════════════════════ -->
 
+        <!-- ══ PANEL: تنبيهات الصلاحية ══════════════════════ -->
+        <div id="panel-expiry-alert" class="panel">
+          <div class="page-header">
+            <div><h2>تنبيهات الصلاحية</h2><p>أصناف تحتاج متابعة عاجلة</p></div>
+            <div class="page-actions">
+              <button class="btn btn-ghost btn-sm" onclick="adminLoadExpiry()"><i class="ti ti-refresh"></i> تحديث</button>
+            </div>
+          </div>
+          <div class="filter-bar" style="margin-bottom:12px">
+            <select id="admin-exp-filter" onchange="adminLoadExpiry()">
+              <option value="all">كل الحالات</option>
+              <option value="expired">🔴 منتهية</option>
+              <option value="critical">🟠 حرجة (أقل من شهرين)</option>
+              <option value="warning">🟡 تحذير (3 شهور)</option>
+            </select>
+            <select id="admin-exp-grp" onchange="adminLoadExpiry()">
+              <option value="all">كل المجموعات</option>
+              <option value="giza">الجيزة</option>
+              <option value="cairo">القاهرة</option>
+              <option value="south">جنوب وشرق</option>
+              <option value="tajmuat">التجمعات</option>
+              <option value="hyper">الهايبر</option>
+              <option value="alex">الإسكندرية</option>
+            </select>
+          </div>
+          <div id="admin-exp-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px"></div>
+          <div class="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th><th>المنسق</th><th>الفرع</th><th>المجموعة</th>
+                  <th>الصنف</th><th>حالة الرف</th><th>ينتهي الرف</th>
+                  <th>حالة المخزن</th><th>ينتهي المخزن</th><th>الحالة الأسوأ</th>
+                </tr>
+              </thead>
+              <tbody id="admin-exp-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <!-- ══ END PANEL ══════════════════════════════════════ -->
+
         <!-- ══ PANEL: كشف الحضور والمرتبات ══════════════════ -->
         <div id="panel-attendance-export" class="panel">
           <div class="page-header">
@@ -2929,6 +2974,117 @@ function rrStyleHeader(ws, firstRow){
 let _pdbFeaFilter = 'all';
 
 // ══════════════════════════════════════════════════════════════
+// EXPIRY ALERTS — تنبيهات الصلاحية في لوحة الإدارة
+// ══════════════════════════════════════════════════════════════
+
+async function adminLoadExpiry(){
+  const tbody = document.getElementById('admin-exp-tbody');
+  const stats  = document.getElementById('admin-exp-stats');
+  const filter = document.getElementById('admin-exp-filter')?.value||'all';
+  const grp    = document.getElementById('admin-exp-grp')?.value||'all';
+  if(!tbody) return;
+  tbody.innerHTML='<tr><td colspan="10" style="text-align:center;padding:1rem">جاري التحميل...</td></tr>';
+
+  try{
+    let url = `${SUPABASE_URL}/rest/v1/products?select=*&order=created_at.desc&limit=3000`;
+    if(grp!=='all') url += `&grp=eq.${grp}`;
+    const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    let data = await res.json();
+    if(!Array.isArray(data)) data=[];
+
+    // أحدث تسجيل لكل صنف لكل منسق
+    const latest={};
+    data.forEach(p=>{ const k=`${p.name}__${p.snf}`; if(!latest[k]) latest[k]=p; });
+
+    const alerts=[];
+    Object.values(latest).forEach(p=>{
+      const sh = calcExpMonths(p.date_shelf, p.months_shelf);
+      const st = calcExpMonths(p.date_stock, p.months_stock);
+      const worst = Math.min(sh??99, st??99);
+      if(worst>3) return;
+      alerts.push({...p, shDiff:sh, stDiff:st, worst});
+    });
+
+    // فلتر
+    let filtered=[...alerts];
+    if(filter==='expired')  filtered=filtered.filter(a=>a.worst<0);
+    if(filter==='critical') filtered=filtered.filter(a=>a.worst>=0&&a.worst<=2);
+    if(filter==='warning')  filtered=filtered.filter(a=>a.worst===3);
+    filtered.sort((a,b)=>a.worst-b.worst);
+
+    // إحصائيات
+    const expired  = alerts.filter(a=>a.worst<0).length;
+    const critical = alerts.filter(a=>a.worst>=0&&a.worst<=2).length;
+    const warning  = alerts.filter(a=>a.worst===3).length;
+
+    // badge في السايدبار
+    const badge = document.getElementById('nav-expiry-badge');
+    const total = expired+critical;
+    if(badge){ badge.textContent=total; badge.style.display=total?'':'none'; }
+
+    if(stats) stats.innerHTML=`
+      <div class="stat-card red"><div class="stat-n">${expired}</div><div class="stat-l">🔴 منتهية</div></div>
+      <div class="stat-card orange"><div class="stat-n">${critical}</div><div class="stat-l">🟠 حرجة</div></div>
+      <div class="stat-card yellow"><div class="stat-n">${warning}</div><div class="stat-l">🟡 تحذير</div></div>
+      <div class="stat-card blue"><div class="stat-n">${alerts.length}</div><div class="stat-l">إجمالي التنبيهات</div></div>`;
+
+    if(!filtered.length){
+      tbody.innerHTML='<tr><td colspan="10" style="text-align:center;padding:1rem;color:var(--text2)">✅ لا توجد تنبيهات</td></tr>';
+      return;
+    }
+
+    const expBadge = diff => diff==null ? '—' :
+      diff<0  ? `<span class="badge b-red">منتهية</span>` :
+      diff<=2 ? `<span class="badge b-orange">بعد ${diff} شهر</span>` :
+                `<span class="badge b-yellow">بعد ${diff} شهر</span>`;
+
+    const getExpDate = (dateStr, months) => {
+      if(!dateStr||!months) return '—';
+      const d = new Date(dateStr+'-01');
+      d.setMonth(d.getMonth()+(+months||0));
+      return d.toLocaleDateString('ar-EG',{month:'short',year:'numeric'});
+    };
+
+    tbody.innerHTML=filtered.map((p,i)=>`<tr style="background:${p.worst<0?'#FFF5F5':p.worst<=2?'#FFF8F0':''}">
+      <td>${i+1}</td>
+      <td><b>${p.name||'—'}</b></td>
+      <td style="font-size:11px">${p.branch||'—'}</td>
+      <td><span class="badge" style="background:${GROUPS[p.grp]?.color||'#ccc'}22;color:${GROUPS[p.grp]?.color||'#555'}">${GROUPS[p.grp]?.label||p.grp||'—'}</span></td>
+      <td style="font-size:11px;max-width:160px">${p.snf||'—'}</td>
+      <td>${expBadge(p.shDiff)}</td>
+      <td style="font-size:11px">${getExpDate(p.date_shelf,p.months_shelf)}</td>
+      <td>${expBadge(p.stDiff)}</td>
+      <td style="font-size:11px">${getExpDate(p.date_stock,p.months_stock)}</td>
+      <td>${expBadge(p.worst)}</td>
+    </tr>`).join('');
+
+  }catch(e){
+    tbody.innerHTML=`<tr><td colspan="10" style="text-align:center;color:var(--red)">تعذر التحميل: ${e.message}</td></tr>`;
+  }
+}
+
+// badge polling عند التحميل
+async function adminCheckExpiryBadge(){
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/products?select=name,snf,date_shelf,months_shelf,date_stock,months_stock&order=created_at.desc&limit=3000`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    let data = await res.json();
+    if(!Array.isArray(data)) return;
+    const latest={};
+    data.forEach(p=>{ const k=`${p.name}__${p.snf}`; if(!latest[k]) latest[k]=p; });
+    let count=0;
+    Object.values(latest).forEach(p=>{
+      const sh=calcExpMonths(p.date_shelf,p.months_shelf);
+      const st=calcExpMonths(p.date_stock,p.months_stock);
+      if(Math.min(sh??99,st??99)<=2) count++;
+    });
+    const badge=document.getElementById('nav-expiry-badge');
+    if(badge){ badge.textContent=count; badge.style.display=count?'':'none'; }
+  }catch(e){}
+}
+
+// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 // CHECKOUT EXCEPTIONS — لوحة الإدارة
 // ══════════════════════════════════════════════════════════════
 
@@ -3491,6 +3647,7 @@ async function doLogin(){
   await loadPDBFromSupabase();
   setupApp();
   startRealtimeAdmin();
+  adminCheckExpiryBadge();
   if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-login"></i> دخول';}
 }
 
@@ -3572,6 +3729,7 @@ function renderCurrentPanel(){
     case 'missing': loadMissing(); break;
     case 'attendance': loadAttendance(); break;
     case 'attendance-export': aeInit(); break;
+    case 'expiry-alert': adminLoadExpiry(); break;
     case 'users': loadAdminUsers().then(()=>loadUsers()); break;
     case 'supervisors': loadSupervisors(); break;
     case 'branches': loadBranches(); qbInitReps(); loadBranchesMap(); break;
@@ -3619,7 +3777,7 @@ function updateBadges(){
 // ══════════════════════════════════════════════════════════════
 // NAV
 // ══════════════════════════════════════════════════════════════
-const PANEL_TITLES={dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',attendance:'الحضور والانصراف','attendance-export':'كشف الحضور والمرتبات',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',branches:'الفروع والعملاء',settings:'الإعدادات','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام'};
+const PANEL_TITLES={dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',attendance:'الحضور والانصراف','attendance-export':'كشف الحضور والمرتبات','expiry-alert':'تنبيهات الصلاحية',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',branches:'الفروع والعملاء',settings:'الإعدادات','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام'};
 
 function showPanel(id){
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
