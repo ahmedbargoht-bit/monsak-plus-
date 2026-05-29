@@ -1698,6 +1698,7 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
               <option value="pending">⏳ معلّقة</option>
               <option value="approved">✅ موافق عليها</option>
               <option value="rejected">❌ مرفوضة</option>
+              <option value="deleted">🗑️ محذوفة</option>
               <option value="all">الكل</option>
             </select>
             <select id="admin-exc-grp" onchange="adminLoadExceptions()">
@@ -1719,7 +1720,7 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
                 <tr>
                   <th>#</th><th>المنسق</th><th>خط السير</th><th>المجموعة</th>
                   <th>السبب</th><th>وقت الطلب</th><th>وقت الانصراف</th>
-                  <th>الموقع</th><th>الحالة</th><th>المشرف</th><th>ملاحظة المشرف</th>
+                  <th>الموقع</th><th>الحالة</th><th>المشرف</th><th>ملاحظة المشرف</th><th>إجراءات</th>
                 </tr>
               </thead>
               <tbody id="admin-exc-tbody"></tbody>
@@ -2843,55 +2844,96 @@ async function adminLoadExceptions(){
   const tbody   = document.getElementById('admin-exc-tbody');
   const stats   = document.getElementById('admin-exc-stats');
   if(!tbody) return;
-  tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:1rem">جاري التحميل...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;padding:1rem">جاري التحميل...</td></tr>';
 
   try{
-    const url = `${SUPABASE_URL}/rest/v1/checkout_exceptions?order=created_at.desc&limit=500`;
+    // جيب كل الطلبات (الأدمن يشوف الكل)
+    let url = `${SUPABASE_URL}/rest/v1/checkout_exceptions?order=created_at.desc&limit=500`;
+    if(filter!=='all') url += `&status=eq.${filter}`;
+    if(grp!=='all')    url += `&rep_group=eq.${grp}`;
+    if(dateVal)        url += `&created_at=gte.${dateVal}T00:00:00&created_at=lte.${dateVal}T23:59:59`;
+
     const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     let data = await res.json();
-    if(!Array.isArray(data)) data = [];
 
-    if(filter!=='all') data = data.filter(d=>d.status===filter);
-    if(grp!=='all')    data = data.filter(d=>d.rep_group===grp);
-    if(dateVal)        data = data.filter(d=>(d.created_at||'').startsWith(dateVal));
+    if(!Array.isArray(data)){
+      console.warn('adminLoadExceptions error:', data);
+      tbody.innerHTML=`<tr><td colspan="12" style="text-align:center;padding:1rem;color:var(--red)">خطأ: ${data?.message||'تعذر التحميل'}</td></tr>`;
+      return;
+    }
 
-    const pending  = data.filter(d=>d.status==='pending').length;
-    const approved = data.filter(d=>d.status==='approved').length;
-    const rejected = data.filter(d=>d.status==='rejected').length;
+    // إحصائيات الكل (بدون فلتر الحالة)
+    const allRes  = await fetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions?select=status`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const allData = await allRes.json();
+    const allArr  = Array.isArray(allData) ? allData : [];
+    const pending  = allArr.filter(d=>d.status==='pending').length;
+    const approved = allArr.filter(d=>d.status==='approved').length;
+    const rejected = allArr.filter(d=>d.status==='rejected').length;
+    const deleted  = allArr.filter(d=>d.status==='deleted').length;
+
     if(stats) stats.innerHTML = `
       <div class="stat-card orange"><div class="stat-n">${pending}</div><div class="stat-l">معلّق</div></div>
       <div class="stat-card green"><div class="stat-n">${approved}</div><div class="stat-l">موافق</div></div>
       <div class="stat-card red"><div class="stat-n">${rejected}</div><div class="stat-l">مرفوض</div></div>
+      <div class="stat-card gray"><div class="stat-n">${deleted}</div><div class="stat-l">محذوف</div></div>
     `;
     const badge = document.getElementById('nav-exc-badge');
     if(badge){ badge.textContent=pending; badge.style.display=pending?'':'none'; }
 
     if(!data.length){
-      tbody.innerHTML='<tr><td colspan="11" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد طلبات</td></tr>';
+      tbody.innerHTML='<tr><td colspan="12" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد طلبات</td></tr>';
       return;
     }
+
     tbody.innerHTML = data.map((d,i)=>{
-      const sc = d.status==='approved'?'b-green':d.status==='rejected'?'b-red':'b-orange';
-      const sl = d.status==='approved'?'✅ موافق':d.status==='rejected'?'❌ مرفوض':'⏳ معلّق';
+      const sc = d.status==='approved'?'b-green':d.status==='rejected'?'b-red':d.status==='deleted'?'b-gray':'b-orange';
+      const sl = d.status==='approved'?'✅ موافق':d.status==='rejected'?'❌ مرفوض':d.status==='deleted'?'🗑️ محذوف':'⏳ معلّق';
       const mapUrl = d.lat&&d.lng?`<a href="https://maps.google.com/?q=${d.lat},${d.lng}" target="_blank" style="color:var(--blue);font-size:10px">📍 خريطة</a>`:'—';
       const createdAt = d.created_at?new Date(d.created_at).toLocaleString('ar-EG',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}):'';
+      const actions = d.status==='pending' ? `
+        <div style="display:flex;gap:4px">
+          <button onclick="adminResolveException(${d.id},'approved')" title="موافقة"
+            style="padding:4px 8px;background:#E8F5E9;color:#1A7A4A;border:none;border-radius:6px;font-size:11px;cursor:pointer">✅</button>
+          <button onclick="adminResolveException(${d.id},'rejected')" title="رفض"
+            style="padding:4px 8px;background:#FFEBEE;color:#C0392B;border:none;border-radius:6px;font-size:11px;cursor:pointer">❌</button>
+          <button onclick="adminResolveException(${d.id},'deleted')" title="حذف"
+            style="padding:4px 8px;background:#f5f5f5;color:#777;border:none;border-radius:6px;font-size:11px;cursor:pointer">🗑️</button>
+        </div>` : `<button onclick="adminResolveException(${d.id},'deleted')" title="حذف"
+            style="padding:4px 8px;background:#f5f5f5;color:#777;border:none;border-radius:6px;font-size:11px;cursor:pointer">🗑️</button>`;
       return `<tr>
         <td>${i+1}</td>
         <td><b>${d.rep_name||'—'}</b></td>
         <td style="font-size:11px">${d.rep_route||'—'}</td>
         <td><span class="badge" style="background:${GROUPS[d.rep_group]?.color||'#ccc'}22;color:${GROUPS[d.rep_group]?.color||'#555'}">${GROUPS[d.rep_group]?.label||d.rep_group||'—'}</span></td>
-        <td style="font-size:11px;max-width:160px">${d.reason||'—'}</td>
+        <td style="font-size:11px;max-width:140px">${d.reason||'—'}</td>
         <td style="font-size:11px">${createdAt}</td>
         <td><b>${d.checkout_time||'—'}</b></td>
         <td>${mapUrl}</td>
         <td><span class="badge ${sc}">${sl}</span></td>
         <td style="font-size:11px">${d.supervisor||'—'}</td>
         <td style="font-size:11px">${d.supervisor_note||'—'}</td>
+        <td>${actions}</td>
       </tr>`;
     }).join('');
   }catch(e){
-    tbody.innerHTML='<tr><td colspan="11" style="text-align:center;padding:1rem;color:var(--red)">تعذر التحميل</td></tr>';
+    console.error('adminLoadExceptions:', e);
+    tbody.innerHTML=`<tr><td colspan="12" style="text-align:center;padding:1rem;color:var(--red)">تعذر التحميل: ${e.message}</td></tr>`;
   }
+}
+
+async function adminResolveException(id, status){
+  const label = status==='approved'?'الموافقة': status==='rejected'?'الرفض':'الحذف';
+  if(!confirm(`تأكيد ${label}؟`)) return;
+  let note = '';
+  if(status==='rejected') note = prompt('ملاحظة (اختياري):')||'';
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body: JSON.stringify({status, supervisor:'admin', supervisor_note:note, updated_at:new Date().toISOString()})
+    });
+    if(res.ok){ showToast(status==='approved'?'✅ تمت الموافقة': status==='rejected'?'❌ تم الرفض':'🗑️ تم الحذف'); adminLoadExceptions(); }
+  }catch(e){ showToast('تعذر الإجراء'); }
 }
 
 // badge polling كل دقيقة
