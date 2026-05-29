@@ -807,6 +807,7 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
             <option value="pending">⏳ معلّقة</option>
             <option value="approved">✅ موافق عليها</option>
             <option value="rejected">❌ مرفوضة</option>
+            <option value="deleted">🗑️ محذوفة</option>
             <option value="all">الكل</option>
           </select>
           <button onclick="loadExceptions()" style="padding:8px 12px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
@@ -3510,8 +3511,9 @@ async function loadExceptions(){
   list.innerHTML = '<div class="empty"><div class="spinner"></div><br>جاري التحميل...</div>';
 
   try{
-    const grpFilter = (cu.groups||[]).map(g=>`rep_group=eq.${g}`).join(',');
-    let url = `${SUPABASE_URL}/rest/v1/checkout_exceptions?or=(${grpFilter})&order=created_at.desc&limit=100`;
+    // استخدام in() بدل or() — أكثر استقراراً في Supabase
+    const grps = (cu.groups||[]).join(',');
+    let url = `${SUPABASE_URL}/rest/v1/checkout_exceptions?rep_group=in.(${grps})&order=created_at.desc&limit=100`;
     if(filter !== 'all') url += `&status=eq.${filter}`;
 
     const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
@@ -3538,13 +3540,20 @@ async function loadExceptions(){
             <div style="font-weight:700;font-size:13px">${r.rep_name}</div>
             <div style="font-size:11px;color:var(--text2)">${r.rep_route||''} · ${createdAt}</div>
           </div>
-          <span style="background:${statusColor}22;color:${statusColor};border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700">${statusLabel}</span>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span style="background:${statusColor}22;color:${statusColor};border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700">${statusLabel}</span>
+            <button onclick="deleteException(${r.id})" title="حذف"
+              style="background:#FFF0F0;color:#C0392B;border:none;border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer">
+              <i class="ti ti-trash"></i>
+            </button>
+          </div>
         </div>
         <div style="font-size:12px;margin-bottom:6px"><b>السبب:</b> ${r.reason||'—'}</div>
         <div style="font-size:11px;color:var(--text2);margin-bottom:8px">
           وقت الانصراف المطلوب: <b>${r.checkout_time||'—'}</b>
           ${mapUrl ? `· <a href="${mapUrl}" target="_blank" style="color:var(--navy)">📍 الموقع</a>` : ''}
         </div>
+        ${r.supervisor_note && r.status!=='pending' ? `<div style="font-size:11px;color:var(--text2);margin-bottom:8px">ملاحظة المشرف: ${r.supervisor_note}</div>` : ''}
         ${r.status==='pending' ? `
         <div style="margin-bottom:8px">
           <textarea id="exc-note-${r.id}" placeholder="ملاحظة (اختياري)..."
@@ -3557,12 +3566,13 @@ async function loadExceptions(){
           <button onclick="resolveException(${r.id},'rejected')" style="flex:1;padding:9px;background:linear-gradient(135deg,#8B1A1A,#C0392B);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
             ❌ رفض
           </button>
-        </div>` : r.supervisor_note ? `<div style="font-size:11px;color:var(--text2)">ملاحظة المشرف: ${r.supervisor_note}</div>` : ''}
+        </div>` : ''}
       </div>`;
     }).join('');
 
   }catch(e){
-    list.innerHTML = '<div class="empty">تعذر التحميل</div>';
+    console.error('loadExceptions error:', e);
+    list.innerHTML = '<div class="empty">تعذر التحميل — ' + e.message + '</div>';
   }
 }
 
@@ -3596,6 +3606,19 @@ async function resolveException(id, status){
   }
 }
 
+async function deleteException(id){
+  if(!confirm('حذف هذا الطلب نهائياً؟')) return;
+  try{
+    // الحذف عبر service_role مش ممكن من anon — نحدّث الحالة لـ deleted
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body: JSON.stringify({status:'deleted', supervisor: cu.name, updated_at: new Date().toISOString()})
+    });
+    if(res.ok){ showToast('🗑️ تم حذف الطلب'); loadExceptions(); }
+  }catch(e){ showToast('تعذر الحذف'); }
+}
+
 function updateExcBadge(count){
   const badge = document.getElementById('exc-badge');
   if(!badge) return;
@@ -3603,12 +3626,12 @@ function updateExcBadge(count){
   badge.style.display = count > 0 ? 'block' : 'none';
 }
 
-// polling للطلبات المعلّقة كل 30 ثانية
+// polling كل 30 ثانية
 function startExcPolling(){
   setInterval(async()=>{
     try{
-      const grpFilter = (cu.groups||[]).map(g=>`rep_group=eq.${g}`).join(',');
-      const url = `${SUPABASE_URL}/rest/v1/checkout_exceptions?or=(${grpFilter})&status=eq.pending&select=id`;
+      const grps = (cu.groups||[]).join(',');
+      const url = `${SUPABASE_URL}/rest/v1/checkout_exceptions?rep_group=in.(${grps})&status=eq.pending&select=id`;
       const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
       const data = await res.json();
       updateExcBadge(Array.isArray(data)?data.length:0);
