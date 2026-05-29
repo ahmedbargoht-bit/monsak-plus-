@@ -1935,13 +1935,6 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           <!-- تأكيد الحذف -->
           <div class="card" style="border:2px solid #C0392B">
             <div class="card-title" style="color:#C0392B"><i class="ti ti-lock"></i> تنفيذ الريستارت</div>
-
-            <!-- تنبيه RLS -->
-            <div style="background:#FFF3E0;border:1px solid #E65100;border-radius:8px;padding:10px;margin-bottom:14px;font-size:12px;color:#8B2500">
-              <i class="ti ti-info-circle"></i>
-              <b>ملاحظة:</b> الحذف يتم عبر Supabase SQL Editor لأن RLS تمنع الحذف عبر API (وده مقصود للأمان).
-            </div>
-
             <div style="margin-bottom:12px">
               <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">أدخل كلمة مرور الإدارة</label>
               <input type="password" id="reset-pass" placeholder="كلمة المرور..." class="modal-inp"/>
@@ -1950,24 +1943,15 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
               <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">اكتب "تأكيد الحذف" للمتابعة</label>
               <input type="text" id="reset-confirm-text" placeholder='اكتب: تأكيد الحذف' class="modal-inp"/>
             </div>
-
-            <div id="reset-sql-wrap" style="display:none;margin-bottom:12px">
-              <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">SQL جاهز للتشغيل في Supabase</div>
-              <textarea id="reset-sql-output" readonly style="width:100%;min-height:180px;font-family:monospace;font-size:11px;padding:10px;border:1px solid var(--border);border-radius:8px;background:#1e1e2e;color:#cdd6f4;resize:vertical"></textarea>
-              <div style="display:flex;gap:8px;margin-top:8px">
-                <button onclick="copyResetSQL()" style="flex:1;padding:9px;background:#1A7A4A;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
-                  <i class="ti ti-copy"></i> نسخ SQL
-                </button>
-                <a href="https://supabase.com/dashboard/project/tneeosrbxedexsrigapg/sql/new" target="_blank"
-                  style="flex:1;padding:9px;background:#3ECF8E;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:4px">
-                  <i class="ti ti-external-link"></i> فتح SQL Editor
-                </a>
+            <div id="reset-progress" style="display:none;margin-bottom:12px">
+              <div style="font-size:12px;color:var(--text2);margin-bottom:6px" id="reset-progress-label">جاري الحذف...</div>
+              <div style="background:#eee;border-radius:999px;height:8px;overflow:hidden">
+                <div id="reset-progress-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#C0392B,#E74C3C);transition:width .3s"></div>
               </div>
             </div>
-
             <div id="reset-msg" style="font-size:12px;margin-bottom:10px;display:none"></div>
-            <button onclick="generateResetSQL()" id="reset-btn" style="width:100%;padding:12px;background:linear-gradient(135deg,#8B1A1A,#C0392B);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
-              <i class="ti ti-code"></i> توليد SQL الريستارت
+            <button onclick="executeReset()" id="reset-btn" style="width:100%;padding:12px;background:linear-gradient(135deg,#8B1A1A,#C0392B);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
+              <i class="ti ti-trash"></i> تنفيذ الريستارت
             </button>
           </div>
         </div>
@@ -3116,10 +3100,14 @@ function resetSelectOperational(){
   });
 }
 
-function generateResetSQL(){
+async function executeReset(){
   const pass        = document.getElementById('reset-pass').value;
   const confirmText = document.getElementById('reset-confirm-text').value.trim();
+  const btn         = document.getElementById('reset-btn');
   const msg         = document.getElementById('reset-msg');
+  const progress    = document.getElementById('reset-progress');
+  const progressBar = document.getElementById('reset-progress-bar');
+  const progressLbl = document.getElementById('reset-progress-label');
 
   if(pass !== adminPass){
     msg.style.display='block'; msg.style.color='#C0392B';
@@ -3135,30 +3123,49 @@ function generateResetSQL(){
     msg.style.display='block'; msg.style.color='#C0392B';
     msg.textContent='❌ اختر جدولاً واحداً على الأقل'; return;
   }
+  if(!confirm(`سيتم حذف بيانات ${selected.length} جدول نهائياً. هل أنت متأكد؟`)) return;
 
-  const sql = `-- ريستارت النظام — ${new Date().toLocaleString('ar-EG')}
--- ${selected.length} جدول محدد للحذف
--- ════════════════════════════════════════════
+  btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري الحذف...';
+  progress.style.display='block'; msg.style.display='none';
+  progressBar.style.width='30%'; progressLbl.textContent='جاري الاتصال بالخادم...';
 
-${selected.map(t=>`TRUNCATE TABLE public.${t} RESTART IDENTITY CASCADE;`).join('\n')}
+  try{
+    // استدعاء دالة reset_tables عبر Supabase RPC
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/reset_tables`,{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'apikey':SUPABASE_KEY,
+        'Authorization':`Bearer ${SUPABASE_KEY}`
+      },
+      body: JSON.stringify({table_names: selected})
+    });
 
-SELECT 'تم الريستارت بنجاح ✅ — ${selected.length} جداول' AS النتيجة;`;
+    progressBar.style.width='80%'; progressLbl.textContent='جاري المعالجة...';
+    const result = await res.json();
 
-  document.getElementById('reset-sql-output').value = sql;
-  document.getElementById('reset-sql-wrap').style.display = 'block';
-  msg.style.display='block'; msg.style.color='#1A7A4A';
-  msg.textContent=`✅ SQL جاهز — انسخه وشغّله في Supabase SQL Editor`;
-}
+    progressBar.style.width='100%'; progressLbl.textContent='اكتمل ✅';
+    msg.style.display='block';
 
-function copyResetSQL(){
-  const ta = document.getElementById('reset-sql-output');
-  ta.select();
-  navigator.clipboard?.writeText(ta.value).then(()=>{
-    showToast('✅ تم نسخ SQL');
-  }).catch(()=>{
-    document.execCommand('copy');
-    showToast('✅ تم النسخ');
-  });
+    if(res.ok && result?.success){
+      const counts = result.deleted||{};
+      const total  = Object.values(counts).reduce((s,v)=>s+(+v||0),0);
+      msg.style.color='#1A7A4A';
+      msg.textContent=`✅ تم حذف ${total.toLocaleString('ar-EG')} سجل من ${selected.length} جدول`;
+      document.getElementById('reset-pass').value='';
+      document.getElementById('reset-confirm-text').value='';
+      setTimeout(loadResetStats, 1500);
+    } else {
+      msg.style.color='#C0392B';
+      msg.textContent=`❌ ${result?.message||result?.error||'حدث خطأ — تأكد من تشغيل reset-function.sql أولاً'}`;
+    }
+  }catch(e){
+    progressBar.style.width='100%';
+    msg.style.display='block'; msg.style.color='#C0392B';
+    msg.textContent='❌ تعذر الاتصال: '+e.message;
+  }finally{
+    btn.disabled=false; btn.innerHTML='<i class="ti ti-trash"></i> تنفيذ الريستارت';
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
