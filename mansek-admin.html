@@ -1055,7 +1055,7 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           </div>
           <div class="tbl-wrap">
             <table>
-              <thead><tr><th>#</th><th>اسم خط السير</th><th>المجموعة</th><th>المنسق المسؤول</th><th>عدد الفروع</th><th>الحالة</th><th>إجراءات</th></tr></thead>
+              <thead><tr><th>#</th><th>اسم خط السير</th><th>المجموعة</th><th>المنسقون</th><th>عدد الفروع</th><th>الحالة</th><th>نشطون</th></tr></thead>
               <tbody id="routes-tbody"></tbody>
             </table>
           </div>
@@ -4857,29 +4857,75 @@ function renderPDBPanel(){
 }
 
 async function loadRoutes(){
+  const tbody  = document.getElementById('routes-tbody');
+  const grp    = document.getElementById('rt-group')?.value||'all';
+  const search = (document.getElementById('rt-search')?.value||'').trim().toLowerCase();
+
+  tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:1.5rem"><div class="spinner"></div></td></tr>';
+
   try{
-    const res = await sb('products_db',{key:'routes_list'});
-    if(res && res[0] && res[0].value){
-      ROUTES_LIST = JSON.parse(res[0].value);
-      try{ localStorage.setItem('routes_list', res[0].value); }catch(e){}
+    // جيب كل المنسقين من REPS (محملين مسبقاً) أو من Supabase
+    let reps = [...(REPS||[])];
+    if(!reps.length){
+      const res = await sb('users',{});
+      reps = (Array.isArray(res)?res:[]).filter(u=>u.role==='rep');
     }
+
+    // بناء خطوط السير: route واحد قد يكون فيه أكتر من منسق
+    const routeMap = {};
+    reps.forEach(u=>{
+      const route = (u.route||'').trim();
+      const grpVal = u.grp || u.groups || '';
+      if(!route) return;
+      if(!routeMap[route]){
+        routeMap[route] = {
+          name:   route,
+          group:  grpVal,
+          reps:   [],
+          status: u.active===false||u.status==='inactive' ? 'inactive' : 'active'
+        };
+      }
+      routeMap[route].reps.push(u.name||'');
+    });
+
+    let data = Object.values(routeMap);
+
+    // فلترة
+    if(grp!=='all')  data = data.filter(r=>r.group===grp);
+    if(search)       data = data.filter(r=>r.name.toLowerCase().includes(search));
+
+    // ترتيب: بالمجموعة ثم الاسم
+    data.sort((a,b)=>a.group.localeCompare(b.group)||a.name.localeCompare(b.name));
+
+    if(!data.length){
+      tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد خطوط سير مطابقة</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = data.map((r,i)=>{
+      const branchCount = (BRANCHES_MAP&&BRANCHES_MAP[r.name]) ? BRANCHES_MAP[r.name].length : '—';
+      const repNames = r.reps.join('، ')||'—';
+      const grpLabel = GROUPS[r.group]?.label||r.group||'—';
+      const grpColor = GROUPS[r.group]?.color||'#999';
+      const activeCount = (REPS||[]).filter(u=>(u.route===r.name)&&(u.active!==false)).length;
+      const statusBadge = r.status==='active'
+        ? `<span class="badge b-green">نشط</span>`
+        : `<span class="badge b-gray">موقوف</span>`;
+      return `<tr>
+        <td>${i+1}</td>
+        <td><b>${r.name}</b></td>
+        <td><span class="badge" style="background:${grpColor}22;color:${grpColor}">${grpLabel}</span></td>
+        <td style="font-size:11px;max-width:180px">${repNames}</td>
+        <td><span class="badge b-navy">${branchCount} فرع</span></td>
+        <td>${statusBadge}</td>
+        <td><span style="font-size:11px;color:var(--text2)">${activeCount} منسق نشط</span></td>
+      </tr>`;
+    }).join('');
+
   }catch(e){
-    ROUTES_LIST = JSON.parse(localStorage.getItem('routes_list')||'[]');
+    tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:var(--red)">تعذر التحميل</td></tr>';
+    console.warn('loadRoutes error:', e);
   }
-  const grp=document.getElementById('rt-group')?.value||'all';
-  const search=(document.getElementById('rt-search')?.value||'').toLowerCase();
-  let data=ROUTES_LIST;
-  if(grp!=='all') data=data.filter(r=>r.group===grp);
-  if(search) data=data.filter(r=>r.name.toLowerCase().includes(search));
-  document.getElementById('routes-tbody').innerHTML=data.map((r,i)=>`<tr>
-    <td>${i+1}</td>
-    <td><b>${r.name}</b></td>
-    <td><span class="badge b-blue">${GROUPS[r.group]?.label||'—'}</span></td>
-    <td style="font-size:11px">${r.rep||'—'}</td>
-    <td><span class="badge b-navy">${(BRANCHES_MAP[r.name]||[]).length} فرع</span></td>
-    <td><span class="badge ${r.status==='active'?'b-green':'b-gray'}">${r.status==='active'?'نشط':'موقوف'}</span></td>
-    <td><button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="deleteRoute('${r.id}')"><i class="ti ti-trash"></i></button></td>
-  </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد خطوط سير — أضف خط سير جديد</td></tr>';
 }
 
 async function saveRoutes(){
