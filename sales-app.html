@@ -689,7 +689,7 @@ async function loadDashData(grp){
     fetch(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grpStr})&select=id,name,grp,branch,snf,created_at&order=created_at.desc&limit=500`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/returns?grp=in.(${grpStr})&select=*&order=created_at.desc&limit=500`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/missing?grp=in.(${grpStr})&select=*&order=created_at.desc&limit=500`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/orders?grp=in.(${grpStr})&select=*&order=created_at.desc&limit=200`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
+    fetch(`${SUPABASE_URL}/rest/v1/orders?from_name=eq.${encodeURIComponent(cu.name)}&deal_source=eq.sales&select=*&order=created_at.desc&limit=200`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
   ]);
 
   const p=Array.isArray(products)?products:[];
@@ -954,52 +954,66 @@ async function loadMissing(){
 // ORDERS
 // ══════════════════════════════════════════════════════════════
 async function sendOrder(){
-  const grp  =document.getElementById('ord-grp-target').value;
-  const snf  =document.getElementById('ord-snf').value.trim();
-  const qty  =+document.getElementById('ord-qty').value||0;
-  const date =document.getElementById('ord-date').value;
-  const note =document.getElementById('ord-note').value.trim();
-  const ok   =document.getElementById('ord-ok');
-  const err  =document.getElementById('ord-err');
+  const target= document.getElementById('ord-grp-target').value;
+  const snf   = document.getElementById('ord-snf').value.trim();
+  const qty   = document.getElementById('ord-qty').value.trim();
+  const date  = document.getElementById('ord-date').value;
+  const note  = document.getElementById('ord-note').value.trim();
+  const ok    = document.getElementById('ord-ok');
+  const err   = document.getElementById('ord-err');
   ok.style.display='none'; err.style.display='none';
-  if(!grp||grp==='all'){err.style.display='block';err.textContent='اختر المجموعة المستهدفة';return;}
+  if(!target||target==='all'){err.style.display='block';err.textContent='اختر المجموعة المستهدفة';return;}
   if(!snf){err.style.display='block';err.textContent='أدخل اسم الصنف';return;}
-  if(qty<1){err.style.display='block';err.textContent='أدخل الكمية';return;}
-  await sbPost('orders',{
-    grp, item:snf, qty, delivery_date:date||null,
-    note, status:'pending', sender_name:cu.name,
-    sender_role:'sales', created_at:new Date().toISOString()
+  if(!qty){err.style.display='block';err.textContent='أدخل الكمية';return;}
+
+  // نبعت للمشرف المسؤول عن المجموعة المحددة
+  const grpLabel = GROUPS[target]?.label||target;
+  const noteText = `صنف: ${snf} | كمية: ${qty}${note?' | '+note:''}`;
+
+  const res = await sbPost('orders',{
+    from_name:   cu.name,
+    to_name:     grpLabel,
+    to_route:    target,
+    note:        noteText,
+    arrival_date: date||null,
+    status:      'pending',
+    deal_source: 'sales'
   });
-  ok.style.display='block'; ok.textContent=`✅ تم إرسال طلبية ${snf} (${qty}) للمجموعة ${GROUPS[grp]?.label||grp}`;
-  document.getElementById('ord-snf').value='';
-  document.getElementById('ord-qty').value='';
-  document.getElementById('ord-note').value='';
-  loadOrders();
+
+  if(res){
+    ok.style.display='block';
+    ok.textContent=`✅ تم إرسال طلبية ${snf} (${qty}) للمجموعة ${grpLabel}`;
+    document.getElementById('ord-snf').value='';
+    document.getElementById('ord-qty').value='';
+    document.getElementById('ord-note').value='';
+    loadOrders();
+  } else {
+    err.style.display='block'; err.textContent='حدث خطأ — حاول مرة أخرى';
+  }
 }
 
 async function loadOrders(){
   if(!cu)return;
-  const filter=document.getElementById('ord-filter').value;
-  const grps=cu.groups;
-  let url=`${SUPABASE_URL}/rest/v1/orders?grp=in.(${grps.join(',')})&sender_role=eq.sales&select=*&order=created_at.desc&limit=200`;
+  const filter = document.getElementById('ord-filter').value;
+  let url = `${SUPABASE_URL}/rest/v1/orders?from_name=eq.${encodeURIComponent(cu.name)}&deal_source=eq.sales&select=*&order=created_at.desc&limit=200`;
   if(filter!=='all') url+=`&status=eq.${filter}`;
-  const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-  let data=await res.json(); if(!Array.isArray(data))data=[];
-  document.getElementById('ord-list').innerHTML=data.length
+  const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+  let data = await res.json(); if(!Array.isArray(data)) data=[];
+
+  document.getElementById('ord-list').innerHTML = data.length
     ? data.map(o=>{
-        const sc=o.status==='confirmed'?'b-green':o.status==='delivered'?'b-navy':'';
-        const sl=o.status==='confirmed'?'✅ مؤكدة':o.status==='delivered'?'📦 مسلّمة':'⏳ معلّقة';
+        const sc = o.status==='confirmed'?'b-green': o.status==='delivered'?'b-navy':'';
+        const sl = o.status==='confirmed'?'✅ مؤكدة': o.status==='delivered'?'📦 مسلّمة':'⏳ معلّقة';
+        const dt = o.created_at?new Date(o.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'}):'—';
         return `<div style="background:#f9f9fb;border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px">
           <div style="display:flex;justify-content:space-between;margin-bottom:6px">
-            <div style="font-weight:700;font-size:13px">${o.item||o.snf||'—'}</div>
+            <div style="font-weight:700;font-size:13px">${GROUPS[o.to_route]?.label||o.to_name||'—'}</div>
             <span class="badge ${sc}">${sl}</span>
           </div>
-          <div style="font-size:11px;color:var(--text2)">
-            ${GROUPS[o.grp]?.label||o.grp||'—'} · كمية: <b>${o.qty}</b>
-            ${o.delivery_date?'· تسليم: '+new Date(o.delivery_date).toLocaleDateString('ar-EG'):''}
-          </div>
-          ${o.note?`<div style="font-size:11px;color:var(--text2);margin-top:4px">💬 ${o.note}</div>`:''}
-          <div style="font-size:10px;color:#aaa;margin-top:4px">${o.created_at?new Date(o.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'—'}</div>
+          <div style="font-size:11px;color:var(--text2)">${o.note||'—'}</div>
+          ${o.arrival_date?`<div style="font-size:11px;color:var(--text2);margin-top:4px">📅 تسليم: ${new Date(o.arrival_date).toLocaleDateString('ar-EG')}</div>`:''}
+          ${o.reject_reason?`<div style="font-size:11px;color:var(--red);margin-top:4px">❌ ${o.reject_reason}</div>`:''}
+          <div style="font-size:10px;color:#aaa;margin-top:4px">${dt}</div>
         </div>`;
       }).join('')
     : '<div class="empty"><i class="ti ti-package-off"></i>لا توجد طلبيات</div>';
@@ -1007,18 +1021,21 @@ async function loadOrders(){
 
 async function loadCoordOrders(){
   if(!cu)return;
-  const grp=document.getElementById('coord-ord-grp').value;
-  const grps=grp==='all'?cu.groups:[grp];
-  const url=`${SUPABASE_URL}/rest/v1/orders?grp=in.(${grps.join(',')})&status=eq.confirmed&select=*&order=created_at.desc&limit=200`;
-  const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-  let data=await res.json(); if(!Array.isArray(data))data=[];
+  const grp = document.getElementById('coord-ord-grp').value;
+  const grps = grp==='all' ? cu.groups : [grp];
+  // طلبيات التنسيق المؤكدة — to_route في مناطقنا وليست من المبيعات
+  let url = `${SUPABASE_URL}/rest/v1/orders?to_route=in.(${grps.join(',')})&status=eq.confirmed&select=*&order=created_at.desc&limit=200`;
+  const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+  let data = await res.json(); if(!Array.isArray(data)) data=[];
   // استثنِ طلبيات المبيعات
-  data=data.filter(o=>o.sender_role!=='sales');
-  document.getElementById('coord-ord-list').innerHTML=data.length
+  data = data.filter(o=>o.deal_source!=='sales');
+
+  document.getElementById('coord-ord-list').innerHTML = data.length
     ? data.map(o=>`<div style="background:#E8F5E9;border:1px solid #C8E6C9;border-radius:10px;padding:10px;margin-bottom:6px;font-size:12px">
-        <div style="font-weight:700">${o.item||o.snf||'—'} <span style="color:var(--green)">× ${o.qty}</span></div>
-        <div style="color:var(--text2)">${GROUPS[o.grp]?.label||o.grp||'—'} · ${o.supervisor_name||o.sender_name||'—'}</div>
-        ${o.note?`<div style="color:var(--text2)">💬 ${o.note}</div>`:''}
+        <div style="font-weight:700">${o.to_name||'—'} <span style="color:var(--green);font-size:11px">← ${o.from_name||'—'}</span></div>
+        <div style="color:var(--text2);margin-top:3px">${o.note||'—'}</div>
+        ${o.branch?`<div style="color:var(--text2)">📍 ${o.branch}</div>`:''}
+        <div style="font-size:10px;color:#aaa;margin-top:3px">${o.created_at?new Date(o.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'}):'—'}</div>
       </div>`).join('')
     : '<div class="empty"><i class="ti ti-checkbox"></i>لا توجد طلبيات مؤكدة</div>';
 }
@@ -1105,7 +1122,7 @@ async function loadBadges(){
     const [r,m,o,e]=await Promise.all([
       fetch(`${SUPABASE_URL}/rest/v1/returns?grp=in.(${grps})&status=eq.new&select=id`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()),
       fetch(`${SUPABASE_URL}/rest/v1/missing?grp=in.(${grps})&select=id&limit=1`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()),
-      fetch(`${SUPABASE_URL}/rest/v1/orders?grp=in.(${grps})&status=eq.confirmed&sender_role=neq.sales&select=id&limit=1`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()),
+      fetch(`${SUPABASE_URL}/rest/v1/orders?from_name=eq.${encodeURIComponent(cu.name)}&deal_source=eq.sales&status=eq.confirmed&select=id&limit=1`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()),
       Promise.resolve([]),
     ]);
     setBadge('ret-badge', Array.isArray(r)?r.length:0);
