@@ -1175,6 +1175,9 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
                 <button class="btn btn-ghost btn-sm" onclick="asrRefresh()" style="color:#fff;border-color:rgba(255,255,255,.3)">
                   <i class="ti ti-refresh"></i> تحديث
                 </button>
+                <button class="btn btn-sm" onclick="asrExportExcel()" style="background:#6B7A3B;color:#fff;border:none">
+                  <i class="ti ti-file-spreadsheet"></i> Excel
+                </button>
               </div>
               <!-- إحصاء سريع -->
               <div id="asr-quick-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px"></div>
@@ -8217,8 +8220,127 @@ function asrCalcExpiry(products){
   });
   return result.sort((a,b)=>a.months-b.months);
 }
+async function asrExportExcel(){
+  const branch = document.getElementById('asr-branch').value;
+  const grp    = document.getElementById('asr-grp').value;
+  const route  = document.getElementById('asr-route').value;
+  if(!branch){ alert('اختر فرعاً أولاً'); return; }
+
+  const enc = encodeURIComponent(branch);
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  try{
+    const [products, returns_, missing_] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/products?branch=eq.${enc}&select=*&order=created_at.desc&limit=500`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/returns?branch=eq.${enc}&select=*&order=created_at.desc&limit=200`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/missing?branch=eq.${enc}&select=*&order=created_at.desc&limit=200`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+    ]);
+
+    const P = Array.isArray(products)?products:[];
+    const R = Array.isArray(returns_)?returns_:[];
+    const M = Array.isArray(missing_)?missing_:[];
+    const EX = asrCalcExpiry(P);
+
+    const wb = XLSX.utils.book_new();
+    const today = new Date().toLocaleDateString('ar-EG',{day:'2-digit',month:'2-digit',year:'numeric'});
+    const grpLabel = ASR_GRP_LABELS[grp]||grp;
+
+    // ── شيت معلومات الفرع ──
+    const infoAoa = [
+      ['تقرير فرع — الطحان جولدن داتس','','','',''],
+      [`الفرع: ${branch}`,'','',`المنطقة: ${grpLabel}`,''],
+      [`خط السير: ${route}`,'','',`تاريخ التقرير: ${today}`,''],
+      [''],
+      ['البيان','العدد','','',''],
+      ['إجمالي الأصناف المسجلة', P.length,'','',''],
+      ['المرتجعات', R.length,'','',''],
+      ['النواقص', M.length,'','',''],
+      ['أصناف تحتاج متابعة صلاحية', EX.length,'','',''],
+    ];
+    const wsInfo = XLSX.utils.aoa_to_sheet(infoAoa);
+    wsInfo['!cols'] = [{wch:28},{wch:12},{wch:12},{wch:20},{wch:16}];
+    wsInfo['!merges'] = [{s:{r:0,c:0},e:{r:0,c:4}}];
+    const hS = {fill:{fgColor:{rgb:'731E2E'}},font:{bold:true,color:{rgb:'FFFFFF'},sz:13,name:'Cairo'},alignment:{horizontal:'center',readingOrder:2}};
+    if(wsInfo['A1']) wsInfo['A1'].s = hS;
+    XLSX.utils.book_append_sheet(wb, wsInfo, 'ملخص الفرع');
+
+    // ── شيت الأصناف ──
+    if(P.length){
+      const prodAoa = [
+        ['الأصناف المسجلة — '+branch,'','','','','','','',''],
+        ['الصنف','Batch رف','تاريخ رف','كمية رف','Batch مخزن','تاريخ مخزن','كمية مخزن','المنسق','التاريخ'],
+        ...P.map(p=>[
+          p.snf||p.name||'—',
+          p.batch_shelf||'—', p.date_shelf||'—', p.shelf_qty||0,
+          p.batch_stock||'—', p.date_stock||'—', p.stock_qty||0,
+          p.name||'—',
+          (p.created_at||'').slice(0,10)
+        ])
+      ];
+      const wsP = XLSX.utils.aoa_to_sheet(prodAoa);
+      wsP['!cols'] = [{wch:24},{wch:12},{wch:14},{wch:10},{wch:12},{wch:14},{wch:10},{wch:18},{wch:12}];
+      wsP['!merges'] = [{s:{r:0,c:0},e:{r:0,c:8}}];
+      const hP = {fill:{fgColor:{rgb:'003049'}},font:{bold:true,color:{rgb:'FFFFFF'},sz:12,name:'Cairo'},alignment:{horizontal:'center',readingOrder:2}};
+      if(wsP['A1']) wsP['A1'].s = hP;
+      // تنسيق هيدر العمود
+      'ABCDEFGHI'.split('').forEach(c=>{ const k=c+'2'; if(wsP[k]) wsP[k].s={fill:{fgColor:{rgb:'005CBF'}},font:{bold:true,color:{rgb:'FFFFFF'},sz:11,name:'Cairo'},alignment:{horizontal:'center',readingOrder:2}}; });
+      XLSX.utils.book_append_sheet(wb, wsP, 'الأصناف');
+    }
+
+    // ── شيت الصلاحية ──
+    if(EX.length){
+      const expAoa = [
+        ['تنبيهات الصلاحية — '+branch,'',''],
+        ['الصنف','تاريخ الانتهاء','شهور متبقية','الحالة'],
+        ...EX.map(e=>[
+          e.snf, e.expDate, e.months,
+          e.months<=0?'منتهية':e.months<=1?'حرجة':'تحذير'
+        ])
+      ];
+      const wsE = XLSX.utils.aoa_to_sheet(expAoa);
+      wsE['!cols'] = [{wch:24},{wch:18},{wch:14},{wch:12}];
+      wsE['!merges'] = [{s:{r:0,c:0},e:{r:0,c:3}}];
+      const hE = {fill:{fgColor:{rgb:'E65100'}},font:{bold:true,color:{rgb:'FFFFFF'},sz:12,name:'Cairo'},alignment:{horizontal:'center',readingOrder:2}};
+      if(wsE['A1']) wsE['A1'].s = hE;
+      XLSX.utils.book_append_sheet(wb, wsE, 'تنبيهات الصلاحية');
+    }
+
+    // ── شيت المرتجعات ──
+    if(R.length){
+      const retAoa = [
+        ['المرتجعات — '+branch,'','',''],
+        ['الصنف','الكمية','السبب','المنسق','التاريخ'],
+        ...R.map(r=>[r.snf||'—', r.qty||0, r.reason||'—', r.rep_name||r.name||'—', (r.created_at||'').slice(0,10)])
+      ];
+      const wsR = XLSX.utils.aoa_to_sheet(retAoa);
+      wsR['!cols'] = [{wch:24},{wch:10},{wch:20},{wch:18},{wch:12}];
+      wsR['!merges'] = [{s:{r:0,c:0},e:{r:0,c:4}}];
+      const hR = {fill:{fgColor:{rgb:'C0392B'}},font:{bold:true,color:{rgb:'FFFFFF'},sz:12,name:'Cairo'},alignment:{horizontal:'center',readingOrder:2}};
+      if(wsR['A1']) wsR['A1'].s = hR;
+      XLSX.utils.book_append_sheet(wb, wsR, 'المرتجعات');
+    }
+
+    // ── شيت النواقص ──
+    if(M.length){
+      const misAoa = [
+        ['النواقص — '+branch,'',''],
+        ['الصنف','السبب','المنسق','التاريخ'],
+        ...M.map(m=>[m.snf||'—', m.reason||'—', m.rep_name||m.name||'—', (m.created_at||'').slice(0,10)])
+      ];
+      const wsM = XLSX.utils.aoa_to_sheet(misAoa);
+      wsM['!cols'] = [{wch:24},{wch:20},{wch:18},{wch:12}];
+      wsM['!merges'] = [{s:{r:0,c:0},e:{r:0,c:3}}];
+      const hM = {fill:{fgColor:{rgb:'F77F00'}},font:{bold:true,color:{rgb:'FFFFFF'},sz:12,name:'Cairo'},alignment:{horizontal:'center',readingOrder:2}};
+      if(wsM['A1']) wsM['A1'].s = hM;
+      XLSX.utils.book_append_sheet(wb, wsM, 'النواقص');
+    }
+
+    const fname = `تقرير_${branch}_${today.replace(/\//g,'-')}.xlsx`;
+    XLSX.writeFile(wb, fname);
+
+  }catch(e){
+    alert('خطأ في التصدير: ' + e.message);
+  }
+}
 
 
-</script>
-</body>
-</html>
