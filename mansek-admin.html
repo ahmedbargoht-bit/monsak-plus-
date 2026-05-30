@@ -381,6 +381,9 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           <div class="nav-item" onclick="showPanel('rep-report')">
             <i class="ti ti-report-analytics"></i> تقرير المنسق
           </div>
+          <div class="nav-item" onclick="showPanel('products-report')">
+            <i class="ti ti-file-spreadsheet"></i> تقرير الأصناف Excel
+          </div>
           <div class="nav-item" onclick="showPanel('activity')">
             <i class="ti ti-activity"></i> سجل النشاط
           </div>
@@ -1591,6 +1594,50 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           </div>
         </div>
 
+        <!-- ══ PANEL: تقرير الأصناف Excel ══════════════════ -->
+        <div id="panel-products-report" class="panel">
+          <div class="page-header">
+            <div><h2>تقرير الأصناف Excel</h2><p>تصدير بتنسيق الفورمة الاحترافية</p></div>
+          </div>
+          <div class="card">
+            <div class="card-title"><i class="ti ti-adjustments"></i> فلاتر التقرير</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+              <div class="form-fld"><label class="form-lbl">المجموعة</label>
+                <select id="adm-rpt-grp">
+                  <option value="all">كل المجموعات</option>
+                  <option value="giza">الجيزة</option>
+                  <option value="cairo">وسط القاهرة</option>
+                  <option value="south">جنوب وشرق</option>
+                  <option value="tajmuat">التجمعات</option>
+                  <option value="hyper">الهايبر</option>
+                  <option value="alex">الإسكندرية</option>
+                </select>
+              </div>
+              <div class="form-fld"><label class="form-lbl">الفرع (اختياري)</label>
+                <input type="text" id="adm-rpt-branch" placeholder="اسم الفرع..."/></div>
+              <div class="form-fld"><label class="form-lbl">المنسق (اختياري)</label>
+                <input type="text" id="adm-rpt-rep" placeholder="اسم المنسق..."/></div>
+              <div></div>
+              <div class="form-fld"><label class="form-lbl">من تاريخ</label>
+                <input type="date" id="adm-rpt-from"/></div>
+              <div class="form-fld"><label class="form-lbl">إلى تاريخ</label>
+                <input type="date" id="adm-rpt-to"/></div>
+            </div>
+            <div id="adm-rpt-status" style="font-size:12px;color:var(--text2);margin-bottom:10px;min-height:18px"></div>
+            <div style="display:flex;gap:10px">
+              <button class="btn btn-ghost btn-sm" onclick="admRptPreview()"><i class="ti ti-eye"></i> معاينة</button>
+              <button class="btn btn-green" onclick="admRptExport()" id="adm-rpt-btn" style="flex:1">
+                <i class="ti ti-file-download"></i> تصدير Excel
+              </button>
+            </div>
+          </div>
+          <div class="card" id="adm-rpt-preview" style="display:none">
+            <div class="card-title"><i class="ti ti-table"></i> معاينة</div>
+            <div id="adm-rpt-preview-content"></div>
+          </div>
+        </div>
+        <!-- ══ END PANEL products-report ════════════════════ -->
+
         <!-- ══ PANEL: تقرير المنسق التفصيلي ══════════════════════ -->
         <div id="panel-rep-report" class="panel">
           <div class="page-header">
@@ -2717,6 +2764,137 @@ function exportAll(){
 }
 
 
+// ══════════════════════════════════════════════════════════════
+// PRODUCTS REPORT EXCEL — لوحة الإدارة
+// ══════════════════════════════════════════════════════════════
+const RPT_DARK_RED_A='731E2E', RPT_OLIVE_A='6B7A3B', RPT_MAX_B_A=8;
+
+function admRptInit(){
+  const now=new Date(),y=now.getFullYear(),m=String(now.getMonth()+1).padStart(2,'0'),d=String(now.getDate()).padStart(2,'0');
+  const f=document.getElementById('adm-rpt-from'),t=document.getElementById('adm-rpt-to');
+  if(f&&!f.value) f.value=`${y}-${m}-01`;
+  if(t&&!t.value) t.value=`${y}-${m}-${d}`;
+}
+
+async function admRptFetch(){
+  const grp   =document.getElementById('adm-rpt-grp').value;
+  const branch=document.getElementById('adm-rpt-branch').value.trim();
+  const rep   =document.getElementById('adm-rpt-rep').value.trim();
+  const from  =document.getElementById('adm-rpt-from').value;
+  const to    =document.getElementById('adm-rpt-to').value;
+  const status=document.getElementById('adm-rpt-status');
+  status.textContent='⏳ جاري تحميل البيانات...';
+
+  const grps = grp==='all' ? Object.keys(GROUPS) : [grp];
+  let url=`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&select=*&order=snf.asc&limit=3000`;
+  if(branch) url+=`&branch=eq.${encodeURIComponent(branch)}`;
+  if(rep)    url+=`&name=eq.${encodeURIComponent(rep)}`;
+  if(from)   url+=`&created_at=gte.${from}T00:00:00`;
+  if(to)     url+=`&created_at=lte.${to}T23:59:59`;
+
+  const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+  let rows=await res.json(); if(!Array.isArray(rows)) rows=[];
+
+  let vUrl=`${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&select=id`;
+  if(branch) vUrl+=`&branch=eq.${encodeURIComponent(branch)}`;
+  if(rep)    vUrl+=`&name=eq.${encodeURIComponent(rep)}`;
+  if(from)   vUrl+=`&date=gte.${from}`;
+  if(to)     vUrl+=`&date=lte.${to}`;
+  const vRes=await fetch(vUrl,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+  const visits=await vRes.json(); const vc=Array.isArray(visits)?visits.length:0;
+
+  const fmt=d=>d?new Date(d).toLocaleDateString('ar-EG',{day:'2-digit',month:'2-digit',year:'numeric'}):'—';
+  const meta={
+    منطقة: grp==='all'?'كل المجموعات':(GROUPS[grp]?.label||grp),
+    فرع: branch||'الكل', منسق: rep||'الكل',
+    من: fmt(from), الى: fmt(to), عدد_الزيارات: vc
+  };
+  status.textContent=`✓ ${rows.length} صنف · ${vc} زيارة`;
+  return {rows, meta};
+}
+
+async function admRptPreview(){
+  const {rows,meta}=await admRptFetch();
+  const data=admRptBuildData(rows,meta);
+  const card=document.getElementById('adm-rpt-preview');
+  const cont=document.getElementById('adm-rpt-preview-content');
+  card.style.display='block';
+  cont.innerHTML=`
+    <div style="font-size:12px;color:var(--text2);margin-bottom:8px">${data.منطقة} · ${data.فرع} · ${data.عدد_الزيارات} زيارة · ${data.اصناف.length} صنف</div>
+    <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
+      <div style="background:#731E2E;color:#fff;padding:8px 10px;font-size:11px;font-weight:700">اسم الصنف · الإجمالي</div>
+      ${data.اصناف.slice(0,15).map((s,i)=>`<div style="display:flex;justify-content:space-between;padding:7px 10px;border-bottom:1px solid var(--border);font-size:12px;background:${i%2?'#FBF0F0':'#fff'}">
+        <div>${s.صنف}</div>
+        <div style="font-weight:700;color:#731E2E">${s.batches.reduce((sum,b)=>sum+b.عدد,0)} وحدة</div>
+      </div>`).join('')}
+      ${data.اصناف.length>15?`<div style="padding:8px;font-size:11px;color:var(--text2);text-align:center">و ${data.اصناف.length-15} أصناف أخرى...</div>`:''}
+    </div>`;
+}
+
+async function admRptExport(){
+  const btn=document.getElementById('adm-rpt-btn');
+  btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري...';
+  try{
+    const {rows,meta}=await admRptFetch();
+    if(!rows.length){alert('لا توجد بيانات');return;}
+    admRptGenerateExcel(admRptBuildData(rows,meta));
+  }catch(e){alert('خطأ: '+e.message);}
+  finally{btn.disabled=false;btn.innerHTML='<i class="ti ti-file-download"></i> تصدير Excel';}
+}
+
+function admRptFmtDate(d){if(!d)return '—';try{return new Date(d+'-01').toLocaleDateString('ar-EG',{month:'long',year:'numeric'});}catch(e){return d;}}
+
+function admRptBuildData(rows,meta){
+  const map={};
+  rows.forEach(p=>{
+    const k=p.snf||'—';if(!map[k])map[k]={صنف:k,batches:{}};
+    if(+p.shelf_qty>0){const dk=admRptFmtDate(p.date_shelf)||'—';if(!map[k].batches[dk])map[k].batches[dk]={عدد:0,تاريخ:dk};map[k].batches[dk].عدد+=+p.shelf_qty||0;}
+    if(+p.stock_qty>0){const dk=(admRptFmtDate(p.date_stock)||'—')+'★';if(!map[k].batches[dk])map[k].batches[dk]={عدد:0,تاريخ:admRptFmtDate(p.date_stock)||'—'};map[k].batches[dk].عدد+=+p.stock_qty||0;}
+  });
+  return {...meta,تاريخ_التقرير:new Date().toLocaleDateString('ar-EG',{day:'2-digit',month:'2-digit',year:'numeric'}),
+    اصناف:Object.values(map).map(s=>({...s,batches:Object.values(s.batches).slice(0,RPT_MAX_B_A)})).filter(s=>s.batches.length)};
+}
+
+function admRptGenerateExcel(data){
+  const MB=RPT_MAX_B_A,TC=2+MB*2,VC=TC+1,ALL=VC,DR=RPT_DARK_RED_A,OL=RPT_OLIVE_A;
+  const aoa=[];
+  aoa.push(['تقرير أصناف الفروع — الطحان جولدن داتس | أصل التمر',...Array(ALL-1).fill('')]);
+  aoa.push([`اسم المنطقة: ${data.منطقة}`,'','',`اسم الفرع: ${data.فرع}`,'','',`اسم المنسق: ${data.منسق}`,...Array(ALL-7).fill('')]);
+  aoa.push([`من: ${data.من}`,'','',`إلى: ${data.الى}`,'','',`عدد الزيارات: ${data.عدد_الزيارات} زيارة`,...Array(ALL-7).fill('')]);
+  aoa.push([`تاريخ التقرير: ${data.تاريخ_التقرير}`,...Array(ALL-1).fill('')]);
+  const h1=['اسم الصنف'];for(let i=1;i<=MB;i++){h1.push(`Batch ${i}`);h1.push('');}h1.push('الإجمالي');h1.push('عدد الزيارات');aoa.push(h1);
+  const h2=[''];for(let i=0;i<MB;i++){h2.push('العدد');h2.push('تاريخ الانتهاء');}h2.push('');h2.push('');aoa.push(h2);
+  data.اصناف.forEach(snf=>{
+    const row=[snf.صنف];let tot=0;
+    for(let i=0;i<MB;i++){if(i<snf.batches.length){row.push(snf.batches[i].عدد);row.push(snf.batches[i].تاريخ);tot+=snf.batches[i].عدد;}else{row.push('');row.push('');}}
+    row.push(tot);row.push(data.عدد_الزيارات);aoa.push(row);
+  });
+  const trow=['الإجمالي الكلي'];let grand=0;
+  for(let i=0;i<MB;i++){const s=data.اصناف.reduce((a,x)=>a+(x.batches[i]?.عدد||0),0);trow.push(s);trow.push('');grand+=s;}
+  trow.push(grand);trow.push(data.عدد_الزيارات);aoa.push(trow);
+  const wb=XLSX.utils.book_new(),ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:28}];for(let i=0;i<MB;i++){ws['!cols'].push({wch:9});ws['!cols'].push({wch:16});}ws['!cols'].push({wch:12});ws['!cols'].push({wch:16});
+  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:ALL-1}},{s:{r:1,c:0},e:{r:1,c:2}},{s:{r:1,c:3},e:{r:1,c:5}},{s:{r:1,c:6},e:{r:1,c:ALL-1}},{s:{r:2,c:0},e:{r:2,c:2}},{s:{r:2,c:3},e:{r:2,c:5}},{s:{r:2,c:6},e:{r:2,c:ALL-1}},{s:{r:3,c:0},e:{r:3,c:ALL-1}},{s:{r:4,c:0},e:{r:5,c:0}},{s:{r:4,c:TC-1},e:{r:5,c:TC-1}},{s:{r:4,c:VC-1},e:{r:5,c:VC-1}}];
+  for(let i=0;i<MB;i++) ws['!merges'].push({s:{r:4,c:1+i*2},e:{r:4,c:2+i*2}});
+  const S=(bg,fc,b,sz,right)=>({fill:{fgColor:{rgb:bg}},font:{bold:b,color:{rgb:fc},sz,name:'Cairo'},alignment:{horizontal:right?'right':'center',vertical:'center',wrapText:true,readingOrder:2},border:{top:{style:'thin'},bottom:{style:'thin'},left:{style:'thin'},right:{style:'thin'}}});
+  const set=(r,c,s)=>{const a=XLSX.utils.encode_cell({r,c});if(!ws[a])ws[a]={t:'z',v:''};ws[a].s=s;};
+  for(let c=0;c<ALL;c++) set(0,c,S(DR,'FFFFFF',true,14));
+  for(let r=1;r<=3;r++) for(let c=0;c<ALL;c++) set(r,c,S('F5E8E8',DR,true,11,true));
+  for(let c=0;c<ALL;c++){set(4,c,S([0,TC-1,VC-1].includes(c)?DR:OL,'FFFFFF',true,11));set(5,c,S([0,TC-1,VC-1].includes(c)?DR:OL,'FFFFFF',true,10));}
+  data.اصناف.forEach((snf,idx)=>{
+    const r=6+idx,bg=idx%2===0?'FFFFFF':'FBF0F0';
+    set(r,0,S(bg,'000000',true,11,true));
+    for(let i=0;i<MB;i++){set(r,1+i*2,S(bg,'000000',false,11));set(r,2+i*2,S(bg,'555555',false,10));}
+    set(r,TC-1,S('F5E8E8',DR,true,11));set(r,VC-1,S('EEF2E6',OL,true,12));
+  });
+  const TR=6+data.اصناف.length;
+  set(TR,0,S(DR,'FFFFFF',true,12,true));
+  for(let c=1;c<ALL;c++) set(TR,c,S(c===VC-1?OL:DR,'FFFFFF',true,c===TC-1?13:11));
+  ws['!rows']=[{hpt:32},{hpt:22},{hpt:22},{hpt:22},{hpt:20},{hpt:20},...data.اصناف.map(()=>({hpt:20})),{hpt:26}];
+  XLSX.utils.book_append_sheet(wb,ws,'تقرير الأصناف');
+  XLSX.writeFile(wb,`تقرير_أصناف_${data.فرع}_${data.من.replace(/\//g,'-')}.xlsx`);
+}
+// ══════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════
 // REPORT — تقرير المنسق التفصيلي
 // ══════════════════════════════════════════════════════════════
@@ -4005,6 +4183,7 @@ function renderCurrentPanel(){
     case 'export-full': break;
     case 'activity': loadActivity(); break;
     case 'rep-report': rrInit(); break;
+    case 'products-report': admRptInit(); break;
     case 'checkout-exceptions': adminLoadExceptions(); break;
     case 'reset': loadResetStats(); break;
     case 'sup-monitor': loadSupMonitor(); break;
@@ -4023,7 +4202,7 @@ function updateBadges(){
 // ══════════════════════════════════════════════════════════════
 // NAV
 // ══════════════════════════════════════════════════════════════
-const PANEL_TITLES={dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',returns:'المرتجعات',attendance:'الحضور والانصراف','attendance-export':'كشف الحضور والمرتبات','expiry-alert':'تنبيهات الصلاحية',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',supervisors:'المشرفون والمديرون','sales-users':'مشرفو المبيعات',branches:'الفروع والعملاء',settings:'الإعدادات','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام'};
+const PANEL_TITLES={dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',returns:'المرتجعات',attendance:'الحضور والانصراف','attendance-export':'كشف الحضور والمرتبات','expiry-alert':'تنبيهات الصلاحية',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',supervisors:'المشرفون والمديرون','sales-users':'مشرفو المبيعات',branches:'الفروع والعملاء',settings:'الإعدادات','products-report':'تقرير الأصناف Excel','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام'};
 
 function showPanel(id){
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
