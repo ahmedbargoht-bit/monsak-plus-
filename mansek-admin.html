@@ -1129,9 +1129,9 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
             </div>
           </div>
 
-          <!-- ── فلاتر 3 قوائم ── -->
+          <!-- ── فلاتر 3 قوائم + فترة زمنية ── -->
           <div class="card" style="margin-bottom:12px">
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;align-items:end">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px">
               <div>
                 <label class="lbl">المجموعة / المنطقة</label>
                 <select id="asr-grp" onchange="asrOnGrpChange()">
@@ -1156,6 +1156,19 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
                   <option value="">اختر الفرع...</option>
                 </select>
               </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end">
+              <div>
+                <label class="lbl">من تاريخ</label>
+                <input type="date" id="asr-from"/>
+              </div>
+              <div>
+                <label class="lbl">إلى تاريخ</label>
+                <input type="date" id="asr-to"/>
+              </div>
+              <button class="btn btn-blue btn-sm" onclick="asrRefresh()" style="white-space:nowrap">
+                <i class="ti ti-search"></i> بحث
+              </button>
             </div>
           </div>
 
@@ -8029,23 +8042,34 @@ async function asrRefresh(){
   document.getElementById('asr-loading').style.display = 'none';
 }
 
+// cache بيانات الفرع للتصدير
+let _asrCache = {P:[], R:[], M:[], EX:[]};
+
 async function asrLoadBranchData(branch){
-  const enc = encodeURIComponent(branch);
-  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const enc  = encodeURIComponent(branch);
+  const from = document.getElementById('asr-from').value;
+  const to   = document.getElementById('asr-to').value;
+  const H    = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  // بناء فلتر التاريخ
+  let dateFilter = '';
+  if(from) dateFilter += `&created_at=gte.${from}T00:00:00`;
+  if(to)   dateFilter += `&created_at=lte.${to}T23:59:59`;
 
   try{
     const [products, returns_, missing_] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/products?branch=eq.${enc}&select=*&order=created_at.desc&limit=500`,{headers:H}).then(r=>r.json()).catch(()=>[]),
-      fetch(`${SUPABASE_URL}/rest/v1/returns?branch=eq.${enc}&select=*&order=created_at.desc&limit=200`,{headers:H}).then(r=>r.json()).catch(()=>[]),
-      fetch(`${SUPABASE_URL}/rest/v1/missing?branch=eq.${enc}&select=*&order=created_at.desc&limit=200`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/products?branch=eq.${enc}&select=*&order=created_at.desc&limit=500${dateFilter}`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/returns?branch=eq.${enc}&select=*&order=created_at.desc&limit=200${dateFilter}`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/missing?branch=eq.${enc}&select=*&order=created_at.desc&limit=200${dateFilter}`,{headers:H}).then(r=>r.json()).catch(()=>[]),
     ]);
 
     const P = Array.isArray(products) ? products : [];
     const R = Array.isArray(returns_) ? returns_ : [];
     const M = Array.isArray(missing_) ? missing_ : [];
+    const EX = asrCalcExpiry(P);
 
-    // ── إحصاء سريع ──
-    const expiry = asrCalcExpiry(P);
+    // حفظ في cache للتصدير
+    _asrCache = {P, R, M, EX};
     document.getElementById('asr-quick-stats').innerHTML = `
       <div style="background:rgba(255,255,255,.12);border-radius:8px;padding:8px;text-align:center">
         <div style="font-size:22px;font-weight:900">${P.length}</div>
@@ -8060,7 +8084,7 @@ async function asrLoadBranchData(branch){
         <div style="font-size:10px;opacity:.8">ناقص</div>
       </div>
       <div style="background:rgba(255,255,255,.12);border-radius:8px;padding:8px;text-align:center">
-        <div style="font-size:22px;font-weight:900;color:#FFB347">${expiry.length}</div>
+        <div style="font-size:22px;font-weight:900;color:#FFB347">${EX.length}</div>
         <div style="font-size:10px;opacity:.8">صلاحية ⚠️</div>
       </div>`;
 
@@ -8226,30 +8250,22 @@ async function asrExportExcel(){
   const route  = document.getElementById('asr-route').value;
   if(!branch){ alert('اختر فرعاً أولاً'); return; }
 
-  const enc = encodeURIComponent(branch);
-  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-
-  try{
-    const [products, returns_, missing_] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/products?branch=eq.${enc}&select=*&order=created_at.desc&limit=500`,{headers:H}).then(r=>r.json()).catch(()=>[]),
-      fetch(`${SUPABASE_URL}/rest/v1/returns?branch=eq.${enc}&select=*&order=created_at.desc&limit=200`,{headers:H}).then(r=>r.json()).catch(()=>[]),
-      fetch(`${SUPABASE_URL}/rest/v1/missing?branch=eq.${enc}&select=*&order=created_at.desc&limit=200`,{headers:H}).then(r=>r.json()).catch(()=>[]),
-    ]);
-
-    const P = Array.isArray(products)?products:[];
-    const R = Array.isArray(returns_)?returns_:[];
-    const M = Array.isArray(missing_)?missing_:[];
-    const EX = asrCalcExpiry(P);
+  // استخدم البيانات المحملة مسبقاً
+  const {P, R, M, EX} = _asrCache;
 
     const wb = XLSX.utils.book_new();
     const today = new Date().toLocaleDateString('ar-EG',{day:'2-digit',month:'2-digit',year:'numeric'});
     const grpLabel = ASR_GRP_LABELS[grp]||grp;
+    const fromVal = document.getElementById('asr-from').value;
+    const toVal   = document.getElementById('asr-to').value;
+    const periodTxt = fromVal||toVal ? `${fromVal||'—'} إلى ${toVal||'—'}` : 'كل الفترات';
 
     // ── شيت معلومات الفرع ──
     const infoAoa = [
       ['تقرير فرع — الطحان جولدن داتس','','','',''],
       [`الفرع: ${branch}`,'','',`المنطقة: ${grpLabel}`,''],
       [`خط السير: ${route}`,'','',`تاريخ التقرير: ${today}`,''],
+      [`الفترة: ${periodTxt}`,'','','',''],
       [''],
       ['البيان','العدد','','',''],
       ['إجمالي الأصناف المسجلة', P.length,'','',''],
@@ -8337,10 +8353,6 @@ async function asrExportExcel(){
 
     const fname = `تقرير_${branch}_${today.replace(/\//g,'-')}.xlsx`;
     XLSX.writeFile(wb, fname);
-
-  }catch(e){
-    alert('خطأ في التصدير: ' + e.message);
-  }
 }
 </script>
 </body>
