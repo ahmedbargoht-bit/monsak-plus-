@@ -321,6 +321,10 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
             <i class="ti ti-alert-triangle"></i> النواقص
             <span class="nav-badge" id="nav-miss-badge" style="display:none"></span>
           </div>
+          <div class="nav-item" onclick="showPanel('returns')">
+            <i class="ti ti-arrow-back-up" style="color:#C0392B"></i> المرتجعات
+            <span class="nav-badge" id="nav-ret-badge" style="display:none;background:#C0392B"></span>
+          </div>
           <div class="nav-item" onclick="showPanel('attendance')">
             <i class="ti ti-clock"></i> الحضور والانصراف
           </div>
@@ -1698,6 +1702,52 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
         </div>
         <!-- ══ END PANEL ══════════════════════════════════════════ -->
 
+        <!-- ══ PANEL: المرتجعات ══════════════════════════════ -->
+        <div id="panel-returns" class="panel">
+          <div class="page-header">
+            <div><h2>المرتجعات</h2><p>أصناف مرتجعة من الفروع والعملاء</p></div>
+            <div class="page-actions">
+              <button class="btn btn-green btn-sm" onclick="exportReturnsExcel()"><i class="ti ti-file-download"></i> تصدير Excel</button>
+            </div>
+          </div>
+          <div class="filter-bar" style="margin-bottom:12px">
+            <select id="admin-ret-grp" onchange="adminLoadReturns()">
+              <option value="all">كل المجموعات</option>
+              <option value="giza">الجيزة</option>
+              <option value="cairo">القاهرة</option>
+              <option value="south">جنوب وشرق</option>
+              <option value="tajmuat">التجمعات</option>
+              <option value="hyper">الهايبر</option>
+              <option value="alex">الإسكندرية</option>
+            </select>
+            <select id="admin-ret-reason" onchange="adminLoadReturns()">
+              <option value="all">كل الأسباب</option>
+              <option value="تغير شكل التمرة">تغير شكل التمرة</option>
+              <option value="العبوة غير صالحة للعرض">العبوة غير صالحة</option>
+              <option value="قرب انتهاء الصلاحية">قرب الانتهاء</option>
+              <option value="منتهي الصلاحية">منتهي الصلاحية</option>
+              <option value="كميات أكبر من استهلاك العميل">كميات زائدة</option>
+            </select>
+            <input type="date" id="admin-ret-from" onchange="adminLoadReturns()"/>
+            <input type="date" id="admin-ret-to"   onchange="adminLoadReturns()"/>
+            <button class="btn btn-ghost btn-sm" onclick="adminLoadReturns()"><i class="ti ti-refresh"></i></button>
+          </div>
+          <div id="admin-ret-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px"></div>
+          <div class="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th><th>المنسق</th><th>خط السير</th><th>المجموعة</th>
+                  <th>العميل/الفرع</th><th>الصنف</th><th>الكمية</th>
+                  <th>سبب الارتجاع</th><th>ملاحظة</th><th>التاريخ</th>
+                </tr>
+              </thead>
+              <tbody id="admin-ret-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <!-- ══ END PANEL ══════════════════════════════════════ -->
+
         <!-- ══ PANEL: تنبيهات الصلاحية ══════════════════════ -->
         <div id="panel-expiry-alert" class="panel">
           <div class="page-header">
@@ -2974,6 +3024,111 @@ function rrStyleHeader(ws, firstRow){
 let _pdbFeaFilter = 'all';
 
 // ══════════════════════════════════════════════════════════════
+// RETURNS — المرتجعات في لوحة الإدارة
+// ══════════════════════════════════════════════════════════════
+
+async function adminLoadReturns(){
+  const tbody  = document.getElementById('admin-ret-tbody');
+  const stats  = document.getElementById('admin-ret-stats');
+  const grp    = document.getElementById('admin-ret-grp')?.value||'all';
+  const reason = document.getElementById('admin-ret-reason')?.value||'all';
+  const from   = document.getElementById('admin-ret-from')?.value||'';
+  const to     = document.getElementById('admin-ret-to')?.value||'';
+  if(!tbody) return;
+  tbody.innerHTML='<tr><td colspan="10" style="text-align:center;padding:1rem">جاري التحميل...</td></tr>';
+
+  try{
+    let url=`${SUPABASE_URL}/rest/v1/returns?order=created_at.desc&limit=1000`;
+    if(grp!=='all')    url+=`&grp=eq.${grp}`;
+    if(reason!=='all') url+=`&reason=eq.${encodeURIComponent(reason)}`;
+    if(from) url+=`&created_at=gte.${from}T00:00:00`;
+    if(to)   url+=`&created_at=lte.${to}T23:59:59`;
+
+    const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    let data=await res.json();
+    if(!Array.isArray(data)) data=[];
+
+    // إحصائيات
+    const totalQty=data.reduce((s,r)=>s+(+r.qty||0),0);
+    const uniqBranch=new Set(data.map(r=>r.branch)).size;
+    const uniqSnf=new Set(data.map(r=>r.snf)).size;
+
+    // badge السايدبار
+    const badge=document.getElementById('nav-ret-badge');
+    if(badge){badge.textContent=data.length;badge.style.display=data.length?'':'none';}
+
+    if(stats) stats.innerHTML=`
+      <div class="stat-card red"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي المرتجعات</div></div>
+      <div class="stat-card orange"><div class="stat-n">${totalQty}</div><div class="stat-l">إجمالي الوحدات</div></div>
+      <div class="stat-card blue"><div class="stat-n">${uniqBranch}</div><div class="stat-l">عملاء مختلفون</div></div>
+      <div class="stat-card green"><div class="stat-n">${uniqSnf}</div><div class="stat-l">أصناف مختلفة</div></div>`;
+
+    if(!data.length){
+      tbody.innerHTML='<tr><td colspan="10" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد مرتجعات</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML=data.map((r,i)=>{
+      const dt=r.created_at?new Date(r.created_at).toLocaleString('ar-EG',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}):'';
+      return `<tr>
+        <td>${i+1}</td>
+        <td><b>${r.name||'—'}</b></td>
+        <td style="font-size:11px">${r.route||'—'}</td>
+        <td><span class="badge" style="background:${GROUPS[r.grp]?.color||'#ccc'}22;color:${GROUPS[r.grp]?.color||'#555'}">${GROUPS[r.grp]?.label||r.grp||'—'}</span></td>
+        <td style="font-size:11px"><b>${r.branch||'—'}</b></td>
+        <td style="font-size:11px;max-width:150px">${r.snf||'—'}</td>
+        <td><b style="color:#C0392B">${r.qty||0}</b></td>
+        <td><span class="badge b-red" style="font-size:10px">${r.reason||'—'}</span></td>
+        <td style="font-size:11px">${r.note||'—'}</td>
+        <td style="font-size:11px">${dt}</td>
+      </tr>`;
+    }).join('');
+
+    // حفظ البيانات للتصدير
+    window._retData = data;
+
+  }catch(e){
+    tbody.innerHTML=`<tr><td colspan="10" style="text-align:center;color:var(--red)">تعذر التحميل: ${e.message}</td></tr>`;
+  }
+}
+
+function exportReturnsExcel(){
+  const data=window._retData||[];
+  if(!data.length){alert('لا توجد بيانات للتصدير');return;}
+  const rows=data.map((r,i)=>({
+    '#':             i+1,
+    'المنسق':        r.name||'',
+    'خط السير':      r.route||'',
+    'المجموعة':      GROUPS[r.grp]?.label||r.grp||'',
+    'العميل/الفرع':  r.branch||'',
+    'الفئة':         r.fea||'',
+    'التصنيف':       r.cat||'',
+    'الصنف':         r.snf||'',
+    'الكمية':        r.qty||0,
+    'سبب الارتجاع':  r.reason||'',
+    'ملاحظة':        r.note||'',
+    'التاريخ':       r.created_at?new Date(r.created_at).toLocaleDateString('ar-EG'):'',
+  }));
+  const wb=XLSX.utils.book_new();
+  const ws=XLSX.utils.json_to_sheet(rows);
+  ws['!cols']=Object.keys(rows[0]).map(()=>({wch:18}));
+  XLSX.utils.book_append_sheet(wb,ws,'المرتجعات');
+  XLSX.writeFile(wb,`مرتجعات_${new Date().toLocaleDateString('ar-EG').replace(/\//g,'-')}.xlsx`);
+}
+
+// تحديث badge عند تحميل الإدارة
+async function adminCheckReturnsBadge(){
+  try{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/returns?status=eq.new&select=id`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const data=await res.json();
+    const count=Array.isArray(data)?data.length:0;
+    const badge=document.getElementById('nav-ret-badge');
+    if(badge){badge.textContent=count;badge.style.display=count?'':'none';}
+  }catch(e){}
+}
+
+// ══════════════════════════════════════════════════════════════
 // EXPIRY ALERTS — تنبيهات الصلاحية في لوحة الإدارة
 // ══════════════════════════════════════════════════════════════
 
@@ -3205,7 +3360,7 @@ setInterval(async()=>{
 // ══════════════════════════════════════════════════════════════
 
 const RESET_TABLES = [
-  'visits','visit_results','products','missing',
+  'visits','visit_results','products','missing','returns',
   'attendance','location','checkout_exceptions',
   'orders','inventory_checks',
   'weekly_plans','weekly_plan_items','supervisor_execution','plan_deviations',
@@ -3648,6 +3803,7 @@ async function doLogin(){
   setupApp();
   startRealtimeAdmin();
   adminCheckExpiryBadge();
+  adminCheckReturnsBadge();
   if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-login"></i> دخول';}
 }
 
@@ -3727,6 +3883,7 @@ function renderCurrentPanel(){
     case 'visits': loadVisits(); break;
     case 'products': loadProducts(); break;
     case 'missing': loadMissing(); break;
+    case 'returns': adminLoadReturns(); break;
     case 'attendance': loadAttendance(); break;
     case 'attendance-export': aeInit(); break;
     case 'expiry-alert': adminLoadExpiry(); break;
@@ -3777,7 +3934,7 @@ function updateBadges(){
 // ══════════════════════════════════════════════════════════════
 // NAV
 // ══════════════════════════════════════════════════════════════
-const PANEL_TITLES={dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',attendance:'الحضور والانصراف','attendance-export':'كشف الحضور والمرتبات','expiry-alert':'تنبيهات الصلاحية',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',branches:'الفروع والعملاء',settings:'الإعدادات','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام'};
+const PANEL_TITLES={dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',returns:'المرتجعات',attendance:'الحضور والانصراف','attendance-export':'كشف الحضور والمرتبات','expiry-alert':'تنبيهات الصلاحية',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',branches:'الفروع والعملاء',settings:'الإعدادات','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام'};
 
 function showPanel(id){
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));

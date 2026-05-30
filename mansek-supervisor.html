@@ -373,6 +373,10 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       <i class="ti ti-alert-circle"></i>الصلاحية
       <span id="expiry-badge" style="display:none;position:absolute;top:4px;right:calc(50% - 14px);background:#E65100;color:#fff;border-radius:999px;font-size:9px;padding:1px 5px;font-weight:700;min-width:16px;text-align:center"></span>
     </div>
+    <div class="tab" onclick="showTab('returns')" id="tab-returns" style="position:relative">
+      <i class="ti ti-arrow-back-up"></i>المرتجعات
+      <span id="ret-sup-badge" style="display:none;position:absolute;top:4px;right:calc(50% - 14px);background:#C0392B;color:#fff;border-radius:999px;font-size:9px;padding:1px 5px;font-weight:700;min-width:16px;text-align:center"></span>
+    </div>
   </div>
 
   <!-- Content -->
@@ -843,6 +847,31 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       </div>
     </div>
 
+    </div>
+
+    <!-- ══ Returns ══════════════════════════════════════════════ -->
+    <div class="screen" id="screen-returns">
+      <div class="card">
+        <div class="card-title"><i class="ti ti-arrow-back-up" style="color:#C0392B"></i> المرتجعات</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <select id="ret-sup-filter" onchange="supLoadReturns()" class="filter-select" style="flex:1">
+            <option value="all">كل الأسباب</option>
+            <option value="تغير شكل التمرة">تغير شكل التمرة</option>
+            <option value="العبوة غير صالحة للعرض">العبوة غير صالحة</option>
+            <option value="قرب انتهاء الصلاحية">قرب الانتهاء</option>
+            <option value="منتهي الصلاحية">منتهي الصلاحية</option>
+            <option value="كميات أكبر من استهلاك العميل">كميات زائدة</option>
+          </select>
+          <input type="date" id="ret-sup-date" onchange="supLoadReturns()" class="filter-select" style="flex:1"/>
+          <button onclick="supLoadReturns()" style="padding:8px 12px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
+            <i class="ti ti-refresh"></i>
+          </button>
+        </div>
+        <div id="sup-ret-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px"></div>
+        <div id="sup-ret-list"><div class="empty">جاري التحميل...</div></div>
+      </div>
+    </div>
+
   </div><!-- end content -->
 
 <!-- ══ Modal: تعديل/حذف نقاط ══════════════════════════════════ -->
@@ -1264,9 +1293,10 @@ async function doLogin(){
 
   await loadAllData();
   showTab('dashboard');
-  _startBlockWatch();   // ابدأ مراقبة الطرد الفوري
-  startExcPolling();    // مراقبة طلبات الاستثناء
-  supCheckExpiryBadge(); // تحقق من الصلاحية
+  _startBlockWatch();
+  startExcPolling();
+  supCheckExpiryBadge();
+  startReturnsBadgePolling();
 }
 
 function logout(){
@@ -1497,6 +1527,7 @@ function showTab(tab){
   if(tab==='visits') rrInit();
   if(tab==='exceptions') loadExceptions();
   if(tab==='expiry') supLoadExpiry();
+  if(tab==='returns') supLoadReturns();
   if(tab==='results'){
     document.getElementById('res-date').value = new Date().toISOString().slice(0,10);
     renderVisitResults();
@@ -3528,8 +3559,101 @@ async function loadFsHistory(){
 }
 
 // ══════════════════════════════════════════════════════════════
-// CHECKOUT EXCEPTIONS — طلبات الاستثناء في تطبيق المشرف
+// RETURNS — المرتجعات في تطبيق المشرف
 // ══════════════════════════════════════════════════════════════
+
+async function supLoadReturns(){
+  const list   = document.getElementById('sup-ret-list');
+  const stats  = document.getElementById('sup-ret-stats');
+  const filter = document.getElementById('ret-sup-filter')?.value||'all';
+  const date   = document.getElementById('ret-sup-date')?.value||'';
+  if(!list) return;
+  list.innerHTML='<div class="empty"><div class="spinner"></div><br>جاري التحميل...</div>';
+
+  try{
+    const grps=(cu.groups||[]).join(',');
+    let url=`${SUPABASE_URL}/rest/v1/returns?grp=in.(${grps})&order=created_at.desc&limit=300`;
+    if(date) url+=`&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59`;
+
+    const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    let data=await res.json();
+    if(!Array.isArray(data)) data=[];
+
+    // فلتر السبب
+    if(filter!=='all') data=data.filter(r=>r.reason===filter);
+
+    // إحصائيات
+    const totalQty=data.reduce((s,r)=>s+(+r.qty||0),0);
+    const uniqSnf=new Set(data.map(r=>r.snf)).size;
+    const newCount=data.filter(r=>r.status==='new').length;
+
+    // badge
+    const badge=document.getElementById('ret-sup-badge');
+    if(badge){badge.textContent=newCount;badge.style.display=newCount?'':'none';}
+
+    if(stats) stats.innerHTML=`
+      <div style="text-align:center;padding:8px;background:#FFEBEE;border-radius:8px;border:1px solid #FFCDD2">
+        <div style="font-size:18px;font-weight:700;color:#C0392B">${data.length}</div>
+        <div style="font-size:10px;color:#C0392B">إجمالي المرتجعات</div>
+      </div>
+      <div style="text-align:center;padding:8px;background:#FFF3E0;border-radius:8px;border:1px solid #FFE0B2">
+        <div style="font-size:18px;font-weight:700;color:#E65100">${totalQty}</div>
+        <div style="font-size:10px;color:#E65100">إجمالي الوحدات</div>
+      </div>
+      <div style="text-align:center;padding:8px;background:#F3E5F5;border-radius:8px;border:1px solid #E1BEE7">
+        <div style="font-size:18px;font-weight:700;color:#6A1B9A">${uniqSnf}</div>
+        <div style="font-size:10px;color:#6A1B9A">أصناف مختلفة</div>
+      </div>`;
+
+    // علّم كـ seen
+    if(newCount){
+      fetch(`${SUPABASE_URL}/rest/v1/returns?grp=in.(${grps})&status=eq.new`,{
+        method:'PATCH',
+        headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+        body:JSON.stringify({status:'seen'})
+      });
+    }
+
+    if(!data.length){list.innerHTML='<div class="empty">لا توجد مرتجعات</div>';return;}
+
+    list.innerHTML=data.map(r=>{
+      const dt=r.created_at?new Date(r.created_at).toLocaleString('ar-EG',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}):'';
+      return `<div style="background:#f9f9fb;border:1px solid var(--border);border-right:4px solid #C0392B;border-radius:10px;padding:12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+          <div>
+            <div style="font-weight:700;font-size:13px">${r.snf}</div>
+            <div style="font-size:11px;color:var(--text2)">${r.name} · ${r.route||''}</div>
+          </div>
+          <span style="background:#FFEBEE;color:#C0392B;border-radius:20px;padding:3px 10px;font-size:12px;font-weight:700">${r.qty} وحدة</span>
+        </div>
+        <div style="font-size:11px;margin-bottom:4px">📍 <b>${r.branch||'—'}</b></div>
+        <div style="font-size:11px;color:#E65100;margin-bottom:4px">⚠️ ${r.reason}</div>
+        ${r.note?`<div style="font-size:11px;color:var(--text2)">💬 ${r.note}</div>`:''}
+        <div style="font-size:10px;color:#aaa;margin-top:4px">${dt}</div>
+      </div>`;
+    }).join('');
+  }catch(e){
+    list.innerHTML=`<div class="empty">تعذر التحميل: ${e.message}</div>`;
+  }
+}
+
+// polling badge كل دقيقة
+function startReturnsBadgePolling(){
+  setInterval(async()=>{
+    try{
+      const grps=(cu.groups||[]).join(',');
+      const res=await fetch(`${SUPABASE_URL}/rest/v1/returns?grp=in.(${grps})&status=eq.new&select=id`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+      const data=await res.json();
+      const count=Array.isArray(data)?data.length:0;
+      const badge=document.getElementById('ret-sup-badge');
+      if(badge){badge.textContent=count;badge.style.display=count?'':'none';}
+    }catch(e){}
+  },60000);
+}
+
+// ══════════════════════════════════════════════════════════════
+window.addEventListener('DOMContentLoaded', ()=>{
 
 async function loadExceptions(){
   const filter = document.getElementById('exc-filter')?.value || 'pending';
