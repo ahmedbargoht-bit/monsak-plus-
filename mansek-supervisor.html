@@ -1,9 +1,10 @@
+<!-- mansek-supervisor.html v3 — 2026-05-31 -->
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
-<title>المشرف بلس | الطحان جولدن داتس | أصل التمر</title>
+<title>المشرف بلس | الطحان جولدن داتس — v2</title>
 
 <!-- PWA Meta Tags -->
 <meta name="theme-color" content="#6A0F0E"/>
@@ -672,10 +673,16 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
           </select>
         </div>
         <div style="margin-bottom:12px">
-          <div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px">الفرع</div>
-          <select class="filter-select" id="fs-branch" style="width:100%">
-            <option value="">اختر الفرع...</option>
-          </select>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <div style="font-size:11px;font-weight:600;color:var(--text2)">الفروع</div>
+            <label style="font-size:10px;cursor:pointer;user-select:none;display:flex;align-items:center;gap:3px;color:var(--navy)">
+              <input type="checkbox" id="fs-check-all" onchange="fsToggleAllBranches(this.checked)" style="accent-color:var(--navy)"/> تحديد الكل
+            </label>
+          </div>
+          <div id="fs-branch-list" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px;background:#fafbfc">
+            <div style="text-align:center;padding:16px;color:var(--text2);font-size:11px">اختر خط السير لعرض الفروع</div>
+          </div>
+          <div id="fs-branch-count" style="font-size:10px;color:var(--text2);margin-top:4px"></div>
         </div>
 
         <!-- قسم بدء الدعم -->
@@ -3134,15 +3141,15 @@ function onAsgnDateChange(){
 
 async function sendAssignment(){
   const rep    = document.getElementById('fs-rep').value;
-  const branch = document.getElementById('fs-branch').value;
+  const selectedBranches = fsGetSelectedBranches();
   const date   = document.getElementById('asgn-date').value;
   const time   = document.getElementById('asgn-time').value;
   const note   = document.getElementById('asgn-note').value.trim();
 
-  if(!rep)   { showToast('⚠️ اختر المنسق');  return; }
-  if(!branch){ showToast('⚠️ اختر الفرع');   return; }
-  if(!date)  { showToast('⚠️ حدد تاريخ الزيارة'); return; }
-  if(!time)  { showToast('⚠️ حدد وقت الوصول');   return; }
+  if(!rep)                     { showToast('⚠️ اختر المنسق');  return; }
+  if(!selectedBranches.length) { showToast('⚠️ حدد فرع واحد على الأقل'); return; }
+  if(!date)                    { showToast('⚠️ حدد تاريخ الزيارة'); return; }
+  if(!time)                    { showToast('⚠️ حدد وقت الوصول');   return; }
 
   const dt = getArabicDateTime();
   const visitDate = new Date(date);
@@ -3153,30 +3160,36 @@ async function sendAssignment(){
     return `${h12}:${mn} ${+h>=12?'م':'ص'}`;
   });
 
-  // حفظ في assignments
+  // تاريخ الصلاحية اليومية — ينتهي في 23:59:59 من يوم الزيارة
+  const directed_date = date; // YYYY-MM-DD
+
+  // حفظ كل فرع كسطر منفصل في assignments
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  const rows = selectedBranches.map(branch=>({
+    supervisor_name: cu.name,
+    rep_name: rep,
+    branch_name: branch,
+    grp: cu.groups[0]||'',
+    visit_date: date,
+    visit_time: time,
+    visit_day: visitDay,
+    note: note,
+    status: 'pending',
+    directed_date: directed_date
+  }));
+
   const res = await fetch(`${SUPABASE_URL}/rest/v1/assignments`,{
-    method:'POST',
-    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=representation'},
-    body: JSON.stringify({
-      supervisor_name: cu.name,
-      rep_name: rep,
-      branch_name: branch,
-      grp: cu.groups[0]||'',
-      visit_date: date,
-      visit_time: time,
-      visit_day: visitDay,
-      note: note,
-      status: 'pending'
-    })
+    method:'POST', headers:H, body: JSON.stringify(rows)
   });
 
   if(!res.ok){ showToast('❌ فشل الإرسال'); return; }
 
-  // إشعار للمنسق
-  const msg = `📋 توجيه جديد من المشرف ${cu.name}:\nبرجاء التوجه لفرع "${branch}" يوم ${visitDay} ${visitDateAr} الساعة ${timeAr}${note?'\nملاحظة: '+note:''}`;
+  // إشعار واحد للمنسق بكل الفروع
+  const branchNames = selectedBranches.join(' · ');
+  const msg = `📋 توجيه جديد من المشرف ${cu.name}:\nبرجاء التوجه لـ ${selectedBranches.length} فرع:\n${branchNames}\nيوم ${visitDay} ${visitDateAr} الساعة ${timeAr}${note?'\nملاحظة: '+note:''}`;
   await fetch(`${SUPABASE_URL}/rest/v1/messages`,{
     method:'POST',
-    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    headers:H,
     body: JSON.stringify({
       from_name: cu.name,
       to_rep: rep,
@@ -3188,7 +3201,7 @@ async function sendAssignment(){
   });
 
   document.getElementById('asgn-note').value='';
-  showToast(`✅ تم إرسال التوجيه لـ ${rep}`);
+  showToast(`✅ تم إرسال ${selectedBranches.length} توجيه لـ ${rep}`);
   loadAssignmentHistory();
 }
 
@@ -3298,69 +3311,72 @@ function _isAssignMode(){
 }
 
 async function onFsRepChange(){
-  if(_isAssignMode()){
-    fillAllBranches();
-    return;
-  }
-
   const repName  = document.getElementById('fs-rep').value;
   const routeSel = document.getElementById('fs-route');
-  const branchSel= document.getElementById('fs-branch');
-  routeSel.innerHTML  = '<option value="">اختر خط السير...</option>';
-  branchSel.innerHTML = '<option value="">اختر الفرع...</option>';
+  const branchList = document.getElementById('fs-branch-list');
+
+  routeSel.innerHTML = '<option value="">اختر خط السير...</option>';
+  branchList.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text2);font-size:11px">اختر خط السير لعرض الفروع</div>';
+  document.getElementById('fs-branch-count').textContent = '';
   if(!repName) return;
 
-  // جرب أولاً فروع المنسق بالاسم
-  let repBranches = _fsAllBranches.filter(b=>b.rep_name===repName);
-
-  // لو مفيش — استخدم كل فروع المجموعة
-  if(!repBranches.length) repBranches = _fsAllBranches;
-
-  const routes = [...new Set(repBranches.map(b=>b.route).filter(Boolean))];
-
-  if(routes.length > 1){
-    routes.sort().forEach(r=>{ const o=document.createElement('option');o.value=r;o.textContent=r;routeSel.appendChild(o); });
-  } else if(routes.length===1){
-    routeSel.innerHTML = `<option value="${routes[0]}">${routes[0]}</option>`;
-    onFsRouteChange();
-  } else {
-    // مفيش خطوط — اعرض الفروع مباشرة
-    repBranches.forEach(b=>{ const o=document.createElement('option');o.value=b.branch_name;o.textContent=b.branch_name;branchSel.appendChild(o); });
-  }
+  // عرض كل خطوط السير التي يغطيها المشرف (كل الفروع في المجموعات)
+  const routes = [...new Set(_fsAllBranches.map(b=>b.route).filter(Boolean))].sort();
+  routes.forEach(r=>{ const o=document.createElement('option');o.value=r;o.textContent=r;routeSel.appendChild(o); });
 }
 
 function onFsRouteChange(){
-  const route    = document.getElementById('fs-route').value;
-  const branchSel= document.getElementById('fs-branch');
+  const route = document.getElementById('fs-route').value;
+  const branchList = document.getElementById('fs-branch-list');
+  const countEl = document.getElementById('fs-branch-count');
+  const checkAll = document.getElementById('fs-check-all');
+  if(checkAll) checkAll.checked = false;
 
-  if(_isAssignMode()){
-    if(!route){ fillAllBranches(); return; }
-    const seen = new Set();
-    const branches = _fsAllBranches
-      .filter(b=>b.route===route && b.branch_name && !seen.has(b.branch_name) && seen.add(b.branch_name))
-      .sort((a,b)=>(a.branch_name||'').localeCompare(b.branch_name||'','ar'));
-    branchSel.innerHTML = '<option value="">اختر الفرع...</option>';
-    branches.forEach(b=>{ const o=document.createElement('option');o.value=b.branch_name;o.textContent=b.branch_name;branchSel.appendChild(o); });
-    if(branches.length===1) branchSel.value=branches[0].branch_name;
+  if(!route){
+    branchList.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text2);font-size:11px">اختر خط السير لعرض الفروع</div>';
+    countEl.textContent = '';
     return;
   }
 
-  const repName = document.getElementById('fs-rep').value;
-  branchSel.innerHTML = '<option value="">اختر الفرع...</option>';
-  if(!route) return;
-
-  // فلتر بالمنسق لو موجود، وإلا كل فروع الخط
-  let branches = _fsAllBranches.filter(b=>b.route===route);
-  const repBranches = branches.filter(b=>b.rep_name===repName);
-  if(repBranches.length) branches = repBranches;
-
-  // إزالة المكرر
+  // جيب فروع الخط بدون تكرار
   const seen = new Set();
-  const unique = branches.filter(b=>b.branch_name && !seen.has(b.branch_name) && seen.add(b.branch_name))
+  const branches = _fsAllBranches
+    .filter(b=>b.route===route && b.branch_name && !seen.has(b.branch_name) && seen.add(b.branch_name))
     .sort((a,b)=>(a.branch_name||'').localeCompare(b.branch_name||'','ar'));
 
-  unique.forEach(b=>{ const o=document.createElement('option');o.value=b.branch_name;o.textContent=b.branch_name;branchSel.appendChild(o); });
-  if(unique.length===1) branchSel.value=unique[0].branch_name;
+  if(!branches.length){
+    branchList.innerHTML = '<div style="text-align:center;padding:12px;color:var(--text2);font-size:11px">لا توجد فروع في هذا الخط</div>';
+    countEl.textContent = '';
+    return;
+  }
+
+  branchList.innerHTML = branches.map((b,i)=>`
+    <label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;
+      border-bottom:${i<branches.length-1?'1px solid var(--border)':'none'};user-select:none;transition:background .15s"
+      onmouseover="this.style.background='#EFF6FF'" onmouseout="this.style.background='transparent'">
+      <input type="checkbox" class="fs-branch-chk" value="${b.branch_name}" onchange="fsUpdateBranchCount()" style="width:16px;height:16px;accent-color:var(--navy);flex-shrink:0"/>
+      <span style="font-size:12px;flex:1">${b.branch_name}</span>
+    </label>`).join('');
+
+  countEl.textContent = `${branches.length} فرع`;
+}
+
+function fsToggleAllBranches(checked){
+  document.querySelectorAll('.fs-branch-chk').forEach(cb=>cb.checked=checked);
+  fsUpdateBranchCount();
+}
+
+function fsUpdateBranchCount(){
+  const total = document.querySelectorAll('.fs-branch-chk').length;
+  const selected = document.querySelectorAll('.fs-branch-chk:checked').length;
+  const el = document.getElementById('fs-branch-count');
+  if(el) el.textContent = selected>0 ? `${selected} من ${total} محدد` : `${total} فرع`;
+  const checkAll = document.getElementById('fs-check-all');
+  if(checkAll) checkAll.checked = selected>0 && selected===total;
+}
+
+function fsGetSelectedBranches(){
+  return [...document.querySelectorAll('.fs-branch-chk:checked')].map(cb=>cb.value);
 }
 
 function selectFsType(btn){
@@ -3374,12 +3390,15 @@ function selectFsType(btn){
 
 async function startFieldSupport(){
   const rep    = document.getElementById('fs-rep').value;
-  const branch = document.getElementById('fs-branch').value;
+  const selectedBranches = fsGetSelectedBranches();
   const type   = document.querySelector('.fs-type-btn[style*="background:var(--navy)"]')?.dataset.val;
 
-  if(!rep)    { showToast('⚠️ اختر المنسق'); return; }
-  if(!branch) { showToast('⚠️ اختر الفرع'); return; }
-  if(!type)   { showToast('⚠️ اختر نوع الدعم'); return; }
+  if(!rep)                    { showToast('⚠️ اختر المنسق'); return; }
+  if(!selectedBranches.length){ showToast('⚠️ حدد فرع واحد على الأقل'); return; }
+  if(!type)                   { showToast('⚠️ اختر نوع الدعم'); return; }
+
+  // لبدء الدعم نأخذ أول فرع محدد
+  const branch = selectedBranches[0];
 
   // جيب الموقع
   let lat=null, lng=null;
