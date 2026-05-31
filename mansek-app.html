@@ -905,16 +905,41 @@ function startShiftTimer(checkInTime){
   showShiftTimer(checkInTime);
 }
 
-function restoreShiftTimer(){
+async function restoreShiftTimer(){
   const savedDate = localStorage.getItem('shift_date_'+cu?.name);
   const savedTime = localStorage.getItem('shift_checkin_'+cu?.name);
-  if(savedDate === new Date().toDateString() && savedTime){
-    // الحضور كان النهارده — استعد العداد
+  const todayStr  = new Date().toDateString();
+
+  if(savedDate === todayStr && savedTime){
+    // موجود في localStorage — استعده مباشرة
     attIn = {time: savedTime, lat:'', lng:''};
-    document.getElementById('att-in-time').textContent = savedTime;
-    document.getElementById('btn-in').classList.add('in');
+    const el = document.getElementById('att-in-time');
+    if(el) el.textContent = savedTime;
+    document.getElementById('btn-in')?.classList.add('in');
     showShiftTimer(savedTime);
+    return;
   }
+
+  // مش موجود في localStorage — جيب من Supabase
+  try{
+    const today = new Date().toLocaleDateString('ar-EG');
+    const url = `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(cu.name)}&date=eq.${encodeURIComponent(today)}&select=time_in&limit=1`;
+    const data = await fetch(url, {
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    }).then(r=>r.json()).catch(()=>[]);
+
+    if(Array.isArray(data) && data[0]?.time_in){
+      const timeIn = data[0].time_in;
+      // احفظ في localStorage للاستخدام القادم
+      localStorage.setItem('shift_checkin_'+cu.name, timeIn);
+      localStorage.setItem('shift_date_'+cu.name, todayStr);
+      attIn = {time: timeIn, lat:'', lng:''};
+      const el = document.getElementById('att-in-time');
+      if(el) el.textContent = timeIn;
+      document.getElementById('btn-in')?.classList.add('in');
+      showShiftTimer(timeIn);
+    }
+  }catch(e){ console.warn('restoreShiftTimer:', e); }
 }
 
 function showShiftTimer(checkInTime){
@@ -924,12 +949,23 @@ function showShiftTimer(checkInTime){
 
   if(shiftTimerInterval) clearInterval(shiftTimerInterval);
 
+  // تحقق من صحة الوقت
+  if(!checkInTime || !checkInTime.includes(':')) return;
+
   shiftTimerInterval = setInterval(()=>{
     const now = new Date();
-    const [h,m] = checkInTime.split(':').map(Number);
+    const parts = checkInTime.split(':');
+    const h = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10);
+    if(isNaN(h) || isNaN(m)) return;
+
     const checkIn = new Date(now);
     checkIn.setHours(h, m, 0, 0);
-    const elapsed = Math.max(0, (now - checkIn) / 1000); // بالثواني
+
+    // لو checkIn في المستقبل (مثلاً وقت الحضور 23:00 والآن 01:00) — نطرح يوم
+    if(checkIn > now) checkIn.setDate(checkIn.getDate() - 1);
+
+    const elapsed = Math.max(0, (now - checkIn) / 1000);
     const total = SHIFT_HOURS * 3600;
     const remaining = Math.max(0, total - elapsed);
 
@@ -948,21 +984,17 @@ function showShiftTimer(checkInTime){
     if(barEl) barEl.style.width = Math.round((remaining/total)*100)+'%';
 
     if(remaining <= 0){
-      // اكتمل الشيفت
       if(cdEl){ cdEl.textContent = '00:00:00'; cdEl.style.color='#1A7A4A'; }
       if(barEl){ barEl.style.background='linear-gradient(90deg,#1A7A4A,#27AE60)'; barEl.style.width='100%'; }
       if(subEl) subEl.textContent = '✅ اكتمل الشيفت — يمكنك تسجيل الانصراف';
       if(badgeEl){ badgeEl.textContent='اكتمل ✅'; badgeEl.style.background='#E8F5E9'; badgeEl.style.color='#1A7A4A'; }
-      // اظهر زر الانصراف في لوحتي
       if(dashCard) dashCard.style.display = 'block';
       clearInterval(shiftTimerInterval);
     } else {
       const hrsLeft = (remaining/3600).toFixed(1);
       if(subEl) subEl.textContent = 'تسجيل الحضور: '+checkInTime+' — متبقي '+hrsLeft+' ساعة';
       if(badgeEl) badgeEl.textContent = hrsLeft+' ساعة متبقية';
-      // إخفاء زر الانصراف في لوحتي حتى اكتمال الشيفت
       if(dashCard) dashCard.style.display = 'none';
-      // إظهار كارد طلب الاستثناء للمنسق الثابت
       showExceptionCard();
     }
   }, 1000);
@@ -2864,9 +2896,10 @@ function updateSupplyBadge(){
 
 function sendLocation(){
   if(!cu) return;
+  const grp = cu.group || cu.grp || '';
   // أولاً: سجّل الأونلاين حتى لو مفيش GPS
   sbUpsert('location', {
-    name:cu.name, route:cu.route, grp:cu.group||'',
+    name:cu.name, route:cu.route, grp,
     lat:'', lng:'', active:true, updated_at: new Date().toISOString()
   }, 'name');
   updateOnlineStatus(true);
@@ -2876,7 +2909,7 @@ function sendLocation(){
     const lat = pos.coords.latitude.toFixed(5);
     const lng = pos.coords.longitude.toFixed(5);
     sbUpsert('location', {
-      name:cu.name, route:cu.route, grp:cu.group||'',
+      name:cu.name, route:cu.route, grp,
       lat, lng, active:true, updated_at: new Date().toISOString()
     }, 'name');
     updateOnlineStatus(true);
