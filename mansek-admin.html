@@ -19294,25 +19294,30 @@ async function exportPlansRange(){
   const to        = document.getElementById('sp-export-to')?.value;
   if(!from||!to){ showToast('حدد نطاق التاريخ','err'); return; }
 
-  showToast('⏳ جاري تحميل الخطط...');
+  showToast('⏳ جاري تحميل البيانات...');
 
+  // جلب الخطط
   let url = `${SUPABASE_URL}/rest/v1/weekly_plans?week_start=gte.${from}&week_start=lte.${to}&select=*&order=supervisor_name.asc,week_start.asc`;
   if(supFilter!=='all') url+=`&supervisor_name=eq.${encodeURIComponent(supFilter)}`;
   const plans = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]);
   if(!Array.isArray(plans)||!plans.length){ showToast('لا توجد خطط في هذه الفترة','err'); return; }
 
+  // جلب البنود — مع كل الحقول
   const planIds = plans.map(p=>p.id);
   let allItems = [];
   try{
-    const ir = await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items?plan_id=in.(${planIds.join(',')})&select=*&order=day_date.asc`,
+    const ir = await fetch(
+      `${SUPABASE_URL}/rest/v1/weekly_plan_items?plan_id=in.(${planIds.join(',')})&select=*&order=day_date.asc,id.asc`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    allItems = await ir.json(); if(!Array.isArray(allItems)) allItems=[];
+    allItems = await ir.json();
+    if(!Array.isArray(allItems)) allItems=[];
   }catch(e){}
 
   const wb = XLSX.utils.book_new();
-  const DAYS_WEEK = ['السبت','الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة'];
   const DR='731E2E', OL='4E5A2B', LR='F5E8E8', GR='E8F5E9', GY='F2F2F2', CR='FBF5F0', WH='FFFFFF';
+  const RD='FFEBEE', YL='FFF8E1';
 
+  // ── ستايل ──
   const S=(bg,fc,b,sz,wrap,right)=>({
     fill:{fgColor:{rgb:bg}},
     font:{bold:!!b,color:{rgb:fc||'2C2C2C'},sz:sz||10,name:'Cairo'},
@@ -19331,80 +19336,111 @@ async function exportPlansRange(){
   const setv=(ws,r,c,v,s)=>{const a=XLSX.utils.encode_cell({r,c});
     ws[a]={t:'s',v:v==null?'':String(v)};if(s)ws[a].s=s;};
 
+  const fmtDate = d => d?new Date(d).toLocaleDateString('ar-EG',{day:'numeric',month:'long',year:'numeric'}):'';
+  const typeLabel = type==='week'?'أسبوعية':type==='month'?'شهرية':'سنوية';
+
   // تجميع حسب المشرف
   const bySup = {};
   plans.forEach(p=>{ if(!bySup[p.supervisor_name]) bySup[p.supervisor_name]=[]; bySup[p.supervisor_name].push(p); });
 
-  const typeLabel = type==='week'?'أسبوعية':type==='month'?'شهرية':'سنوية';
-  const fmtDate = d => d ? new Date(d).toLocaleDateString('ar-EG',{day:'numeric',month:'long',year:'numeric'}) : '';
-
   Object.entries(bySup).forEach(([supName, supPlans])=>{
+    // ── الأعمدة: الأسبوع | نوع | السبت | الأحد | الاثنين | الثلاثاء | الأربعاء | الخميس | الجمعة ──
+    // لكن كل يوم فيه خليتين: الخطة + الإنجاز الفعلي
+    // هنعمل شيت بهذا الشكل:
+    // عمود A: الأسبوع
+    // عمود B: الخطة/الإنجاز
+    // أعمدة C-I: أيام الأسبوع (السبت→الجمعة)
+
     const aoa = [];
     const merges = [];
-    let rowIdx = 0;
 
-    // ══ R0: هيدر (لوجو + عنوان) ══
-    aoa.push(['','','خطة العمل '+typeLabel+' — الطحان جولدن داتس','','','','','','']);
+    // R0: هيدر
+    aoa.push(['','','خطة العمل '+typeLabel+' — '+supName,'','','','','','']);
     // R1: معلومات
-    aoa.push([
-      'المشرف: '+supName,'','',
-      'الفترة: '+fmtDate(from)+' — '+fmtDate(to),'','','','',''
-    ]);
+    aoa.push(['الفترة: '+fmtDate(from)+' — '+fmtDate(to),'','',
+              'الحالة: كل الخطط | إجمالي الأسابيع: '+supPlans.length,'','','','','']);
     // R2: فراغ
     aoa.push(['','','','','','','','','']);
     // R3: رؤوس الأيام
-    aoa.push(['الأسبوع','الخطة/الإنجاز',...DAYS_WEEK]);
+    aoa.push(['الأسبوع','','السبت','الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة']);
 
-    merges.push({s:{r:0,c:0},e:{r:0,c:1}}); // لوجو
-    merges.push({s:{r:0,c:2},e:{r:0,c:8}}); // عنوان
+    // merges الهيدر
+    merges.push({s:{r:0,c:0},e:{r:0,c:1}});  // لوجو
+    merges.push({s:{r:0,c:2},e:{r:0,c:8}});  // عنوان
     merges.push({s:{r:1,c:0},e:{r:1,c:2}});
     merges.push({s:{r:1,c:3},e:{r:1,c:8}});
     merges.push({s:{r:2,c:0},e:{r:2,c:8}});
-    rowIdx = 4;
+    merges.push({s:{r:3,c:0},e:{r:3,c:1}});  // merge عمود الأسبوع في الهيدر
 
-    // ══ لكل أسبوع ══
+    let rowIdx = 4;
+
     supPlans.forEach((plan, wi)=>{
       const items = allItems.filter(i=>i.plan_id===plan.id);
 
-      // أيام الأسبوع: السبت → الجمعة
+      // أيام الأسبوع من السبت (index 0) للجمعة (index 6)
       const weekDays = [];
-      const ws_start = new Date(plan.week_start);
-      // السبت = day 6, ابدأ من أقرب سبت
-      const dayOfWeek = ws_start.getDay(); // 0=أحد
-      // ابحث عن السبت في نطاق الأسبوع
+      const startDate = new Date(plan.week_start);
       for(let i=0;i<7;i++){
-        const d = new Date(ws_start);
-        d.setDate(ws_start.getDate() + i);
+        const d = new Date(startDate);
+        d.setDate(startDate.getDate()+i);
         weekDays.push(d.toISOString().slice(0,10));
       }
 
       const statusLabel = plan.status==='approved'?'✅ معتمدة':plan.status==='rejected'?'❌ مرفوضة':'⏳ مسودة';
-      const weekRange = new Date(plan.week_start).toLocaleDateString('ar-EG',{day:'numeric',month:'short'})+
-        ' — '+new Date(plan.week_end||plan.week_start).toLocaleDateString('ar-EG',{day:'numeric',month:'short'});
+      const weekLabel = new Date(plan.week_start).toLocaleDateString('ar-EG',{day:'numeric',month:'short'})+
+        ' — '+new Date(plan.week_end||plan.week_start).toLocaleDateString('ar-EG',{day:'numeric',month:'short'})+
+        '\n'+statusLabel;
 
-      // صف الخطة
-      const planRow = [weekRange+'\n'+statusLabel, 'الخطة'];
-      // صف الإنجاز
+      // حساب الإنجاز
+      const totalItems = items.length;
+      const doneItems  = items.filter(x=>x.status==='done').length;
+      const pct = totalItems>0?Math.round(doneItems/totalItems*100):0;
+      const weekLabelFull = weekLabel+'\n'+pct+'% إنجاز';
+
+      // صف الخطة المخططة
+      const planRow = [weekLabelFull, 'الخطة المخططة'];
+      // صف ما تم إنجازه
       const doneRow = ['', 'ما تم إنجازه'];
 
-      weekDays.forEach((dayStr, di)=>{
-        // السبت = di=0, الجمعة = di=6
-        const dayOfW = new Date(dayStr).getDay(); // 0=أحد, 5=جمعة, 6=سبت
-        if(dayOfW === 5){ // جمعة
+      weekDays.forEach((dayStr,di)=>{
+        const dayDate = new Date(dayStr);
+        const isJuma = dayDate.getDay() === 5; // جمعة
+
+        if(isJuma){
           planRow.push('إجازة');
           doneRow.push('إجازة');
-        } else {
-          const dayItems = items.filter(x=>x.day_date===dayStr);
-          // الخطة: route + ملاحظات
-          const planText = dayItems.map(x=>{
-            let t = x.route||x.branch||'';
-            if(x.visit_type && x.visit_type!=='متابعة أداء') t += ' ('+x.visit_type+')';
-            if(x.notes) t += '\n'+x.notes;
-            return t;
-          }).join('\n')||'';
-          planRow.push(planText);
-          doneRow.push('');
+          return;
         }
+
+        const dayItems = items.filter(x=>x.day_date===dayStr);
+
+        // الخطة: اسم الفرع + خط السير + ملاحظات
+        const planText = dayItems.map(x=>{
+          const branch = x.branch_name||x.route||'';
+          const route  = x.branch_name && x.route ? x.route : '';
+          const note   = x.notes||'';
+          const type2  = x.visit_type && x.visit_type!=='متابعة أداء' ? x.visit_type : '';
+          let t = branch;
+          if(route) t += '\n📍'+route;
+          if(type2) t += '\n🎯'+type2;
+          if(note)  t += '\n📝'+note;
+          return t;
+        }).filter(Boolean).join('\n─────\n')||'—';
+
+        // الإنجاز: ما تم فعلاً
+        const doneText = dayItems.length ? dayItems.map(x=>{
+          if(x.status==='done'){
+            const actual = x.actual_routes||x.branch_name||x.route||'';
+            return '✅ '+actual;
+          } else if(x.status==='missed'){
+            return '❌ فائت: '+(x.branch_name||x.route||'');
+          } else {
+            return '⏳ مجدول: '+(x.branch_name||x.route||'');
+          }
+        }).join('\n') : '—';
+
+        planRow.push(planText);
+        doneRow.push(doneText);
       });
 
       aoa.push(planRow);
@@ -19422,56 +19458,82 @@ async function exportPlansRange(){
     merges.push({s:{r:rowIdx+1,c:0},e:{r:rowIdx+1,c:8}});
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = [{wch:18},{wch:13},{wch:18},{wch:18},{wch:18},{wch:18},{wch:18},{wch:18},{wch:12}];
+    ws['!cols'] = [{wch:20},{wch:15},{wch:22},{wch:22},{wch:22},{wch:22},{wch:22},{wch:22},{wch:12}];
     ws['!merges'] = merges;
 
     // ارتفاع الصفوف
-    ws['!rows'] = [{hpt:55},{hpt:22},{hpt:8},{hpt:26}];
-    supPlans.forEach(()=>{ ws['!rows'].push({hpt:42}); ws['!rows'].push({hpt:32}); });
+    ws['!rows'] = [{hpt:60},{hpt:22},{hpt:8},{hpt:26}];
+    supPlans.forEach(()=>{ ws['!rows'].push({hpt:72}); ws['!rows'].push({hpt:60}); });
     ws['!rows'].push({hpt:8}); ws['!rows'].push({hpt:18});
 
-    // ══ ستايل ══
+    // ══ تطبيق الستايل ══
     // R0: هيدر
     for(let c=0;c<9;c++) set(ws,0,c,SM(DR,'FFFFFF',true,14));
-    setv(ws,0,2,'خطة العمل '+typeLabel+' — الطحان جولدن داتس',SM(DR,'FFFFFF',true,14));
+    setv(ws,0,2,'خطة العمل '+typeLabel+' — '+supName,SM(DR,'FFFFFF',true,14));
 
     // R1: معلومات
     for(let c=0;c<9;c++) set(ws,1,c,S(LR,DR,true,11,false,true));
 
     // R2: فراغ
-    for(let c=0;c<9;c++) set(ws,2,c,S(WH,'FFFFFF',false,6));
+    for(let c=0;c<9;c++) set(ws,2,c,S(WH,'FFFFFF',false,4));
 
     // R3: رؤوس الأيام
     for(let c=0;c<9;c++) set(ws,3,c,SM(OL,'FFFFFF',true,11));
 
     // صفوف الأسابيع
     supPlans.forEach((_,wi)=>{
-      const r = 4 + wi*2;
+      const r = 4+wi*2;
+
       // عمود الأسبوع
-      set(ws,r,0,SM(DR,'FFFFFF',true,10));
-      set(ws,r+1,0,SM(DR,'FFFFFF',false,10));
-      // خطة/إنجاز
+      set(ws,r,0,SM(DR,'FFFFFF',true,9));
+      set(ws,r+1,0,SM(DR,'FFFFFF',false,9));
+
+      // خطة/إنجاز label
       set(ws,r,1,S(LR,DR,true,10));
       set(ws,r+1,1,S(GR,'1B5E20',true,10));
+
       // أيام
       for(let c=2;c<9;c++){
         if(c===8){ // جمعة
           set(ws,r,c,S(GY,'888888',false,10));
           set(ws,r+1,c,S(GY,'888888',false,10));
         } else {
-          set(ws,r,c,S(WH,'2C2C2C',false,10,true));
-          set(ws,r+1,c,S(GR,'1B5E20',false,10,true));
+          // خطة
+          set(ws,r,c,S(WH,'2C2C2C',false,9,true));
+          // إنجاز — نلون حسب المحتوى
+          set(ws,r+1,c,S(GR,'1B5E20',false,9,true));
         }
       }
+
+      // لون إنجاز حسب الحالة
+      const items2 = allItems.filter(i=>i.plan_id===supPlans[wi].id);
+      const weekDays2 = [];
+      const startDate2 = new Date(supPlans[wi].week_start);
+      for(let i=0;i<7;i++){
+        const d=new Date(startDate2); d.setDate(startDate2.getDate()+i);
+        weekDays2.push(d.toISOString().slice(0,10));
+      }
+      weekDays2.forEach((dayStr,di)=>{
+        const c = 2+di;
+        if(c>=9) return;
+        const dayItems2 = items2.filter(x=>x.day_date===dayStr);
+        if(!dayItems2.length) return;
+        const allDone   = dayItems2.every(x=>x.status==='done');
+        const anyMissed = dayItems2.some(x=>x.status==='missed');
+        const anyPend   = dayItems2.some(x=>x.status==='pending'||!x.status);
+        let bg = GR; // أخضر افتراضي
+        if(anyMissed && !allDone) bg = RD;
+        else if(anyPend) bg = YL;
+        set(ws,r+1,c,S(bg,anyMissed?'B71C1C':'1B5E20',false,9,true));
+      });
     });
 
     // footer style
-    const lastR = 4 + supPlans.length*2 + 1;
+    const lastR = 4+supPlans.length*2+1;
     set(ws,lastR,0,S(CR,'999999',false,9));
 
-    // اسم الـ sheet
-    const sheetName = supName.length>25 ? supName.slice(0,25) : supName;
-    XLSX.utils.book_append_sheet(wb, ws, sheetName||'مشرف');
+    const sheetName = (supName||'مشرف').slice(0,25);
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
   });
 
   const supLabel = supFilter==='all'?'كل_المشرفين':supFilter.split(' ').slice(0,2).join('_');
