@@ -1986,19 +1986,32 @@ function renderOrders(){
   b.textContent=pending.length;b.style.display=pending.length?'block':'none';
   if(!pending.length){area.innerHTML='<div class="empty-state"><i class="ti ti-package"></i>مفيش طلبيات دلوقتي</div>';return;}
   area.innerHTML=pending.map(o=>{
-    const oDate=new Date(o.arrival_date||o.arrivalDate);oDate.setHours(0,0,0,0);
+    // دعم supply_requests (من المشرف) وorders (القديم)
+    const arrDate = o.date || o.arrival_date || o.arrivalDate || '';
+    const oDate=new Date(arrDate); oDate.setHours(0,0,0,0);
     const diff=Math.round((oDate-today)/86400000);
     let cls='oc-soon',tag='📦 طلبية قادمة';
     if(diff===0){cls='oc-today';tag='🔴 طلبية اليوم!';}
     else if(diff===1){cls='oc-tomorrow';tag='⚠️ طلبية غداً';}
-    const dl=diff===0?'اليوم':diff===1?'غداً':'بعد '+diff+' أيام';
-    return`<div class="order-card ${cls}"><div class="oc-tag">${tag}</div><div class="oc-title">📦 طلبية لفرعك</div><div class="oc-branch">📍 ${o.branch||'الكل'}</div><div class="oc-date">📅 ${dl}</div>${o.note?`<div style="font-size:11px;background:rgba(255,255,255,.15);border-radius:6px;padding:5px 8px;margin-top:5px">${o.note}</div>`:''}<button class="oc-confirm" onclick="confirmOrder('${o.id}')">تأكيد الاستلام ✓</button></div>`;
+    const dl=diff===0?'اليوم':diff===1?'غداً':diff>0?'بعد '+diff+' أيام':arrDate||'—';
+    const fromSup = o._from_sup ? '<div style="font-size:10px;background:rgba(255,255,255,.2);border-radius:6px;padding:3px 8px;margin-bottom:4px;display:inline-block">👔 من المشرف: '+( o.name||'—')+'</div>' : '';
+    const title = o._from_sup ? (o.snf||'ميعاد طلبية من المشرف') : '📦 طلبية لفرعك';
+    return`<div class="order-card ${cls}"><div class="oc-tag">${tag}</div>${fromSup}<div class="oc-title">${title}</div><div class="oc-branch">📍 ${o.branch||o.route||'خط سيرك'}</div><div class="oc-date">📅 ${dl}</div>${o.note?`<div style="font-size:11px;background:rgba(255,255,255,.15);border-radius:6px;padding:5px 8px;margin-top:5px">${o.note}</div>`:''}<button class="oc-confirm" onclick="confirmOrder('${o.id}','${o._from_sup?'sup':'old'}')">تأكيد الاستلام ✓</button></div>`;
   }).join('');
 }
 
-function confirmOrder(id){
+function confirmOrder(id, type='old'){
   confirmed.add(id);
-  apiPost({action:'markOrderDone',id});
+  if(type==='sup'){
+    // تحديث supply_requests
+    fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify({status:'confirmed'})
+    }).catch(()=>{});
+  } else {
+    apiPost({action:'markOrderDone',id});
+  }
   renderOrders();
 }
 
@@ -2604,8 +2617,31 @@ function notifyNewAssignment(a){
 async function fetchOrders(){
   if(!cu) return;
   try{
+    // جدول orders القديم
     const all = await sbSelect('orders');
-    orders = all.filter(o => o.to_route===cu.route && o.status!=='done');
+    const oldOrders = all.filter(o => o.to_route===cu.route && o.status!=='done');
+
+    // جدول supply_requests — طلبيات المشرف للمنسق
+    let supOrders = [];
+    try{
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/supply_requests?route=eq.${encodeURIComponent(cu.route)}&status=eq.pending_supervisor&select=*&order=created_at.desc`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+      );
+      const data = await res.json();
+      if(Array.isArray(data)){
+        // نحول supply_requests لنفس شكل orders
+        supOrders = data.map(o=>({
+          ...o,
+          _from_sup: true,
+          to_route: o.route,
+          item: o.snf||'ميعاد طلبية',
+          note: o.note||'',
+        }));
+      }
+    }catch(e){}
+
+    orders = [...oldOrders, ...supOrders.filter(o=>!confirmed.has(o.id))];
     renderOrders();
     const b = document.getElementById('ord-badge');
     b.textContent = orders.length; b.style.display = orders.length ? 'block' : 'none';
