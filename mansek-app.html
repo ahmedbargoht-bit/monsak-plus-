@@ -907,31 +907,43 @@ function startShiftTimer(checkInTime){
 }
 
 async function restoreShiftTimer(){
+  const todayStr  = new Date().toDateString();
   const savedDate = localStorage.getItem('shift_date_'+cu?.name);
   const savedTime = localStorage.getItem('shift_checkin_'+cu?.name);
-  const todayStr  = new Date().toDateString();
 
+  // أولاً: من localStorage
   if(savedDate === todayStr && savedTime){
-    // موجود في localStorage — استعده مباشرة
     attIn = {time: savedTime, lat:'', lng:''};
     const el = document.getElementById('att-in-time');
     if(el) el.textContent = savedTime;
     document.getElementById('btn-in')?.classList.add('in');
     showShiftTimer(savedTime);
+    // أظهر كارد الانصراف للثابت
+    if(cu?.coordType==='ثابت'){
+      const coCard = document.getElementById('checkout-branch-card');
+      if(coCard) coCard.style.display='block';
+    }
     return;
   }
 
-  // مش موجود في localStorage — جيب من Supabase
+  // ثانياً: من Supabase
   try{
     const today = new Date().toLocaleDateString('ar-EG');
-    const url = `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(cu.name)}&date=eq.${encodeURIComponent(today)}&select=time_in&limit=1`;
-    const data = await fetch(url, {
-      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
-    }).then(r=>r.json()).catch(()=>[]);
-
-    if(Array.isArray(data) && data[0]?.time_in){
-      const timeIn = data[0].time_in;
-      // احفظ في localStorage للاستخدام القادم
+    const isoToday = new Date().toISOString().slice(0,10);
+    // جرب الاتنين (ar-EG و ISO)
+    const urls = [
+      `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(cu.name)}&date=eq.${encodeURIComponent(today)}&type=eq.in&select=time_in,time&limit=1`,
+      `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(cu.name)}&date=eq.${encodeURIComponent(isoToday)}&type=eq.in&select=time_in,time&limit=1`
+    ];
+    let timeIn = null;
+    for(const url of urls){
+      const data = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]);
+      if(Array.isArray(data) && data[0]){
+        timeIn = data[0].time_in || data[0].time;
+        break;
+      }
+    }
+    if(timeIn){
       localStorage.setItem('shift_checkin_'+cu.name, timeIn);
       localStorage.setItem('shift_date_'+cu.name, todayStr);
       attIn = {time: timeIn, lat:'', lng:''};
@@ -939,6 +951,10 @@ async function restoreShiftTimer(){
       if(el) el.textContent = timeIn;
       document.getElementById('btn-in')?.classList.add('in');
       showShiftTimer(timeIn);
+      if(cu?.coordType==='ثابت'){
+        const coCard = document.getElementById('checkout-branch-card');
+        if(coCard) coCard.style.display='block';
+      }
     }
   }catch(e){ console.warn('restoreShiftTimer:', e); }
 }
@@ -1081,10 +1097,16 @@ async function doLogin(){
   const name=document.getElementById('l-name').value;
   const pass=document.getElementById('l-pass').value;
   const err=document.getElementById('l-err');
+  const btn=document.getElementById('l-btn');
   if(!name){err.textContent='اختر اسمك';err.style.display='block';return;}
   if(!pass){err.textContent='أدخل الباسورد';err.style.display='block';return;}
 
-  // تحقق من الباسورد مباشرة من Supabase
+  btn.disabled=true;
+  btn.innerHTML='<i class="ti ti-loader"></i> جاري التحقق...';
+
+  let freshRep = null;
+
+  // جيب دايماً من Supabase
   try{
     const url=`${SUPABASE_URL}/rest/v1/users?select=*&name=eq.${encodeURIComponent(name)}&role=eq.rep&limit=1`;
     const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
@@ -1092,33 +1114,77 @@ async function doLogin(){
       const data=await res.json();
       if(data&&data.length){
         const u=data[0];
-        if(u.pass_hash!==pass){err.style.display='block';return;}
-        // حدّث REPS بالبيانات الجديدة
+        if(u.pass_hash!==pass){
+          err.textContent='كلمة المرور غلط';
+          err.style.display='block';
+          btn.disabled=false;
+          btn.innerHTML='<i class="ti ti-login"></i> دخول';
+          return;
+        }
+        if(u.status==='inactive'){
+          err.textContent='هذا الحساب موقوف';
+          err.style.display='block';
+          btn.disabled=false;
+          btn.innerHTML='<i class="ti ti-login"></i> دخول';
+          return;
+        }
+        freshRep={
+          name:u.name,
+          route:u.route||'',
+          group:u.grp||u.groups||'',
+          type:u.user_type||'متحرك',
+          pass:u.pass_hash||'',
+          goal:u.goal||0,
+          coordType:u.user_type||'متحرك'
+        };
+        // حدّث REPS cache
         const idx=REPS.findIndex(r=>r.name===name);
-        const updated={name:u.name,route:u.route||'',group:u.grp||'',type:u.user_type||'متحرك',pass:u.pass_hash||'',goal:u.goal||0,coordType:u.user_type||'متحرك'};
-        if(idx!==-1) REPS[idx]=updated; else REPS.push(updated);
-        err.style.display='none';
+        if(idx!==-1) REPS[idx]=freshRep; else REPS.push(freshRep);
+        // احفظ في localStorage للـ offline
+        try{ localStorage.setItem('rep_data_'+name, JSON.stringify(freshRep)); }catch(e){}
       } else {
-        // مش موجود في Supabase — جرب الـ fallback
-        const rep=REPS.find(r=>r.name===name);
-        if(!rep||rep.pass!==pass){err.style.display='block';return;}
-        err.style.display='none';
+        err.textContent='هذا الاسم غير مسجل في النظام';
+        err.style.display='block';
+        btn.disabled=false;
+        btn.innerHTML='<i class="ti ti-login"></i> دخول';
+        return;
       }
-    } else {
-      // Supabase فشل — جرب الـ fallback
-      const rep=REPS.find(r=>r.name===name);
-      if(!rep||rep.pass!==pass){err.style.display='block';return;}
-      err.style.display='none';
     }
   }catch(e){
-    // offline — جرب الـ fallback
-    const rep=REPS.find(r=>r.name===name);
-    if(!rep||rep.pass!==pass){err.style.display='block';return;}
-    err.style.display='none';
+    // offline — جرب من localStorage
+    try{
+      const saved=localStorage.getItem('rep_data_'+name);
+      if(saved){
+        const u=JSON.parse(saved);
+        if(u.pass===pass||u.pass_hash===pass) freshRep=u;
+      }
+    }catch(e2){}
+    if(!freshRep){
+      // آخر fallback من REPS hardcoded
+      const rep=REPS.find(r=>r.name===name);
+      if(rep&&(rep.pass===pass||rep.pass_hash===pass)) freshRep=rep;
+    }
+    if(!freshRep){
+      err.textContent='أنت offline — تعذر التحقق';
+      err.style.display='block';
+      btn.disabled=false;
+      btn.innerHTML='<i class="ti ti-login"></i> دخول';
+      return;
+    }
   }
 
-  const freshRep = REPS.find(r=>r.name===name);
-  if(!freshRep){err.textContent='تعذر تحميل البيانات';err.style.display='block';return;}
+  if(!freshRep){
+    err.textContent='تعذر تحميل البيانات';
+    err.style.display='block';
+    btn.disabled=false;
+    btn.innerHTML='<i class="ti ti-login"></i> دخول';
+    return;
+  }
+
+  err.style.display='none';
+  btn.disabled=false;
+  btn.innerHTML='<i class="ti ti-login"></i> دخول';
+
   const repType = freshRep.coordType || freshRep.type || 'متحرك';
   cu={name,route:freshRep.route,group:freshRep.group,coordType:repType,score:0};
   document.getElementById('top-user').textContent=name;
@@ -1129,10 +1195,8 @@ async function doLogin(){
     document.getElementById('fixed-banner-wrap').style.display='block';
     document.getElementById('fixed-banner-text').textContent='منسق ثابت — '+freshRep.route+' 🏪';
     document.getElementById('fixed-extra-wrap').style.display='block';
-    // استعادة العداد لو كان شغّال
     restoreShiftTimer();
   }
-  // إظهار تاب طلب توريد لكل المنسقين
   document.getElementById('nav-supply-req').style.display='flex';
   showScreen('s-main');
   showWelcomeSplash(name);
@@ -1369,11 +1433,31 @@ async function popBranches(route){
             const o=document.createElement('option');
             o.value=b.branch_name; o.textContent=b.branch_name; sel.appendChild(o);
           });
-          if(data.length===1){ sel.value=data[0].branch_name; checkStep1Done(); }
+          // اختيار تلقائي لو فرع واحد بس
+          if(data.length===1){
+            sel.value=data[0].branch_name;
+            checkStep1Done();
+          }
+          // لو كان في فرع محفوظ من آخر زيارة — اختاره
+          else {
+            const lastBranch=localStorage.getItem('last_branch_'+cu.name);
+            if(lastBranch && data.find(b=>b.branch_name===lastBranch)){
+              sel.value=lastBranch;
+              checkStep1Done();
+            }
+          }
+          return; // خلص هنا للثابت
         }
       }
     }catch(e){}
-  } else {
+    // لو مفيش فروع في Supabase — استخدم الـ route كفرع
+    if(cu.route){
+      addedBranches.add(cu.route);
+      const o=document.createElement('option');
+      o.value=cu.route; o.textContent=cu.route; sel.appendChild(o);
+      sel.value=cu.route;
+      checkStep1Done();
+    }
     // المتحرك — جيب من BRANCHES
     let branches = BRANCHES[route] || [];
     if(!branches.length && route) branches=[route];
@@ -1436,15 +1520,19 @@ function recordAtt(type){
   const now=new Date();
   const t=now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
   document.getElementById('att-in-time').textContent=t;
+
   const done=(lat,lng,loc)=>{
     document.getElementById('att-in-loc').textContent=loc||'';
     if(type==='in'){
       attIn={time:t,lat,lng,loc};
       document.getElementById('btn-in').classList.add('in');
-      // المنسق الثابت — شغّل العداد
+      // المنسق الثابت — شغّل العداد + احفظ اللوكيشن مرة واحدة
       if(cu?.coordType==='ثابت'){
         startShiftTimer(t);
-        // أظهر كارد الانصراف من الفرع
+        // احفظ اللوكيشن في localStorage للثابت عشان ما يطلبش تاني
+        if(lat&&lng){
+          localStorage.setItem('fixed_loc_'+cu.name, JSON.stringify({lat,lng,loc,date:new Date().toDateString()}));
+        }
         const coCard = document.getElementById('checkout-branch-card');
         if(coCard) coCard.style.display = 'block';
       }
@@ -1452,6 +1540,22 @@ function recordAtt(type){
     apiPost({action:'saveAttendance',name:cu.name,route:cu.route,group:cu.group,type,time:t,lat,lng});
     checkEntryReady();
   };
+
+  // المنسق الثابت — استخدم اللوكيشن المحفوظ لو موجود
+  if(cu?.coordType==='ثابت'){
+    const savedLoc = localStorage.getItem('fixed_loc_'+cu.name);
+    if(savedLoc){
+      try{
+        const loc=JSON.parse(savedLoc);
+        if(loc.date===new Date().toDateString()){
+          done(loc.lat,loc.lng,loc.loc);
+          return;
+        }
+      }catch(e){}
+    }
+  }
+
+  // جديد أو متحرك — اجيب اللوكيشن الحالي
   navigator.geolocation?navigator.geolocation.getCurrentPosition(
     p=>done(p.coords.latitude.toFixed(4),p.coords.longitude.toFixed(4),p.coords.latitude.toFixed(4)+', '+p.coords.longitude.toFixed(4)),
     ()=>done('','','تعذر تحديد الموقع'),{timeout:8000,enableHighAccuracy:true}
@@ -1527,6 +1631,11 @@ function calcPts(e){
 async function saveVisit(){
   const branch=document.getElementById('f-branch').value;
   if(!branch){alert('اختر الفرع أولاً');return;}
+
+  // احفظ آخر فرع للمنسق الثابت
+  if(cu?.coordType==='ثابت'){
+    try{ localStorage.setItem('last_branch_'+cu.name, branch); }catch(e){}
+  }
   const skuOn=products.reduce((s,p)=>s+(parseInt(p.shelf)||0),0);
   const e={
     action:'saveVisit',
@@ -1986,32 +2095,19 @@ function renderOrders(){
   b.textContent=pending.length;b.style.display=pending.length?'block':'none';
   if(!pending.length){area.innerHTML='<div class="empty-state"><i class="ti ti-package"></i>مفيش طلبيات دلوقتي</div>';return;}
   area.innerHTML=pending.map(o=>{
-    // دعم supply_requests (من المشرف) وorders (القديم)
-    const arrDate = o.date || o.arrival_date || o.arrivalDate || '';
-    const oDate=new Date(arrDate); oDate.setHours(0,0,0,0);
+    const oDate=new Date(o.arrival_date||o.arrivalDate);oDate.setHours(0,0,0,0);
     const diff=Math.round((oDate-today)/86400000);
     let cls='oc-soon',tag='📦 طلبية قادمة';
     if(diff===0){cls='oc-today';tag='🔴 طلبية اليوم!';}
     else if(diff===1){cls='oc-tomorrow';tag='⚠️ طلبية غداً';}
-    const dl=diff===0?'اليوم':diff===1?'غداً':diff>0?'بعد '+diff+' أيام':arrDate||'—';
-    const fromSup = o._from_sup ? '<div style="font-size:10px;background:rgba(255,255,255,.2);border-radius:6px;padding:3px 8px;margin-bottom:4px;display:inline-block">👔 من المشرف: '+( o.name||'—')+'</div>' : '';
-    const title = o._from_sup ? (o.snf||'ميعاد طلبية من المشرف') : '📦 طلبية لفرعك';
-    return`<div class="order-card ${cls}"><div class="oc-tag">${tag}</div>${fromSup}<div class="oc-title">${title}</div><div class="oc-branch">📍 ${o.branch||o.route||'خط سيرك'}</div><div class="oc-date">📅 ${dl}</div>${o.note?`<div style="font-size:11px;background:rgba(255,255,255,.15);border-radius:6px;padding:5px 8px;margin-top:5px">${o.note}</div>`:''}<button class="oc-confirm" onclick="confirmOrder('${o.id}','${o._from_sup?'sup':'old'}')">تأكيد الاستلام ✓</button></div>`;
+    const dl=diff===0?'اليوم':diff===1?'غداً':'بعد '+diff+' أيام';
+    return`<div class="order-card ${cls}"><div class="oc-tag">${tag}</div><div class="oc-title">📦 طلبية لفرعك</div><div class="oc-branch">📍 ${o.branch||'الكل'}</div><div class="oc-date">📅 ${dl}</div>${o.note?`<div style="font-size:11px;background:rgba(255,255,255,.15);border-radius:6px;padding:5px 8px;margin-top:5px">${o.note}</div>`:''}<button class="oc-confirm" onclick="confirmOrder('${o.id}')">تأكيد الاستلام ✓</button></div>`;
   }).join('');
 }
 
-function confirmOrder(id, type='old'){
+function confirmOrder(id){
   confirmed.add(id);
-  if(type==='sup'){
-    // تحديث supply_requests
-    fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
-      method:'PATCH',
-      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body:JSON.stringify({status:'confirmed'})
-    }).catch(()=>{});
-  } else {
-    apiPost({action:'markOrderDone',id});
-  }
+  apiPost({action:'markOrderDone',id});
   renderOrders();
 }
 
@@ -2617,31 +2713,8 @@ function notifyNewAssignment(a){
 async function fetchOrders(){
   if(!cu) return;
   try{
-    // جدول orders القديم
     const all = await sbSelect('orders');
-    const oldOrders = all.filter(o => o.to_route===cu.route && o.status!=='done');
-
-    // جدول supply_requests — طلبيات المشرف للمنسق
-    let supOrders = [];
-    try{
-      const res = await fetch(
-        `${SUPABASE_URL}/rest/v1/supply_requests?route=eq.${encodeURIComponent(cu.route)}&status=eq.pending_supervisor&select=*&order=created_at.desc`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
-      );
-      const data = await res.json();
-      if(Array.isArray(data)){
-        // نحول supply_requests لنفس شكل orders
-        supOrders = data.map(o=>({
-          ...o,
-          _from_sup: true,
-          to_route: o.route,
-          item: o.snf||'ميعاد طلبية',
-          note: o.note||'',
-        }));
-      }
-    }catch(e){}
-
-    orders = [...oldOrders, ...supOrders.filter(o=>!confirmed.has(o.id))];
+    orders = all.filter(o => o.to_route===cu.route && o.status!=='done');
     renderOrders();
     const b = document.getElementById('ord-badge');
     b.textContent = orders.length; b.style.display = orders.length ? 'block' : 'none';
@@ -3037,13 +3110,30 @@ function openOQDB(){
   });
 }
 
-// حفظ عملية في الـ Queue
+// حفظ عملية في الـ Queue — مع منع التكرار
 async function saveToOQ(action, table, data){
   const db    = await openOQDB();
   const tx    = db.transaction(OQ_STORE,'readwrite');
   const store = tx.objectStore(OQ_STORE);
-  store.add({action, table, data, savedAt: Date.now()});
-  updateQueueBadge();
+
+  // منع تكرار نفس البيانات خلال 5 ثواني
+  const recent = await new Promise((res,rej)=>{
+    const r=store.getAll(); r.onsuccess=e=>res(e.target.result||[]); r.onerror=e=>rej(e);
+  });
+  const now = Date.now();
+  const isDuplicate = recent.some(item=>{
+    if(item.action!==action || item.table!==table) return false;
+    if(now - item.savedAt > 5000) return false; // أقدم من 5 ثواني
+    // مقارنة البيانات
+    try{
+      return JSON.stringify(item.data) === JSON.stringify(data);
+    }catch(e){ return false; }
+  });
+
+  if(!isDuplicate){
+    store.add({action, table, data, savedAt: now});
+    updateQueueBadge();
+  }
 }
 
 // رفع كل العمليات المحفوظة
