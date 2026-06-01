@@ -923,7 +923,9 @@ async function doLogin(){
   cu = {
     name: user.name,
     level: user.level||'sup',
-    groups: (user.groups||'').split(',').map(g=>g.trim()).filter(Boolean),
+    groups: user.level==='gm'
+      ? Object.keys(GROUPS)
+      : (user.groups||'').split(',').map(g=>g.trim()).filter(Boolean),
     id: user.id
   };
   setupApp();
@@ -1239,7 +1241,28 @@ async function loadPlan(){
   document.getElementById('plan-week-label').textContent=
     `${currentWeekStart.toLocaleDateString('ar-EG',{day:'numeric',month:'long'})} — ${we.toLocaleDateString('ar-EG',{day:'numeric',month:'long',year:'numeric'})}`;
 
-  // جيب أو أنشئ خطة الأسبوع
+  // الـ GM يشوف كل الخطط — مش بيعمل خطة جديدة
+  if(cu.level==='gm'){
+    try{
+      const url=`${SUPABASE_URL}/rest/v1/weekly_plans?select=*&week_start=eq.${ws}&plan_type=eq.sales&order=supervisor_name.asc&limit=50`;
+      const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+      const allPlans = res.ok ? await res.json() : [];
+      currentPlan = allPlans[0]||null;
+      planItems = [];
+      if(allPlans.length){
+        for(const p of allPlans){
+          if(p.id){
+            const items = await sbGet('weekly_plan_items',{plan_id:p.id},{order:'day_date.asc',limit:100});
+            planItems = planItems.concat(items);
+          }
+        }
+      }
+    }catch(e){ planItems=[]; }
+    renderPlanDays();
+    return;
+  }
+
+  // المشرف العادي — جيب أو أنشئ خطة الأسبوع
   let plans = await sbGet('weekly_plans',{supervisor_name:cu.name, week_start:ws},{limit:1});
   if(!plans.length){
     const res = await sbPost('weekly_plans',{supervisor_name:cu.name, week_start:ws, week_end:weStr, status:'draft', plan_type:'sales'});
@@ -2115,7 +2138,14 @@ window.addEventListener('DOMContentLoaded',async()=>{
   // restore session
   try{
     const saved=sessionStorage.getItem('sales_cu');
-    if(saved){ cu=JSON.parse(saved); setupApp(); }
+    if(saved){
+      cu=JSON.parse(saved);
+      // لو GM وgroups مش مكتملة — أصلحها
+      if(cu.level==='gm' && (!cu.groups||!cu.groups.length)){
+        cu.groups = Object.keys(GROUPS);
+      }
+      setupApp();
+    }
   }catch(e){}
   // تاريخ اليوم افتراضي للفلاتر
   const today=new Date().toISOString().slice(0,10);
