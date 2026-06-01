@@ -404,6 +404,16 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       <div id="dash-loading" class="loading"><div class="spinner"></div><br>جاري التحميل...</div>
       <div id="dash-content" style="display:none">
         <div class="stats-grid" id="dash-stats"></div>
+
+        <!-- ══ لوكيشن المنسقين المباشر ══ -->
+        <div class="card" style="border:1.5px solid #E3F2FD">
+          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span><i class="ti ti-map-pin" style="color:#1565C0"></i> تواجد المنسقين الآن</span>
+            <button onclick="loadRepLocations()" style="background:none;border:none;color:#1565C0;cursor:pointer;font-size:16px"><i class="ti ti-refresh"></i></button>
+          </div>
+          <div id="dash-loc-list"><div class="empty" style="padding:1rem">جاري التحميل...</div></div>
+        </div>
+
         <div class="card">
           <div class="card-title"><i class="ti ti-trending-up"></i> أداء اليوم</div>
           <div id="dash-perf"></div>
@@ -1708,10 +1718,127 @@ function renderDashboard(){
       </div>
       <span style="font-size:13px;font-weight:900;color:var(--navy)">${v.points||0}</span>
     </div>`).join('') : '<div class="empty">لا توجد زيارات اليوم</div>';
+
+  // تحميل اللوكيشن
+  loadRepLocations();
 }
 
 // ══════════════════════════════════════════════════════════════
-// LEADERBOARD
+// لوكيشن المنسقين — REAL-TIME LOCATION
+// ══════════════════════════════════════════════════════════════
+async function loadRepLocations(){
+  const el = document.getElementById('dash-loc-list');
+  if(!el) return;
+
+  try{
+    // جيب اللوكيشن + الحضور لمجموعات المشرف
+    const grps = cu.groups||[];
+    const today = new Date().toISOString().slice(0,10);
+    const todayAr = new Date().toLocaleDateString('ar-EG');
+
+    const [locData, attData, visitData] = await Promise.all([
+      // اللوكيشن الحالي
+      fetch(`${SUPABASE_URL}/rest/v1/location?grp=in.(${grps.join(',')})&select=*&order=updated_at.desc`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
+      // الحضور اليوم
+      fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=in.(${grps.join(',')})&created_at=gte.${today}T00:00:00&select=*&order=created_at.desc`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
+      // آخر زيارة اليوم
+      fetch(`${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&created_at=gte.${today}T00:00:00&select=name,branch,created_at&order=created_at.desc&limit=200`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
+    ]);
+
+    const locs  = Array.isArray(locData) ? locData : [];
+    const atts  = Array.isArray(attData) ? attData : [];
+    const visits= Array.isArray(visitData)? visitData: [];
+
+    if(!locs.length && !atts.length){
+      el.innerHTML='<div class="empty" style="padding:1rem"><i class="ti ti-map-pin-off"></i><br>لا يوجد منسقون متصلون الآن</div>';
+      return;
+    }
+
+    // جمع البيانات لكل منسق
+    const repsMap = {};
+    locs.forEach(l=>{
+      repsMap[l.name] = repsMap[l.name]||{name:l.name,grp:l.grp,lat:null,lng:null,active:false,lastSeen:null,timeIn:null,timeOut:null,lastBranch:null};
+      repsMap[l.name].lat = l.lat;
+      repsMap[l.name].lng = l.lng;
+      repsMap[l.name].active = l.active;
+      repsMap[l.name].lastSeen = l.updated_at;
+    });
+    atts.forEach(a=>{
+      if(!repsMap[a.name]) repsMap[a.name]={name:a.name,grp:a.grp,lat:null,lng:null,active:false,lastSeen:null,timeIn:null,timeOut:null,lastBranch:null};
+      if(a.type==='in'  && !repsMap[a.name].timeIn)  repsMap[a.name].timeIn  = a.time_in||a.time;
+      if(a.type==='out' && !repsMap[a.name].timeOut) repsMap[a.name].timeOut = a.time_out||a.time;
+    });
+    // جيب آخر فرع لكل منسق اليوم
+    const lastVisitByRep = {};
+    visits.forEach(v=>{ if(!lastVisitByRep[v.name]) lastVisitByRep[v.name]=v.branch; });
+    Object.keys(repsMap).forEach(n=>{ repsMap[n].lastBranch = lastVisitByRep[n]||null; });
+
+    // ترتيب: نشط أولاً، بعدين باسم
+    const sorted = Object.values(repsMap).sort((a,b)=>{
+      if(a.active&&!b.active) return -1;
+      if(!a.active&&b.active) return 1;
+      return (a.name||'').localeCompare(b.name||'','ar');
+    });
+
+    const now = Date.now();
+    el.innerHTML = sorted.map(rep=>{
+      const grpColor = GROUPS[rep.grp]?.color||'#888';
+      const grpLabel = GROUPS[rep.grp]?.label||rep.grp||'—';
+
+      // وقت آخر تحديث
+      let lastSeenText = '—';
+      if(rep.lastSeen){
+        const diff = Math.floor((now - new Date(rep.lastSeen).getTime())/60000);
+        if(diff < 1)       lastSeenText = 'الآن 🟢';
+        else if(diff < 5)  lastSeenText = `منذ ${diff} د 🟢`;
+        else if(diff < 30) lastSeenText = `منذ ${diff} د 🟡`;
+        else               lastSeenText = `منذ ${Math.floor(diff/60)} س 🔴`;
+      }
+
+      // رابط الخريطة
+      const mapLink = rep.lat && rep.lng
+        ? `<a href="https://www.google.com/maps?q=${rep.lat},${rep.lng}" target="_blank"
+            style="display:inline-flex;align-items:center;gap:4px;background:#E3F2FD;color:#1565C0;
+            padding:3px 8px;border-radius:6px;font-size:10px;font-weight:700;text-decoration:none">
+            <i class="ti ti-map"></i> خريطة</a>`
+        : '';
+
+      return `<div style="padding:10px;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:flex-start">
+        <!-- أيقونة الحالة -->
+        <div style="width:10px;height:10px;border-radius:50%;background:${rep.active?'#1A7A4A':'#9CA3AF'};
+          flex-shrink:0;margin-top:4px"></div>
+
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px">
+            <span style="font-size:13px;font-weight:700">${rep.name}</span>
+            <span style="background:${grpColor}22;color:${grpColor};padding:1px 6px;border-radius:999px;font-size:10px;font-weight:700">${grpLabel}</span>
+            <span style="font-size:10px;color:var(--text2)">${lastSeenText}</span>
+          </div>
+
+          <!-- آخر فرع -->
+          ${rep.lastBranch?`<div style="font-size:11px;color:#1565C0;margin-bottom:4px">
+            <i class="ti ti-building-store" style="font-size:11px"></i> ${rep.lastBranch}</div>`:''}
+
+          <!-- حضور وانصراف -->
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <span style="font-size:11px;background:#E8F5E9;color:#1A7A4A;padding:2px 7px;border-radius:6px">
+              🟢 حضور: ${rep.timeIn||'لم يسجل'}</span>
+            ${rep.timeOut?`<span style="font-size:11px;background:#FFEBEE;color:#C0392B;padding:2px 7px;border-radius:6px">
+              🔴 انصراف: ${rep.timeOut}</span>`:''}
+            ${mapLink}
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+
+  }catch(e){
+    el.innerHTML=`<div class="empty" style="padding:1rem;color:#C0392B">خطأ في التحميل: ${e.message}</div>`;
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 function renderLeaderboard(){
   const period = document.getElementById('lb-period').value;
@@ -4109,6 +4236,14 @@ function startExcPolling(){
       updateExcBadge(Array.isArray(data)?data.length:0);
     }catch(e){}
   }, 30000);
+
+  // polling اللوكيشن كل دقيقتين
+  setInterval(()=>{
+    const dashScreen = document.getElementById('screen-dashboard');
+    if(dashScreen?.classList.contains('active')||dashScreen?.style.display!=='none'){
+      loadRepLocations();
+    }
+  }, 2*60*1000);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -4264,31 +4399,51 @@ function supRptInit(){
   const f=document.getElementById('sup-rpt-from'),t=document.getElementById('sup-rpt-to');
   if(f&&!f.value) f.value=`${y}-${m}-01`;
   if(t&&!t.value) t.value=`${y}-${m}-${d}`;
-  // تفعيل مجموعات المشرف فقط
+
+  // فلتر المجموعات حسب مجموعات المشرف فقط
   const myGrps = cu?.groups||[];
-  if(myGrps.length){
-    document.querySelectorAll('.rpt-grp-cb').forEach(cb=>{
-      if(cb.value==='all') { cb.checked=false; cb.closest('.rpt-cb-lbl').classList.remove('active'); }
-      else if(myGrps.includes(cb.value)){ cb.checked=true; cb.closest('.rpt-cb-lbl').classList.add('active'); }
-    });
-    rptLoadBranches();
-  }
+  document.querySelectorAll('.rpt-grp-cb').forEach(cb=>{
+    const lbl = cb.closest('.rpt-cb-lbl');
+    if(cb.value==='all'){
+      // زرار "كل المجموعات" — أخفيه دايماً
+      if(lbl) lbl.style.display='none';
+      cb.checked=false;
+    } else if(myGrps.includes(cb.value)){
+      // مجموعة المشرف — اظهرها ومحددة
+      if(lbl) lbl.style.display='inline-flex';
+      cb.checked=true;
+      if(lbl) lbl.classList.add('active');
+    } else {
+      // مجموعة تانية — أخفيها
+      if(lbl) lbl.style.display='none';
+      cb.checked=false;
+    }
+  });
+  rptLoadBranches();
 }
 
 function rptGrpChange(cb){
+  const myGrps = cu?.groups||[];
+  // لو المشرف يحاول يختار مجموعة مش ضمنه — امنعه
+  if(cb.value!=='all' && myGrps.length && !myGrps.includes(cb.value)){
+    cb.checked=false;
+    cb.closest('.rpt-cb-lbl')?.classList.remove('active');
+    return;
+  }
   const all = document.querySelectorAll('.rpt-grp-cb');
   if(cb.value==='all'){
-    all.forEach(c=>{ if(c.value!=='all'){c.checked=false;c.closest('.rpt-cb-lbl').classList.remove('active');} });
+    all.forEach(c=>{ if(c.value!=='all'){c.checked=false;c.closest('.rpt-cb-lbl')?.classList.remove('active');} });
   } else {
     const allCb = document.querySelector('.rpt-grp-cb[value="all"]');
-    if(allCb){ allCb.checked=false; allCb.closest('.rpt-cb-lbl').classList.remove('active'); }
+    if(allCb){ allCb.checked=false; allCb.closest('.rpt-cb-lbl')?.classList.remove('active'); }
   }
   const anyChecked=[...all].filter(c=>c.value!=='all'&&c.checked).length;
   if(!anyChecked){
-    const allCb=document.querySelector('.rpt-grp-cb[value="all"]');
-    if(allCb){ allCb.checked=true; allCb.closest('.rpt-cb-lbl').classList.add('active'); }
+    // رجّع مجموعة المشرف الأولى
+    const firstMyGrp = document.querySelector(`.rpt-grp-cb[value="${myGrps[0]}"]`);
+    if(firstMyGrp){ firstMyGrp.checked=true; firstMyGrp.closest('.rpt-cb-lbl')?.classList.add('active'); }
   }
-  cb.closest('.rpt-cb-lbl').classList.toggle('active',cb.checked);
+  cb.closest('.rpt-cb-lbl')?.classList.toggle('active',cb.checked);
   rptLoadBranches();
 }
 
