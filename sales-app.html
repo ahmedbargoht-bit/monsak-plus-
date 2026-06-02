@@ -1068,6 +1068,8 @@ async function doLogin(){
     groups: (user.level||'').trim().toLowerCase()==='gm'
       ? Object.keys(GROUPS)
       : (user.groups||'').split(',').map(g=>g.trim()).filter(Boolean),
+    supervisors: (user.supervisors||'').split(',').map(s=>s.trim()).filter(Boolean),
+    job_title: user.level==='gm' ? 'GM' : user.level==='manager' ? 'مدير بيع' : 'مشرف بيع',
     id: user.id
   };
   setupApp();
@@ -1102,6 +1104,12 @@ function setupApp(){
     aiSetDates();
   } else {
     if(aiTab) aiTab.style.display='none';
+  }
+  // تحديث المسمى الوظيفي
+  const topUser = document.getElementById('top-user');
+  if(topUser){
+    const jobLabel = cu.level==='gm'?'GM':cu.level==='manager'?'مدير بيع':'مشرف بيع';
+    topUser.textContent = cu.name + ' — ' + (cu.level==='gm'?'يشوف الكل':cu.groups.map(g=>GROUPS[g]?.label||g).join(' · '));
   }
 
   showPanel('dash');
@@ -1243,7 +1251,7 @@ function fillGroupSelects(){
   const info=document.getElementById('acc-info');
   if(info) info.innerHTML=`
     الاسم: <b>${cu.name}</b><br>
-    المستوى: <b>${cu.level==='gm'?'مدير مبيعات':'مشرف مبيعات'}</b><br>
+    المستوى: <b>${cu.level==='gm'?'GM':cu.level==='manager'?'مدير بيع':'مشرف بيع'}</b><br>
     المناطق: <b>${cu.groups.map(g=>GROUPS[g]?.label||g).join(' · ')}</b>
   `;
 }
@@ -1272,7 +1280,7 @@ function showPanel(id){
   if(id==='expiry')   loadExpiry();
   if(id==='reports')  rptInit();
   if(id==='routes')   rtInit();
-  if(id==='field')    loadFieldPanel();
+  if(id==='field')    { initFieldGrpFilter(); loadFieldPanel(); }
   if(id==='target')   { tgtInitDate(); tgtLoadData(); }
 }
 
@@ -1284,7 +1292,7 @@ function closeModal(id){ document.getElementById(id).classList.remove('active');
 async function loadDash(){
   if(!cu)return;
   document.getElementById('dash-name').textContent = cu.name;
-  document.getElementById('dash-title').textContent = cu.level==='gm'?'مدير المبيعات — الكل':'مشرف مبيعات — '+cu.groups.map(g=>GROUPS[g]?.label||g).join(' · ');
+  document.getElementById('dash-title').textContent = cu.level==='gm'?'GM — يشوف الكل':(cu.level==='manager'?'مدير بيع':'مشرف بيع')+' — '+cu.groups.map(g=>GROUPS[g]?.label||g).join(' · ');
 
   // فلتر المجموعات
   const pills=document.getElementById('dash-grp-pills');
@@ -2316,6 +2324,21 @@ window.addEventListener('DOMContentLoaded',async()=>{
 // متابعة الميدان — FIELD MONITORING
 // ══════════════════════════════════════════════════════════════
 
+function initFieldGrpFilter(){
+  // فلتر field-grp بناء على مجموعات المستخدم
+  const sel = document.getElementById('field-grp');
+  if(!sel || !cu) return;
+  const myGrps = cu.level==='gm' ? Object.keys(GROUPS) : (cu.groups||[]);
+  sel.innerHTML = myGrps.length>1 ? '<option value="all">كل مناطقي</option>' : '';
+  myGrps.forEach(g=>{
+    const o = document.createElement('option');
+    o.value = g; o.textContent = GROUPS[g]?.label||g;
+    sel.appendChild(o);
+  });
+  // لو مستخدم عنده منطقة واحدة، حددها تلقائياً
+  if(myGrps.length===1) sel.value = myGrps[0];
+}
+
 async function loadFieldPanel(){
   const grp   = document.getElementById('field-grp')?.value||'all';
   const date  = document.getElementById('field-date')?.value||new Date().toISOString().slice(0,10);
@@ -3297,9 +3320,20 @@ function tgtInitDate(){
 
 async function tgtLoadData(){
   if(!cu) return;
-  // جيب الأهداف بتاعت المشرف
+  // جيب الأهداف — بناء على الصلاحيات
   try{
-    const url = `${SUPABASE_URL}/rest/v1/sales_targets?select=*&supervisor_name=eq.${encodeURIComponent(cu.name)}&limit=100`;
+    let url;
+    const allowedSups = cu.supervisors||[];
+    if(cu.level==='gm'){
+      // GM يشوف الكل بدون قيود
+      url = `${SUPABASE_URL}/rest/v1/sales_targets?select=*&limit=500`;
+    } else if(allowedSups.length){
+      // مشرف عنده قائمة مشرفين محددين
+      url = `${SUPABASE_URL}/rest/v1/sales_targets?select=*&supervisor_name=in.(${allowedSups.map(s=>`"${s}"`).join(',')})&limit=500`;
+    } else {
+      // مشرف عادي يشوف نفسه بس
+      url = `${SUPABASE_URL}/rest/v1/sales_targets?select=*&supervisor_name=eq.${encodeURIComponent(cu.name)}&limit=100`;
+    }
     const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     tgtTargets = res.ok ? await res.json() : [];
   }catch(e){ tgtTargets=[]; }
@@ -3336,7 +3370,7 @@ function tgtRender(){
   const remaining = totalTarget - totalAchieved;
 
   // تحديث الـ UI
-  const fmt = n => n < 0 ? '-' + Math.abs(Math.round(n)).toLocaleString('ar-EG') : Math.round(n).toLocaleString('ar-EG');
+  const fmt = n => n < 0 ? '-' + Math.abs(Math.round(n)).toLocaleString('en-US') : Math.round(n).toLocaleString('en-US');
   document.getElementById('tgt-month-label').textContent = monthLabel;
   document.getElementById('tgt-total-target').textContent = fmt(totalTarget) + ' ج';
   document.getElementById('tgt-total-achieved').textContent = fmt(totalAchieved) + ' ج';
@@ -3381,7 +3415,7 @@ function tgtRenderRoutes(){
     const pct = target > 0 ? Math.min(100,Math.round(achieved/target*100)) : 0;
     const remaining = target - achieved;
     const color = pct>=100?'#22c55e':pct>=70?'#f59e0b':'#ef4444';
-    const fmt = n => Math.round(Math.abs(n)).toLocaleString('ar-EG');
+    const fmt = n => Math.round(Math.abs(n)).toLocaleString('en-US');
 
     return `<div style="padding:10px 0;border-bottom:1px solid #f5f5f5">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
@@ -3417,7 +3451,7 @@ function tgtRenderSalesLog(){
   }
   log.innerHTML = tgtSales.slice(0,20).map(s=>{
     const d = s.sale_date||s.created_at?.slice(0,10);
-    const amt = Math.round(+(s.sale_amount||0)).toLocaleString('ar-EG');
+    const amt = Math.round(+(s.sale_amount||0)).toLocaleString('en-US');
     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #f5f5f5">
       <div>
         <div style="font-size:12px;font-weight:600">${s.route||'—'}</div>
