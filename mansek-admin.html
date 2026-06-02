@@ -568,7 +568,7 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
           <div class="stats-grid" id="loc-stats"></div>
           <div class="card">
             <div class="card-title"><i class="ti ti-map-pin" style="color:var(--green)"></i> لوكيشن المنسقين — مباشر</div>
-            <div class="filter-bar">
+            <div class="filter-bar" style="flex-wrap:wrap;gap:8px">
               <select id="loc-filter-group" onchange="filterLocations()">
                 <option value="all">كل المجموعات</option>
                 <option value="giza">مجموعة الجيزة</option>
@@ -576,17 +576,26 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
                 <option value="south">جنوب وشرق القاهرة</option>
                 <option value="tajmuat">مجموعة التجمعات</option>
                 <option value="hyper">الهايبر ماركت</option>
-                  <option value="alex">الإسكندرية</option>
+                <option value="alex">الإسكندرية</option>
               </select>
               <select id="loc-filter-status" onchange="filterLocations()">
                 <option value="all">الكل</option>
                 <option value="online">متصل فقط</option>
                 <option value="offline">غير متصل</option>
               </select>
+              <!-- ── فلتر التاريخ ── -->
+              <div style="display:flex;align-items:center;gap:6px;margin-right:auto">
+                <span style="font-size:11px;color:var(--text2);font-weight:600">📅 عرض لوكيشن:</span>
+                <button id="loc-btn-today" class="btn btn-sm btn-blue" onclick="locSetDateFilter('today')">اليوم</button>
+                <button id="loc-btn-yesterday" class="btn btn-sm btn-ghost" onclick="locSetDateFilter('yesterday')">أمس</button>
+                <button id="loc-btn-all" class="btn btn-sm btn-ghost" onclick="locSetDateFilter('all')">الكل</button>
+              </div>
             </div>
+            <!-- شريط التاريخ المختار -->
+            <div id="loc-date-label" style="font-size:11px;color:var(--blue);padding:4px 0 8px;font-weight:600"></div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>المنسق</th><th>المجموعة</th><th>خط السير</th><th>الموقع</th><th>آخر تحديث</th><th>الحالة</th></tr></thead>
+                <thead><tr><th>المنسق</th><th>المجموعة</th><th>خط السير</th><th>الفرع</th><th>الموقع</th><th>آخر تحديث</th><th>الحالة</th></tr></thead>
                 <tbody id="loc-table"></tbody>
               </table>
             </div>
@@ -5478,7 +5487,58 @@ function renderLB(){
 // ══════════════════════════════════════════════════════════════
 // LOCATION
 // ══════════════════════════════════════════════════════════════
+// ── فلتر تاريخ اللوكيشن ─────────────────────────────────────
+window._locDateFilter = 'all'; // 'all' | 'today' | 'yesterday'
+window._locBranchMap  = {};    // name → branch (من attendance)
+
+function locSetDateFilter(mode){
+  window._locDateFilter = mode;
+  // تحديث أزرار
+  ['today','yesterday','all'].forEach(m=>{
+    const btn = document.getElementById(`loc-btn-${m}`);
+    if(!btn) return;
+    btn.className = 'btn btn-sm ' + (m===mode ? 'btn-blue' : 'btn-ghost');
+  });
+  // تحديث label
+  const lbl = document.getElementById('loc-date-label');
+  if(lbl){
+    const today     = new Date().toLocaleDateString('ar-EG',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+    const yest      = new Date(Date.now()-864e5).toLocaleDateString('ar-EG',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+    lbl.textContent = mode==='today' ? `📅 اليوم — ${today}`
+                    : mode==='yesterday' ? `📅 أمس — ${yest}`
+                    : '';
+  }
+  filterLocations();
+}
+
+// بناء map اسم المنسق → آخر فرع سجّل فيه لوكيشن وحضور
+function buildLocBranchMap(dateStr){
+  const att = cachedData.attendance||[];
+  const map  = {};
+  att.forEach(a=>{
+    if(!a.name) return;
+    // date field قد يكون YYYY-MM-DD
+    const d = (a.date||'').slice(0,10);
+    if(dateStr && d !== dateStr) return;
+    if(a.branch || a.branch_name){
+      map[a.name] = a.branch || a.branch_name;
+    }
+  });
+  // visits كمان ممكن تحتوي فرع
+  const vis = cachedData.visits||[];
+  vis.forEach(v=>{
+    if(!v.name) return;
+    const d = (v.date||'').slice(0,10);
+    if(dateStr && d !== dateStr) return;
+    if(v.branch && !map[v.name]) map[v.name] = v.branch;
+  });
+  window._locBranchMap = map;
+}
+
 function renderLocations(){
+  // بناء branch map لليوم الحالي افتراضياً
+  const todayStr = new Date().toISOString().slice(0,10);
+  buildLocBranchMap(todayStr);
   filterLocations();
   const {location}=cachedData;
   const visible=CU.groups;
@@ -5491,34 +5551,59 @@ function renderLocations(){
     <div class="stat-card blue"><div class="stat-n">${locs.length}</div><div class="stat-l">إجمالي</div></div>
     <div class="stat-card yellow"><div class="stat-n">${locs.length?Math.round(online/locs.length*100):0}%</div><div class="stat-l">نسبة التغطية</div></div>
   `;
-  filterLocations();
 }
 
 function filterLocations(){
   const {location}=cachedData;
   const visible=CU.groups;
-  const grp=document.getElementById('loc-filter-group')?.value||'all';
+  const grp   =document.getElementById('loc-filter-group')?.value||'all';
   const status=document.getElementById('loc-filter-status')?.value||'all';
+  const mode  =window._locDateFilter||'all';
   const TEN=10*60*1000,nowMs=Date.now();
+
+  // حساب نطاق التاريخ
+  const todayStr     = new Date().toISOString().slice(0,10);
+  const yesterdayStr = new Date(Date.now()-864e5).toISOString().slice(0,10);
+  const targetDate   = mode==='today' ? todayStr : mode==='yesterday' ? yesterdayStr : null;
+
+  // بناء branch map للتاريخ المحدد
+  buildLocBranchMap(targetDate);
+
   let locs=location.filter(l=>visible.includes(l.grp||''));
+
+  // فلتر التاريخ على updated_at
+  if(targetDate){
+    locs=locs.filter(l=>{
+      const d=(l.updated_at||'').slice(0,10);
+      return d===targetDate;
+    });
+  }
+
   if(grp!=='all') locs=locs.filter(l=>l.grp===grp);
   locs=locs.map(l=>({...l,active:(nowMs-new Date(l.updated_at).getTime())<TEN}));
   if(status==='online') locs=locs.filter(l=>l.active);
   if(status==='offline') locs=locs.filter(l=>!l.active);
 
+  const branchMap = window._locBranchMap||{};
+
   document.getElementById('loc-table').innerHTML=locs.map(l=>{
-    const gc=GROUPS[l.grp]?.color||'#ccc';
+    const gc =GROUPS[l.grp]?.color||'#ccc';
     const url=l.lat&&l.lng?`https://maps.google.com/?q=${l.lat},${l.lng}`:'#';
     const upd=l.updated_at?new Date(l.updated_at).toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'}):'—';
+    const branchVal = l.branch || l.branch_name || branchMap[l.name] || '—';
+    const branchHtml = branchVal!=='—'
+      ? `<span style="font-size:11px;background:#EEF6FF;color:#003A80;padding:2px 7px;border-radius:6px;font-weight:600">${branchVal}</span>`
+      : '<span style="color:#bbb;font-size:11px">—</span>';
     return`<tr>
       <td><b>${l.name}</b></td>
       <td><span class="badge" style="background:${gc}22;color:${gc}">${GROUPS[l.grp]?.label||l.grp}</span></td>
       <td style="font-size:11px">${l.route||'—'}</td>
+      <td>${branchHtml}</td>
       <td>${l.lat?`<a href="${url}" target="_blank" style="color:var(--blue);font-size:11px">📍 ${l.lat}, ${l.lng}</a>`:'—'}</td>
       <td style="font-size:11px">${upd}</td>
       <td><span class="badge ${l.active?'b-green':'b-gray'}">${l.active?'● متصل':'○ غير متصل'}</span></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="6" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات</td></tr>';
+  }).join('') || '<tr><td colspan="7" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات للفترة المحددة</td></tr>';
 }
 
 // ══════════════════════════════════════════════════════════════
