@@ -1632,6 +1632,65 @@ textarea{width:100%;padding:8px 12px;border:1.5px solid var(--border);border-rad
         </div>
 
         <!-- ══ PANEL: خطط المبيعات ══════════════════════════════ -->
+
+        <!-- ══ PANEL: خطط مشرفي التنسيق ══════════════════════════ -->
+        <div id="panel-coord-plans" class="panel">
+          <div class="page-header">
+            <div>
+              <h2><i class="ti ti-calendar-check" style="color:#7C3AED"></i> خطط مشرفي التنسيق</h2>
+              <p>متابعة وعرض وتصدير خطط المشرفين الأسبوعية</p>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn-action" onclick="cpLoad()"><i class="ti ti-refresh"></i> تحديث</button>
+              <button class="btn-action" style="background:#7C3AED;color:#fff" onclick="cpExport()"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+            </div>
+          </div>
+
+          <!-- فلاتر -->
+          <div class="card" style="margin-bottom:12px">
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <select id="cp-sup-filter" onchange="cpLoad()" style="flex:1;min-width:160px">
+                <option value="all">كل المشرفين</option>
+              </select>
+              <select id="cp-week-filter" onchange="cpLoad()" style="flex:1;min-width:160px">
+                <option value="current">الأسبوع الحالي</option>
+                <option value="prev">الأسبوع الماضي</option>
+                <option value="next">الأسبوع القادم</option>
+              </select>
+              <select id="cp-status-filter" onchange="cpLoad()" style="flex:1;min-width:140px">
+                <option value="all">كل الحالات</option>
+                <option value="approved">✅ معتمدة</option>
+                <option value="draft">⏳ مسودة</option>
+              </select>
+              <select id="cp-grp-filter" onchange="cpLoad()" style="flex:1;min-width:140px">
+                <option value="all">كل المجموعات</option>
+                <option value="giza">مجموعة الجيزة</option>
+                <option value="cairo">وسط القاهرة</option>
+                <option value="south">جنوب وشرق القاهرة</option>
+                <option value="tajmuat">مجموعة التجمعات</option>
+                <option value="hyper">الهايبر ماركت</option>
+                <option value="alex">الإسكندرية</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- KPI -->
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px" id="cp-kpi"></div>
+
+          <!-- قائمة الخطط -->
+          <div id="cp-plans-list"></div>
+
+          <!-- Modal: تفاصيل خطة منسق -->
+          <div class="modal-overlay" id="modal-coord-plan" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;overflow-y:auto">
+            <div style="background:#fff;max-width:700px;margin:20px auto;border-radius:16px;padding:24px;position:relative">
+              <button onclick="document.getElementById('modal-coord-plan').style.display='none'"
+                style="position:absolute;top:12px;left:12px;background:#f0f0f0;border:none;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:13px">✕ إغلاق</button>
+              <div style="font-size:16px;font-weight:800;color:#1A1A2E;margin-bottom:16px" id="cp-modal-title">تفاصيل الخطة</div>
+              <div id="cp-modal-body"></div>
+            </div>
+          </div>
+        </div>
+
         <div id="panel-sales-plans" class="panel">
           <div class="page-header">
             <div>
@@ -5653,6 +5712,7 @@ function setupApp(){
   document.getElementById('sb-name').textContent=CU.name;
   document.getElementById('sb-role').textContent=CU.role;
   if(CU.level!=='gm') document.getElementById('nav-admin-section').style.display='none';
+  // خطط التنسيق — متاحة لكل المستويات في قسم التنسيق
   // Sales Dashboard — مرئي لـ gm + manager فقط
   const sdNavEl = document.getElementById('nav-sales-dashboard');
   if(sdNavEl){
@@ -5738,6 +5798,7 @@ function renderCurrentPanel(){
     case 'supervisors': loadSupervisors(); break;
     case 'sales-users': loadSalesUsersPanel(); break;
     case 'rep-users': loadRepUsersPanel(); break;
+    case 'coord-plans': cpLoad(); break;
     case 'sales-plans': loadSalesPlans(); break;
     case 'branches': loadBranches(); qbInitReps(); loadBranchesMap(); break;
     case 'messages': renderMessages(); break;
@@ -10926,6 +10987,248 @@ function getSalesPlanWeekStart(offset=0){
   d.setDate(d.getDate() - day + (offset * 7));
   d.setHours(0,0,0,0);
   return d.toISOString().slice(0,10);
+}
+
+
+// ══════════════════════════════════════════════════════════════
+// COORD PLANS — خطط مشرفي التنسيق
+// ══════════════════════════════════════════════════════════════
+const CP_WEEK_DAYS = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','السبت'];
+
+function cpGetWeekRange(type){
+  const now = new Date();
+  const day = now.getDay();
+  const sunday = new Date(now);
+  sunday.setDate(now.getDate() - day);
+  if(type==='prev') sunday.setDate(sunday.getDate()-7);
+  if(type==='next') sunday.setDate(sunday.getDate()+7);
+  const start = sunday.toISOString().slice(0,10);
+  const end   = new Date(sunday.getTime()+6*86400000).toISOString().slice(0,10);
+  return {start, end};
+}
+
+async function cpLoad(){
+  const supFilter    = document.getElementById('cp-sup-filter')?.value||'all';
+  const weekType     = document.getElementById('cp-week-filter')?.value||'current';
+  const statusFilter = document.getElementById('cp-status-filter')?.value||'all';
+  const grpFilter    = document.getElementById('cp-grp-filter')?.value||'all';
+  const {start, end} = cpGetWeekRange(weekType);
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  // جيب كل الخطط الأسبوعية (مش sales)
+  let url = `${SUPABASE_URL}/rest/v1/weekly_plans?select=*&week_start=gte.${start}&week_start=lte.${end}&order=supervisor_name.asc&limit=200`;
+  const plans = await fetch(url,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+
+  // فلتر plan_type — التنسيق فقط (مش sales)
+  let coordPlans = plans.filter(p=>!p.plan_type||p.plan_type==='coord'||p.plan_type==='weekly');
+
+  // فلتر المشرف
+  const sups = [...new Set(coordPlans.map(p=>p.supervisor_name).filter(Boolean))].sort();
+  const supSel = document.getElementById('cp-sup-filter');
+  const curSup = supSel?.value||'all';
+  if(supSel){
+    supSel.innerHTML = '<option value="all">كل المشرفين</option>' +
+      sups.map(s=>`<option value="${s}" ${s===curSup?'selected':''}>${s}</option>`).join('');
+  }
+
+  if(supFilter!=='all') coordPlans = coordPlans.filter(p=>p.supervisor_name===supFilter);
+  if(statusFilter!=='all') coordPlans = coordPlans.filter(p=>p.status===statusFilter);
+
+  // جيب بنود كل الخطط
+  let allItems = [];
+  if(coordPlans.length){
+    const ids = coordPlans.map(p=>p.id).join(',');
+    const itemsUrl = `${SUPABASE_URL}/rest/v1/weekly_plan_items?select=*&plan_id=in.(${ids})&order=day_date.asc&limit=2000`;
+    allItems = await fetch(itemsUrl,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+  }
+
+  // KPI
+  const approved = coordPlans.filter(p=>p.status==='approved').length;
+  const draft    = coordPlans.filter(p=>p.status==='draft').length;
+  const doneItems= allItems.filter(i=>i.status==='done').length;
+  const pct = allItems.length ? Math.round(doneItems/allItems.length*100) : 0;
+  document.getElementById('cp-kpi').innerHTML = `
+    <div class="stat-card purple"><div class="stat-n">${coordPlans.length}</div><div class="stat-l">إجمالي الخطط</div></div>
+    <div class="stat-card green"><div class="stat-n">${approved}</div><div class="stat-l">معتمدة</div></div>
+    <div class="stat-card yellow"><div class="stat-n">${draft}</div><div class="stat-l">مسودة</div></div>
+    <div class="stat-card blue"><div class="stat-n">${pct}%</div><div class="stat-l">نسبة الإنجاز</div></div>`;
+
+  // قائمة الخطط
+  const list = document.getElementById('cp-plans-list');
+  if(!coordPlans.length){
+    list.innerHTML = '<div style="text-align:center;padding:40px;color:#888;font-size:14px"><i class="ti ti-calendar-off" style="font-size:32px;display:block;margin-bottom:8px;opacity:.3"></i>لا توجد خطط لهذا الأسبوع</div>';
+    return;
+  }
+
+  list.innerHTML = coordPlans.map(plan=>{
+    const items    = allItems.filter(i=>i.plan_id===plan.id);
+    const done     = items.filter(i=>i.status==='done').length;
+    const planPct  = items.length ? Math.round(done/items.length*100) : 0;
+    const statusBadge = plan.status==='approved'
+      ? '<span class="badge b-green">✅ معتمدة</span>'
+      : plan.status==='draft'
+      ? '<span class="badge b-orange">⏳ مسودة</span>'
+      : '<span class="badge b-gray">غير معروف</span>';
+    const pctColor = planPct>=80?'#15803D':planPct>=50?'#D97706':'#DC2626';
+
+    // تجميع المهام بالأيام
+    const byDay = {};
+    items.forEach(i=>{ if(!byDay[i.day_date]) byDay[i.day_date]=[]; byDay[i.day_date].push(i); });
+
+    return `<div class="card" style="margin-bottom:12px;border-right:4px solid #7C3AED">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+        <div>
+          <div style="font-size:15px;font-weight:800;color:#1A1A2E">${plan.supervisor_name||'—'}</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:2px">
+            ${plan.week_start||''} — ${plan.week_end||''}
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          ${statusBadge}
+          <button onclick="cpShowDetail('${plan.id}')"
+            style="background:#F3E8FF;color:#7C3AED;border:none;border-radius:8px;padding:6px 10px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif;font-weight:700">
+            <i class="ti ti-eye"></i> تفاصيل
+          </button>
+        </div>
+      </div>
+
+      <!-- progress -->
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <div style="flex:1;background:#F0F2F5;border-radius:99px;height:6px;overflow:hidden">
+          <div style="height:6px;border-radius:99px;background:${pctColor};width:${planPct}%;transition:width .6s"></div>
+        </div>
+        <span style="font-size:11px;font-weight:700;color:${pctColor};flex-shrink:0">${done}/${items.length} — ${planPct}%</span>
+      </div>
+
+      <!-- أيام مختصرة -->
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        ${Object.entries(byDay).map(([date,dayItems])=>{
+          const d = new Date(date);
+          const dayDone = dayItems.filter(i=>i.status==='done').length;
+          const bg = dayDone===dayItems.length?'#DCFCE7':dayItems.length?'#FEF3C7':'#F0F2F5';
+          const tc = dayDone===dayItems.length?'#15803D':dayItems.length?'#D97706':'#888';
+          return `<div style="background:${bg};color:${tc};padding:4px 10px;border-radius:8px;font-size:10px;font-weight:700">
+            ${CP_WEEK_DAYS[d.getDay()]||date} (${dayDone}/${dayItems.length})
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }).join('');
+
+  // حفظ البيانات للـ modal
+  window._cpPlans = coordPlans;
+  window._cpAllItems = allItems;
+}
+
+async function cpShowDetail(planId){
+  const plan = (window._cpPlans||[]).find(p=>String(p.id)===String(planId));
+  const items = (window._cpAllItems||[]).filter(i=>String(i.plan_id)===String(planId));
+  if(!plan){ showToast('خطأ في تحميل البيانات','err'); return; }
+
+  document.getElementById('cp-modal-title').innerHTML =
+    `<i class="ti ti-calendar-check" style="color:#7C3AED"></i> خطة: ${plan.supervisor_name} — ${plan.week_start||''}`;
+
+  const DAYS_AR = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+  const TASK_LABELS = {visit:'زيارة فرع',rep_follow:'متابعة منسق',challenge:'حل تحدي',order:'عمل طلبية'};
+  const TASK_ICONS  = {visit:'ti-building-store',rep_follow:'ti-user-check',challenge:'ti-flame',order:'ti-truck-delivery'};
+  const TASK_COLORS = {visit:'#2563EB',rep_follow:'#D97706',challenge:'#7C3AED',order:'#15803D'};
+
+  const byDay = {};
+  items.forEach(i=>{ if(!byDay[i.day_date]) byDay[i.day_date]=[]; byDay[i.day_date].push(i); });
+
+  const totalDone = items.filter(i=>i.status==='done').length;
+  const totalPts  = items.reduce((s,i)=>s+(+i.points||0),0);
+
+  document.getElementById('cp-modal-body').innerHTML = `
+    <!-- ملخص -->
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px">
+      <div class="stat-card blue"><div class="stat-n">${items.length}</div><div class="stat-l">إجمالي المهام</div></div>
+      <div class="stat-card green"><div class="stat-n">${totalDone}</div><div class="stat-l">منجز</div></div>
+      <div class="stat-card purple"><div class="stat-n">${totalPts}</div><div class="stat-l">نقاط</div></div>
+    </div>
+
+    <!-- المهام بالأيام -->
+    ${Object.entries(byDay).sort((a,b)=>a[0].localeCompare(b[0])).map(([date,dayItems])=>{
+      const d = new Date(date);
+      const dayDone = dayItems.filter(i=>i.status==='done').length;
+      return `<div style="margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;
+          background:#F8F9FF;padding:8px 12px;border-radius:10px;margin-bottom:8px">
+          <div style="font-size:13px;font-weight:800;color:#1A1A2E">
+            ${DAYS_AR[d.getDay()]} — ${d.toLocaleDateString('ar-EG',{day:'numeric',month:'long'})}
+          </div>
+          <span class="badge ${dayDone===dayItems.length?'b-green':'b-orange'}">${dayDone}/${dayItems.length}</span>
+        </div>
+        ${dayItems.map(item=>{
+          const type  = item.task_type||'visit';
+          const color = TASK_COLORS[type]||'#2563EB';
+          const icon  = TASK_ICONS[type]||'ti-check';
+          const label = TASK_LABELS[type]||type;
+          const isDone= item.status==='done';
+          return `<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;
+            background:${isDone?'#F0FDF4':'#fff'};border:1px solid ${isDone?'#86EFAC':'#E5E7EB'};
+            border-radius:10px;margin-bottom:6px">
+            <div style="width:32px;height:32px;background:${color}18;border-radius:8px;
+              display:flex;align-items:center;justify-content:center;flex-shrink:0">
+              <i class="ti ${icon}" style="color:${color};font-size:14px"></i>
+            </div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:11px;font-weight:700;color:${color}">${label}</div>
+              <div style="font-size:12px;font-weight:600;color:#1A1A2E;margin-top:2px">
+                ${item.rep_name||item.challenge_text||'—'}
+              </div>
+              ${item.branch_name?`<div style="font-size:11px;color:var(--text2)">${item.branch_name}</div>`:''}
+              ${item.result?`<div style="font-size:11px;color:#15803D;margin-top:4px;background:#F0FDF4;padding:3px 8px;border-radius:6px">✓ ${item.result}</div>`:''}
+              ${item.is_modified&&item.change_reason?`<div style="font-size:10px;color:#D97706;margin-top:3px">✏️ تعديل: ${item.change_reason}</div>`:''}
+            </div>
+            <div style="flex-shrink:0;text-align:center">
+              ${isDone
+                ? `<span class="badge b-green">✓ منجز</span>${item.points?`<div style="font-size:10px;color:#D97706;margin-top:3px">⭐${item.points}</div>`:''}`
+                : '<span class="badge b-gray">⏳</span>'
+              }
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`;
+    }).join('')}`;
+
+  document.getElementById('modal-coord-plan').style.display = 'flex';
+  document.getElementById('modal-coord-plan').style.alignItems = 'flex-start';
+}
+
+function cpExport(){
+  if(typeof XLSX==='undefined'){showToast('جاري تحميل المكتبة','info');return;}
+  const plans = window._cpPlans||[];
+  const items = window._cpAllItems||[];
+  if(!plans.length){showToast('لا توجد بيانات للتصدير','err');return;}
+
+  const wb = XLSX.utils.book_new();
+  const TASK_LABELS = {visit:'زيارة فرع',rep_follow:'متابعة منسق',challenge:'حل تحدي',order:'عمل طلبية'};
+  const DAYS_AR = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+
+  const rows = [['المشرف','اليوم','التاريخ','نوع المهمة','المنسق/التحدي','الفرع','الحالة','النتيجة','النقاط','تعديل','سبب التعديل']];
+  items.forEach(item=>{
+    const plan = plans.find(p=>p.id===item.plan_id);
+    const d = new Date(item.day_date||'');
+    rows.push([
+      plan?.supervisor_name||'—',
+      DAYS_AR[d.getDay()]||item.day_name||'—',
+      item.day_date||'—',
+      TASK_LABELS[item.task_type||'visit']||item.task_type||'—',
+      item.rep_name||item.challenge_text||'—',
+      item.branch_name||'—',
+      item.status==='done'?'✅ منجز':'⏳ مجدول',
+      item.result||'—',
+      item.points||0,
+      item.is_modified?'نعم':'لا',
+      item.change_reason||'—'
+    ]);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{wch:18},{wch:10},{wch:12},{wch:14},{wch:22},{wch:22},{wch:12},{wch:24},{wch:8},{wch:8},{wch:20}];
+  XLSX.utils.book_append_sheet(wb, ws, 'خطط التنسيق');
+  XLSX.writeFile(wb, `خطط_التنسيق_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
 async function loadSalesPlans(){
