@@ -2769,8 +2769,43 @@ async function saveTaskToPlan(){
     payload.notes       = document.getElementById('mv-order-details')?.value.trim()||note;
     if(!payload.branch_name){ showToast('اختر الفرع','err'); return; }
   }
-  await sbPost('weekly_plan_items', payload);
-  planItems = await sbGet('weekly_plan_items',{plan_id:currentPlan.id},{order:'day_date.asc,id.asc',limit:200});
+  // اكتب في الجدول المناسب
+  if(currentPlan._newTable && window._plansTableExists !== false){
+    // plan_branches للجديد
+    const branchPayload = {
+      plan_id:      currentPlan.id,
+      branch_name:  payload.branch_name || payload.rep_name || payload.challenge_text || '—',
+      target_sales: payload.target_sales || 0,
+      target_coord: payload.target_coord || 0,
+      visit_date:   payload.day_date,
+      visit_status: 'pending',
+      geo_status:   'unknown',
+      created_at:   new Date().toISOString()
+    };
+    await sbPost('plan_branches', branchPayload);
+    const bRes = await sbGet('plan_branches', {plan_id: currentPlan.id}, {order:'branch_name.asc', limit:200});
+    planItems = bRes.map(b=>({
+      id: b.id, plan_id: b.plan_id,
+      branch_name: b.branch_name, day_date: b.visit_date || payload.day_date,
+      task_type: 'visit', status: b.visit_status || 'pending',
+      target_sales: b.target_sales||0, target_coord: b.target_coord||0,
+      geo_status: b.geo_status||'unknown'
+    }));
+  } else {
+    // weekly_plan_items للقديم
+    // أزل الحقول اللي مش في الجدول
+    const cleanPayload = {
+      plan_id: payload.plan_id, supervisor_name: payload.supervisor_name,
+      day_date: payload.day_date, task_type: payload.task_type,
+      status: payload.status, points: payload.points,
+      branch_name: payload.branch_name||'', rep_name: payload.rep_name||'',
+      challenge_text: payload.challenge_text||'',
+      route: payload.route||'', grp: payload.grp||'',
+      target_sales: payload.target_sales||0, target_coord: payload.target_coord||0,
+    };
+    await sbPost('weekly_plan_items', cleanPayload);
+    planItems = await sbGet('weekly_plan_items',{plan_id:currentPlan.id},{order:'day_date.asc,id.asc',limit:200});
+  }
   renderPlanDays();
   closeModal('modal-task');
   // reset fields
@@ -5198,8 +5233,7 @@ async function loadPlan() {
 
   renderPlanDays();
   checkPlanAlerts?.();
-  await shLoadHeader();       // الأصلية — staff roles
-  shLoadHeaderApprovals();   // الجديدة — approvals بدون recursion
+  shLoadHeaderApprovals();   // approvals فقط — بدون recursion
   salesLoadBranchCoords?.();
   renderSalesExecMatrix?.();
   shUpdateStatus?.();
@@ -5346,6 +5380,32 @@ async function shLoadHeaderApprovals() {
   } catch(e) {}
 }
 
+
+// ── showToast: دالة الإشعارات ─────────────────────────────────
+function showToast(msg, type='ok'){
+  let el = document.getElementById('sales-toast');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'sales-toast';
+    el.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);'
+      + 'padding:10px 20px;border-radius:20px;font-size:13px;font-weight:700;'
+      + 'font-family:Cairo,sans-serif;z-index:9999;transition:opacity .3s;'
+      + 'box-shadow:0 4px 16px rgba(0,0,0,.25);white-space:nowrap;direction:rtl;';
+    document.body.appendChild(el);
+  }
+  const colors = {
+    ok  : {bg:'#6B7A3B', color:'#fff'},
+    err : {bg:'#731E2E', color:'#fff'},
+    info: {bg:'#4B3C1A', color:'#EDE5D8'},
+  };
+  const c = colors[type] || colors.ok;
+  el.style.background = c.bg;
+  el.style.color = c.color;
+  el.style.opacity = '1';
+  el.textContent = msg;
+  clearTimeout(el._t);
+  el._t = setTimeout(()=>{ el.style.opacity='0'; }, 2800);
+}
 </script>
 
 <!-- VERSION BADGE -->
