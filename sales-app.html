@@ -328,6 +328,16 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
 .sales-kpi-n.green{color:#4ade80}
 .sales-kpi-n.red{color:#f87171}
 .sales-kpi-l{font-size:9px;color:rgba(255,255,255,.5);margin-top:2px}
+
+/* ══ Geofencing Status Colors — نظام الخطط الجديد ══ */
+.geo-inside  { background:rgba(107,122,59,.18) !important; border-color:rgba(107,122,59,.5) !important; }
+.geo-near    { background:rgba(197,91,72,.18)  !important; border-color:rgba(197,91,72,.5)  !important; }
+.geo-outside { background:rgba(115,30,46,.22)  !important; border-color:rgba(115,30,46,.55) !important; }
+.geo-badge-inside  { background:#6B7A3B22; color:#6B7A3B; border:1px solid #6B7A3B44; border-radius:20px; padding:2px 8px; font-size:10px; font-weight:700; }
+.geo-badge-near    { background:#C55B4822; color:#C55B48; border:1px solid #C55B4844; border-radius:20px; padding:2px 8px; font-size:10px; font-weight:700; }
+.geo-badge-outside { background:#731E2E22; color:#731E2E; border:1px solid #731E2E55; border-radius:20px; padding:2px 8px; font-size:10px; font-weight:700; }
+/* Plan status pills */
+.hier-status-pill.submitted { background:rgba(197,91,72,.2); color:#F5B8A0; border:1.5px solid rgba(197,91,72,.4); }
 </style>
 </head>
 <body>
@@ -5003,6 +5013,272 @@ self.addEventListener('fetch', e=>{ e.respondWith(caches.match(e.request).then(r
     navigator.serviceWorker.register(swUrl).catch(()=>{});
   });
 }
+
+// ════════════════════════════════════════════════════════════════
+// نظام الخطط الجديد v1.5 — sales-app
+// يحفظ في plans + plan_branches ويقرأ منهم
+// ════════════════════════════════════════════════════════════════
+
+// ─── Override: loadPlan → يدعم plans الجديد ─────────────────────
+const _origLoadPlan = typeof loadPlan === 'function' ? loadPlan : null;
+
+async function loadPlan() {
+  if (!cu) return;
+  const ws = currentWeekStart.toISOString().slice(0, 10);
+  const we = new Date(currentWeekStart); we.setDate(we.getDate() + 6);
+  const weStr = we.toISOString().slice(0, 10);
+  const H = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
+
+  document.getElementById('plan-week-label').textContent =
+    currentWeekStart.toLocaleDateString('ar-EG', { day: 'numeric', month: 'long' }) +
+    ' — ' + we.toLocaleDateString('ar-EG', { day: 'numeric', month: 'long', year: 'numeric' });
+
+  // GM view — كل الخطط
+  if (cu.level === 'gm') {
+    try {
+      // جرب plans الجديد
+      let allPlans = await fetch(
+        `${SUPABASE_URL}/rest/v1/plans?week_start=eq.${ws}&plan_type=in.(sales,hyper_sales,special_sales,group_sales)&order=supervisor_name.asc&limit=50`,
+        { headers: H }
+      ).then(r => r.ok ? r.json() : []).catch(() => []);
+
+      // fallback
+      if (!allPlans.length) {
+        const r = await fetch(
+          `${SUPABASE_URL}/rest/v1/weekly_plans?select=*&week_start=eq.${ws}&or=(plan_type.eq.sales,plan_type.is.null)&order=supervisor_name.asc&limit=50`,
+          { headers: H }
+        ).then(r => r.ok ? r.json() : []).catch(() => []);
+        allPlans = r;
+      }
+
+      currentPlan = allPlans[0] || null;
+      planItems = [];
+      for (const p of allPlans) {
+        if (!p.id) continue;
+        if (p._newTable || allPlans[0]?.__isNew) {
+          const branches = await fetch(
+            `${SUPABASE_URL}/rest/v1/plan_branches?plan_id=eq.${p.id}&limit=200`, { headers: H }
+          ).then(r => r.ok ? r.json() : []).catch(() => []);
+          planItems = planItems.concat(branches.map(b => ({ ...b, task_type: 'visit' })));
+        } else {
+          const items = await sbGet('weekly_plan_items', { plan_id: p.id }, { order: 'day_date.asc', limit: 200 });
+          planItems = planItems.concat(items);
+        }
+      }
+    } catch (e) { planItems = []; }
+    renderPlanDays();
+    return;
+  }
+
+  // مشرف عادي — جيب أو أنشئ
+  let planRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/plans?supervisor_name=eq.${encodeURIComponent(cu.name)}&week_start=eq.${ws}&limit=1`,
+    { headers: H }
+  ).then(r => r.ok ? r.json() : []).catch(() => []);
+
+  if (planRes.length) {
+    currentPlan = { ...planRes[0], _newTable: true };
+  } else {
+    // جرب القديم
+    let old = await sbGet('weekly_plans', { supervisor_name: cu.name, week_start: ws }, { limit: 1 });
+    if (Array.isArray(old) && old.length) {
+      currentPlan = old[0];
+    } else {
+      // أنشئ جديد في الجدولين
+      const planData = {
+        supervisor_name: cu.name, week_start: ws, week_end: weStr,
+        status: 'draft', plan_type: 'sales', created_at: new Date().toISOString()
+      };
+      // plans جديد
+      const nr = await fetch(`${SUPABASE_URL}/rest/v1/plans`, {
+        method: 'POST',
+        headers: { ...H, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+        body: JSON.stringify(planData)
+      }).then(r => r.ok ? r.json() : null).catch(() => null);
+
+      // weekly_plans قديم (للتوافق)
+      const or = await sbPost('weekly_plans', { ...planData });
+
+      const np = Array.isArray(nr) ? nr[0] : nr;
+      currentPlan = np ? { ...np, _newTable: true } : (Array.isArray(or) ? or[0] : or);
+    }
+  }
+
+  // جلب البنود
+  if (currentPlan?.id) {
+    if (currentPlan._newTable) {
+      const bRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/plan_branches?plan_id=eq.${currentPlan.id}&order=branch_name.asc&limit=200`,
+        { headers: H }
+      ).then(r => r.ok ? r.json() : []).catch(() => []);
+      planItems = bRes.map(b => ({
+        id: b.id, plan_id: b.plan_id, day_date: b.visit_date || ws,
+        branch_name: b.branch_name, task_type: 'visit',
+        status: b.visit_status || 'pending',
+        target_sales: b.target_sales || 0, target_coord: b.target_coord || 0,
+        geo_status: b.geo_status || 'unknown'
+      }));
+    } else {
+      planItems = await sbGet('weekly_plan_items', { plan_id: currentPlan.id }, { order: 'day_date.asc,id.asc', limit: 200 });
+    }
+  }
+
+  renderPlanDays();
+  checkPlanAlerts?.();
+  shLoadHeader?.();
+  salesLoadBranchCoords?.();
+  renderSalesExecMatrix?.();
+  shUpdateStatus?.();
+
+  // ابدأ polling للاعتماد
+  salesStartPlanPolling();
+}
+
+// ─── Override: shSubmitPlan → يدعم plans الجديد ─────────────────
+async function shSubmitPlan() {
+  if (!currentPlan) return;
+  const btn = document.getElementById('sh-submit-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ جاري الإرسال...';
+  const now = new Date().toISOString();
+  const H = {
+    'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`,
+    'Content-Type': 'application/json', 'Prefer': 'return=minimal'
+  };
+
+  try {
+    // تحديث في الجدول المناسب
+    const table = currentPlan._newTable ? 'plans' : 'weekly_plans';
+    await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${currentPlan.id}`, {
+      method: 'PATCH', headers: H,
+      body: JSON.stringify({ status: 'submitted', submitted_at: now })
+    });
+
+    // لو قديم → حاول تعمل migration للجديد
+    if (!currentPlan._newTable && planItems.length) {
+      await salesMigrateToNewPlans(now);
+    }
+
+    currentPlan.status = 'submitted';
+    shUpdateStatus?.();
+
+    // broadcast
+    localStorage.setItem('plan_submitted', JSON.stringify({
+      planId: currentPlan.id, supervisorName: cu.name, time: now, type: 'sales'
+    }));
+
+    showToast('✅ تم رفع الخطة للاعتماد — ستظهر في لوحة التحكم فوراً');
+  } catch (e) { showToast('❌ تعذر الإرسال'); }
+  btn.disabled = false;
+  btn.textContent = '📤 رفع للاعتماد';
+}
+
+// ─── Migration: weekly_plans → plans ─────────────────────────────
+async function salesMigrateToNewPlans(now) {
+  const H = {
+    'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`,
+    'Content-Type': 'application/json', 'Prefer': 'return=representation'
+  };
+  const ws = currentWeekStart.toISOString().slice(0, 10);
+  const we = new Date(currentWeekStart); we.setDate(we.getDate() + 6);
+
+  try {
+    const nr = await fetch(`${SUPABASE_URL}/rest/v1/plans`, {
+      method: 'POST', headers: H,
+      body: JSON.stringify({
+        supervisor_name: cu.name,
+        week_start: ws, week_end: we.toISOString().slice(0, 10),
+        status: 'submitted', plan_type: 'sales',
+        submitted_at: now, created_at: now
+      })
+    }).then(r => r.ok ? r.json() : null).catch(() => null);
+
+    const newPlanId = Array.isArray(nr) ? nr[0]?.id : nr?.id;
+    if (!newPlanId || !planItems.length) return;
+
+    const branches = planItems.filter(i => i.task_type === 'visit' || !i.task_type).map(i => ({
+      plan_id: newPlanId,
+      branch_name: i.branch_name || i.route || '—',
+      target_sales: i.target_sales || 0,
+      target_coord: i.target_coord || 0,
+      visit_date: i.day_date,
+      visit_status: i.status || 'pending',
+      geo_status: i.geo_status || 'unknown',
+      created_at: now
+    }));
+
+    if (branches.length) {
+      await fetch(`${SUPABASE_URL}/rest/v1/plan_branches`, {
+        method: 'POST', headers: { ...H, 'Prefer': 'return=minimal' },
+        body: JSON.stringify(branches)
+      });
+    }
+  } catch (e) { /* silent */ }
+}
+
+// ─── Polling: تحقق من تغيير status كل 30 ثانية ────────────────────
+let _salesPlanPoll = null;
+function salesStartPlanPolling() {
+  if (_salesPlanPoll) clearInterval(_salesPlanPoll);
+  _salesPlanPoll = setInterval(async () => {
+    if (!currentPlan?.id) return;
+    const table = currentPlan._newTable ? 'plans' : 'weekly_plans';
+    const H = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/${table}?id=eq.${currentPlan.id}&select=status,merch_approved,area_approved`,
+      { headers: H }
+    ).then(r => r.ok ? r.json() : []).catch(() => []);
+
+    if (!res.length) return;
+    const fresh = res[0];
+    if (fresh.status !== currentPlan.status) {
+      currentPlan.status = fresh.status;
+      currentPlan.merch_approved = fresh.merch_approved;
+      currentPlan.area_approved  = fresh.area_approved;
+      shUpdateStatus?.();
+      if (fresh.status === 'approved') {
+        showToast('🎉 تم اعتماد خطتك من قِبل الإدارة!');
+      } else if (fresh.status === 'rejected') {
+        showToast('❌ تم رفض الخطة — يرجى المراجعة');
+      }
+    }
+  }, 30000);
+}
+
+// ─── shLoadHeader: تحديث حالات الاعتماد في UI ─────────────────────
+const _origShLoadHeader = typeof shLoadHeader === 'function' ? shLoadHeader.bind({}) : null;
+async function shLoadHeader() {
+  if (_origShLoadHeader) await _origShLoadHeader();
+
+  if (!currentPlan?.id) return;
+  const H = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
+
+  // لو جديد → جيب من plan_approvals
+  if (currentPlan._newTable) {
+    const appr = await fetch(
+      `${SUPABASE_URL}/rest/v1/plan_approvals?plan_id=eq.${currentPlan.id}&order=created_at.desc`,
+      { headers: H }
+    ).then(r => r.ok ? r.json() : []).catch(() => []);
+
+    const merch = appr.find(a => a.approver_role === 'merch_manager');
+    const area  = appr.find(a => a.approver_role === 'area_manager');
+
+    // تحديث الأزرار في الـ UI (نفس منطق شاشة الخطة)
+    const updateDot = (elId, nameId, approved, name) => {
+      const dot  = document.getElementById(elId);
+      const nameEl = document.getElementById(nameId);
+      if (!dot) return;
+      dot.style.background = approved ? '#6B7A3B' : '#C55B48';
+      if (nameEl) nameEl.textContent = approved ? '✅ ' + (name || 'معتمد') : 'في انتظار الاعتماد';
+    };
+
+    // مدير التنسيق
+    updateDot('sh-dot-merch', 'sh-name-merch', !!merch, merch?.approver_name);
+    // مدير البيع  
+    updateDot('sh-dot-area',  'sh-name-area',  !!area,  area?.approver_name);
+  }
+}
+
 </script>
 
 <!-- VERSION BADGE -->
