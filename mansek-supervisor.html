@@ -3418,27 +3418,43 @@ async function hierLoadSalesRoles(grps){
 
 // تحميل الخطة مع الهيدر الهرمي
 async function hierLoadPlan(){
+  if(!cu?.name) return;
   const ws = hierGetWeekStart(hierWeekOffset);
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
 
   try{
-    // جلب الخطة
-    const plans = await sbGet('weekly_plans',
-      {supervisor_name: cu.name, week_start: ws},
-      {limit:1});
-    hierPlanData = (Array.isArray(plans) && plans.length) ? plans[0] : null;
+    // جلب الخطة من plans
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/plans?supervisor_name=eq.${encodeURIComponent(cu.name)}&week_start=eq.${ws}&limit=1`,
+      {headers:H}
+    );
+    const planRes = r.ok ? await r.json().catch(()=>[]) : [];
+    hierPlanData = Array.isArray(planRes) && planRes.length ? planRes[0] : null;
 
-    // جلب البنود
+    // جلب الفروع من plan_branches
     let items = [];
     if(hierPlanData){
-      const res = await sbGet('weekly_plan_items',{plan_id:hierPlanData.id},{order:'day_date.asc'});
-      items = Array.isArray(res) ? res : [];
+      const br = await fetch(
+        `${SUPABASE_URL}/rest/v1/plan_branches?plan_id=eq.${hierPlanData.id}&order=branch_name.asc&limit=500`,
+        {headers:H}
+      );
+      const branches = br.ok ? await br.json().catch(()=>[]) : [];
+      // map لنفس شكل planItems
+      items = Array.isArray(branches) ? branches.map(b=>({
+        id: b.id, plan_id: b.plan_id,
+        branch_name: b.branch_name,
+        day_date: b.visit_date || ws,
+        task_type: 'visit',
+        status: b.visit_status || 'pending',
+        target_sales: b.target_sales || 0,
+        target_coord: b.target_coord || 0,
+        geo_status: b.geo_status || 'unknown',
+        check_in_lat: b.visit_lat, check_in_lng: b.visit_lng
+      })) : [];
     }
 
-    // تحديث الهيدر
     hierUpdateHeader(hierPlanData);
     hierUpdateKPI(items);
-
-    // تحديث currentPlan وplanItems للـ render القديم
     currentPlan = hierPlanData;
     planItems   = items;
     renderPlan();
@@ -3459,11 +3475,11 @@ async function hierSubmitPlan(){
   btn.textContent = '⏳ جاري الرفع...';
 
   try{
-    await fetch(`${SUPABASE_URL}/rest/v1/weekly_plans?id=eq.${hierPlanData.id}`,{
+    await fetch(`${SUPABASE_URL}/rest/v1/plans?id=eq.${hierPlanData.id}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,
                'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body: JSON.stringify({status:'pending', submitted_at: new Date().toISOString()})
+      body: JSON.stringify({status:'submitted', submitted_at: new Date().toISOString()})
     });
 
     // إرسال إشعار للمديرَين عبر جدول messages
@@ -3527,10 +3543,17 @@ async function loadCurrentPlan(){
 
 async function _loadCurrentPlanLegacy(){
   const weekStart = getWeekDates()[0].date;
-  const data = await sbGet('weekly_plans',{supervisor_name:cu.name, week_start:weekStart});
+  const data = await sbGet('plans',{supervisor_name:cu.name, week_start:weekStart});
   if(data && data.length){
     currentPlan = data[0];
-    const items = await sbGet('weekly_plan_items',{plan_id:currentPlan.id},{order:'day_date.asc'});
+    const brs = await sbGet('plan_branches',{plan_id:currentPlan.id},{order:'branch_name.asc'});
+  const items = brs.map(b=>({
+    id:b.id, plan_id:b.plan_id, branch_name:b.branch_name,
+    day_date:b.visit_date, task_type:'visit',
+    status:b.visit_status||'pending',
+    target_sales:b.target_sales||0, target_coord:b.target_coord||0,
+    geo_status:b.geo_status||'unknown'
+  }));
     planItems = Array.isArray(items) ? items : [];
   } else {
     currentPlan = null;
@@ -3713,22 +3736,27 @@ async function createNewPlan(){
   const weekEnd   = dates[6].date;
 
   // لو في مسودة موجودة امسحها
-  if(currentPlan){
-    await fetch(`${SUPABASE_URL}/rest/v1/weekly_plans?id=eq.${currentPlan.id}`,{
+  // الحذف هيتم في الكود الجديد فوق
+
+  // حذف الخطة القديمة من plans لو موجودة
+  if(currentPlan?.id){
+    await fetch(`${SUPABASE_URL}/rest/v1/plans?id=eq.${currentPlan.id}`,{
       method:'DELETE',
       headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
     });
   }
 
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/weekly_plans`,{
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/plans`,{
     method:'POST',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=representation'},
     body: JSON.stringify({
       supervisor_name: cu.name,
-      supervisor_grp: cu.groups[0]||'',
       week_start: weekStart,
       week_end: weekEnd,
-      status:'draft'
+      plan_type: cu.groups?.includes('hyper') ? 'hyper'
+               : cu.groups?.includes('roving') ? 'roving'
+               : cu.groups?.includes('special') ? 'special' : 'coord',
+      status: 'draft'
     })
   });
 
@@ -3745,9 +3773,9 @@ async function approvePlan(){
   if(!currentPlan) return;
   if(planItems.length===0){ showToast('⚠️ أضف زيارات للخطة أولاً'); return; }
 
-  await sbPatch('weekly_plans', `id=eq.${currentPlan.id}`, {
-    status:'approved',
-    approved_at: new Date().toISOString()
+  await sbPatch('plans', `id=eq.${currentPlan.id}`, {
+    status:'submitted',
+    submitted_at: new Date().toISOString()
   });
 
   // إنشاء سجل التنفيذ
@@ -3864,30 +3892,31 @@ async function addPlanItem(){
 
   for(const branch of selectedBranches){
     try{
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items`,{
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches`,{
         method:'POST',
         headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=representation'},
         body: JSON.stringify({
-          plan_id:     currentPlan.id,
-          day_name:    _addingDay.dayName,
-          day_date:    _addingDay.date,
-          rep_name:    rep,
-          branch_name: branch,
-          target_goal: goal,
-          grp,
-          route,
-          task_type:    'visit',
-          status:       'pending',
-          points:       0,
-          is_modified:  false,
+          plan_id:      currentPlan.id,
+          branch_name:  branch,
           target_sales: targetSales,
-          target_coord: targetCoord
+          target_coord: targetCoord,
+          visit_date:   _addingDay.date,
+          visit_status: 'pending',
+          geo_status:   'unknown'
         })
       });
       if(res.ok){
         const data = await res.json();
-        const item = Array.isArray(data) ? data[0] : data;
-        if(item) planItems.push(item);
+        const b = Array.isArray(data) ? data[0] : data;
+        if(b) planItems.push({
+          id: b.id, plan_id: b.plan_id,
+          branch_name: b.branch_name,
+          day_date: b.visit_date || _addingDay.date,
+          task_type: 'visit', status: b.visit_status || 'pending',
+          target_sales: b.target_sales || 0,
+          target_coord: b.target_coord || 0,
+          geo_status: b.geo_status || 'unknown'
+        });
         addedCount++;
       } else {
         const errText = await res.text();
@@ -3920,7 +3949,7 @@ async function onPiRepChange(){}
 async function onPiRouteChange(){}
 
 async function removePlanItem(itemId){
-  await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items?id=eq.${itemId}`,{
+  await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${itemId}`,{
     method:'DELETE',
     headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
   });
@@ -3951,7 +3980,7 @@ async function calcExecutionPoints(){
 
       // حدّث حالة البند
       if(item.status!=='done'){
-        await sbPatch('weekly_plan_items',`id=eq.${item.id}`,{status:'done',visit_id:match.id});
+        await sbPatch('plan_branches',`id=eq.${item.id}`,{visit_status:'done'});
         item.status = 'done';
       }
     }
@@ -4016,7 +4045,14 @@ async function loadDailyExecution(){
 
   // جيب بيانات محدثة من Supabase
   try{
-    const freshItems = await sbGet('weekly_plan_items',{plan_id:currentPlan.id},{order:'day_date.asc'});
+    const freshRes = await sbGet('plan_branches',{plan_id:currentPlan.id},{order:'branch_name.asc'});
+      const freshItems = freshRes.map(b=>({
+        id:b.id, plan_id:b.plan_id, branch_name:b.branch_name,
+        day_date:b.visit_date, task_type:'visit',
+        status:b.visit_status||'pending',
+        target_sales:b.target_sales||0, target_coord:b.target_coord||0,
+        geo_status:b.geo_status||'unknown'
+      }));
     if(Array.isArray(freshItems) && freshItems.length) planItems = freshItems;
   }catch(e){ console.warn('loadDailyExecution fetch error:', e); }
 
@@ -4098,10 +4134,10 @@ async function toggleVisitStatus(itemId, currentStatus){
   const icon = next==='done'?'✅ تم التنفيذ':next==='missed'?'❌ فائت':'⏳ مجدول';
 
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items?id=eq.${itemId}`,{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${itemId}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body: JSON.stringify({status:next})
+      body: JSON.stringify({visit_status:next})
     });
 
     if(res.ok){
@@ -4429,10 +4465,10 @@ async function saveVisitResult(){
     }
 
     // حدّث حالة الزيارة
-    await fetch(`${SUPABASE_URL}/rest/v1/weekly_plan_items?id=eq.${_currentResultItem.planItemId}`,{
+    await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${_currentResultItem.planItemId}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body: JSON.stringify({status:'done'})
+      body: JSON.stringify({visit_status:'done'})
     });
     const idx = planItems.findIndex(i=>i.id===_currentResultItem.planItemId);
     if(idx!==-1) planItems[idx].status='done';
