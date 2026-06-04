@@ -5127,10 +5127,22 @@ async function loadPlan() {
   }
 
   // مشرف عادي — جيب أو أنشئ
-  let planRes = await fetch(
-    `${SUPABASE_URL}/rest/v1/plans?supervisor_name=eq.${encodeURIComponent(cu.name)}&week_start=eq.${ws}&limit=1`,
-    { headers: H }
-  ).then(r => r.ok ? r.json() : []).catch(() => []);
+  // flag: هل جدول plans موجود؟
+  if (typeof window._plansTableExists === 'undefined') window._plansTableExists = null;
+
+  let planRes = [];
+  if (window._plansTableExists !== false) {
+    const pr = await fetch(
+      `${SUPABASE_URL}/rest/v1/plans?supervisor_name=eq.${encodeURIComponent(cu.name)}&week_start=eq.${ws}&limit=1`,
+      { headers: H }
+    );
+    if (pr.status === 404) {
+      window._plansTableExists = false;
+    } else if (pr.ok) {
+      window._plansTableExists = true;
+      planRes = await pr.json().catch(() => []);
+    }
+  }
 
   if (planRes.length) {
     currentPlan = { ...planRes[0], _newTable: true };
@@ -5204,14 +5216,14 @@ async function shSubmitPlan() {
 
   try {
     // تحديث في الجدول المناسب
-    const table = currentPlan._newTable ? 'plans' : 'weekly_plans';
+    const table = (currentPlan._newTable && window._plansTableExists !== false) ? 'plans' : 'weekly_plans';
     await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${currentPlan.id}`, {
       method: 'PATCH', headers: H,
       body: JSON.stringify({ status: 'submitted', submitted_at: now })
     });
 
-    // لو قديم → حاول تعمل migration للجديد
-    if (!currentPlan._newTable && planItems.length) {
+    // لو قديم → حاول migration للجديد فقط لو الجدول موجود
+    if (!currentPlan._newTable && planItems.length && window._plansTableExists !== false) {
       await salesMigrateToNewPlans(now);
     }
 
@@ -5278,7 +5290,7 @@ function salesStartPlanPolling() {
   if (_salesPlanPoll) clearInterval(_salesPlanPoll);
   _salesPlanPoll = setInterval(async () => {
     if (!currentPlan?.id) return;
-    const table = currentPlan._newTable ? 'plans' : 'weekly_plans';
+    const table = (currentPlan._newTable && window._plansTableExists !== false) ? 'plans' : 'weekly_plans';
     const H = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
     const res = await fetch(
       `${SUPABASE_URL}/rest/v1/${table}?id=eq.${currentPlan.id}&select=status,merch_approved,area_approved`,
