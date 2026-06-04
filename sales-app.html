@@ -1502,11 +1502,14 @@ let planItems = [];
 async function sbGet(table, params={}, opts={}){
   try{
     let url = `${SUPABASE_URL}/rest/v1/${table}?select=*`;
-    Object.entries(params).forEach(([k,v])=> url+=`&${k}=eq.${encodeURIComponent(v)}`);
+    Object.entries(params).forEach(([k,v])=>{
+      if(v!==undefined && v!==null && v!=='') url+=`&${k}=eq.${encodeURIComponent(v)}`;
+    });
     if(opts.order) url+=`&order=${opts.order}`;
     if(opts.limit) url+=`&limit=${opts.limit}`;
     const r = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    const d = await r.json();
+    if(!r.ok) return [];
+    const d = await r.json().catch(()=>[]);
     return Array.isArray(d) ? d : [];
   }catch(e){ return []; }
 }
@@ -2527,9 +2530,11 @@ let _geoFilter = 'all'; // فلتر الـ geo الحالي
 
 async function salesLoadBranchCoords(){
   if(Object.keys(_salesBranchCoords).length > 0) return;
+  const grps = ((cu?.groups?.length ? cu.groups : [cu?.grp]) || []).filter(Boolean);
+  if(!grps.length) return; // guard: لا توجد مجموعات محددة
   try{
-    const grps = cu.groups || [cu.grp];
     for(const grp of grps){
+      if(!grp) continue;
       const res = await fetch(
         `${SUPABASE_URL}/rest/v1/branches?select=branch_name,lat,lng&grp=eq.${encodeURIComponent(grp)}&status=eq.active&limit=500`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
@@ -5127,7 +5132,7 @@ async function loadPlan() {
   }
 
   // مشرف عادي — جيب أو أنشئ
-  // flag: هل جدول plans موجود؟
+  if (!cu?.name) return; // guard
   if (typeof window._plansTableExists === 'undefined') window._plansTableExists = null;
 
   let planRes = [];
@@ -5193,7 +5198,8 @@ async function loadPlan() {
 
   renderPlanDays();
   checkPlanAlerts?.();
-  shLoadHeader?.();
+  await shLoadHeader();       // الأصلية — staff roles
+  shLoadHeaderApprovals();   // الجديدة — approvals بدون recursion
   salesLoadBranchCoords?.();
   renderSalesExecMatrix?.();
   shUpdateStatus?.();
@@ -5317,38 +5323,27 @@ function salesStartPlanPolling() {
   }, 30000);
 }
 
-// ─── shLoadHeader: تحديث حالات الاعتماد في UI ─────────────────────
-const _origShLoadHeader = typeof shLoadHeader === 'function' ? shLoadHeader.bind({}) : null;
-async function shLoadHeader() {
-  if (_origShLoadHeader) await _origShLoadHeader();
-
+// ─── shLoadHeaderApprovals: تحديث الاعتمادات (بدون override) ────
+async function shLoadHeaderApprovals() {
   if (!currentPlan?.id) return;
+  if (!currentPlan._newTable) return; // legacy: مش محتاج plan_approvals
   const H = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
-
-  // لو جديد → جيب من plan_approvals
-  if (currentPlan._newTable) {
+  try {
     const appr = await fetch(
       `${SUPABASE_URL}/rest/v1/plan_approvals?plan_id=eq.${currentPlan.id}&order=created_at.desc`,
       { headers: H }
     ).then(r => r.ok ? r.json() : []).catch(() => []);
-
     const merch = appr.find(a => a.approver_role === 'merch_manager');
     const area  = appr.find(a => a.approver_role === 'area_manager');
-
-    // تحديث الأزرار في الـ UI (نفس منطق شاشة الخطة)
-    const updateDot = (elId, nameId, approved, name) => {
-      const dot  = document.getElementById(elId);
-      const nameEl = document.getElementById(nameId);
-      if (!dot) return;
-      dot.style.background = approved ? '#6B7A3B' : '#C55B48';
-      if (nameEl) nameEl.textContent = approved ? '✅ ' + (name || 'معتمد') : 'في انتظار الاعتماد';
+    const setDot = (dotId, nameId, ok, name) => {
+      const d = document.getElementById(dotId);
+      const n = document.getElementById(nameId);
+      if (d) d.style.background = ok ? '#6B7A3B' : '#C55B48';
+      if (n) n.textContent = ok ? '✅ ' + (name || 'معتمد') : 'في انتظار الاعتماد';
     };
-
-    // مدير التنسيق
-    updateDot('sh-dot-merch', 'sh-name-merch', !!merch, merch?.approver_name);
-    // مدير البيع  
-    updateDot('sh-dot-area',  'sh-name-area',  !!area,  area?.approver_name);
-  }
+    setDot('sh-dot-merch', 'sh-name-merch', !!merch, merch?.approver_name);
+    setDot('sh-dot-area',  'sh-name-area',  !!area,  area?.approver_name);
+  } catch(e) {}
 }
 
 </script>
