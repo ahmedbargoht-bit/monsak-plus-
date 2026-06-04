@@ -1,4 +1,4 @@
-<!-- mansek-supervisor.html v2.1 🟢 — 2026-06-04 | المستهدفات المزدوجة (بيعي + تنسيقي) لكل فرع -->
+<!-- mansek-supervisor.html v2.2 🟢 — 2026-06-04 | المستهدفات المزدوجة (بيعي + تنسيقي) لكل فرع -->
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -230,6 +230,17 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 .plan-branch-target.sales-t{border-left:1px solid var(--border);color:#E65100;background:#FFF8F0}
 .plan-branch-target.coord-t{color:#1565C0;background:#F0F8FF}
 .plan-branch-target-val{font-weight:700;font-size:11px}
+
+/* ══ Geofencing (v2.2) ══════════════════════════════════════ */
+.geo-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:700}
+.geo-badge.inside{background:#D4EDDA;color:#155724}
+.geo-badge.near{background:#FFF3CD;color:#856404}
+.geo-badge.outside{background:#F8D7DA;color:#721C24}
+.geo-badge.unknown{background:#E2E3E5;color:#555}
+.geo-dist{font-size:10px;color:var(--text2);margin-top:2px}
+.visit-row.geo-inside{border-right:3px solid #28A745}
+.visit-row.geo-near{border-right:3px solid #FFC107}
+.visit-row.geo-outside{border-right:3px solid #DC3545}
 
 /* ══ Hierarchical Header (v2.0) ══════════════════════════════ */
 .hier-header{background:linear-gradient(135deg,#6A0F0E 0%,#8B1A1A 50%,#731E2E 100%);
@@ -700,7 +711,16 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
         <select class="filter-select" id="v-rep" onchange="renderVisits()">
           <option value="all">كل المنسقين</option>
         </select>
+        <select class="filter-select" id="v-geo" onchange="renderVisits()" style="font-size:11px">
+          <option value="all">كل النطاقات 🗺️</option>
+          <option value="inside">✅ داخل النطاق</option>
+          <option value="near">🟡 قريب</option>
+          <option value="outside">🔴 خارج النطاق</option>
+          <option value="unknown">📍 بدون موقع</option>
+        </select>
       </div>
+      <!-- Geofencing Summary Strip (v2.2) -->
+      <div id="geo-summary-strip" style="display:flex;gap:6px;flex-wrap:wrap;padding:8px 0;margin-bottom:8px;display:none"></div>
       <div id="visits-list"></div>
 
       <!-- ══ تقرير Excel ══════════════════════════════════════════ -->
@@ -2084,6 +2104,7 @@ async function loadAllData(){
   document.getElementById('dash-loading').style.display='none';
   document.getElementById('dash-content').style.display='block';
 
+  await loadBranchCoords(); // (v2.2) تحميل إحداثيات الفروع للـ Geofencing
   renderDashboard();
   renderLeaderboard();
   renderVisits();
@@ -2864,13 +2885,92 @@ function renderLeaderboard(){
 // ══════════════════════════════════════════════════════════════
 // VISITS
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// GEOFENCING (v2.2) — حساب المسافة بين موقع الزيارة والفرع
+// ══════════════════════════════════════════════════════════════
+let _branchCoordsMap = {}; // { branch_name: {lat, lng} }
+
+async function loadBranchCoords(){
+  if(Object.keys(_branchCoordsMap).length > 0) return; // cached
+  try {
+    for(const grp of cu.groups){
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/branches?select=branch_name,lat,lng&grp=eq.${encodeURIComponent(grp)}&status=eq.active&limit=500`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+      );
+      const json = await res.json();
+      if(Array.isArray(json)){
+        json.forEach(b=>{
+          if(b.branch_name && b.lat && b.lng){
+            _branchCoordsMap[b.branch_name] = {lat: parseFloat(b.lat), lng: parseFloat(b.lng)};
+          }
+        });
+      }
+    }
+  } catch(e){ console.warn('loadBranchCoords error:', e); }
+}
+
+function haversineMeters(lat1, lng1, lat2, lng2){
+  const R = 6371000;
+  const φ1 = lat1 * Math.PI/180;
+  const φ2 = lat2 * Math.PI/180;
+  const Δφ = (lat2-lat1) * Math.PI/180;
+  const Δλ = (lng2-lng1) * Math.PI/180;
+  const a = Math.sin(Δφ/2)*Math.sin(Δφ/2) +
+            Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)*Math.sin(Δλ/2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function getGeoBadge(visit){
+  const vLat = parseFloat(visit.lat);
+  const vLng = parseFloat(visit.lng);
+  if(!vLat || !vLng) return {cls:'unknown', label:'📍 —', dist: null};
+
+  const branchCoords = _branchCoordsMap[visit.branch];
+  if(!branchCoords) return {cls:'unknown', label:'📍 —', dist: null};
+
+  const dist = Math.round(haversineMeters(vLat, vLng, branchCoords.lat, branchCoords.lng));
+
+  if(dist < 200)  return {cls:'inside',  label:'✅ داخل النطاق', dist};
+  if(dist < 500)  return {cls:'near',    label:'🟡 قريب', dist};
+  return              {cls:'outside', label:'🔴 خارج النطاق', dist};
+}
+
+function fmtDist(meters){
+  if(meters === null) return '';
+  if(meters < 1000) return `${meters} م`;
+  return `${(meters/1000).toFixed(1)} كم`;
+}
+
 function renderVisits(){
   const dateVal = document.getElementById('v-date').value;
   const repFilter = document.getElementById('v-rep').value;
+  const geoFilter = document.getElementById('v-geo')?.value || 'all';
 
   let data = cachedVisits;
   if(dateVal) data = data.filter(v=>v.created_at?.startsWith(dateVal));
   if(repFilter!=='all') data = data.filter(v=>v.name===repFilter);
+
+  // Geofencing Summary Strip
+  const strip = document.getElementById('geo-summary-strip');
+  if(strip && data.length){
+    const counts = {inside:0, near:0, outside:0, unknown:0};
+    data.forEach(v=>{ const g=getGeoBadge(v); counts[g.cls]=(counts[g.cls]||0)+1; });
+    strip.style.display = 'flex';
+    strip.innerHTML = [
+      {cls:'inside',  label:'✅ داخل النطاق', color:'#28A745'},
+      {cls:'near',    label:'🟡 قريب',         color:'#FFC107'},
+      {cls:'outside', label:'🔴 خارج النطاق', color:'#DC3545'},
+      {cls:'unknown', label:'📍 بدون موقع',   color:'#888'},
+    ].map(s=>`<span style="background:${s.color}22;color:${s.color};border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700;cursor:pointer"
+      onclick="document.getElementById('v-geo').value='${s.cls}';renderVisits()">
+      ${s.label} <b>${counts[s.cls]||0}</b>
+    </span>`).join('');
+  } else if(strip){ strip.style.display='none'; }
+
+  // Geo filter
+  if(geoFilter !== 'all') data = data.filter(v=> getGeoBadge(v).cls === geoFilter);
+
   data = data.slice(0,50);
 
   if(!data.length){
@@ -2878,26 +2978,32 @@ function renderVisits(){
     return;
   }
 
-  document.getElementById('visits-list').innerHTML = data.map(v=>`
-    <div class="visit-row">
+  document.getElementById('visits-list').innerHTML = data.map(v=>{
+    const geo = getGeoBadge(v);
+    return `<div class="visit-row geo-${geo.cls}">
       <div class="visit-row-top">
         <div>
           <div class="visit-rep">${v.name}</div>
           <div class="visit-branch">${v.branch||'—'} · ${v.date||''}</div>
         </div>
-        <div class="visit-pts">${v.points||0}</div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          <div class="visit-pts">${v.points||0}</div>
+          <span class="geo-badge ${geo.cls}">${geo.label}</span>
+          ${geo.dist!==null?`<div class="geo-dist">${fmtDist(geo.dist)}</div>`:''}
+        </div>
       </div>
       <div class="visit-meta">${v.created_at?new Date(v.created_at).toLocaleString('ar-EG'):''}</div>
       ${v.adjusted_by?`<div class="adjusted-badge">⚠️ عُدّل بواسطة ${v.adjusted_by}: ${v.adjusted_reason||''}</div>`:''}
       <div class="pts-actions">
-        <button class="btn-pts btn-edit" onclick="openPtsModal('edit','${v.id}','${(v.name||'').replace(/'/g,"\\'")}',${v.points||0})">
+        <button class="btn-pts btn-edit" onclick="openPtsModal('edit','${v.id}','${(v.name||'').replace(/'/g,"\\'")}',${ v.points||0})">
           <i class="ti ti-pencil"></i> تعديل النقاط
         </button>
-        <button class="btn-pts btn-del" onclick="openPtsModal('delete','${v.id}','${(v.name||'').replace(/'/g,"\\'")}',${v.points||0})">
+        <button class="btn-pts btn-del" onclick="openPtsModal('delete','${v.id}','${(v.name||'').replace(/'/g,"\\'")}',${ v.points||0})">
           <i class="ti ti-trash"></i> حذف النقاط
         </button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 // ══════════════════════════════════════════════════════════════
