@@ -608,6 +608,9 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     <div class="tab" onclick="showTab('plan')" id="tab-plan">
       <i class="ti ti-calendar-week"></i>الخطة
     </div>
+    <div class="tab" onclick="showTab('team-plans')" id="tab-team-plans" style="display:none">
+      <i class="ti ti-users-group"></i>خطط الفريق
+    </div>
     <div class="tab" onclick="showTab('daily')" id="tab-daily">
       <i class="ti ti-clipboard-check"></i>اليومي
     </div>
@@ -1984,6 +1987,8 @@ async function doLogin(){
 
   await loadAllData();
   showTab('dashboard');
+  // إظهار التابات حسب الدور
+  setupTabsByRole();
   _startBlockWatch();
   startExcPolling();
   supCheckExpiryBadge();
@@ -7391,6 +7396,201 @@ async function deletePlan(){
   showToast('✅ تم مسح الخطة');
 }
 
+
+// ════════════════════════════════════════════════════════════════
+// إعداد التابات حسب الدور
+// ════════════════════════════════════════════════════════════════
+function setupTabsByRole(){
+  const level = cu?.level || 'sup';
+
+  // تاب خطط الفريق — للمدير فقط (dm) والـ GM
+  const teamTab = document.getElementById('tab-team-plans');
+  if(teamTab){
+    teamTab.style.display = (level === 'dm' || level === 'gm') ? 'flex' : 'none';
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+// خطط الفريق — للمدير في تطبيق المشرف
+// ════════════════════════════════════════════════════════════════
+function teamGetWeekStartSup(type='current'){
+  const now = new Date();
+  const day = now.getDay();
+  const diffToSat = day >= 6 ? 0 : -(day+1);
+  const sat = new Date(now);
+  sat.setDate(now.getDate() + diffToSat);
+  if(type==='prev') sat.setDate(sat.getDate()-7);
+  if(type==='next') sat.setDate(sat.getDate()+7);
+  const fri = new Date(sat); fri.setDate(sat.getDate()+6);
+  return { start: sat.toISOString().slice(0,10), end: fri.toISOString().slice(0,10) };
+}
+
+async function teamPlansLoadSup(){
+  const weekType   = document.getElementById('tp-sup-week')?.value   || 'current';
+  const statusFilt = document.getElementById('tp-sup-status')?.value || 'all';
+  const {start, end} = teamGetWeekStartSup(weekType);
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  // جلب الخطط — فقط المشرفين التابعين للمدير
+  // المدير بيشوف المشرفين اللي groups بتاعتهم في grp بتاعه
+  const managerGroups = cu?.groups || [];
+  
+  let url = `${SUPABASE_URL}/rest/v1/plans?select=*&week_start=gte.${start}&week_start=lte.${end}&order=supervisor_name.asc&limit=100`;
+  if(statusFilt !== 'all') url += `&status=eq.${statusFilt}`;
+
+  let plans = await fetch(url,{headers:H}).then(r=>r.ok?r.json().catch(()=>[]):[]).catch(()=>[]);
+  if(!Array.isArray(plans)) plans=[];
+
+  // فلتر: بس المشرفين اللي في مجموعات المدير
+  if(managerGroups.length && cu?.level !== 'gm'){
+    // جيب المشرفين التابعين
+    const supRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/users?select=name,groups&role=eq.supervisor&status=eq.active`,
+      {headers:H}
+    ).then(r=>r.ok?r.json().catch(()=>[]):[]).catch(()=>[]);
+
+    const mySupNames = (Array.isArray(supRes)?supRes:[])
+      .filter(u=>{
+        const uGroups = (u.groups||'').split(',').map(g=>g.trim()).filter(Boolean);
+        return uGroups.some(g=>managerGroups.includes(g));
+      })
+      .map(u=>u.name);
+
+    plans = plans.filter(p=>mySupNames.includes(p.supervisor_name));
+  }
+
+  // جلب الفروع
+  let branches = [];
+  if(plans.length){
+    const ids = plans.map(p=>p.id).join(',');
+    const bRes = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?plan_id=in.(${ids})&limit=2000`,{headers:H})
+      .then(r=>r.ok?r.json().catch(()=>[]):[]).catch(()=>[]);
+    branches = Array.isArray(bRes) ? bRes : [];
+  }
+
+  // KPI
+  const total    = plans.length;
+  const submitted= plans.filter(p=>p.status==='submitted').length;
+  const approved = plans.filter(p=>p.status==='approved').length;
+  const done     = branches.filter(b=>b.visit_status==='done').length;
+  const pct      = branches.length ? Math.round(done/branches.length*100) : 0;
+
+  const kpi = document.getElementById('tp-sup-kpi');
+  if(kpi) kpi.innerHTML = `
+    <div style="background:#F5F0E8;border-radius:10px;padding:10px;text-align:center;border:1px solid #E8D9C0">
+      <div style="font-size:20px;font-weight:900;color:#4B3C1A">${total}</div>
+      <div style="font-size:10px;color:#8B6F47">إجمالي الخطط</div>
+    </div>
+    <div style="background:#FFF8F0;border-radius:10px;padding:10px;text-align:center;border:1px solid #F5C8A0">
+      <div style="font-size:20px;font-weight:900;color:#C55B48">${submitted}</div>
+      <div style="font-size:10px;color:#8B6F47">📤 بانتظار الاعتماد</div>
+    </div>
+    <div style="background:#F0F7EE;border-radius:10px;padding:10px;text-align:center;border:1px solid #C8E6C9">
+      <div style="font-size:20px;font-weight:900;color:#2E7D32">${approved}</div>
+      <div style="font-size:10px;color:#8B6F47">✅ معتمدة</div>
+    </div>`;
+
+  // cache
+  window._supTeamPlans    = plans;
+  window._supTeamBranches = branches;
+
+  // رسم الخطط
+  const list = document.getElementById('tp-sup-list');
+  if(!list) return;
+
+  if(!plans.length){
+    list.innerHTML = `<div style="text-align:center;padding:40px;color:#B0A090">
+      <i class="ti ti-calendar-off" style="font-size:36px;display:block;margin-bottom:10px;opacity:.3"></i>
+      لا توجد خطط لهذه الفترة</div>`;
+    return;
+  }
+
+  const stColors = {draft:'#8B6F47',submitted:'#C55B48',approved:'#6B7A3B',rejected:'#731E2E'};
+  const stLabels = {draft:'⏳ مسودة',submitted:'📤 مرفوعة',approved:'✅ معتمدة',rejected:'❌ مرفوضة'};
+
+  list.innerHTML = plans.map(plan=>{
+    const pb    = branches.filter(b=>b.plan_id===plan.id);
+    const done  = pb.filter(b=>b.visit_status==='done').length;
+    const pct   = pb.length ? Math.round(done/pb.length*100) : 0;
+    const stClr = stColors[plan.status]||'#888';
+    const stLbl = stLabels[plan.status]||plan.status;
+    const pctClr= pct>=80?'#6B7A3B':pct>=50?'#C55B48':'#731E2E';
+
+    return `<div style="background:#fff;border:1.5px solid #E8D9C0;border-right:4px solid ${stClr};border-radius:12px;margin-bottom:10px;overflow:hidden">
+      <!-- هيدر -->
+      <div style="background:#4B3C1A;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+        <div>
+          <div style="font-size:13px;font-weight:900;color:#EDE5D8">${plan.supervisor_name}</div>
+          <div style="font-size:10px;color:rgba(237,229,216,.5)">${plan.week_start} ← ${plan.week_end}</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span style="background:${stClr}22;color:${stClr};border:1px solid ${stClr}44;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700">${stLbl}</span>
+          ${plan.status==='submitted'?`
+          <button onclick="supApprovePlan('${plan.id}')"
+            style="background:#6B7A3B;color:#fff;border:none;border-radius:8px;padding:5px 12px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer;font-weight:700">
+            ✅ اعتماد
+          </button>
+          <button onclick="supRejectPlan('${plan.id}')"
+            style="background:#731E2E;color:#fff;border:none;border-radius:8px;padding:5px 12px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer;font-weight:700">
+            ❌ رفض
+          </button>`:''}
+          ${plan.status==='approved'?`<span style="color:#C8D8A0;font-size:11px;font-weight:700">✅ معتمدة</span>`:''}
+        </div>
+      </div>
+      <!-- التقدم -->
+      <div style="padding:10px 14px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <div style="flex:1;background:#F0EAE0;border-radius:99px;height:5px;overflow:hidden">
+            <div style="height:5px;border-radius:99px;background:${pctClr};width:${pct}%"></div>
+          </div>
+          <span style="font-size:11px;font-weight:700;color:${pctClr}">${done}/${pb.length} — ${pct}%</span>
+        </div>
+        <!-- الفروع -->
+        ${pb.length ? `<div style="display:flex;flex-wrap:wrap;gap:4px">
+          ${pb.slice(0,6).map(b=>{
+            const isDone=b.visit_status==='done';
+            return `<span style="font-size:10px;padding:2px 8px;border-radius:20px;
+              background:${isDone?'#E8F5E9':'#FFF8F0'};color:${isDone?'#2E7D32':'#8B6F47'};
+              border:1px solid ${isDone?'#C8E6C9':'#E8D9C0'}">
+              ${isDone?'✅':'⏳'} ${b.branch_name}
+            </span>`;
+          }).join('')}
+          ${pb.length>6?`<span style="font-size:10px;color:#aaa;padding:2px 8px">+${pb.length-6}</span>`:''}
+        </div>` : '<div style="font-size:11px;color:#B0A090">لا توجد فروع مضافة بعد</div>'}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function supApprovePlan(planId){
+  if(!confirm('اعتماد هذه الخطة؟')) return;
+  const now = new Date().toISOString();
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  await fetch(`${SUPABASE_URL}/rest/v1/plans?id=eq.${planId}`,{
+    method:'PATCH', headers:H,
+    body:JSON.stringify({
+      status:'approved',
+      merch_approved:true,
+      merch_approved_at:now,
+      merch_approved_by:cu?.name||'مدير التنسيق',
+      approved_at:now
+    })
+  });
+  showToast('✅ تم اعتماد الخطة');
+  teamPlansLoadSup();
+}
+
+async function supRejectPlan(planId){
+  if(!confirm('رفض هذه الخطة؟')) return;
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  await fetch(`${SUPABASE_URL}/rest/v1/plans?id=eq.${planId}`,{
+    method:'PATCH', headers:H,
+    body:JSON.stringify({status:'rejected'})
+  });
+  showToast('❌ تم رفض الخطة');
+  teamPlansLoadSup();
+}
+
 </script>
 
 <!-- VERSION BADGE -->
@@ -7404,3 +7604,38 @@ async function deletePlan(){
 </div>
 </body>
 </html>
+    <!-- ══ شاشة خطط الفريق (للمدير) ══ -->
+    <div id="screen-team-plans" style="display:none;flex-direction:column;gap:12px;padding:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <div>
+          <div style="font-size:16px;font-weight:900;color:#2C1F0A">خطط الفريق</div>
+          <div style="font-size:11px;color:#8B6F47">متابعة واعتماد خطط مشرفي التنسيق</div>
+        </div>
+        <button onclick="teamPlansLoadSup()" style="background:#4B3C1A;color:#EDE5D8;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-family:Cairo,sans-serif;cursor:pointer">
+          <i class="ti ti-refresh"></i> تحديث
+        </button>
+      </div>
+
+      <!-- فلتر الأسبوع -->
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="tp-sup-week" onchange="teamPlansLoadSup()" style="flex:1;padding:8px;border:1.5px solid #E8D9C0;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
+          <option value="current">الأسبوع الحالي</option>
+          <option value="prev">الأسبوع الماضي</option>
+          <option value="next">الأسبوع القادم</option>
+        </select>
+        <select id="tp-sup-status" onchange="teamPlansLoadSup()" style="flex:1;padding:8px;border:1.5px solid #E8D9C0;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
+          <option value="all">كل الحالات</option>
+          <option value="submitted">📤 بانتظار الاعتماد</option>
+          <option value="approved">✅ معتمدة</option>
+          <option value="draft">⏳ مسودة</option>
+        </select>
+      </div>
+
+      <!-- KPI -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px" id="tp-sup-kpi"></div>
+
+      <!-- قائمة الخطط -->
+      <div id="tp-sup-list"></div>
+    </div>
+
+
