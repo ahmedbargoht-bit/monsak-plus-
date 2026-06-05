@@ -1,4 +1,4 @@
-<!-- mansek-admin v3.9 — missing: date range from/to 2026-06-05 -->
+<!-- mansek-admin v4.0 — sales plans: full feature parity + GM approval + PDF 2026-06-05 -->
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -2018,7 +2018,8 @@ h2,h3{color:#2C1F0A}
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="btn-action" onclick="plansLoad('sales')"><i class="ti ti-refresh"></i> تحديث</button>
-              <button class="btn-action" style="background:var(--dark-red);color:#EDE5D8" onclick="plansExportExcel('sales')"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+              <button class="btn-action" style="background:#2E7D32;color:#fff" onclick="plansExportExcel('sales')"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+              <button class="btn-action" style="background:var(--dark-red);color:#EDE5D8" onclick="plansExportPDF('sales')"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
             </div>
           </div>
           <!-- فلاتر -->
@@ -2048,6 +2049,21 @@ h2,h3{color:#2C1F0A}
             </div>
           </div>
           <!-- KPI -->
+          <!-- شريط تحديد -->
+          <div id="sp2-select-bar" style="display:none;background:#EEF3FF;border:1.5px solid #B8C8F0;border-radius:10px;padding:8px 14px;margin-bottom:10px;align-items:center;gap:10px;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:700;color:#1565C0;font-size:12px">
+              <input type="checkbox" id="sp2-select-all" onchange="sp2ToggleAll(this)" style="width:15px;height:15px;accent-color:#1565C0">
+              تحديد الكل
+            </label>
+            <span id="sp2-sel-count" style="font-size:11px;color:#888">0 محدد</span>
+            <div style="flex:1"></div>
+            <button onclick="plansExportExcel('sales',true)" style="background:#2E7D32;color:#fff;border:none;border-radius:8px;padding:5px 12px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer;font-weight:700">
+              <i class="ti ti-file-spreadsheet"></i> تصدير المحدد Excel
+            </button>
+            <button onclick="plansExportPDF('sales',true)" style="background:#731E2E;color:#fff;border:none;border-radius:8px;padding:5px 12px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer;font-weight:700">
+              <i class="ti ti-file-type-pdf"></i> تصدير المحدد PDF
+            </button>
+          </div>
           <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px" id="sp2-kpi"></div>
           <!-- قائمة الخطط -->
           <div id="sp2-plans-list"></div>
@@ -13711,6 +13727,114 @@ function plansBranchRow(branch) {
 }
 
 // ── دالة التحميل الرئيسية ─────────────────────────────────────────
+// ── تحديد خطط المبيعات ────────────────────────────────────────
+function sp2ToggleAll(cb){
+  document.querySelectorAll('.sp2-plan-cb').forEach(c=>c.checked=cb.checked);
+  sp2UpdateCount();
+}
+function sp2UpdateCount(){
+  const all=document.querySelectorAll('.sp2-plan-cb');
+  const sel=document.querySelectorAll('.sp2-plan-cb:checked');
+  const el=document.getElementById('sp2-sel-count');
+  if(el) el.textContent=sel.length+' محدد من '+all.length;
+  const allCb=document.getElementById('sp2-select-all');
+  if(allCb) allCb.checked=sel.length===all.length&&all.length>0;
+  const bar=document.getElementById('sp2-select-bar');
+  if(bar) bar.style.display=all.length?'flex':'none';
+}
+
+// ── اعتماد خطة مبيعات (مدير البيع أو GM) ──────────────────────
+async function plansSalesApprove(planId, role){
+  const label = role==='gm'?'المدير العام':'مدير البيع';
+  if(!confirm(`اعتماد هذه الخطة كـ ${label}؟`)) return;
+  const now = new Date().toISOString();
+  const patch = role==='gm' ? {
+    gm_approved:true, gm_approved_at:now, gm_approved_by: CU?.name||label,
+    merch_approved:true, merch_approved_at:now, merch_approved_by: CU?.name||label,
+    status:'approved', approved_at:now
+  } : {
+    area_approved:true, area_approved_at:now, area_approved_by: CU?.name||label,
+    status:'submitted'
+  };
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  await fetch(`${SUPABASE_URL}/rest/v1/weekly_plans?id=eq.${planId}`,{method:'PATCH',headers:H,body:JSON.stringify(patch)});
+  showToast(role==='gm'?'🏆 تم اعتماد الخطة من المدير العام':'✅ تم اعتماد الخطة من مدير البيع');
+  plansLoad('sales');
+}
+
+// ── تصدير PDF لخطط المبيعات ────────────────────────────────────
+function plansExportPDF(mode, onlySelected){
+  const plans    = window[`_plans_${mode}`]    || [];
+  const branches = window[`_branches_${mode}`] || [];
+  let data = plans;
+  if(onlySelected){
+    const ids=new Set([...document.querySelectorAll('.sp2-plan-cb:checked')].map(c=>c.dataset.planId));
+    if(ids.size) data=plans.filter(p=>ids.has(String(p.id)));
+  }
+  if(!data.length){showToast('لا توجد بيانات للتصدير','err');return;}
+
+  const now=new Date().toLocaleDateString('ar-EG');
+  let tablesHTML='';
+  data.forEach((plan,pi)=>{
+    const pb=branches.filter(b=>b.plan_id===plan.id);
+    const done=pb.filter(b=>b.visit_status==='done').length;
+    const pct=pb.length?Math.round(done/pb.length*100):0;
+    const stLabel={draft:'مسودة',submitted:'مرفوعة',approved:'معتمدة',rejected:'مرفوضة'}[plan.status]||plan.status;
+    tablesHTML+=`
+      <div style="margin-bottom:24px;page-break-inside:avoid">
+        <div style="background:#2C1F0A;color:#EDE5D8;padding:8px 14px;border-radius:8px 8px 0 0;font-size:12px;font-weight:700;display:flex;justify-content:space-between">
+          <span>${plan.supervisor_name||'—'}</span>
+          <span>${stLabel} — إنجاز ${pct}%</span>
+        </div>
+        <div style="background:#F5F0E8;color:#4B3C1A;padding:5px 14px;font-size:10px;font-style:italic">
+          الفترة: ${plan.week_start||''} ← ${plan.week_end||''} &nbsp;|&nbsp;
+          ${plan.area_approved?`✅ مدير البيع: ${plan.area_approved_by||''}`:''} &nbsp;
+          ${plan.gm_approved?`🏆 GM: ${plan.gm_approved_by||''}  `:''}
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:10px">
+          <thead><tr style="background:#4B3C1A;color:#EDE5D8">
+            <th style="padding:6px;border:1px solid #2C1F0A">#</th>
+            <th style="padding:6px;border:1px solid #2C1F0A">الفرع</th>
+            <th style="padding:6px;border:1px solid #2C1F0A">الحالة</th>
+            <th style="padding:6px;border:1px solid #2C1F0A">م.بيعي</th>
+            <th style="padding:6px;border:1px solid #2C1F0A">م.تنسيقي</th>
+            <th style="padding:6px;border:1px solid #2C1F0A">التاريخ</th>
+          </tr></thead>
+          <tbody>
+          ${pb.map((b,i)=>`<tr style="background:${b.visit_status==='done'?'#E8F5E9':b.visit_status==='missed'?'#FFEBEE':'#FFFDF8'}">
+            <td style="padding:5px;border:1px solid #E0D8CC;text-align:center">${i+1}</td>
+            <td style="padding:5px;border:1px solid #E0D8CC;font-weight:600">${b.branch_name||'—'}</td>
+            <td style="padding:5px;border:1px solid #E0D8CC;text-align:center">${b.visit_status==='done'?'✅':b.visit_status==='missed'?'❌':'⏳'}</td>
+            <td style="padding:5px;border:1px solid #E0D8CC;text-align:center">${b.target_sales||0}</td>
+            <td style="padding:5px;border:1px solid #E0D8CC;text-align:center">${b.target_coord||0}</td>
+            <td style="padding:5px;border:1px solid #E0D8CC">${b.day_date||''}</td>
+          </tr>`).join('')||`<tr><td colspan="6" style="text-align:center;padding:10px;color:#aaa">لا توجد بنود</td></tr>`}
+          </tbody>
+        </table>
+      </div>`;
+  });
+
+  const html=`<!DOCTYPE html><html dir="rtl" lang="ar">
+  <head><meta charset="UTF-8"><title>خطط مشرفي المبيعات</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap');
+    body{font-family:'Cairo',Arial,sans-serif;color:#2C1F0A;padding:12px;font-size:10px}
+    @media print{div{page-break-inside:avoid}}
+  </style></head><body>
+  <div style="background:#2C1F0A;color:#EDE5D8;text-align:center;padding:10px;font-size:14px;font-weight:900;border-radius:8px 8px 0 0">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
+  <div style="background:#C8A96E;color:#2C1F0A;text-align:center;padding:7px;font-size:12px;font-weight:700">خطط مشرفي المبيعات</div>
+  <div style="background:#F5F0E8;color:#4B3C1A;text-align:center;padding:5px;font-size:9px;font-style:italic;margin-bottom:14px">تاريخ التصدير: ${now} — إجمالي: ${data.length} خطة</div>
+  ${tablesHTML}
+  <div style="background:#F5F0E8;color:#4B3C1A;text-align:center;padding:5px;font-size:8px;margin-top:12px;border-radius:6px">Al Tahhan Golden Dates © 2026</div>
+  </body></html>`;
+
+  const win=window.open('','_blank','width=1100,height=700');
+  win.document.write(html);
+  win.document.close();
+  setTimeout(()=>{win.focus();win.print();},800);
+  showToast('📄 جاري فتح نافذة PDF...');
+}
+
 async function plansLoad(mode = 'coord') {
   const prefix = mode === 'coord' ? 'cp2' : 'sp2';
   const supFilter    = document.getElementById(`${prefix}-sup-filter`)?.value || 'all';
@@ -13742,20 +13866,28 @@ async function plansLoad(mode = 'coord') {
 
   // ── fallback: weekly_plans القديم لو plans فاضل ──
   if (!plans.length) {
-    const oldTypes  = mode === 'coord'
-      ? `&or=(plan_type.is.null,plan_type.in.(coord,hyper,roving,group,special))`
-      : `&or=(plan_type.eq.sales,plan_type.is.null)`;
-    let oldUrl = `${SUPABASE_URL}/rest/v1/weekly_plans?week_start=gte.${start}&week_start=lte.${end}${oldTypes}&order=supervisor_name.asc&limit=200`;
+    let oldUrl = `${SUPABASE_URL}/rest/v1/weekly_plans?week_start=gte.${start}&week_start=lte.${end}&order=supervisor_name.asc&limit=200`;
+    if (mode === 'coord') {
+      oldUrl += `&plan_type=neq.sales`;
+    } else {
+      oldUrl += `&plan_type=eq.sales`;
+    }
     if (statusFilter !== 'all') oldUrl += `&status=eq.${statusFilter}`;
     const oldPlans = await fetch(oldUrl, { headers: PLANS_H() })
       .then(r => r.ok ? r.json() : []).catch(() => []);
     // map الجداول القديمة لنفس الشكل
     plans = oldPlans.map(p => ({
       id: p.id, supervisor_name: p.supervisor_name,
+      supervisor_grp: p.supervisor_grp,
       week_start: p.week_start, week_end: p.week_end,
-      status: p.status, plan_type: p.plan_type || 'coord',
+      status: p.status, plan_type: p.plan_type || (mode==='sales'?'sales':'coord'),
       merch_approved: p.merch_approved || p.area_approved || false,
       area_approved:  p.area_approved  || p.merch_approved || false,
+      gm_approved:    p.gm_approved || false,
+      gm_approved_by: p.gm_approved_by,
+      gm_approved_at: p.gm_approved_at,
+      area_approved_by: p.area_approved_by,
+      area_approved_at: p.area_approved_at,
       approved_by: p.approved_by,
       _legacy: true
     }));
@@ -13803,12 +13935,16 @@ async function plansLoad(mode = 'coord') {
   const done     = allBranches.filter(b => b.visit_status === 'done').length;
   const pct      = allBranches.length ? Math.round(done / allBranches.length * 100) : 0;
 
+  const gmApproved = plans.filter(p=>p.gm_approved).length;
   const kpiEl = document.getElementById(`${prefix}-kpi`);
   if (kpiEl) kpiEl.innerHTML = `
     <div class="stat-card purple"><div class="stat-n">${total}</div><div class="stat-l">إجمالي الخطط</div></div>
     <div class="stat-card green"><div class="stat-n">${approved}</div><div class="stat-l">✅ معتمدة</div></div>
     <div class="stat-card yellow"><div class="stat-n">${submitted}</div><div class="stat-l">📤 مرفوعة</div></div>
-    <div class="stat-card blue"><div class="stat-n">${pct}%</div><div class="stat-l">نسبة الإنجاز</div></div>`;
+    ${mode==='sales'?`<div class="stat-card blue" style="border-color:#1565C044"><div class="stat-n" style="color:#1565C0">${gmApproved}</div><div class="stat-l">🏆 معتمدة GM</div></div>`:`<div class="stat-card blue"><div class="stat-n">${pct}%</div><div class="stat-l">نسبة الإنجاز</div></div>`}`;
+
+  // تحديث شريط التحديد بعد التحميل
+  if(mode==='sales') setTimeout(sp2UpdateCount, 100);
 
   // cache للـ modal
   window[`_plans_${mode}`]        = plans;
@@ -13845,6 +13981,9 @@ async function plansLoad(mode = 'coord') {
       <!-- هيدر الخطة العنابي -->
       <div style="background:var(--dark-red);padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <input type="checkbox" class="sp2-plan-cb" data-plan-id="${plan.id}"
+            onchange="sp2UpdateCount()"
+            style="width:16px;height:16px;accent-color:#C8A96E;cursor:pointer;flex-shrink:0">
           <div>
             <div style="font-size:14px;font-weight:900;color:#EDE5D8">${plan.supervisor_name || '—'}</div>
             <div style="font-size:10px;color:rgba(237,229,216,.55);margin-top:2px">
@@ -13865,6 +14004,25 @@ async function plansLoad(mode = 'coord') {
             style="background:rgba(237,229,216,.15);border:1px solid rgba(237,229,216,.25);color:#EDE5D8;
             border-radius:8px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif;font-weight:700">
             <i class="ti ti-eye"></i> تفاصيل</button>
+          ${mode==='sales' ? `
+            ${plan.status==='submitted' && !plan.area_approved ? `
+            <button onclick="plansSalesApprove('${plan.id}','sales_manager')"
+              style="background:rgba(107,122,59,.3);border:1px solid var(--olive);color:#C8D8A0;
+              border-radius:8px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif;font-weight:700">
+              ✅ اعتماد مدير البيع</button>` : ''}
+            ${(plan.area_approved || plan.status==='submitted') && !plan.gm_approved ? `
+            <button onclick="plansSalesApprove('${plan.id}','gm')"
+              style="background:rgba(21,101,192,.3);border:1px solid #1565C0;color:#90CAF9;
+              border-radius:8px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif;font-weight:700">
+              🏆 اعتماد GM</button>` : ''}
+            ${plan.gm_approved ? `<span style="color:#90CAF9;font-size:11px;font-weight:700">🏆 معتمدة GM</span>` :
+              plan.area_approved ? `<span style="color:#C8D8A0;font-size:11px;font-weight:700">✅ مدير البيع — بانتظار GM</span>` : ''}
+            ${plan.status==='draft'||plan.status==='rejected'?`
+            <button onclick="plansReject('${plan.id}','${mode}')"
+              style="background:rgba(115,30,46,.3);border:1px solid rgba(115,30,46,.5);color:#F5B8A0;
+              border-radius:8px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif;font-weight:700">
+              <i class="ti ti-x"></i> رفض</button>`:''}
+          ` : `
           ${plan.status !== 'approved' ? `
           <button onclick="plansApprove('${plan.id}','${mode}')"
             style="background:rgba(107,122,59,.3);border:1px solid var(--olive);color:#C8D8A0;
@@ -13875,6 +14033,7 @@ async function plansLoad(mode = 'coord') {
             border-radius:8px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif;font-weight:700">
             <i class="ti ti-x"></i> رفض</button>
           ` : `<span style="color:#C8D8A0;font-size:11px;font-weight:700">✅ معتمدة</span>`}
+          `}
         </div>
       </div>
 
