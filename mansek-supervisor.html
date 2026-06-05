@@ -4070,42 +4070,49 @@ function toggleRouteChip(el, route){
 
 async function updateAreaSupervisor(){
   const selectedRoutes = [...document.querySelectorAll('#pi-routes-list .chip.selected')].map(c=>c.dataset.route);
-  const wrap = document.getElementById('pi-area-sup-wrap');
+  const wrap   = document.getElementById('pi-area-sup-wrap');
   const nameEl = document.getElementById('pi-area-sup-name');
   const roleEl = document.getElementById('pi-area-sup-role');
 
-  if(!selectedRoutes.length){
-    wrap.style.display = 'none';
+  if(!selectedRoutes.length){ wrap.style.display='none'; return; }
+
+  // جيب الـ grp من أول فرع مرتبط بالخط المختار
+  const firstBranch = _allBranchesCache.find(b=>selectedRoutes.includes(b.route));
+  const grp = firstBranch?.grp || '';
+
+  if(!grp){ 
+    nameEl.textContent = 'غير محدد';
+    roleEl.textContent = selectedRoutes[0];
+    wrap.style.display = 'block';
     return;
   }
 
-  // ابحث عن المشرف الميداني المسؤول عن هذا الخط في users (role=supervisor)
   try {
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    // جرب تجيب supervisor بناءً على route
-    const firstRoute = selectedRoutes[0];
+    // جيب كل supervisors وفلتر اللي groups بتاعته يحتوي على الـ grp
     const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/users?select=name,role,route,grp&role=eq.supervisor&route=eq.${encodeURIComponent(firstRoute)}&status=eq.active&limit=1`,
+      `${SUPABASE_URL}/rest/v1/users?select=name,groups,grp&role=eq.supervisor&status=eq.active&limit=100`,
       {headers:H}
     );
     const data = res.ok ? await res.json().catch(()=>[]) : [];
-    if(Array.isArray(data) && data.length){
-      const sup = data[0];
-      nameEl.textContent = sup.name || '—';
-      roleEl.textContent = 'مشرف ميداني — ' + (sup.grp||firstRoute);
+    
+    // فلتر: المشرف اللي groups بتاعته تحتوي على الـ grp ومش dm
+    const sup = (Array.isArray(data)?data:[]).find(u=>{
+      const uGroups = (u.groups||u.grp||'').replace(/"/g,'').split(',').map(g=>g.trim()).filter(Boolean);
+      return uGroups.includes(grp) && uGroups.length <= 2; // sup مش dm (dm عنده مجموعات كتير)
+    }) || (Array.isArray(data)?data:[]).find(u=>{
+      const uGroups = (u.groups||u.grp||'').replace(/"/g,'').split(',').map(g=>g.trim()).filter(Boolean);
+      return uGroups.includes(grp);
+    });
+
+    if(sup){
+      nameEl.textContent = sup.name;
+      roleEl.textContent = 'مشرف ميداني — ' + selectedRoutes[0];
       wrap.style.display = 'block';
     } else {
-      // جرب في branches (حقل supervisor_name)
-      const br = _allBranchesCache.find(b=>selectedRoutes.includes(b.route) && b.supervisor_name);
-      if(br && br.supervisor_name){
-        nameEl.textContent = br.supervisor_name;
-        roleEl.textContent = 'مشرف المنطقة — ' + firstRoute;
-        wrap.style.display = 'block';
-      } else {
-        nameEl.textContent = 'غير محدد';
-        roleEl.textContent = firstRoute;
-        wrap.style.display = 'block';
-      }
+      nameEl.textContent = 'غير محدد';
+      roleEl.textContent = grp + ' — ' + selectedRoutes[0];
+      wrap.style.display = 'block';
     }
   } catch(e){
     wrap.style.display = 'none';
