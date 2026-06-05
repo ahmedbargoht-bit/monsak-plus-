@@ -992,6 +992,11 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
               style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;border-radius:8px;padding:7px 12px;font-size:10px;font-family:Cairo,sans-serif;cursor:pointer">
               + جديدة
             </button>
+            <button onclick="deletePlan()"
+              style="background:rgba(115,30,46,.4);border:1px solid rgba(115,30,46,.6);color:#F5B8A0;border-radius:8px;padding:7px 12px;font-size:10px;font-family:Cairo,sans-serif;cursor:pointer"
+              title="مسح الخطة الحالية نهائياً">
+              🗑️
+            </button>
           </div>
         </div>
 
@@ -3459,7 +3464,7 @@ async function hierLoadPlan(){
 
     // جلب الفروع من plan_branches
     let items = [];
-    if(hierPlanData){
+    if(hierPlanData && hierPlanData.id){
       const br = await fetch(
         `${SUPABASE_URL}/rest/v1/plan_branches?plan_id=eq.${hierPlanData.id}&order=branch_name.asc&limit=500`,
         {headers:H}
@@ -3483,11 +3488,14 @@ async function hierLoadPlan(){
     hierUpdateKPI(items);
     currentPlan = hierPlanData;
     planItems   = items;
-    renderPlan();
+    renderPlan(); // تعرض الأيام دايماً
 
   } catch(e){
     showToast('تعذّر تحميل الخطة');
     hierUpdateHeader(null);
+    currentPlan = null;
+    planItems   = [];
+    renderPlan(); // عرض الأيام حتى لو في خطأ
   }
 }
 
@@ -3596,27 +3604,10 @@ function renderPlan(){
   const planDays  = document.getElementById('plan-days');
   if(!planDays) return;
 
-  // ── لو مفيش خطة ──
-  if(!currentPlan){
-    planDays.innerHTML = `
-      <div style="text-align:center;padding:40px 16px">
-        <div style="font-size:44px;margin-bottom:12px">📋</div>
-        <div style="font-size:14px;font-weight:700;color:rgba(255,255,255,.7);margin-bottom:6px">لا توجد خطة لهذا الأسبوع</div>
-        <div style="font-size:12px;color:rgba(255,255,255,.4);margin-bottom:20px">اضغط "+ جديدة" لإنشاء الخطة الأسبوعية</div>
-        <button onclick="createNewPlan()"
-          style="background:rgba(255,255,255,.15);border:1.5px solid rgba(255,255,255,.3);color:#fff;
-          border-radius:10px;padding:10px 24px;font-size:13px;font-family:Cairo,sans-serif;cursor:pointer;font-weight:700">
-          + إنشاء خطة جديدة
-        </button>
-      </div>`;
-    const submitBtn = document.getElementById('hier-submit-btn');
-    if(submitBtn){ submitBtn.disabled=true; submitBtn.style.opacity='.4'; }
-    return;
-  }
-
-  const isLocked = currentPlan.status==='approved';
-  const isDraft  = currentPlan.status==='draft';
-  const isSubmit = currentPlan.status==='submitted';
+  // الحالة والأذونات
+  const isLocked = currentPlan?.status==='approved';
+  const isDraft  = currentPlan?.status==='draft' || !currentPlan;
+  const isSubmit = currentPlan?.status==='submitted';
 
   // ── أيام الأسبوع ──
   planDays.innerHTML = weekDates.map(d=>{
@@ -3642,7 +3633,7 @@ function renderPlan(){
             padding:2px 9px;border-radius:20px;font-size:10px;font-weight:700">
             ${doneCount}/${dayItems.length}
           </span>` : ''}
-          ${isDraft ? `<button onclick="openPlanItemModal('${d.date}','${d.name}')"
+          ${(isDraft) ? `<button onclick="openPlanItemModal('${d.date}','${d.name}')"
             style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#EDE5D8;
             border-radius:7px;padding:4px 10px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer;font-weight:700">
             + إضافة
@@ -3698,8 +3689,8 @@ function renderPlan(){
   // ── زر الرفع ──
   const submitBtn = document.getElementById('hier-submit-btn');
   if(submitBtn){
-    const canSubmit = isDraft && planItems.length > 0;
-    submitBtn.disabled    = !canSubmit;
+    const canSubmit = currentPlan && isDraft && planItems.length > 0;
+    submitBtn.disabled      = !canSubmit;
     submitBtn.style.opacity = canSubmit ? '1' : '.4';
     submitBtn.textContent   = isLocked?'✅ معتمدة':isSubmit?'📤 مرفوعة للاعتماد':'📤 رفع للاعتماد';
   }
@@ -3926,7 +3917,11 @@ async function approvePlan(){
 let _allBranchesCache = []; // cache للفروع
 
 async function openPlanItemModal(date, dayName){
-  if(!currentPlan){ showToast('أنشئ خطة أولاً'); return; }
+  // لو مفيش خطة، أنشئ واحدة تلقائياً
+  if(!currentPlan){
+    await createNewPlan();
+    if(!currentPlan){ showToast('تعذّر إنشاء الخطة'); return; }
+  }
   _addingDay = {date, dayName};
   document.getElementById('modal-plan-day').textContent = dayName + ' — ' + date;
   document.getElementById('pi-goal').value = '';
@@ -7343,6 +7338,39 @@ async function supExportReport(){
 // ══════════════════════════════════════════════════════════════
 
 // loadBranchCoords guard مدمج في الدالة الأصلية
+
+
+// ── مسح الخطة الحالية نهائياً ──────────────────────────────────
+async function deletePlan(){
+  if(!currentPlan){ showToast('لا توجد خطة لمسحها'); return; }
+  if(!confirm('سيتم مسح الخطة الحالية وجميع فروعها نهائياً. هل أنت متأكد؟')) return;
+
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  // مسح plan_branches أولاً
+  await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?plan_id=eq.${currentPlan.id}`,{
+    method:'DELETE', headers:H
+  });
+
+  // مسح plan_approvals
+  await fetch(`${SUPABASE_URL}/rest/v1/plan_approvals?plan_id=eq.${currentPlan.id}`,{
+    method:'DELETE', headers:H
+  });
+
+  // مسح الخطة نفسها
+  await fetch(`${SUPABASE_URL}/rest/v1/plans?id=eq.${currentPlan.id}`,{
+    method:'DELETE', headers:H
+  });
+
+  currentPlan  = null;
+  hierPlanData = null;
+  planItems    = [];
+
+  hierUpdateHeader(null);
+  hierUpdateKPI([]);
+  renderPlan();
+  showToast('✅ تم مسح الخطة');
+}
 
 </script>
 
