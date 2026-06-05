@@ -1,4 +1,4 @@
-<!-- mansek-admin v3.2 — styled Excel export + PDF 2026-06-05 -->
+<!-- mansek-admin v3.3 — checkbox multi-select export 2026-06-05 -->
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -1907,6 +1907,24 @@ h2,h3{color:#2C1F0A}
 
           <!-- KPI -->
           <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px" id="tp-kpi"></div>
+
+          <!-- شريط تحديد للتصدير -->
+          <div id="tp-select-bar" style="display:none;background:#EEF3FF;border:1.5px solid #B8C8F0;border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:700;color:#1565C0;font-size:13px">
+              <input type="checkbox" id="tp-select-all" onchange="toggleSelectAll(this)" style="width:16px;height:16px;accent-color:#1565C0">
+              تحديد الكل
+            </label>
+            <span style="color:#888;font-size:12px" id="tp-selected-count">0 محدد</span>
+            <div style="flex:1"></div>
+            <button onclick="exportSelectedExcel()"
+              style="background:#2E7D32;color:#fff;border:none;border-radius:8px;padding:7px 16px;font-size:12px;font-family:Cairo,sans-serif;cursor:pointer;font-weight:700;display:flex;align-items:center;gap:6px">
+              <i class="ti ti-file-spreadsheet"></i> تصدير المحدد Excel
+            </button>
+            <button onclick="exportSelectedPDF()"
+              style="background:#731E2E;color:#fff;border:none;border-radius:8px;padding:7px 16px;font-size:12px;font-family:Cairo,sans-serif;cursor:pointer;font-weight:700;display:flex;align-items:center;gap:6px">
+              <i class="ti ti-file-type-pdf"></i> تصدير المحدد PDF
+            </button>
+          </div>
 
           <!-- الخطط -->
           <div id="tp-plans-container"></div>
@@ -13657,6 +13675,11 @@ async function teamPlansLoad(){
   }
 
   container.innerHTML = plans.map(plan => teamPlanTable(plan, branches, start)).join('');
+  // cache all plans for selection reset
+  window._allTeamPlans    = plans;
+  window._allTeamBranches = branches;
+  // إظهار شريط التحديد وتحديث العداد
+  setTimeout(updateSelectCount, 100);
 }
 
 function teamPlanTable(plan, allBranches, weekStart){
@@ -13748,13 +13771,18 @@ function teamPlanTable(plan, allBranches, weekStart){
   <div class="card" style="margin-bottom:20px;padding:0;overflow:hidden;border:1px solid rgba(75,60,26,.2)">
     <!-- هيدر الخطة -->
     <div style="background:#4B3C1A;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-      <div>
-        <div style="font-size:15px;font-weight:900;color:#EDE5D8">خطة العمل الأسبوعية — ${plan.supervisor_name}</div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <input type="checkbox" class="plan-checkbox" data-plan-id="${plan.id}"
+          onchange="updateSelectCount()"
+          style="width:18px;height:18px;accent-color:#C8A96E;cursor:pointer;flex-shrink:0">
+        <div>
+          <div style="font-size:15px;font-weight:900;color:#EDE5D8">خطة العمل الأسبوعية — ${plan.supervisor_name}</div>
         <div style="font-size:11px;color:rgba(237,229,216,.55);margin-top:2px">
           الفترة: ${plan.week_start} — ${plan.week_end} &nbsp;|&nbsp;
           إجمالي الأسابيع: 1 &nbsp;|&nbsp; الخطط المعتمدة: ${plan.status==='approved'?1:0}
         </div>
       </div>
+        </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span style="background:${stClr}22;color:${stClr};border:1px solid ${stClr}44;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700">${stLbl}</span>
         <span style="background:rgba(237,229,216,.1);color:#EDE5D8;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700">✅ ${pct}% إنجاز</span>
@@ -13889,6 +13917,54 @@ async function teamDeletePlan(planId){
 }
 
 // ── تصدير Excel ─────────────────────────────────────────────
+// ── تحديد / إلغاء تحديد الكل ──────────────────────────────────────────────
+function toggleSelectAll(cb){
+  document.querySelectorAll('.plan-checkbox').forEach(c=>{ c.checked=cb.checked; });
+  updateSelectCount();
+}
+
+function updateSelectCount(){
+  const all      = document.querySelectorAll('.plan-checkbox');
+  const selected = document.querySelectorAll('.plan-checkbox:checked');
+  const countEl  = document.getElementById('tp-selected-count');
+  const allCb    = document.getElementById('tp-select-all');
+  if(countEl) countEl.textContent = selected.length + ' محدد من ' + all.length;
+  if(allCb)   allCb.checked = selected.length === all.length && all.length > 0;
+  // إظهار/إخفاء شريط التصدير
+  const bar = document.getElementById('tp-select-bar');
+  if(bar) bar.style.display = all.length ? 'flex' : 'none';
+}
+
+function getSelectedPlans(){
+  const ids = [...document.querySelectorAll('.plan-checkbox:checked')].map(c=>c.dataset.planId);
+  const plans    = window._teamPlans    || [];
+  const branches = window._teamBranches || [];
+  const sel = ids.length ? plans.filter(p=>ids.includes(String(p.id))) : plans;
+  return {plans: sel, branches};
+}
+
+async function exportSelectedExcel(){
+  const {plans, branches} = getSelectedPlans();
+  if(!plans.length){ showToast('لا توجد خطط محددة','err'); return; }
+  window._teamPlans    = plans;
+  window._teamBranches = branches;
+  await teamPlansExportExcel();
+  // restore
+  window._teamPlans    = window._allTeamPlans    || plans;
+  window._teamBranches = window._allTeamBranches || branches;
+}
+
+async function exportSelectedPDF(){
+  const {plans, branches} = getSelectedPlans();
+  if(!plans.length){ showToast('لا توجد خطط محددة','err'); return; }
+  const orig_p = window._teamPlans, orig_b = window._teamBranches;
+  window._teamPlans    = plans;
+  window._teamBranches = branches;
+  teamPlansExportPDF();
+  window._teamPlans    = orig_p;
+  window._teamBranches = orig_b;
+}
+
 async function teamPlansExportExcel(){
   if(typeof XLSX === 'undefined'){ showToast('جاري تحميل مكتبة Excel...','info'); return; }
   const plans    = window._teamPlans    || [];
