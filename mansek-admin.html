@@ -1,4 +1,4 @@
-<!-- mansek-admin v3.5 — fix reset badge visibility 2026-06-05 -->
+<!-- mansek-admin v3.6 — expiry export Excel+PDF + fix object Object 2026-06-05 -->
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -2853,8 +2853,14 @@ h2,h3{color:#2C1F0A}
         <div id="panel-expiry-alert" class="panel">
           <div class="page-header">
             <div><h2>تنبيهات الصلاحية</h2><p>أصناف تحتاج متابعة عاجلة</p></div>
-            <div class="page-actions">
+            <div class="page-actions" style="display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn btn-ghost btn-sm" onclick="adminLoadExpiry()"><i class="ti ti-refresh"></i> تحديث</button>
+              <button class="btn btn-sm" style="background:#2E7D32;color:#fff;border:none;cursor:pointer" onclick="expiryExportExcel()">
+                <i class="ti ti-file-spreadsheet"></i> تصدير Excel
+              </button>
+              <button class="btn btn-sm" style="background:#731E2E;color:#fff;border:none;cursor:pointer" onclick="expiryExportPDF()">
+                <i class="ti ti-file-type-pdf"></i> تصدير PDF
+              </button>
             </div>
           </div>
           <div class="filter-bar" style="margin-bottom:12px">
@@ -5274,8 +5280,10 @@ async function adminLoadExpiry(){
 
     const getExpDate = (dateStr, months) => {
       if(!dateStr||!months) return '—';
-      const d = new Date(dateStr+'-01');
-      d.setMonth(d.getMonth()+(+months||0));
+      const m = typeof months === 'object' ? (months?.months || months?.value || 0) : months;
+      const d = new Date(String(dateStr).slice(0,7)+'-01');
+      if(isNaN(d)) return '—';
+      d.setMonth(d.getMonth()+(+m||0));
       return d.toLocaleDateString('ar-EG',{month:'short',year:'numeric'});
     };
 
@@ -5295,6 +5303,163 @@ async function adminLoadExpiry(){
   }catch(e){
     tbody.innerHTML=`<tr><td colspan="10" style="text-align:center;color:var(--red)">تعذر التحميل: ${e.message}</td></tr>`;
   }
+}
+
+// ── تصدير الصلاحية Excel ────────────────────────────────────────────────────
+function expiryGetData(){
+  // نجيب البيانات من الجدول الموجود في الصفحة
+  const rows = [];
+  document.querySelectorAll('#admin-exp-tbody tr').forEach(tr=>{
+    const cells = [...tr.querySelectorAll('td')].map(td=>td.innerText.trim());
+    if(cells.length >= 10) rows.push(cells);
+  });
+  return rows;
+}
+
+function expiryExportExcel(){
+  if(typeof XLSX==='undefined'){ showToast('جاري تحميل مكتبة Excel...'); return; }
+  const rows = expiryGetData();
+  if(!rows.length){ showToast('لا توجد بيانات للتصدير','err'); return; }
+
+  const C = {
+    dark:'2C1F0A', caramel:'4B3C1A', gold:'C8A96E', cream:'EDE5D8',
+    light:'F5F0E8', red:'731E2E', orange:'E65100', green:'2E7D32',
+    yellow:'E8A020', white:'FFFFFF', grey:'F8F9FA', line:'E0D8CC'
+  };
+  const fill = c=>({patternType:'solid',fgColor:{rgb:c}});
+  const font = (bold,sz,color,italic)=>({bold:!!bold,sz:sz||11,color:{rgb:color||C.dark},italic:!!italic,name:'Arial'});
+  const align = (h,v,wrap)=>({horizontal:h||'right',vertical:v||'center',wrapText:!!wrap,readingOrder:2});
+  const brd = (s,c)=>{const b={style:s||'thin',color:{rgb:c||C.line}};return{left:b,right:b,top:b,bottom:b};};
+
+  const COLS=['#','المنسق','الفرع','المجموعة','الصنف','حالة الرف','ينتهي الرف','حالة المخزن','ينتهي المخزن','الحالة الأسوأ'];
+  const now = new Date().toLocaleDateString('ar-EG');
+  const grpSel = document.getElementById('admin-exp-grp')?.value||'all';
+  const fltSel = document.getElementById('admin-exp-filter')?.value||'all';
+
+  const aoa = [
+    ['الطحان جولدن دايتس — Al Tahhan Golden Dates',...Array(9).fill('')],
+    ['تنبيهات الصلاحية — أصناف تحتاج متابعة عاجلة',...Array(9).fill('')],
+    [`تاريخ التصدير: ${now}  |  المجموعة: ${grpSel==='all'?'كل المجموعات':grpSel}  |  الفلتر: ${fltSel==='all'?'كل الحالات':fltSel}`,...Array(9).fill('')],
+    Array(10).fill(''),
+    COLS,
+    ...rows
+  ];
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa,{cellStyles:true});
+  const enc=(r,c)=>XLSX.utils.encode_cell({r,c});
+  const sty=(r,c,s)=>{if(!ws[enc(r,c)])ws[enc(r,c)]={t:'z',v:''};ws[enc(r,c)].s=s;};
+
+  ws['!merges']=[
+    {s:{r:0,c:0},e:{r:0,c:9}},
+    {s:{r:1,c:0},e:{r:1,c:9}},
+    {s:{r:2,c:0},e:{r:2,c:9}},
+    {s:{r:3,c:0},e:{r:3,c:9}},
+  ];
+
+  // Row 0 — company header
+  sty(0,0,{font:font(1,15,C.cream),fill:fill(C.dark),alignment:align('center'),border:brd('medium',C.dark)});
+  // Row 1 — title
+  sty(1,0,{font:font(1,13,C.dark),fill:fill(C.gold),alignment:align('center'),border:brd('medium',C.caramel)});
+  // Row 2 — info
+  sty(2,0,{font:font(0,10,C.caramel,true),fill:fill(C.light),alignment:align('center'),border:brd('thin',C.line)});
+  // Row 3 — spacer
+  for(let c=0;c<10;c++) sty(3,c,{fill:fill(C.dark)});
+  // Row 4 — headers
+  for(let c=0;c<10;c++) sty(4,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:align('center'),border:brd('medium',C.dark)});
+
+  // Data rows
+  for(let ri=5;ri<aoa.length;ri++){
+    const worst = aoa[ri][9]||'';
+    const isExp = worst.includes('منتهية');
+    const isCrit= worst.includes('شهر') && !worst.includes('3');
+    const rowBg = isExp?'FFF5F5':isCrit?'FFF8F0':C.white;
+    for(let c=0;c<10;c++){
+      let s={font:font(0,9,C.dark),fill:fill(rowBg),alignment:align(c===0?'center':'right',undefined,true),border:brd('thin',C.line)};
+      // status cols
+      if(c===5||c===7||c===9){
+        const v=String(aoa[ri][c]);
+        const fg=v.includes('منتهية')?C.red:v.includes('حرجة')||v.includes('شهر')&&!v.includes('3')?C.orange:C.green;
+        s={...s,font:font(1,9,fg),fill:fill(rowBg),alignment:align('center')};
+      }
+      sty(ri,c,s);
+    }
+  }
+
+  ws['!cols']=[{wch:5},{wch:18},{wch:22},{wch:14},{wch:32},{wch:16},{wch:14},{wch:16},{wch:14},{wch:14}];
+  ws['!rows']=[{hpt:36},{hpt:28},{hpt:20},{hpt:8},{hpt:26}];
+  ws['!rows'][0]={hpt:36};
+
+  XLSX.utils.book_append_sheet(wb,ws,'تنبيهات الصلاحية');
+  XLSX.writeFile(wb,`تنبيهات_الصلاحية_${new Date().toISOString().slice(0,10)}.xlsx`);
+  showToast('✅ تم تصدير تنبيهات الصلاحية');
+}
+
+function expiryExportPDF(){
+  const rows = expiryGetData();
+  if(!rows.length){ showToast('لا توجد بيانات للتصدير','err'); return; }
+
+  const now    = new Date().toLocaleDateString('ar-EG');
+  const grpSel = document.getElementById('admin-exp-grp')?.value||'all';
+  const fltSel = document.getElementById('admin-exp-filter')?.value||'all';
+
+  const STATUS_CLASS = v => v.includes('منتهية')?'st-exp':v.includes('بعد')&&!v.includes('3')?'st-crit':'st-warn';
+
+  const rowsHTML = rows.map((r,i)=>`
+    <tr class="${r[9]?.includes('منتهية')?'row-exp':r[9]?.includes('بعد')&&!r[9]?.includes('3')?'row-crit':''}">
+      <td style="text-align:center">${r[0]}</td>
+      <td><b>${r[1]}</b></td>
+      <td>${r[2]}</td>
+      <td><span class="grp-badge">${r[3]}</span></td>
+      <td>${r[4]}</td>
+      <td class="${STATUS_CLASS(r[5]||'')}">${r[5]}</td>
+      <td>${r[6]}</td>
+      <td class="${STATUS_CLASS(r[7]||'')}">${r[7]}</td>
+      <td>${r[8]}</td>
+      <td class="${STATUS_CLASS(r[9]||'')}"><b>${r[9]}</b></td>
+    </tr>`).join('');
+
+  const html=`<!DOCTYPE html><html dir="rtl" lang="ar">
+  <head><meta charset="UTF-8"><title>تنبيهات الصلاحية</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap');
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Cairo',Arial,sans-serif;color:#2C1F0A;font-size:10px}
+    .hdr-co{background:#2C1F0A;color:#EDE5D8;text-align:center;padding:10px;font-size:15px;font-weight:900;border-radius:8px 8px 0 0}
+    .hdr-title{background:#C8A96E;color:#2C1F0A;text-align:center;padding:7px;font-size:12px;font-weight:700}
+    .hdr-info{background:#F5F0E8;color:#4B3C1A;text-align:center;padding:5px;font-size:9px;font-style:italic;margin-bottom:10px;border-radius:0 0 6px 6px}
+    .kpi-bar{display:flex;gap:6px;margin-bottom:10px}
+    .kpi{flex:1;border-radius:6px;padding:6px;text-align:center;font-weight:700}
+    table{width:100%;border-collapse:collapse}
+    th{background:#4B3C1A;color:#EDE5D8;padding:6px 5px;font-size:9px;font-weight:700;text-align:center;border:1px solid #2C1F0A}
+    td{padding:5px;font-size:9px;border:1px solid #E0D8CC;vertical-align:middle}
+    .grp-badge{background:#EEF4FF;color:#1565C0;border-radius:20px;padding:1px 6px;font-size:8px}
+    .st-exp{color:#731E2E;font-weight:700;text-align:center}
+    .st-crit{color:#E65100;font-weight:700;text-align:center}
+    .st-warn{color:#E8A020;font-weight:700;text-align:center}
+    .row-exp{background:#FFF5F5}
+    .row-crit{background:#FFF8F0}
+    .footer{background:#F5F0E8;color:#4B3C1A;text-align:center;padding:5px;font-size:8px;margin-top:8px;border-radius:6px}
+    @media print{body{font-size:9px}}
+  </style></head><body>
+  <div class="hdr-co">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
+  <div class="hdr-title">تنبيهات الصلاحية — أصناف تحتاج متابعة عاجلة</div>
+  <div class="hdr-info">تاريخ التصدير: ${now} &nbsp;|&nbsp; المجموعة: ${grpSel==='all'?'كل المجموعات':grpSel} &nbsp;|&nbsp; إجمالي: ${rows.length} صنف</div>
+  <table>
+    <thead><tr>
+      <th>#</th><th>المنسق</th><th>الفرع</th><th>المجموعة</th><th>الصنف</th>
+      <th>حالة الرف</th><th>ينتهي الرف</th><th>حالة المخزن</th><th>ينتهي المخزن</th><th>الحالة الأسوأ</th>
+    </tr></thead>
+    <tbody>${rowsHTML}</tbody>
+  </table>
+  <div class="footer">Al Tahhan Golden Dates © 2026 — نظام إدارة التنسيق الميداني</div>
+  </body></html>`;
+
+  const win=window.open('','_blank','width=1100,height=700');
+  win.document.write(html);
+  win.document.close();
+  setTimeout(()=>{win.focus();win.print();},800);
+  showToast('📄 جاري فتح نافذة PDF...');
 }
 
 // badge polling عند التحميل
