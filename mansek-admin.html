@@ -8192,11 +8192,12 @@ function renderSupervisors(){
       <td>${statusBadge}</td>
       <td>
         <div style="display:flex;gap:4px">
-          ${sup.source==='users'?`
-          <button class="btn btn-ghost btn-xs" onclick="openEditSup(${i})" title="تعديل"><i class="ti ti-edit"></i></button>
-          <button class="btn btn-xs" style="background:${sup.status==='active'?'#FFF3E0':'#E8F5E9'};color:${sup.status==='active'?'#E65100':'#1B5E20'}" onclick="toggleSupStatus(${i})">${sup.status==='active'?'إيقاف':'تفعيل'}</button>
-          <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="deleteSup(${i})" title="حذف"><i class="ti ti-trash"></i></button>
-          `:'<span style="font-size:10px;color:#aaa">نظام</span>'}
+          <button class="btn btn-ghost btn-xs" onclick="${sup.source==='staff'?'openEditStaff':'openEditSup'}(${i})" title="تعديل"><i class="ti ti-edit"></i></button>
+          <button class="btn btn-xs" style="background:${sup.status==='active'?'#FFF3E0':'#E8F5E9'};color:${sup.status==='active'?'#E65100':'#1B5E20'}" onclick="${sup.source==='staff'?'toggleStaffStatus':'toggleSupStatus'}(${i})">${sup.status==='active'?'إيقاف':'تفعيل'}</button>
+          <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="${sup.source==='staff'?'deleteStaff':'deleteSup'}(${i})" title="حذف"><i class="ti ti-trash"></i></button>
+          ${sup.source==='staff'?`
+          <button class="btn btn-xs" style="background:#E3F2FD;color:#0D47A1" onclick="openStaffPermissions(${i})" title="الصلاحيات"><i class="ti ti-key"></i></button>
+          `:''}
         </div>
       </td>
     </tr>`;
@@ -13869,6 +13870,200 @@ async function teamPlansExportExcel(){
   const {start} = teamGetWeekRange(weekType);
   XLSX.writeFile(wb, `خطط_الفريق_${start}.xlsx`);
   showToast('✅ تم تصدير الخطط');
+}
+
+
+// ════════════════════════════════════════════════════════
+// إدارة Staff (المديرون والمشرفون الإداريون)
+// ════════════════════════════════════════════════════════
+
+const APP_LABELS = {
+  'mansek': 'تطبيق التنسيق',
+  'sales':  'تطبيق المبيعات',
+  'admin':  'لوحة التحكم'
+};
+
+function openEditStaff(idx){
+  const st = SUPERVISORS[idx];
+  if(!st) return;
+
+  let modal = document.getElementById('modal-edit-staff');
+  if(!modal){
+    modal = document.createElement('div');
+    modal.id = 'modal-edit-staff';
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:480px">
+        <div class="modal-title"><i class="ti ti-edit"></i> تعديل بيانات المدير/المشرف</div>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
+          <div>
+            <label style="font-size:12px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">الاسم</label>
+            <input id="ess-name" class="modal-inp" placeholder="الاسم الكامل">
+          </div>
+          <div>
+            <label style="font-size:12px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">الدور</label>
+            <select id="ess-role" class="modal-inp">
+              <option value="gm">مدير عام</option>
+              <option value="merch_manager">مدير التنسيق</option>
+              <option value="sales_manager">مدير البيع</option>
+              <option value="hyper_sup">مشرف الهايبر</option>
+              <option value="group_sup">مشرف المجموعة</option>
+              <option value="merch_sup">مشرف التنسيق</option>
+              <option value="special_sup">مشرف الأسواق الخاصة</option>
+              <option value="hyper_sales_sup">مشرف بيع هايبر</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:12px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">المجموعات المسؤول عنها</label>
+            <div id="ess-groups" style="display:flex;flex-wrap:wrap;gap:6px;padding:8px;border:1.5px solid var(--border);border-radius:8px;background:#f9f9f9"></div>
+          </div>
+          <div>
+            <label style="font-size:12px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">ملاحظات</label>
+            <input id="ess-notes" class="modal-inp" placeholder="وصف الدور والصلاحيات">
+          </div>
+        </div>
+        <div class="modal-btns">
+          <button class="btn-modal btn-cancel" onclick="document.getElementById('modal-edit-staff').classList.remove('open')">إلغاء</button>
+          <button class="btn-modal btn-ok" onclick="saveEditStaff()">💾 حفظ</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+  }
+
+  modal._idx = idx;
+  document.getElementById('ess-name').value  = st.name  || '';
+  document.getElementById('ess-role').value  = st.role  || 'merch_manager';
+  document.getElementById('ess-notes').value = st.notes || '';
+
+  // مربعات المجموعات
+  const grpDiv = document.getElementById('ess-groups');
+  const allGrps = Object.entries(GROUPS||{});
+  const curGrps = st.groups || [];
+  grpDiv.innerHTML = allGrps.map(([key,g])=>`
+    <label style="display:inline-flex;align-items:center;gap:5px;background:#fff;border:1.5px solid ${curGrps.includes(key)?g.color:'#ddd'};
+      border-radius:20px;padding:4px 10px;font-size:11px;cursor:pointer;transition:all .15s">
+      <input type="checkbox" value="${key}" ${curGrps.includes(key)?'checked':''} 
+        style="accent-color:${g.color}" onchange="updateStaffGroupBadge(this,'${g.color}')">
+      <span style="color:${g.color}">◆</span> ${g.label||key}
+    </label>`).join('');
+
+  modal.classList.add('open');
+}
+
+function updateStaffGroupBadge(inp, color){
+  const lbl = inp.closest('label');
+  lbl.style.borderColor = inp.checked ? color : '#ddd';
+}
+
+async function saveEditStaff(){
+  const modal = document.getElementById('modal-edit-staff');
+  const idx   = modal._idx;
+  const st    = SUPERVISORS[idx];
+  if(!st) return;
+
+  const name  = document.getElementById('ess-name').value.trim();
+  const role  = document.getElementById('ess-role').value;
+  const notes = document.getElementById('ess-notes').value.trim();
+  const groups= [...document.querySelectorAll('#ess-groups input:checked')].map(i=>i.value);
+
+  if(!name){ showToast('أدخل الاسم','err'); return; }
+
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  const grpArr = `{${groups.join(',')}}`;
+
+  await fetch(`${SUPABASE_URL}/rest/v1/staff?id=eq.${st.id}`,{
+    method:'PATCH', headers:H,
+    body:JSON.stringify({ name, role, grp: grpArr, notes })
+  });
+
+  showToast('✅ تم حفظ التعديلات');
+  modal.classList.remove('open');
+  loadSupervisors();
+}
+
+async function toggleStaffStatus(idx){
+  const st = SUPERVISORS[idx];
+  if(!st) return;
+  const newStatus = st.status !== 'active';
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  await fetch(`${SUPABASE_URL}/rest/v1/staff?id=eq.${st.id}`,{
+    method:'PATCH', headers:H,
+    body:JSON.stringify({active: newStatus})
+  });
+  showToast(newStatus ? '✅ تم التفعيل' : '⏸️ تم الإيقاف');
+  loadSupervisors();
+}
+
+async function deleteStaff(idx){
+  const st = SUPERVISORS[idx];
+  if(!st || !confirm(`حذف "${st.name}" نهائياً؟`)) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  await fetch(`${SUPABASE_URL}/rest/v1/staff?id=eq.${st.id}`,{method:'DELETE',headers:H});
+  showToast('✅ تم الحذف');
+  loadSupervisors();
+}
+
+function openStaffPermissions(idx){
+  const st = SUPERVISORS[idx];
+  if(!st) return;
+
+  let modal = document.getElementById('modal-staff-perms');
+  if(!modal){
+    modal = document.createElement('div');
+    modal.id = 'modal-staff-perms';
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:420px">
+        <div class="modal-title"><i class="ti ti-key"></i> صلاحيات التطبيقات</div>
+        <div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:12px" id="sperms-name"></div>
+        <div id="sperms-apps" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px"></div>
+        <div class="modal-btns">
+          <button class="btn-modal btn-cancel" onclick="document.getElementById('modal-staff-perms').classList.remove('open')">إلغاء</button>
+          <button class="btn-modal btn-ok" onclick="saveStaffPermissions()">💾 حفظ الصلاحيات</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+  }
+
+  modal._idx = idx;
+  document.getElementById('sperms-name').textContent = st.name + ' — ' + (ROLE_LABELS_MAP[st.role]||st.role);
+
+  // parse app_access من JSON string
+  let curApps = [];
+  try { curApps = JSON.parse(st.pass) || []; } catch(e){ curApps = []; }
+
+  document.getElementById('sperms-apps').innerHTML = Object.entries(APP_LABELS).map(([key,label])=>`
+    <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1.5px solid ${curApps.includes(key)?'#005CBF':'#ddd'};
+      border-radius:10px;cursor:pointer;background:${curApps.includes(key)?'#E3F2FD':'#fff'};transition:all .2s">
+      <input type="checkbox" value="${key}" ${curApps.includes(key)?'checked':''}
+        style="width:16px;height:16px;accent-color:#005CBF"
+        onchange="this.closest('label').style.borderColor=this.checked?'#005CBF':'#ddd';this.closest('label').style.background=this.checked?'#E3F2FD':'#fff'">
+      <div>
+        <div style="font-size:13px;font-weight:700">${label}</div>
+        <div style="font-size:10px;color:#aaa">${key}</div>
+      </div>
+    </label>`).join('');
+
+  modal.classList.add('open');
+}
+
+async function saveStaffPermissions(){
+  const modal = document.getElementById('modal-staff-perms');
+  const idx   = modal._idx;
+  const st    = SUPERVISORS[idx];
+  if(!st) return;
+
+  const apps = [...document.querySelectorAll('#sperms-apps input:checked')].map(i=>i.value);
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+
+  await fetch(`${SUPABASE_URL}/rest/v1/staff?id=eq.${st.id}`,{
+    method:'PATCH', headers:H,
+    body:JSON.stringify({ app_access: apps })
+  });
+
+  showToast('✅ تم حفظ الصلاحيات');
+  modal.classList.remove('open');
+  loadSupervisors();
 }
 
 </script>
