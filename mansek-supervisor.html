@@ -1593,10 +1593,34 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 <!-- ══ Modal: تغيير خط السير الطارئ ══════════════════════════ -->
 <div class="modal-overlay" id="modal-deviation">
   <div class="modal-sheet">
-    <div class="modal-title" style="color:#E65100">⚠️ تغيير خطة اليوم</div>
+    <div class="modal-title" style="color:#E65100">✏️ تعديل خطة اليوم</div>
     <div id="modal-dev-day" style="font-size:12px;color:var(--text2);text-align:center;margin-bottom:12px"></div>
     <div style="background:#FFF3E0;border:1px solid #FFE0B2;border-radius:8px;padding:10px;margin-bottom:12px;font-size:11px;color:#E65100">
-      سيتم تعليق نقاط الالتزام بالخطة لحين مراجعة الإدارة
+      ⚠️ سيتم تسجيل التعديل مع سبب التغيير وإشعار مدير التنسيق
+    </div>
+
+    <!-- الفرع المراد تعديله -->
+    <div style="margin-bottom:10px">
+      <div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px">الفرع المراد تعديله</div>
+      <select class="modal-inp" id="modal-dev-branch-old" style="margin-bottom:0">
+        <option value="">اختر الفرع الأصلي...</option>
+      </select>
+    </div>
+
+    <!-- الفرع الجديد -->
+    <div style="margin-bottom:10px">
+      <div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px">الفرع البديل (اختياري)</div>
+      <select class="modal-inp" id="modal-dev-branch-new" style="margin-bottom:0">
+        <option value="">نفس الفرع / لا يوجد بديل</option>
+      </select>
+    </div>
+
+    <!-- المنسق الجديد -->
+    <div style="margin-bottom:10px">
+      <div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px">المنسق البديل (اختياري)</div>
+      <select class="modal-inp" id="modal-dev-rep-new" style="margin-bottom:0">
+        <option value="">نفس المنسق</option>
+      </select>
     </div>
     <div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px">خطوط السير الفعلية اليوم</div>
     <div id="modal-dev-actual-routes" style="display:flex;flex-wrap:wrap;gap:6px;padding:8px;
@@ -3253,10 +3277,12 @@ let hierPlanData   = null; // بيانات الخطة الحالية من Supaba
 // حساب تاريخ بداية الأسبوع مع offset
 function hierGetWeekStart(offset=0){
   const today = new Date();
-  const day   = today.getDay();
-  const sun   = new Date(today);
-  sun.setDate(today.getDate() - day + offset*7);
-  return sun.toISOString().slice(0,10);
+  const day   = today.getDay(); // 0=أحد ... 6=سبت
+  // السبت=6، نريد بداية الأسبوع يوم السبت
+  const diffToSat = (day >= 6) ? 0 : -(day + 1);
+  const sat = new Date(today);
+  sat.setDate(today.getDate() + diffToSat + offset*7);
+  return sat.toISOString().slice(0,10);
 }
 
 function hierPrevWeek(){ hierWeekOffset--; hierLoadPlan(); }
@@ -3520,15 +3546,17 @@ const DAYS = ['الأحد','الاثنين','الثلاثاء','الأربعاء
 
 function getWeekDates(){
   const today = new Date();
-  const day = today.getDay();
-  const sunday = new Date(today);
-  sunday.setDate(today.getDate() - day);
+  const day = today.getDay(); // 0=أحد ... 6=سبت
+  const diffToSat = (day >= 6) ? 0 : -(day + 1);
+  const saturday = new Date(today);
+  saturday.setDate(today.getDate() + diffToSat);
   const dates = [];
+  const dayNames = ['السبت','الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة'];
   for(let i=0; i<7; i++){
-    const d = new Date(sunday);
-    d.setDate(sunday.getDate()+i);
+    const d = new Date(saturday);
+    d.setDate(saturday.getDate()+i);
     dates.push({
-      name: DAYS[i],
+      name: dayNames[i],
       date: d.toISOString().slice(0,10),
       label: d.toLocaleDateString('ar-EG',{weekday:'long',month:'short',day:'numeric'})
     });
@@ -3615,8 +3643,11 @@ function renderPlan(){
             <span class="badge ${item.status==='done'?'b-green':item.status==='missed'?'b-red':'b-gray'}">
               ${item.status==='done'?'✅ منجز':item.status==='missed'?'❌ فائت':'⏳ مجدول'}
             </span>
-            ${currentPlan.status!=='approved'?`<button onclick="removePlanItem(${item.id})"
+            ${currentPlan.status==='draft'?`<button onclick="removePlanItem(${item.id})"
               style="background:#FFEBEE;color:var(--red);border:none;border-radius:4px;padding:3px 6px;font-size:10px;cursor:pointer">✕</button>`:''}
+            ${currentPlan.status==='submitted'||currentPlan.status==='approved'?`<button onclick="openDeviationModal('${item.day_date||_deviationDay?.date}','${item.branch_name}')"
+              style="background:#FFF3E0;color:#E65100;border:none;border-radius:4px;padding:3px 6px;font-size:10px;cursor:pointer;font-family:Cairo,sans-serif">✏️ تعديل</button>`:''}
+
           </div>
           ${hasTargets ? `<div class="plan-branch-targets">
             <div class="plan-branch-target coord-t">
@@ -4220,24 +4251,48 @@ async function openDeviationModal(date, dayName){
   document.getElementById('modal-dev-day').textContent = dayName + ' — ' + date;
   document.getElementById('modal-dev-reason').value = '';
   document.getElementById('modal-dev-err').style.display='none';
-
-  // جيب كل الفروع لمجموعات المشرف عشان يختار الخطوط الفعلية
-  const routesDiv = document.getElementById('modal-dev-actual-routes');
-  routesDiv.innerHTML = '<div style="color:var(--text2);font-size:12px">جاري التحميل...</div>';
   document.getElementById('modal-deviation').classList.add('open');
 
-  let allRoutes = [];
-  for(const grp of cu.groups){
-    const data = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=route&grp=eq.${encodeURIComponent(grp)}&status=eq.active`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    const json = await data.json();
-    if(Array.isArray(json)) json.forEach(b=>{ if(b.route && !allRoutes.includes(b.route)) allRoutes.push(b.route); });
-  }
-  allRoutes.sort();
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const grps = (cu?.groups||[cu?.grp]).filter(Boolean);
 
-  routesDiv.innerHTML = allRoutes.map(r=>`
-    <div class="chip" data-route="${r}" onclick="this.classList.toggle('selected')">${r}</div>
-  `).join('') || '<div style="color:var(--text2);font-size:12px">لا توجد خطوط سير</div>';
+  // فروع اليوم الحالية في الخطة
+  const dayBranches = planItems.filter(i=>i.day_date===date);
+  const oldBranchSel = document.getElementById('modal-dev-branch-old');
+  oldBranchSel.innerHTML = '<option value="">اختر الفرع الأصلي...</option>'
+    + dayBranches.map(b=>`<option value="${b.id}">${b.branch_name}${b.rep_name?' — '+b.rep_name:''}</option>`).join('');
+
+  // كل الفروع المتاحة (للبديل)
+  let allBranches = [];
+  for(const grp of grps){
+    if(!grp) continue;
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&grp=eq.${encodeURIComponent(grp)}&status=eq.active&limit=500`,{headers:H});
+    if(!r.ok) continue;
+    const j = await r.json().catch(()=>[]);
+    if(Array.isArray(j)) allBranches.push(...j.map(b=>b.branch_name));
+  }
+  allBranches = [...new Set(allBranches)].sort();
+  const newBranchSel = document.getElementById('modal-dev-branch-new');
+  newBranchSel.innerHTML = '<option value="">نفس الفرع / لا يوجد بديل</option>'
+    + allBranches.map(b=>`<option value="${b}">${b}</option>`).join('');
+
+  // المنسقين المتاحين (للبديل)
+  let allReps = [];
+  for(const grp of grps){
+    if(!grp) continue;
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/users?select=name&role=eq.rep&grp=eq.${encodeURIComponent(grp)}&status=eq.active&order=name.asc&limit=200`,{headers:H});
+    if(!r.ok) continue;
+    const j = await r.json().catch(()=>[]);
+    if(Array.isArray(j)) allReps.push(...j.map(u=>u.name));
+  }
+  allReps = [...new Set(allReps)].sort();
+  const newRepSel = document.getElementById('modal-dev-rep-new');
+  newRepSel.innerHTML = '<option value="">نفس المنسق</option>'
+    + allReps.map(r=>`<option value="${r}">${r}</option>`).join('');
+
+  // إخفاء قسم الخطوط القديم
+  const routesDiv = document.getElementById('modal-dev-actual-routes');
+  if(routesDiv) routesDiv.style.display='none';
 }
 
 function closeDeviationModal(){
@@ -4248,31 +4303,50 @@ function closeDeviationModal(){
 async function confirmDeviation(){
   const reason = document.getElementById('modal-dev-reason').value.trim();
   const err = document.getElementById('modal-dev-err');
-  const actualRoutes = [...document.querySelectorAll('#modal-dev-actual-routes .chip.selected')].map(c=>c.dataset.route);
+  const oldBranchId = document.getElementById('modal-dev-branch-old').value;
+  const newBranch   = document.getElementById('modal-dev-branch-new').value;
+  const newRep      = document.getElementById('modal-dev-rep-new').value;
 
-  if(reason.length < 10){ err.textContent='اكتب سبب واضح (10 أحرف على الأقل)'; err.style.display='block'; return; }
+  if(!oldBranchId){ err.textContent='اختر الفرع المراد تعديله'; err.style.display='block'; return; }
+  if(reason.length < 5){ err.textContent='اكتب سبب التعديل (5 أحرف على الأقل)'; err.style.display='block'; return; }
 
-  // الخطوط الأصلية لليوم ده من الخطة
-  const originalItems = planItems.filter(i=>i.day_date===_deviationDay.date);
-  const originalRoutes = [...new Set(originalItems.map(i=>i.route).filter(Boolean))].join('، ');
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  const now = new Date().toISOString();
 
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_deviations`,{
+  // تحديث plan_branches بالفرع/المنسق الجديد + تسجيل سبب التعديل
+  const patchData = { change_reason: reason, modified_at: now };
+  if(newBranch) patchData.branch_name = newBranch;
+  if(newRep)    patchData.rep_name = newRep;
+
+  const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${oldBranchId}`,{
+    method:'PATCH', headers:H, body:JSON.stringify(patchData)
+  });
+
+  // تسجيل الانحراف في plan_deviations
+  const oldItem = planItems.find(i=>String(i.id)===String(oldBranchId));
+  await fetch(`${SUPABASE_URL}/rest/v1/plan_deviations`,{
     method:'POST',
-    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    headers:H,
     body: JSON.stringify({
       supervisor_name: cu.name,
       plan_id: currentPlan?.id||null,
       day_date: _deviationDay.date,
       day_name: _deviationDay.dayName,
-      original_routes: originalRoutes,
-      actual_routes: actualRoutes.join('، '),
+      original_routes: oldItem?.branch_name||'—',
+      actual_routes: newBranch||oldItem?.branch_name||'—',
       reason,
-      status: 'pending',
-      pts_suspended: 10 // نقاط معلقة لحين المراجعة
+      status: 'pending'
     })
   });
 
-  if(res.ok){
+  if(patchRes.ok){
+    // تحديث الـ cache المحلي
+    const idx = planItems.findIndex(i=>String(i.id)===String(oldBranchId));
+    if(idx!==-1){
+      if(newBranch) planItems[idx].branch_name = newBranch;
+      if(newRep)    planItems[idx].rep_name = newRep;
+      planItems[idx].change_reason = reason;
+    }
     closeDeviationModal();
     // reload
     const devs = await sbGet('plan_deviations',{supervisor_name:cu.name});
