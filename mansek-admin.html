@@ -1,4 +1,4 @@
-<!-- mansek-admin v3.1 — gm_approved + visit details + new fields 2026-06-05 -->
+<!-- mansek-admin v3.2 — styled Excel export + PDF 2026-06-05 -->
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -1878,6 +1878,9 @@ h2,h3{color:#2C1F0A}
               <button class="btn-action" style="background:var(--olive);color:#EDE5D8" onclick="teamPlansExportExcel()">
                 <i class="ti ti-file-spreadsheet"></i> تصدير Excel
               </button>
+              <button class="btn-action" style="background:#731E2E;color:#EDE5D8" onclick="teamPlansExportPDF()">
+                <i class="ti ti-file-type-pdf"></i> تصدير PDF
+              </button>
             </div>
           </div>
 
@@ -1920,6 +1923,9 @@ h2,h3{color:#2C1F0A}
               <button class="btn-action" onclick="teamPlansLoad()"><i class="ti ti-refresh"></i> تحديث</button>
               <button class="btn-action" style="background:var(--olive);color:#EDE5D8" onclick="teamPlansExportExcel()">
                 <i class="ti ti-file-spreadsheet"></i> تصدير Excel
+              </button>
+              <button class="btn-action" style="background:#731E2E;color:#EDE5D8" onclick="teamPlansExportPDF()">
+                <i class="ti ti-file-type-pdf"></i> تصدير PDF
               </button>
             </div>
           </div>
@@ -13889,48 +13895,282 @@ async function teamPlansExportExcel(){
   const branches = window._teamBranches || [];
   if(!plans.length){ showToast('لا توجد بيانات للتصدير','err'); return; }
 
-  const wb = XLSX.utils.book_new();
+  // ── Palette ──────────────────────────────────────────────────────────────
+  const C = {
+    darkBrown : '2C1F0A', caramel: '4B3C1A', gold: 'C8A96E',
+    cream     : 'EDE5D8', lightCream: 'F5F0E8', white: 'FFFFFF',
+    redDark   : '731E2E', green: '2E7D32', greenBg: 'E8F5E9',
+    orange    : 'E65100', orangeBg: 'FFF3E0', greyBg: 'F8F9FA',
+    greyLine  : 'E0D8CC', blue: '1565C0'
+  };
 
-  plans.forEach(plan=>{
+  // ── Style builders ────────────────────────────────────────────────────────
+  const fill = c => ({patternType:'solid', fgColor:{rgb:c}});
+  const font = (bold,sz,color,italic) => ({bold:!!bold, sz:sz||11, color:{rgb:color||C.darkBrown}, italic:!!italic, name:'Arial'});
+  const align = (h,v,wrap) => ({horizontal:h||'right', vertical:v||'center', wrapText:!!wrap, readingOrder:2});
+  const border = (style,color) => {
+    const s = {style:style||'thin', color:{rgb:color||C.greyLine}};
+    return {left:s, right:s, top:s, bottom:s};
+  };
+
+  const DAY_COLORS = {
+    'السبت':'EEF4FF','الأحد':'FFF8EE','الاثنين':'F0FFF4',
+    'الثلاثاء':'FFF0F8','الأربعاء':'F5EEFF','الخميس':'FFFBEE','الجمعة':'FFEEEE'
+  };
+  const STATUS_COLORS = {
+    done    : {fg:C.green,   bg:C.greenBg},
+    skipped : {fg:C.redDark, bg:'FFF0F0'},
+    pending : {fg:C.orange,  bg:C.orangeBg}
+  };
+
+  const weekType = document.getElementById('tp-week-filter')?.value || 'current';
+  const {start}  = teamGetWeekRange(weekType);
+  const wb       = XLSX.utils.book_new();
+
+  plans.forEach(plan => {
     const planB = branches.filter(b=>b.plan_id===plan.id);
-    const rows  = [['اليوم','التاريخ','الفرع','الحالة','مشرف المنطقة','المنسق','خطة الزيارة','الغرض','الملاحظات','المستهدف التنسيقي','المستهدف البيعي','سبب التعديل']];
+    const total = planB.length;
+    const done  = planB.filter(b=>b.visit_status==='done').length;
+    const pct   = total ? Math.round(done/total*100) : 0;
 
+    // Build aoa rows
+    const COLS = ['اليوم','التاريخ','الفرع','الحالة','مشرف المنطقة','المنسق',
+                  'خطة الزيارة','الغرض','الملاحظات','م.تنسيقي','م.بيعي','سبب التعديل'];
+    const numCols = COLS.length;
+
+    // row 0 → company header
+    // row 1 → plan title
+    // row 2 → week / stats
+    // row 3 → separator
+    // row 4 → column headers
+    // row 5+ → data
+
+    const aoa = [
+      ['الطحان جولدن دايتس — Al Tahhan Golden Dates', ...Array(numCols-1).fill('')],
+      [`خطة العمل الأسبوعية — ${plan.supervisor_name}`, ...Array(numCols-1).fill('')],
+      [`الفترة: ${plan.week_start} ← ${plan.week_end}  |  إجمالي: ${total}  |  تم: ${done}  |  إنجاز: ${pct}%`, ...Array(numCols-1).fill('')],
+      Array(numCols).fill(''),   // spacer
+      COLS
+    ];
+
+    const dataStartRow = aoa.length; // 5 (0-indexed)
+
+    // fill data
     TEAM_DAYS.forEach((day,i)=>{
       const d = new Date(plan.week_start);
       d.setDate(d.getDate()+i);
       const date = d.toISOString().slice(0,10);
       const dayB = planB.filter(b=>b.visit_date===date);
       if(!dayB.length){
-        rows.push([day, date,'—','—','—','—','','—','—','—','']);
+        aoa.push([day, date, '—','—','—','—','—','—','—','—','—','—']);
       } else {
-        dayB.forEach(b=>{
-          rows.push([
+        dayB.forEach(b => {
+          const stLabel = b.visit_status==='done'?'✅ منجز':b.visit_status==='skipped'?'❌ فائت':'⏳ مجدول';
+          aoa.push([
             day, date,
-            b.branch_name||'—',
-            b.visit_status==='done'?'✅ منجز':b.visit_status==='skipped'?'❌ فائت':'⏳ مجدول',
-            b.area_supervisor||'—',
-            b.rep_name||'—',
-            b.visit_plan||'—',
-            b.visit_purpose||'—',
-            b.notes||'',
-            b.target_coord||0,
-            b.target_sales||0,
-            b.change_reason||''
+            b.branch_name||'—', stLabel,
+            b.area_supervisor||'—', b.rep_name||'—',
+            b.visit_plan||'—', b.visit_purpose||'—', b.notes||'',
+            b.target_coord||0, b.target_sales||0, b.change_reason||''
           ]);
         });
       }
     });
 
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws['!cols'] = [{wch:12},{wch:14},{wch:24},{wch:12},{wch:18},{wch:28},{wch:22},{wch:22},{wch:16},{wch:16},{wch:24}];
+    // footer row
+    aoa.push(Array(numCols).fill(''));
+    aoa.push(['Al Tahhan Golden Dates © 2026 — نظام إدارة التنسيق الميداني', ...Array(numCols-1).fill('')]);
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa, {cellStyles:true});
+    const R  = aoa.length;
+
+    // helper to apply style to a cell
+    const enc = (r,c) => XLSX.utils.encode_cell({r,c});
+    const sty = (r,c,s) => { if(!ws[enc(r,c)]) ws[enc(r,c)]={t:'z',v:''}; ws[enc(r,c)].s = s; };
+
+    // merges
+    ws['!merges'] = [
+      {s:{r:0,c:0}, e:{r:0,c:numCols-1}},
+      {s:{r:1,c:0}, e:{r:1,c:numCols-1}},
+      {s:{r:2,c:0}, e:{r:2,c:numCols-1}},
+      {s:{r:3,c:0}, e:{r:3,c:numCols-1}},
+      {s:{r:R-1,c:0}, e:{r:R-1,c:numCols-1}},
+    ];
+
+    // Row 0 — company header
+    sty(0,0,{font:font(1,15,C.cream), fill:fill(C.darkBrown), alignment:align('center'), border:border('medium',C.darkBrown)});
+
+    // Row 1 — plan title
+    sty(1,0,{font:font(1,13,C.darkBrown), fill:fill(C.gold), alignment:align('center'), border:border('medium',C.caramel)});
+
+    // Row 2 — week info
+    sty(2,0,{font:font(0,10,C.caramel,true), fill:fill(C.lightCream), alignment:align('center'), border:border('thin',C.greyLine)});
+
+    // Row 3 — spacer
+    for(let c=0;c<numCols;c++) sty(3,c,{fill:fill(C.darkBrown)});
+
+    // Row 4 — headers
+    for(let c=0;c<numCols;c++){
+      sty(4,c,{font:font(1,10,C.cream), fill:fill(C.caramel), alignment:align('center'), border:border('medium',C.darkBrown)});
+    }
+
+    // Data rows
+    for(let ri=dataStartRow; ri<R-2; ri++){
+      const dayVal = aoa[ri][0];
+      const rowBg  = DAY_COLORS[dayVal] || C.white;
+      const isEmpty= aoa[ri][2]==='—' && aoa[ri][3]==='—';
+      const bg     = isEmpty ? C.greyBg : rowBg;
+
+      for(let c=0;c<numCols;c++){
+        let s = {font:font(0,9,isEmpty?'BBBBBB':C.darkBrown), fill:fill(bg), alignment:align(c<2?'center':'right',undefined,true), border:border('thin',C.greyLine)};
+
+        // Day col
+        if(c===0) s = {...s, font:font(1,10,C.caramel), fill:fill(C.lightCream), alignment:align('center')};
+
+        // Status col
+        if(c===3){
+          const stVal = String(aoa[ri][3]);
+          const st = stVal.includes('✅') ? STATUS_COLORS.done : stVal.includes('❌') ? STATUS_COLORS.skipped : STATUS_COLORS.pending;
+          s = {...s, font:font(1,10,st.fg), fill:fill(st.bg), alignment:align('center')};
+        }
+
+        // Numbers
+        if(c===9||c===10) s = {...s, alignment:align('center')};
+
+        sty(ri,c,s);
+      }
+    }
+
+    // Footer rows
+    for(let c=0;c<numCols;c++) sty(R-2,c,{fill:fill(C.darkBrown)});
+    sty(R-1,0,{font:font(0,9,C.caramel,true), fill:fill(C.lightCream), alignment:align('center')});
+
+    // Column widths
+    ws['!cols'] = [{wch:10},{wch:14},{wch:26},{wch:13},{wch:20},{wch:18},{wch:22},{wch:24},{wch:20},{wch:12},{wch:12},{wch:18}];
+
+    // Row heights (approximate via !rows)
+    ws['!rows'] = [];
+    ws['!rows'][0] = {hpt:36};
+    ws['!rows'][1] = {hpt:28};
+    ws['!rows'][2] = {hpt:20};
+    ws['!rows'][3] = {hpt:8};
+    ws['!rows'][4] = {hpt:26};
+
     const sheetName = (plan.supervisor_name||'مشرف').slice(0,28);
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
   });
 
-  const weekType = document.getElementById('tp-week-filter')?.value || 'current';
-  const {start} = teamGetWeekRange(weekType);
   XLSX.writeFile(wb, `خطط_الفريق_${start}.xlsx`);
-  showToast('✅ تم تصدير الخطط');
+  showToast('✅ تم تصدير الخطط بتصميم احترافي');
+}
+
+// ── تصدير PDF ────────────────────────────────────────────────────────────────
+function teamPlansExportPDF(){
+  const plans    = window._teamPlans    || [];
+  const branches = window._teamBranches || [];
+  if(!plans.length){ showToast('لا توجد بيانات للتصدير','err'); return; }
+
+  const weekType = document.getElementById('tp-week-filter')?.value || 'current';
+  const {start, end} = teamGetWeekRange(weekType);
+
+  const DAY_COLORS = {
+    'السبت':'#EEF4FF','الأحد':'#FFF8EE','الاثنين':'#F0FFF4',
+    'الثلاثاء':'#FFF0F8','الأربعاء':'#F5EEFF','الخميس':'#FFFBEE','الجمعة':'#FFEEEE'
+  };
+
+  let html = `<!DOCTYPE html><html dir="rtl" lang="ar">
+  <head><meta charset="UTF-8"><title>خطط الفريق — ${start}</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap');
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Cairo',Arial,sans-serif;background:#fff;color:#2C1F0A;font-size:11px}
+    .page-break{page-break-after:always}
+    .plan-wrap{margin-bottom:32px}
+    .hdr-co{background:#2C1F0A;color:#EDE5D8;text-align:center;padding:10px;font-size:15px;font-weight:900;border-radius:8px 8px 0 0}
+    .hdr-title{background:#C8A96E;color:#2C1F0A;text-align:center;padding:7px;font-size:13px;font-weight:700}
+    .hdr-info{background:#F5F0E8;color:#4B3C1A;text-align:center;padding:5px;font-size:10px;font-style:italic;border-bottom:2px solid #4B3C1A}
+    .kpi-bar{display:flex;gap:6px;padding:8px;background:#EDE5D8}
+    .kpi{flex:1;border-radius:6px;padding:6px;text-align:center;font-weight:700;font-size:11px}
+    table{width:100%;border-collapse:collapse;margin-top:0}
+    th{background:#4B3C1A;color:#EDE5D8;padding:7px 6px;font-size:10px;font-weight:700;text-align:center;border:1px solid #2C1F0A}
+    td{padding:6px;font-size:10px;border:1px solid #E0D8CC;vertical-align:top}
+    .day-cell{background:#F5F0E8;color:#4B3C1A;font-weight:700;text-align:center}
+    .st-done{background:#E8F5E9;color:#2E7D32;font-weight:700;text-align:center}
+    .st-pend{background:#FFF3E0;color:#E65100;font-weight:700;text-align:center}
+    .st-skip{background:#FFEBEE;color:#731E2E;font-weight:700;text-align:center}
+    .empty-row td{color:#BBBBBB;background:#F8F9FA}
+    .footer{background:#F5F0E8;color:#4B3C1A;text-align:center;padding:5px;font-size:9px;font-style:italic;margin-top:4px;border-radius:0 0 8px 8px}
+    @media print{body{font-size:10px}.page-break{page-break-after:always}}
+  </style></head><body>`;
+
+  plans.forEach((plan, pi) => {
+    const planB = branches.filter(b=>b.plan_id===plan.id);
+    const total = planB.length;
+    const done  = planB.filter(b=>b.visit_status==='done').length;
+    const pct   = total ? Math.round(done/total*100) : 0;
+    const stLabel = {draft:'مسودة',submitted:'مرفوعة للاعتماد',approved:'معتمدة',gm_approved:'معتمدة GM',rejected:'مرفوضة'}[plan.status]||plan.status;
+
+    html += `<div class="plan-wrap ${pi>0?'page-break':''}">
+      <div class="hdr-co">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
+      <div class="hdr-title">خطة العمل الأسبوعية — ${plan.supervisor_name}</div>
+      <div class="hdr-info">الفترة: ${plan.week_start} ← ${plan.week_end} &nbsp;|&nbsp; الحالة: ${stLabel}</div>
+      <div class="kpi-bar">
+        <div class="kpi" style="background:#EEF4FF;color:#1565C0">إجمالي: ${total}</div>
+        <div class="kpi" style="background:#E8F5E9;color:#2E7D32">تم: ${done}</div>
+        <div class="kpi" style="background:#FFF3E0;color:#E65100">مجدول: ${total-done}</div>
+        <div class="kpi" style="background:#${pct>=80?'E8F5E9':pct>=50?'FFF3E0':'FFEBEE'};color:#${pct>=80?'2E7D32':pct>=50?'E65100':'731E2E'}">إنجاز: ${pct}%</div>
+      </div>
+      <table>
+        <thead><tr>
+          <th style="min-width:50px">اليوم</th><th style="min-width:70px">التاريخ</th>
+          <th style="min-width:130px">الفرع</th><th style="min-width:70px">الحالة</th>
+          <th style="min-width:90px">مشرف المنطقة</th><th style="min-width:90px">المنسق</th>
+          <th style="min-width:90px">الغرض</th><th>الملاحظات</th>
+          <th style="min-width:50px">م.تنسيق</th><th style="min-width:50px">م.بيعي</th>
+        </tr></thead><tbody>`;
+
+    TEAM_DAYS.forEach((day,i)=>{
+      const d = new Date(plan.week_start);
+      d.setDate(d.getDate()+i);
+      const date = d.toISOString().slice(0,10);
+      const dayB = planB.filter(b=>b.visit_date===date);
+      const dayBg = DAY_COLORS[day]||'#fff';
+
+      if(!dayB.length){
+        html += `<tr class="empty-row"><td class="day-cell">${day}</td><td style="text-align:center">${date}</td><td colspan="8" style="text-align:center;color:#bbb">لا توجد زيارات</td></tr>`;
+      } else {
+        dayB.forEach((b,bi)=>{
+          const stCls = b.visit_status==='done'?'st-done':b.visit_status==='skipped'?'st-skip':'st-pend';
+          const stTxt = b.visit_status==='done'?'✅ منجز':b.visit_status==='skipped'?'❌ فائت':'⏳ مجدول';
+          html += `<tr style="background:${dayBg}">
+            ${bi===0?`<td class="day-cell" rowspan="${dayB.length}">${day}</td>`:''}
+            <td style="text-align:center">${date}</td>
+            <td style="font-weight:600">${b.branch_name||'—'}</td>
+            <td class="${stCls}">${stTxt}</td>
+            <td>${b.area_supervisor||'—'}</td>
+            <td>${b.rep_name||'—'}</td>
+            <td>${b.visit_purpose||'—'}</td>
+            <td>${b.notes||''}</td>
+            <td style="text-align:center">${b.target_coord||0}</td>
+            <td style="text-align:center">${b.target_sales||0}</td>
+          </tr>`;
+        });
+      }
+    });
+
+    html += `</tbody></table>
+      <div class="footer">Al Tahhan Golden Dates © 2026 — نظام إدارة التنسيق الميداني</div>
+    </div>`;
+  });
+
+  html += '</body></html>';
+
+  // فتح نافذة للطباعة/حفظ PDF
+  const win = window.open('','_blank','width=1000,height=700');
+  win.document.write(html);
+  win.document.close();
+  setTimeout(()=>{ win.focus(); win.print(); }, 800);
+  showToast('📄 جاري فتح نافذة PDF...');
 }
 
 
