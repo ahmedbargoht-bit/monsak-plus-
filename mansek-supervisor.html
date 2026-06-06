@@ -664,8 +664,14 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 
         <!-- ══ لوكيشن المنسقين المباشر ══ -->
         <div class="card" style="border:1.5px solid #E3F2FD">
-          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-            <span><i class="ti ti-map-pin" style="color:#1565C0"></i> تواجد المنسقين الآن</span>
+          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+            <span><i class="ti ti-map-pin" style="color:#1565C0"></i> تواجد المنسقين</span>
+            <div style="display:flex;align-items:center;gap:8px">
+              <input type="date" id="dash-loc-date" 
+                style="border:1.5px solid #D4C4A8;border-radius:8px;padding:4px 8px;font-family:Cairo,sans-serif;font-size:12px;color:#4B3C1A;background:#FFFDF8"
+                onchange="loadRepLocations()"/>
+              <button onclick="loadRepLocations()" style="background:none;border:none;color:var(--navy);cursor:pointer;font-size:16px"><i class="ti ti-refresh"></i></button>
+            </div>
           </div>
           <div id="dash-loc-list"><div class="empty" style="padding:1rem">جاري التحميل...</div></div>
         </div>
@@ -2498,6 +2504,8 @@ function renderDashboard(){
     </div>`).join('') : '<div class="empty">لا توجد زيارات اليوم</div>';
 
   // تحميل اللوكيشن
+  const locDateEl = document.getElementById('dash-loc-date');
+  if(locDateEl && !locDateEl.value) locDateEl.value = new Date().toISOString().slice(0,10);
   loadRepLocations();
   renderRepCards();
 }
@@ -2530,7 +2538,7 @@ async function runMissingStepsCheck(){
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
 
       // تقارير الأصناف اليوم
-      fetch(`${SUPABASE_URL}/rest/v1/product_reports?created_at=gte.${today}T00:00:00&select=name&limit=500`,
+      fetch(`${SUPABASE_URL}/rest/v1/visit_results?created_at=gte.${today}T00:00:00&select=rep_name&limit=500`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     ]);
 
@@ -2554,7 +2562,7 @@ async function runMissingStepsCheck(){
       locByRep[l.name] = diffMin < 180; // نشط لو آخر 3 ساعات
     });
 
-    const rptReps = new Set(rpts.map(r=>r.name).filter(Boolean));
+    const rptReps = new Set(rpts.map(r=>r.rep_name).filter(Boolean));
 
     // قائمة المنسقين من الحضور + اللوكيشن + الزيارات الكاشد
     const allReps = new Set([
@@ -2800,9 +2808,9 @@ async function loadRepDetail(){
     );
     const attendance = await attRes.json().catch(()=>[]);
 
-    // جيب التقارير (product_reports)
+    // جيب التقارير (visit_results)
     const rptRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/product_reports?name=eq.${encodeURIComponent(name)}&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59&select=id&limit=500`,
+      `${SUPABASE_URL}/rest/v1/visit_results?rep_name=eq.${encodeURIComponent(name)}&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59&select=id&limit=500`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
     );
     const reports = await rptRes.json().catch(()=>[]);
@@ -2869,21 +2877,27 @@ async function loadRepLocations(){
   const el = document.getElementById('dash-loc-list');
   if(!el) return;
 
+  // تحديد التاريخ من الفلتر أو اليوم
+  const dateInput = document.getElementById('dash-loc-date');
+  const today = new Date().toISOString().slice(0,10);
+  if(dateInput && !dateInput.value) dateInput.value = today;
+  const selectedDate = dateInput?.value || today;
+  const isToday = selectedDate === today;
+
   try{
-    // جيب اللوكيشن + الحضور لمجموعات المشرف
     const grps = cu.groups||[];
-    const today = new Date().toISOString().slice(0,10);
-    const todayAr = new Date().toLocaleDateString('ar-EG');
 
     const [locData, attData, visitData] = await Promise.all([
-      // اللوكيشن الحالي
-      fetch(`${SUPABASE_URL}/rest/v1/location?grp=in.(${grps.join(',')})&select=*&order=id.desc`,
+      // اللوكيشن — يتجيب بس لو اليوم
+      isToday
+        ? fetch(`${SUPABASE_URL}/rest/v1/location?grp=in.(${grps.join(',')})&select=*&order=id.desc`,
+            {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[])
+        : Promise.resolve([]),
+      // الحضور بالتاريخ المختار
+      fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=in.(${grps.join(',')})&date=eq.${selectedDate}&select=*&order=date.desc`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-      // الحضور اليوم
-      fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=in.(${grps.join(',')})&date=eq.${today}&select=*&order=date.desc`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-      // آخر زيارة اليوم
-      fetch(`${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&created_at=gte.${today}T00:00:00&select=name,branch,created_at&order=created_at.desc&limit=200`,
+      // الزيارات بالتاريخ المختار
+      fetch(`${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&created_at=gte.${selectedDate}T00:00:00&created_at=lte.${selectedDate}T23:59:59&select=name,branch,created_at&order=created_at.desc&limit=500`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     ]);
 
@@ -2892,7 +2906,8 @@ async function loadRepLocations(){
     const visits= Array.isArray(visitData)? visitData: [];
 
     if(!locs.length && !atts.length){
-      el.innerHTML='<div class="empty" style="padding:1rem"><i class="ti ti-map-pin-off"></i><br>لا يوجد منسقون متصلون الآن</div>';
+      const dateLabel = selectedDate === today ? 'اليوم' : selectedDate;
+      el.innerHTML=`<div class="empty" style="padding:1rem"><i class="ti ti-map-pin-off"></i><br>لا يوجد بيانات لـ ${dateLabel}</div>`;
       return;
     }
 
