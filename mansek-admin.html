@@ -1584,6 +1584,18 @@ h2,h3{color:#2C1F0A}
             <!-- ── إدارة وحذف ── -->
             <div id="create-tab-manage" class="create-tab-panel" style="display:none">
 
+              <!-- زرار رفع الفروع المكودة -->
+              <div style="background:#FFF8E1;border:1px solid #FFD54F;border-radius:10px;padding:14px 16px;margin-bottom:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <div style="flex:1;min-width:200px">
+                  <div style="font-size:13px;font-weight:700;color:#4B3C1A">📦 رفع الفروع المكودة على Supabase</div>
+                  <div style="font-size:11px;color:#8B6F47;margin-top:3px">يرفع كل فروع BRANCHES_MAP الموجودة في الكود دفعة واحدة</div>
+                </div>
+                <button class="btn btn-green" onclick="syncBranchesMapToSupabase()" id="sync-branches-btn">
+                  <i class="ti ti-cloud-upload"></i> رفع الفروع الآن
+                </button>
+              </div>
+              <div id="sync-branches-msg" style="display:none;padding:10px 14px;border-radius:8px;font-size:12px;margin-bottom:14px"></div>
+
               <!-- تبويبات داخلية -->
               <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
                 <button onclick="manageSwitch('groups')" id="mtab-groups"
@@ -16008,7 +16020,67 @@ async function loadManageSupervisors(){
   </tr>`).join('');
 }
 
-async function deleteEntity(table, filter, name, title, reloadFn){
+async function syncBranchesMapToSupabase(){
+  const btn = document.getElementById('sync-branches-btn');
+  const msg = document.getElementById('sync-branches-msg');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="ti ti-loader ti-spin"></i> جارٍ الرفع...';
+  msg.style.display = 'none';
+
+  // بناء قائمة الفروع من BRANCHES_MAP
+  const rows = [];
+  Object.entries(BRANCHES_MAP).forEach(([route, branches])=>{
+    const rep = REPS.find(r=>r.route===route);
+    const grp = rep?.group || 'giza';
+    (Array.isArray(branches)?branches:[]).forEach(b=>{
+      rows.push({ branch_name:b, route, grp, client_type:'B', status:'active' });
+    });
+  });
+
+  if(!rows.length){
+    msg.style.display='block';
+    msg.style.background='#FFEBEE'; msg.style.color='#B71C1C';
+    msg.textContent='❌ لا توجد فروع في BRANCHES_MAP';
+    btn.disabled=false; btn.innerHTML='<i class="ti ti-cloud-upload"></i> رفع الفروع الآن';
+    return;
+  }
+
+  // رفع على Supabase على دفعات (100 في كل مرة)
+  let success=0, failed=0;
+  const chunkSize=100;
+  for(let i=0;i<rows.length;i+=chunkSize){
+    const chunk=rows.slice(i,i+chunkSize);
+    try{
+      const res=await fetch(`${SUPABASE_URL}/rest/v1/branches?on_conflict=branch_name,route`,{
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'apikey':SUPABASE_KEY,
+          'Authorization':`Bearer ${SUPABASE_KEY}`,
+          'Prefer':'resolution=ignore-duplicates,return=minimal'
+        },
+        body:JSON.stringify(chunk)
+      });
+      if(res.ok) success+=chunk.length;
+      else failed+=chunk.length;
+    }catch(e){ failed+=chunk.length; }
+  }
+
+  msg.style.display='block';
+  if(failed===0){
+    msg.style.background='#E8F5E9'; msg.style.color='#1A7A4A'; msg.style.border='1px solid #A5D6A7';
+    msg.innerHTML=`✅ تم رفع <b>${success}</b> فرع على Supabase بنجاح!`;
+    loadBranches();
+    rebuildBranchesMap();
+  } else {
+    msg.style.background='#FFF8E1'; msg.style.color='#E65100'; msg.style.border='1px solid #FFD54F';
+    msg.innerHTML=`⚠️ نجح: <b>${success}</b> · فشل: <b>${failed}</b> (قد تكون مكررة أو في الجدول مش فيه unique constraint على branch_name+route)`;
+  }
+  btn.disabled=false;
+  btn.innerHTML='<i class="ti ti-cloud-upload"></i> رفع الفروع الآن';
+}
+
+
   confirmDelete(title, name, async ()=>{
     try{
       const res=await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`,{
