@@ -4493,6 +4493,500 @@ h2,h3{color:#2C1F0A}
 </div>
 
 <script>
+
+// ══ CREATE ENTITIES FUNCTIONS ══
+// ── تبديل التابات الداخلية ──────────────────────────────────
+function switchCreateTab(tab){
+  document.querySelectorAll('.create-tab-panel').forEach(p=>p.style.display='none');
+  document.querySelectorAll('.create-tab-btn').forEach(b=>{
+    b.style.color='#8B6F47';
+    b.style.borderBottomColor='transparent';
+  });
+  const panel=document.getElementById('create-tab-'+tab);
+  const btn=document.getElementById('ctab-'+tab);
+  if(panel) panel.style.display='block';
+  if(btn){ btn.style.color='#C55B48'; btn.style.borderBottomColor='#C55B48'; }
+
+  // تحميل الـ dropdowns عند فتح التابات
+  if(tab==='routes') loadGroupsDropdowns();
+  if(tab==='cbranch'){ loadGroupsDropdowns(); loadRoutesDropdown('cb-route'); }
+  if(tab==='supervisor'){ loadGroupsDropdowns(); loadRoutesDropdown('cs-route'); }
+  if(tab==='manage') manageSwitch('groups');
+}
+
+function showCreateMsg(id, ok, msg){
+  const el=document.getElementById(id);
+  if(!el) return;
+  el.style.display='block';
+  el.style.background = ok ? '#E8F5E9' : '#FFEBEE';
+  el.style.color       = ok ? '#1A7A4A' : '#B71C1C';
+  el.style.border      = ok ? '1px solid #A5D6A7' : '1px solid #FFCDD2';
+  el.textContent       = msg;
+  if(ok) setTimeout(()=>el.style.display='none', 3000);
+}
+
+// ── تحميل المجموعات في الـ dropdowns ──────────────────────────
+async function loadGroupsDropdowns(){
+  let groups=[];
+  try{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/groups?select=*&order=name.asc&limit=200`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    if(res.ok) groups=await res.json();
+  }catch(e){}
+
+  // fallback للـ GROUPS الثابتة
+  if(!groups.length){
+    groups=Object.entries(GROUPS).map(([key,v])=>({key_name:key, name:v.label.replace(/^[^\s]+ /,''), emoji:''}));
+  }
+
+  const selIds=['cr-group','cb-group','cs-group'];
+  selIds.forEach(id=>{
+    const sel=document.getElementById(id);
+    if(!sel) return;
+    const cur=sel.value;
+    sel.innerHTML='<option value="">اختر المجموعة...</option>';
+    groups.forEach(g=>{
+      const opt=document.createElement('option');
+      opt.value=g.key_name||g.id;
+      opt.textContent=(g.emoji||'')+' '+(g.name||g.key_name);
+      if(opt.value===cur) opt.selected=true;
+      sel.appendChild(opt);
+    });
+    // أضف المجموعات الثابتة اللي مش في الـ DB
+    Object.entries(GROUPS).forEach(([key,v])=>{
+      if(!groups.find(g=>g.key_name===key)){
+        const opt=document.createElement('option');
+        opt.value=key;
+        opt.textContent=v.label;
+        if(opt.value===cur) opt.selected=true;
+        sel.appendChild(opt);
+      }
+    });
+  });
+}
+
+// ── تحميل خطوط السير في الـ dropdown ──────────────────────────
+async function loadRoutesDropdown(selId){
+  const sel=document.getElementById(selId);
+  if(!sel) return;
+  const cur=sel.value;
+  sel.innerHTML='<option value="">اختر خط السير...</option>';
+
+  // خطوط السير من BRANCHES_MAP الثابتة
+  const staticRoutes = Object.keys(BRANCHES_MAP||{});
+
+  let dbRoutes=[];
+  try{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/routes?select=*&order=name.asc&limit=500`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    if(res.ok) dbRoutes=await res.json();
+  }catch(e){}
+
+  // دمج الاتنين بدون تكرار
+  const allRoutes = [...dbRoutes.map(r=>r.name)];
+  staticRoutes.forEach(r=>{ if(!allRoutes.includes(r)) allRoutes.push(r); });
+  allRoutes.sort((a,b)=>a.localeCompare(b,'ar'));
+
+  allRoutes.forEach(name=>{
+    const opt=document.createElement('option');
+    opt.value=name;
+    opt.textContent=name;
+    if(name===cur) opt.selected=true;
+    sel.appendChild(opt);
+  });
+}
+
+// ── إنشاء مجموعة ───────────────────────────────────────────────
+async function createGroup(){
+  const name  = (document.getElementById('cg-name')?.value||'').trim();
+  const key   = (document.getElementById('cg-key')?.value||'').trim().toLowerCase().replace(/\s+/g,'_');
+  const color = document.getElementById('cg-color')?.value||'#005CBF';
+  const emoji = (document.getElementById('cg-emoji')?.value||'').trim();
+
+  if(!name||!key){ showCreateMsg('cg-msg',false,'❌ اسم المجموعة ومفتاحها مطلوبان'); return; }
+
+  const payload={ key_name:key, name, color, emoji, created_at:new Date().toISOString() };
+  try{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/groups`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify(payload)
+    });
+    if(res.ok){
+      showCreateMsg('cg-msg',true,'✅ تم إنشاء المجموعة بنجاح على Supabase!');
+      document.getElementById('cg-name').value='';
+      document.getElementById('cg-key').value='';
+      document.getElementById('cg-emoji').value='';
+    } else {
+      const err=await res.text();
+      if(err.includes('duplicate')||err.includes('unique')){
+        showCreateMsg('cg-msg',false,'⚠️ المجموعة موجودة بالفعل — جرب مفتاح مختلف');
+      } else {
+        showCreateMsg('cg-msg',false,'❌ فشل الإنشاء: '+err.substring(0,120));
+      }
+    }
+  }catch(e){ showCreateMsg('cg-msg',false,'❌ خطأ في الاتصال: '+e.message); }
+}
+
+// ── إنشاء خط سير ───────────────────────────────────────────────
+async function createRoute(){
+  const name  = (document.getElementById('cr-name')?.value||'').trim();
+  const group = document.getElementById('cr-group')?.value||'';
+
+  if(!name){ showCreateMsg('cr-msg',false,'❌ اسم خط السير مطلوب'); return; }
+  if(!group){ showCreateMsg('cr-msg',false,'❌ اختر المجموعة'); return; }
+
+  const payload={ name, grp:group, created_at:new Date().toISOString() };
+  try{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/routes`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify(payload)
+    });
+    if(res.ok){
+      showCreateMsg('cr-msg',true,'✅ تم إنشاء خط السير بنجاح على Supabase!');
+      document.getElementById('cr-name').value='';
+      document.getElementById('cr-group').value='';
+      // تحديث الـ dropdowns الأخرى
+      loadRoutesDropdown('cb-route');
+      loadRoutesDropdown('cs-route');
+      loadRoutesDropdown('qb-rep');
+    } else {
+      const err=await res.text();
+      if(err.includes('duplicate')||err.includes('unique')){
+        showCreateMsg('cr-msg',false,'⚠️ خط السير موجود بالفعل');
+      } else {
+        showCreateMsg('cr-msg',false,'❌ فشل الإنشاء: '+err.substring(0,120));
+      }
+    }
+  }catch(e){ showCreateMsg('cr-msg',false,'❌ خطأ في الاتصال: '+e.message); }
+}
+
+// ── إنشاء فرع جديد ─────────────────────────────────────────────
+async function createBranchNew(){
+  const name  = (document.getElementById('cb-name')?.value||'').trim();
+  const route = document.getElementById('cb-route')?.value||'';
+  const group = document.getElementById('cb-group')?.value||'';
+  const type  = document.getElementById('cb-type')?.value||'B';
+
+  if(!name){ showCreateMsg('cb-msg',false,'❌ اسم الفرع مطلوب'); return; }
+  if(!route){ showCreateMsg('cb-msg',false,'❌ اختر خط السير'); return; }
+  if(!group){ showCreateMsg('cb-msg',false,'❌ اختر المجموعة'); return; }
+
+  const payload={ branch_name:name, route, grp:group, client_type:type, status:'active', created_at:new Date().toISOString() };
+  try{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/branches`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify(payload)
+    });
+    if(res.ok){
+      showCreateMsg('cb-msg',true,'✅ تم إنشاء الفرع بنجاح على Supabase!');
+      document.getElementById('cb-name').value='';
+      document.getElementById('cb-route').value='';
+      await loadBranches();
+      rebuildBranchesMap();
+    } else {
+      const err=await res.text();
+      showCreateMsg('cb-msg',false,'❌ فشل الإنشاء: '+err.substring(0,120));
+    }
+  }catch(e){ showCreateMsg('cb-msg',false,'❌ خطأ في الاتصال: '+e.message); }
+}
+
+// ── إنشاء منسق جديد ────────────────────────────────────────────
+async function createSupervisor(){
+  const name     = (document.getElementById('cs-name')?.value||'').trim();
+  const username = (document.getElementById('cs-username')?.value||'').trim().toLowerCase();
+  const password = document.getElementById('cs-password')?.value||'';
+  const route    = document.getElementById('cs-route')?.value||'';
+  const group    = document.getElementById('cs-group')?.value||'';
+  const role     = document.getElementById('cs-role')?.value||'rep';
+
+  if(!name){ showCreateMsg('cs-msg',false,'❌ اسم المنسق مطلوب'); return; }
+  if(!password||password.length<6){ showCreateMsg('cs-msg',false,'❌ كلمة المرور 6 أحرف على الأقل'); return; }
+  if(!route){ showCreateMsg('cs-msg',false,'❌ اختر خط السير'); return; }
+  if(!group){ showCreateMsg('cs-msg',false,'❌ اختر المجموعة'); return; }
+
+  const payload={
+    name,
+    pass_hash: password,
+    route,
+    grp: group,
+    groups: group,
+    user_type: role,
+    role: role,
+    status:'active',
+    created_at:new Date().toISOString()
+  };
+  try{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/users`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify(payload)
+    });
+    if(res.ok){
+      showCreateMsg('cs-msg',true,'✅ تم إنشاء المنسق بنجاح على Supabase!');
+      document.getElementById('cs-name').value='';
+      document.getElementById('cs-username').value='';
+      document.getElementById('cs-password').value='';
+      document.getElementById('cs-route').value='';
+    } else {
+      const err=await res.text();
+      if(err.includes('duplicate')||err.includes('unique')){
+        showCreateMsg('cs-msg',false,'⚠️ اسم المستخدم مستخدم بالفعل — جرب اسماً آخر');
+      } else {
+        showCreateMsg('cs-msg',false,'❌ فشل الإنشاء: '+err.substring(0,120));
+      }
+    }
+  }catch(e){ showCreateMsg('cs-msg',false,'❌ خطأ في الاتصال: '+e.message); }
+}
+
+// ── تحميل فلتر المجموعات ديناميكياً ───────────────────────────
+async function loadGroupsFilter(){
+  const container = document.getElementById('br-grp-filter');
+  if(!container) return;
+
+  // المجموعات الثابتة
+  const staticGroups = Object.entries(GROUPS).map(([key,v])=>({key_name:key, name:v.label, color:v.color}));
+
+  // المجموعات من Supabase
+  let dbGroups=[];
+  try{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/groups?select=*&order=name.asc&limit=200`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    if(res.ok) dbGroups=await res.json();
+  }catch(e){}
+
+  // دمج بدون تكرار
+  const allGroups=[...staticGroups];
+  dbGroups.forEach(g=>{
+    if(!allGroups.find(s=>s.key_name===g.key_name)){
+      allGroups.push({key_name:g.key_name, name:(g.emoji||'')+(g.name||g.key_name), color:g.color||'#888'});
+    }
+  });
+
+  // احتفظ بالقيم المختارة حالياً
+  const checked=[...container.querySelectorAll('.br-grp-cb:checked')].map(c=>c.value);
+
+  container.innerHTML=`<label class="br-cb-lbl ${checked.includes('all')||checked.length===0?'active':''}">
+    <input type="checkbox" class="br-grp-cb" value="all" ${checked.includes('all')||checked.length===0?'checked':''} onchange="brGrpChange(this)"/> كل المجموعات
+  </label>`;
+
+  allGroups.forEach(g=>{
+    const isChecked=checked.includes(g.key_name);
+    const lbl=document.createElement('label');
+    lbl.className='br-cb-lbl'+(isChecked?' active':'');
+    lbl.innerHTML=`<input type="checkbox" class="br-grp-cb" value="${g.key_name}" ${isChecked?'checked':''} onchange="brGrpChange(this)"/> ${g.name}`;
+    container.appendChild(lbl);
+  });
+}
+
+
+const _origShowPanel = typeof showPanel === 'function' ? showPanel : null;
+document.addEventListener('DOMContentLoaded', ()=>{
+  // تحميل مسبق عند فتح تاب الفروع
+  const branchNavItem = document.querySelector('[onclick*="branches"]');
+  if(branchNavItem){
+    const origClick = branchNavItem.getAttribute('onclick');
+    branchNavItem.setAttribute('onclick', origClick + '; loadGroupsDropdowns(); loadRoutesDropdown("cb-route"); loadRoutesDropdown("cs-route");');
+  }
+});
+
+// ── إدارة وحذف ─────────────────────────────────────────────────
+function manageSwitch(tab){
+  ['groups','routes','supervisors'].forEach(t=>{
+    document.getElementById('manage-'+t).style.display = t===tab?'block':'none';
+    const btn=document.getElementById('mtab-'+t);
+    if(btn){
+      btn.style.background  = t===tab?'#C55B48':'transparent';
+      btn.style.color       = t===tab?'#fff':'#8B6F47';
+      btn.style.borderColor = t===tab?'#C55B48':'#D4C4A8';
+    }
+  });
+  if(tab==='groups')      loadManageGroups();
+  if(tab==='routes')      loadManageRoutes();
+  if(tab==='supervisors') loadManageSupervisors();
+}
+
+function confirmDelete(title, name, onConfirm){
+  const overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML=`
+    <div style="background:#FFFDF8;border-radius:16px;padding:28px;width:360px;box-shadow:0 8px 32px rgba(75,60,26,.3);border:1px solid #E8D9C0;text-align:center">
+      <div style="font-size:40px;margin-bottom:12px">🗑️</div>
+      <h3 style="font-size:15px;font-weight:700;color:#2C1F0A;margin-bottom:8px">حذف ${title}</h3>
+      <p style="font-size:13px;color:#8B6F47;margin-bottom:6px">هل أنت متأكد من حذف:</p>
+      <p style="font-size:14px;font-weight:700;color:#731E2E;margin-bottom:16px;padding:8px 16px;background:#FFEBEE;border-radius:8px">${name}</p>
+      <p style="font-size:11px;color:#B71C1C;margin-bottom:20px">⚠️ لا يمكن التراجع عن هذا الإجراء</p>
+      <div style="display:flex;gap:10px;justify-content:center">
+        <button id="dmd-yes" style="padding:10px 24px;background:linear-gradient(135deg,#731E2E,#5A1520);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">🗑️ نعم، احذف</button>
+        <button id="dmd-no"  style="padding:10px 24px;background:#F5F0E8;color:#4B3C1A;border:1.5px solid #D4C4A8;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:Cairo,sans-serif">إلغاء</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  document.getElementById('dmd-yes').onclick=()=>{ overlay.remove(); onConfirm(); };
+  document.getElementById('dmd-no').onclick =()=>{ overlay.remove(); };
+  overlay.onclick=(e)=>{ if(e.target===overlay) overlay.remove(); };
+}
+
+async function loadManageGroups(){
+  const tbody=document.getElementById('manage-groups-tbody');
+  if(!tbody) return;
+  tbody.innerHTML='<tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--text2)">جارٍ التحميل...</td></tr>';
+  let data=[];
+  try{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/groups?select=*&order=name.asc&limit=200`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    if(res.ok) data=await res.json();
+  }catch(e){}
+  if(!data.length){
+    tbody.innerHTML='<tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد مجموعات مضافة على Supabase</td></tr>';
+    return;
+  }
+  tbody.innerHTML=data.map(g=>`<tr>
+    <td style="font-family:monospace;font-size:11px;color:#8B6F47">${g.key_name||'—'}</td>
+    <td><b>${g.emoji||''} ${g.name||'—'}</b></td>
+    <td><span style="display:inline-block;width:20px;height:20px;border-radius:4px;background:${g.color||'#ccc'};border:1px solid #ddd"></span></td>
+    <td>
+      <button onclick="deleteEntity('groups','id=eq.${g.id}','${(g.name||'').replace(/'/g,"\\'")}','المجموعة',loadManageGroups)"
+        class="btn btn-sm btn-red"><i class="ti ti-trash"></i> حذف</button>
+    </td>
+  </tr>`).join('');
+}
+
+async function loadManageRoutes(){
+  const tbody=document.getElementById('manage-routes-tbody');
+  if(!tbody) return;
+  tbody.innerHTML='<tr><td colspan="3" style="text-align:center;padding:1rem;color:var(--text2)">جارٍ التحميل...</td></tr>';
+  let data=[];
+  try{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/routes?select=*&order=name.asc&limit=500`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    if(res.ok) data=await res.json();
+  }catch(e){}
+  if(!data.length){
+    tbody.innerHTML='<tr><td colspan="3" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد خطوط سير مضافة على Supabase</td></tr>';
+    return;
+  }
+  tbody.innerHTML=data.map(r=>`<tr>
+    <td><b>${r.name||'—'}</b></td>
+    <td><span class="badge b-blue">${r.grp||'—'}</span></td>
+    <td>
+      <button onclick="deleteEntity('routes','id=eq.${r.id}','${(r.name||'').replace(/'/g,"\\'")}','خط السير',loadManageRoutes)"
+        class="btn btn-sm btn-red"><i class="ti ti-trash"></i> حذف</button>
+    </td>
+  </tr>`).join('');
+}
+
+async function loadManageSupervisors(){
+  const tbody=document.getElementById('manage-supervisors-tbody');
+  if(!tbody) return;
+  tbody.innerHTML='<tr><td colspan="5" style="text-align:center;padding:1rem;color:var(--text2)">جارٍ التحميل...</td></tr>';
+  let data=[];
+  try{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/users?select=*&order=name.asc&limit=500`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    if(res.ok) data=await res.json();
+  }catch(e){}
+  if(!data.length){
+    tbody.innerHTML='<tr><td colspan="5" style="text-align:center;padding:1rem;color:var(--text2)">لا يوجد منسقون</td></tr>';
+    return;
+  }
+  const roleLabel={rep:'منسق',supervisor:'مشرف',manager:'مدير',admin:'أدمن'};
+  tbody.innerHTML=data.map(u=>`<tr>
+    <td><b>${u.name||'—'}</b></td>
+    <td style="font-size:11px">${u.route||'—'}</td>
+    <td><span class="badge b-blue">${u.grp||u.groups||'—'}</span></td>
+    <td><span class="badge b-gray">${roleLabel[u.role||u.user_type]||u.role||'—'}</span></td>
+    <td>
+      <button onclick="deleteEntity('users','id=eq.${u.id}','${(u.name||'').replace(/'/g,"\\'")}','المنسق',loadManageSupervisors)"
+        class="btn btn-sm btn-red"><i class="ti ti-trash"></i> حذف</button>
+    </td>
+  </tr>`).join('');
+}
+
+async function syncBranchesMapToSupabase(){
+  const btn = document.getElementById('sync-branches-btn');
+  const msg = document.getElementById('sync-branches-msg');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="ti ti-loader ti-spin"></i> جارٍ الرفع...';
+  msg.style.display = 'none';
+
+  // بناء قائمة الفروع من BRANCHES_MAP
+  const rows = [];
+  Object.entries(BRANCHES_MAP).forEach(([route, branches])=>{
+    const rep = REPS.find(r=>r.route===route);
+    const grp = rep?.group || 'giza';
+    (Array.isArray(branches)?branches:[]).forEach(b=>{
+      rows.push({ branch_name:b, route, grp, client_type:'B', status:'active' });
+    });
+  });
+
+  if(!rows.length){
+    msg.style.display='block';
+    msg.style.background='#FFEBEE'; msg.style.color='#B71C1C';
+    msg.textContent='❌ لا توجد فروع في BRANCHES_MAP';
+    btn.disabled=false; btn.innerHTML='<i class="ti ti-cloud-upload"></i> رفع الفروع الآن';
+    return;
+  }
+
+  // رفع على Supabase على دفعات (100 في كل مرة)
+  let success=0, failed=0;
+  const chunkSize=100;
+  for(let i=0;i<rows.length;i+=chunkSize){
+    const chunk=rows.slice(i,i+chunkSize);
+    try{
+      const res=await fetch(`${SUPABASE_URL}/rest/v1/branches?on_conflict=branch_name,route`,{
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'apikey':SUPABASE_KEY,
+          'Authorization':`Bearer ${SUPABASE_KEY}`,
+          'Prefer':'resolution=ignore-duplicates,return=minimal'
+        },
+        body:JSON.stringify(chunk)
+      });
+      if(res.ok) success+=chunk.length;
+      else failed+=chunk.length;
+    }catch(e){ failed+=chunk.length; }
+  }
+
+  msg.style.display='block';
+  if(failed===0){
+    msg.style.background='#E8F5E9'; msg.style.color='#1A7A4A'; msg.style.border='1px solid #A5D6A7';
+    msg.innerHTML=`✅ تم رفع <b>${success}</b> فرع على Supabase بنجاح!`;
+    loadBranches();
+    rebuildBranchesMap();
+  } else {
+    msg.style.background='#FFF8E1'; msg.style.color='#E65100'; msg.style.border='1px solid #FFD54F';
+    msg.innerHTML=`⚠️ نجح: <b>${success}</b> · فشل: <b>${failed}</b> (قد تكون مكررة أو في الجدول مش فيه unique constraint على branch_name+route)`;
+  }
+  btn.disabled=false;
+  btn.innerHTML='<i class="ti ti-cloud-upload"></i> رفع الفروع الآن';
+}
+
+
+  confirmDelete(title, name, async ()=>{
+    try{
+      const res=await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`,{
+        method:'DELETE',
+        headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+      });
+      if(res.ok){
+        showToast(`🗑️ تم حذف ${title}: ${name}`);
+        if(typeof reloadFn==='function') reloadFn();
+        if(table==='groups'){ loadGroupsFilter(); loadGroupsDropdowns(); }
+        if(table==='routes'){ loadRoutesDropdown('cb-route'); loadRoutesDropdown('cs-route'); }
+      } else {
+        const err=await res.text();
+        alert('❌ فشل الحذف: '+err.substring(0,120));
+      }
+    }catch(e){ alert('❌ خطأ: '+e.message); }
+  });
+}
+
+// ══ END CREATE ENTITIES ══
+
 // ══════════════════════════════════════════════════════════════
 // CONFIG
 // ══════════════════════════════════════════════════════════════
@@ -15608,498 +16102,6 @@ function supDeleteDispatch(idx){
 <!-- ══ VERSION BADGE ══ -->
 
 
-<!-- ══ CREATE ENTITIES JS ══ -->
-<script>
-// ── تبديل التابات الداخلية ──────────────────────────────────
-function switchCreateTab(tab){
-  document.querySelectorAll('.create-tab-panel').forEach(p=>p.style.display='none');
-  document.querySelectorAll('.create-tab-btn').forEach(b=>{
-    b.style.color='#8B6F47';
-    b.style.borderBottomColor='transparent';
-  });
-  const panel=document.getElementById('create-tab-'+tab);
-  const btn=document.getElementById('ctab-'+tab);
-  if(panel) panel.style.display='block';
-  if(btn){ btn.style.color='#C55B48'; btn.style.borderBottomColor='#C55B48'; }
-
-  // تحميل الـ dropdowns عند فتح التابات
-  if(tab==='routes') loadGroupsDropdowns();
-  if(tab==='cbranch'){ loadGroupsDropdowns(); loadRoutesDropdown('cb-route'); }
-  if(tab==='supervisor'){ loadGroupsDropdowns(); loadRoutesDropdown('cs-route'); }
-  if(tab==='manage') manageSwitch('groups');
-}
-
-function showCreateMsg(id, ok, msg){
-  const el=document.getElementById(id);
-  if(!el) return;
-  el.style.display='block';
-  el.style.background = ok ? '#E8F5E9' : '#FFEBEE';
-  el.style.color       = ok ? '#1A7A4A' : '#B71C1C';
-  el.style.border      = ok ? '1px solid #A5D6A7' : '1px solid #FFCDD2';
-  el.textContent       = msg;
-  if(ok) setTimeout(()=>el.style.display='none', 3000);
-}
-
-// ── تحميل المجموعات في الـ dropdowns ──────────────────────────
-async function loadGroupsDropdowns(){
-  let groups=[];
-  try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/groups?select=*&order=name.asc&limit=200`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    if(res.ok) groups=await res.json();
-  }catch(e){}
-
-  // fallback للـ GROUPS الثابتة
-  if(!groups.length){
-    groups=Object.entries(GROUPS).map(([key,v])=>({key_name:key, name:v.label.replace(/^[^\s]+ /,''), emoji:''}));
-  }
-
-  const selIds=['cr-group','cb-group','cs-group'];
-  selIds.forEach(id=>{
-    const sel=document.getElementById(id);
-    if(!sel) return;
-    const cur=sel.value;
-    sel.innerHTML='<option value="">اختر المجموعة...</option>';
-    groups.forEach(g=>{
-      const opt=document.createElement('option');
-      opt.value=g.key_name||g.id;
-      opt.textContent=(g.emoji||'')+' '+(g.name||g.key_name);
-      if(opt.value===cur) opt.selected=true;
-      sel.appendChild(opt);
-    });
-    // أضف المجموعات الثابتة اللي مش في الـ DB
-    Object.entries(GROUPS).forEach(([key,v])=>{
-      if(!groups.find(g=>g.key_name===key)){
-        const opt=document.createElement('option');
-        opt.value=key;
-        opt.textContent=v.label;
-        if(opt.value===cur) opt.selected=true;
-        sel.appendChild(opt);
-      }
-    });
-  });
-}
-
-// ── تحميل خطوط السير في الـ dropdown ──────────────────────────
-async function loadRoutesDropdown(selId){
-  const sel=document.getElementById(selId);
-  if(!sel) return;
-  const cur=sel.value;
-  sel.innerHTML='<option value="">اختر خط السير...</option>';
-
-  // خطوط السير من BRANCHES_MAP الثابتة
-  const staticRoutes = Object.keys(BRANCHES_MAP||{});
-
-  let dbRoutes=[];
-  try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/routes?select=*&order=name.asc&limit=500`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    if(res.ok) dbRoutes=await res.json();
-  }catch(e){}
-
-  // دمج الاتنين بدون تكرار
-  const allRoutes = [...dbRoutes.map(r=>r.name)];
-  staticRoutes.forEach(r=>{ if(!allRoutes.includes(r)) allRoutes.push(r); });
-  allRoutes.sort((a,b)=>a.localeCompare(b,'ar'));
-
-  allRoutes.forEach(name=>{
-    const opt=document.createElement('option');
-    opt.value=name;
-    opt.textContent=name;
-    if(name===cur) opt.selected=true;
-    sel.appendChild(opt);
-  });
-}
-
-// ── إنشاء مجموعة ───────────────────────────────────────────────
-async function createGroup(){
-  const name  = (document.getElementById('cg-name')?.value||'').trim();
-  const key   = (document.getElementById('cg-key')?.value||'').trim().toLowerCase().replace(/\s+/g,'_');
-  const color = document.getElementById('cg-color')?.value||'#005CBF';
-  const emoji = (document.getElementById('cg-emoji')?.value||'').trim();
-
-  if(!name||!key){ showCreateMsg('cg-msg',false,'❌ اسم المجموعة ومفتاحها مطلوبان'); return; }
-
-  const payload={ key_name:key, name, color, emoji, created_at:new Date().toISOString() };
-  try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/groups`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body:JSON.stringify(payload)
-    });
-    if(res.ok){
-      showCreateMsg('cg-msg',true,'✅ تم إنشاء المجموعة بنجاح على Supabase!');
-      document.getElementById('cg-name').value='';
-      document.getElementById('cg-key').value='';
-      document.getElementById('cg-emoji').value='';
-    } else {
-      const err=await res.text();
-      if(err.includes('duplicate')||err.includes('unique')){
-        showCreateMsg('cg-msg',false,'⚠️ المجموعة موجودة بالفعل — جرب مفتاح مختلف');
-      } else {
-        showCreateMsg('cg-msg',false,'❌ فشل الإنشاء: '+err.substring(0,120));
-      }
-    }
-  }catch(e){ showCreateMsg('cg-msg',false,'❌ خطأ في الاتصال: '+e.message); }
-}
-
-// ── إنشاء خط سير ───────────────────────────────────────────────
-async function createRoute(){
-  const name  = (document.getElementById('cr-name')?.value||'').trim();
-  const group = document.getElementById('cr-group')?.value||'';
-
-  if(!name){ showCreateMsg('cr-msg',false,'❌ اسم خط السير مطلوب'); return; }
-  if(!group){ showCreateMsg('cr-msg',false,'❌ اختر المجموعة'); return; }
-
-  const payload={ name, grp:group, created_at:new Date().toISOString() };
-  try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/routes`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body:JSON.stringify(payload)
-    });
-    if(res.ok){
-      showCreateMsg('cr-msg',true,'✅ تم إنشاء خط السير بنجاح على Supabase!');
-      document.getElementById('cr-name').value='';
-      document.getElementById('cr-group').value='';
-      // تحديث الـ dropdowns الأخرى
-      loadRoutesDropdown('cb-route');
-      loadRoutesDropdown('cs-route');
-      loadRoutesDropdown('qb-rep');
-    } else {
-      const err=await res.text();
-      if(err.includes('duplicate')||err.includes('unique')){
-        showCreateMsg('cr-msg',false,'⚠️ خط السير موجود بالفعل');
-      } else {
-        showCreateMsg('cr-msg',false,'❌ فشل الإنشاء: '+err.substring(0,120));
-      }
-    }
-  }catch(e){ showCreateMsg('cr-msg',false,'❌ خطأ في الاتصال: '+e.message); }
-}
-
-// ── إنشاء فرع جديد ─────────────────────────────────────────────
-async function createBranchNew(){
-  const name  = (document.getElementById('cb-name')?.value||'').trim();
-  const route = document.getElementById('cb-route')?.value||'';
-  const group = document.getElementById('cb-group')?.value||'';
-  const type  = document.getElementById('cb-type')?.value||'B';
-
-  if(!name){ showCreateMsg('cb-msg',false,'❌ اسم الفرع مطلوب'); return; }
-  if(!route){ showCreateMsg('cb-msg',false,'❌ اختر خط السير'); return; }
-  if(!group){ showCreateMsg('cb-msg',false,'❌ اختر المجموعة'); return; }
-
-  const payload={ branch_name:name, route, grp:group, client_type:type, status:'active', created_at:new Date().toISOString() };
-  try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/branches`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body:JSON.stringify(payload)
-    });
-    if(res.ok){
-      showCreateMsg('cb-msg',true,'✅ تم إنشاء الفرع بنجاح على Supabase!');
-      document.getElementById('cb-name').value='';
-      document.getElementById('cb-route').value='';
-      await loadBranches();
-      rebuildBranchesMap();
-    } else {
-      const err=await res.text();
-      showCreateMsg('cb-msg',false,'❌ فشل الإنشاء: '+err.substring(0,120));
-    }
-  }catch(e){ showCreateMsg('cb-msg',false,'❌ خطأ في الاتصال: '+e.message); }
-}
-
-// ── إنشاء منسق جديد ────────────────────────────────────────────
-async function createSupervisor(){
-  const name     = (document.getElementById('cs-name')?.value||'').trim();
-  const username = (document.getElementById('cs-username')?.value||'').trim().toLowerCase();
-  const password = document.getElementById('cs-password')?.value||'';
-  const route    = document.getElementById('cs-route')?.value||'';
-  const group    = document.getElementById('cs-group')?.value||'';
-  const role     = document.getElementById('cs-role')?.value||'rep';
-
-  if(!name){ showCreateMsg('cs-msg',false,'❌ اسم المنسق مطلوب'); return; }
-  if(!password||password.length<6){ showCreateMsg('cs-msg',false,'❌ كلمة المرور 6 أحرف على الأقل'); return; }
-  if(!route){ showCreateMsg('cs-msg',false,'❌ اختر خط السير'); return; }
-  if(!group){ showCreateMsg('cs-msg',false,'❌ اختر المجموعة'); return; }
-
-  const payload={
-    name,
-    pass_hash: password,
-    route,
-    grp: group,
-    groups: group,
-    user_type: role,
-    role: role,
-    status:'active',
-    created_at:new Date().toISOString()
-  };
-  try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/users`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body:JSON.stringify(payload)
-    });
-    if(res.ok){
-      showCreateMsg('cs-msg',true,'✅ تم إنشاء المنسق بنجاح على Supabase!');
-      document.getElementById('cs-name').value='';
-      document.getElementById('cs-username').value='';
-      document.getElementById('cs-password').value='';
-      document.getElementById('cs-route').value='';
-    } else {
-      const err=await res.text();
-      if(err.includes('duplicate')||err.includes('unique')){
-        showCreateMsg('cs-msg',false,'⚠️ اسم المستخدم مستخدم بالفعل — جرب اسماً آخر');
-      } else {
-        showCreateMsg('cs-msg',false,'❌ فشل الإنشاء: '+err.substring(0,120));
-      }
-    }
-  }catch(e){ showCreateMsg('cs-msg',false,'❌ خطأ في الاتصال: '+e.message); }
-}
-
-// ── تحميل فلتر المجموعات ديناميكياً ───────────────────────────
-async function loadGroupsFilter(){
-  const container = document.getElementById('br-grp-filter');
-  if(!container) return;
-
-  // المجموعات الثابتة
-  const staticGroups = Object.entries(GROUPS).map(([key,v])=>({key_name:key, name:v.label, color:v.color}));
-
-  // المجموعات من Supabase
-  let dbGroups=[];
-  try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/groups?select=*&order=name.asc&limit=200`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    if(res.ok) dbGroups=await res.json();
-  }catch(e){}
-
-  // دمج بدون تكرار
-  const allGroups=[...staticGroups];
-  dbGroups.forEach(g=>{
-    if(!allGroups.find(s=>s.key_name===g.key_name)){
-      allGroups.push({key_name:g.key_name, name:(g.emoji||'')+(g.name||g.key_name), color:g.color||'#888'});
-    }
-  });
-
-  // احتفظ بالقيم المختارة حالياً
-  const checked=[...container.querySelectorAll('.br-grp-cb:checked')].map(c=>c.value);
-
-  container.innerHTML=`<label class="br-cb-lbl ${checked.includes('all')||checked.length===0?'active':''}">
-    <input type="checkbox" class="br-grp-cb" value="all" ${checked.includes('all')||checked.length===0?'checked':''} onchange="brGrpChange(this)"/> كل المجموعات
-  </label>`;
-
-  allGroups.forEach(g=>{
-    const isChecked=checked.includes(g.key_name);
-    const lbl=document.createElement('label');
-    lbl.className='br-cb-lbl'+(isChecked?' active':'');
-    lbl.innerHTML=`<input type="checkbox" class="br-grp-cb" value="${g.key_name}" ${isChecked?'checked':''} onchange="brGrpChange(this)"/> ${g.name}`;
-    container.appendChild(lbl);
-  });
-}
-
-
-const _origShowPanel = typeof showPanel === 'function' ? showPanel : null;
-document.addEventListener('DOMContentLoaded', ()=>{
-  // تحميل مسبق عند فتح تاب الفروع
-  const branchNavItem = document.querySelector('[onclick*="branches"]');
-  if(branchNavItem){
-    const origClick = branchNavItem.getAttribute('onclick');
-    branchNavItem.setAttribute('onclick', origClick + '; loadGroupsDropdowns(); loadRoutesDropdown("cb-route"); loadRoutesDropdown("cs-route");');
-  }
-});
-
-// ── إدارة وحذف ─────────────────────────────────────────────────
-function manageSwitch(tab){
-  ['groups','routes','supervisors'].forEach(t=>{
-    document.getElementById('manage-'+t).style.display = t===tab?'block':'none';
-    const btn=document.getElementById('mtab-'+t);
-    if(btn){
-      btn.style.background  = t===tab?'#C55B48':'transparent';
-      btn.style.color       = t===tab?'#fff':'#8B6F47';
-      btn.style.borderColor = t===tab?'#C55B48':'#D4C4A8';
-    }
-  });
-  if(tab==='groups')      loadManageGroups();
-  if(tab==='routes')      loadManageRoutes();
-  if(tab==='supervisors') loadManageSupervisors();
-}
-
-function confirmDelete(title, name, onConfirm){
-  const overlay=document.createElement('div');
-  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center';
-  overlay.innerHTML=`
-    <div style="background:#FFFDF8;border-radius:16px;padding:28px;width:360px;box-shadow:0 8px 32px rgba(75,60,26,.3);border:1px solid #E8D9C0;text-align:center">
-      <div style="font-size:40px;margin-bottom:12px">🗑️</div>
-      <h3 style="font-size:15px;font-weight:700;color:#2C1F0A;margin-bottom:8px">حذف ${title}</h3>
-      <p style="font-size:13px;color:#8B6F47;margin-bottom:6px">هل أنت متأكد من حذف:</p>
-      <p style="font-size:14px;font-weight:700;color:#731E2E;margin-bottom:16px;padding:8px 16px;background:#FFEBEE;border-radius:8px">${name}</p>
-      <p style="font-size:11px;color:#B71C1C;margin-bottom:20px">⚠️ لا يمكن التراجع عن هذا الإجراء</p>
-      <div style="display:flex;gap:10px;justify-content:center">
-        <button id="dmd-yes" style="padding:10px 24px;background:linear-gradient(135deg,#731E2E,#5A1520);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">🗑️ نعم، احذف</button>
-        <button id="dmd-no"  style="padding:10px 24px;background:#F5F0E8;color:#4B3C1A;border:1.5px solid #D4C4A8;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:Cairo,sans-serif">إلغاء</button>
-      </div>
-    </div>`;
-  document.body.appendChild(overlay);
-  document.getElementById('dmd-yes').onclick=()=>{ overlay.remove(); onConfirm(); };
-  document.getElementById('dmd-no').onclick =()=>{ overlay.remove(); };
-  overlay.onclick=(e)=>{ if(e.target===overlay) overlay.remove(); };
-}
-
-async function loadManageGroups(){
-  const tbody=document.getElementById('manage-groups-tbody');
-  if(!tbody) return;
-  tbody.innerHTML='<tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--text2)">جارٍ التحميل...</td></tr>';
-  let data=[];
-  try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/groups?select=*&order=name.asc&limit=200`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    if(res.ok) data=await res.json();
-  }catch(e){}
-  if(!data.length){
-    tbody.innerHTML='<tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد مجموعات مضافة على Supabase</td></tr>';
-    return;
-  }
-  tbody.innerHTML=data.map(g=>`<tr>
-    <td style="font-family:monospace;font-size:11px;color:#8B6F47">${g.key_name||'—'}</td>
-    <td><b>${g.emoji||''} ${g.name||'—'}</b></td>
-    <td><span style="display:inline-block;width:20px;height:20px;border-radius:4px;background:${g.color||'#ccc'};border:1px solid #ddd"></span></td>
-    <td>
-      <button onclick="deleteEntity('groups','id=eq.${g.id}','${(g.name||'').replace(/'/g,"\\'")}','المجموعة',loadManageGroups)"
-        class="btn btn-sm btn-red"><i class="ti ti-trash"></i> حذف</button>
-    </td>
-  </tr>`).join('');
-}
-
-async function loadManageRoutes(){
-  const tbody=document.getElementById('manage-routes-tbody');
-  if(!tbody) return;
-  tbody.innerHTML='<tr><td colspan="3" style="text-align:center;padding:1rem;color:var(--text2)">جارٍ التحميل...</td></tr>';
-  let data=[];
-  try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/routes?select=*&order=name.asc&limit=500`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    if(res.ok) data=await res.json();
-  }catch(e){}
-  if(!data.length){
-    tbody.innerHTML='<tr><td colspan="3" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد خطوط سير مضافة على Supabase</td></tr>';
-    return;
-  }
-  tbody.innerHTML=data.map(r=>`<tr>
-    <td><b>${r.name||'—'}</b></td>
-    <td><span class="badge b-blue">${r.grp||'—'}</span></td>
-    <td>
-      <button onclick="deleteEntity('routes','id=eq.${r.id}','${(r.name||'').replace(/'/g,"\\'")}','خط السير',loadManageRoutes)"
-        class="btn btn-sm btn-red"><i class="ti ti-trash"></i> حذف</button>
-    </td>
-  </tr>`).join('');
-}
-
-async function loadManageSupervisors(){
-  const tbody=document.getElementById('manage-supervisors-tbody');
-  if(!tbody) return;
-  tbody.innerHTML='<tr><td colspan="5" style="text-align:center;padding:1rem;color:var(--text2)">جارٍ التحميل...</td></tr>';
-  let data=[];
-  try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/users?select=*&order=name.asc&limit=500`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    if(res.ok) data=await res.json();
-  }catch(e){}
-  if(!data.length){
-    tbody.innerHTML='<tr><td colspan="5" style="text-align:center;padding:1rem;color:var(--text2)">لا يوجد منسقون</td></tr>';
-    return;
-  }
-  const roleLabel={rep:'منسق',supervisor:'مشرف',manager:'مدير',admin:'أدمن'};
-  tbody.innerHTML=data.map(u=>`<tr>
-    <td><b>${u.name||'—'}</b></td>
-    <td style="font-size:11px">${u.route||'—'}</td>
-    <td><span class="badge b-blue">${u.grp||u.groups||'—'}</span></td>
-    <td><span class="badge b-gray">${roleLabel[u.role||u.user_type]||u.role||'—'}</span></td>
-    <td>
-      <button onclick="deleteEntity('users','id=eq.${u.id}','${(u.name||'').replace(/'/g,"\\'")}','المنسق',loadManageSupervisors)"
-        class="btn btn-sm btn-red"><i class="ti ti-trash"></i> حذف</button>
-    </td>
-  </tr>`).join('');
-}
-
-async function syncBranchesMapToSupabase(){
-  const btn = document.getElementById('sync-branches-btn');
-  const msg = document.getElementById('sync-branches-msg');
-  btn.disabled = true;
-  btn.innerHTML = '<i class="ti ti-loader ti-spin"></i> جارٍ الرفع...';
-  msg.style.display = 'none';
-
-  // بناء قائمة الفروع من BRANCHES_MAP
-  const rows = [];
-  Object.entries(BRANCHES_MAP).forEach(([route, branches])=>{
-    const rep = REPS.find(r=>r.route===route);
-    const grp = rep?.group || 'giza';
-    (Array.isArray(branches)?branches:[]).forEach(b=>{
-      rows.push({ branch_name:b, route, grp, client_type:'B', status:'active' });
-    });
-  });
-
-  if(!rows.length){
-    msg.style.display='block';
-    msg.style.background='#FFEBEE'; msg.style.color='#B71C1C';
-    msg.textContent='❌ لا توجد فروع في BRANCHES_MAP';
-    btn.disabled=false; btn.innerHTML='<i class="ti ti-cloud-upload"></i> رفع الفروع الآن';
-    return;
-  }
-
-  // رفع على Supabase على دفعات (100 في كل مرة)
-  let success=0, failed=0;
-  const chunkSize=100;
-  for(let i=0;i<rows.length;i+=chunkSize){
-    const chunk=rows.slice(i,i+chunkSize);
-    try{
-      const res=await fetch(`${SUPABASE_URL}/rest/v1/branches?on_conflict=branch_name,route`,{
-        method:'POST',
-        headers:{
-          'Content-Type':'application/json',
-          'apikey':SUPABASE_KEY,
-          'Authorization':`Bearer ${SUPABASE_KEY}`,
-          'Prefer':'resolution=ignore-duplicates,return=minimal'
-        },
-        body:JSON.stringify(chunk)
-      });
-      if(res.ok) success+=chunk.length;
-      else failed+=chunk.length;
-    }catch(e){ failed+=chunk.length; }
-  }
-
-  msg.style.display='block';
-  if(failed===0){
-    msg.style.background='#E8F5E9'; msg.style.color='#1A7A4A'; msg.style.border='1px solid #A5D6A7';
-    msg.innerHTML=`✅ تم رفع <b>${success}</b> فرع على Supabase بنجاح!`;
-    loadBranches();
-    rebuildBranchesMap();
-  } else {
-    msg.style.background='#FFF8E1'; msg.style.color='#E65100'; msg.style.border='1px solid #FFD54F';
-    msg.innerHTML=`⚠️ نجح: <b>${success}</b> · فشل: <b>${failed}</b> (قد تكون مكررة أو في الجدول مش فيه unique constraint على branch_name+route)`;
-  }
-  btn.disabled=false;
-  btn.innerHTML='<i class="ti ti-cloud-upload"></i> رفع الفروع الآن';
-}
-
-
-  confirmDelete(title, name, async ()=>{
-    try{
-      const res=await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`,{
-        method:'DELETE',
-        headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
-      });
-      if(res.ok){
-        showToast(`🗑️ تم حذف ${title}: ${name}`);
-        if(typeof reloadFn==='function') reloadFn();
-        if(table==='groups'){ loadGroupsFilter(); loadGroupsDropdowns(); }
-        if(table==='routes'){ loadRoutesDropdown('cb-route'); loadRoutesDropdown('cs-route'); }
-      } else {
-        const err=await res.text();
-        alert('❌ فشل الحذف: '+err.substring(0,120));
-      }
-    }catch(e){ alert('❌ خطأ: '+e.message); }
-  });
-}
-</script>
 
 <!-- ══ SQL لإنشاء الجداول — شغّلها في Supabase SQL Editor ══
 -- جدول المجموعات
