@@ -1895,7 +1895,7 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 const SUPABASE_URL = 'https://tneeosrbxedexsrigapg.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRuZWVvc3JieGVkZXhzcmlnYXBnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxMTcxMTQsImV4cCI6MjA5NDY5MzExNH0.JHXgJ6EeDcdeofD5HShRnWvwPazCIfY7q7pCC2GMOFw';
 
-const GROUPS = {
+let GROUPS = {
   giza:    {label:'🔵 مجموعة الجيزة',     color:'#005CBF'},
   cairo:   {label:'🟢 وسط القاهرة',        color:'#1A7A4A'},
   south:   {label:'🔴 جنوب وشرق القاهرة', color:'#D62828'},
@@ -1903,6 +1903,23 @@ const GROUPS = {
   hyper:   {label:'🟣 الهايبر ماركت',      color:'#6A0DAD'},
   alex:    {label:'🌊 الإسكندرية',         color:'#0097A7'},
 };
+
+async function loadDynamicGroups(){
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/groups?select=*&order=name.asc&limit=200`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    if(res.ok){
+      const dbGroups = await res.json();
+      dbGroups.forEach(g=>{
+        if(!GROUPS[g.key_name]){
+          GROUPS[g.key_name] = {label:(g.emoji||'')+(g.name||g.key_name), color:g.color||'#888'};
+        }
+      });
+    }
+  }catch(e){}
+  // تحديث فلتر المجموعات بعد التحميل
+  loadRptGrpFilter();
+}
 
 // ── State ──
 let cu = null; // current supervisor
@@ -2009,6 +2026,9 @@ async function doLogin(){
   document.getElementById('s-login').style.display='none';
   document.getElementById('s-app').style.display='flex';
   document.getElementById('top-sup-name').textContent = name + ' — ' + (cu.groups.map(g=>GROUPS[g]?.label||g).join('، '));
+
+  // تحميل المجموعات الديناميكية من Supabase
+  await loadDynamicGroups();
 
   // شاشة الترحيب
   showWelcomeScreen(name);
@@ -2217,7 +2237,7 @@ async function loadAllData(){
   // جيب الحضور
   cachedAttendance = [];
   for(const grp of cu.groups){
-    const a = await sbGet('attendance',{grp},{order:'created_at.desc',limit:200});
+    const a = await sbGet('attendance',{grp},{order:'date.desc',limit:200});
     if(Array.isArray(a)) cachedAttendance.push(...a);
   }
 
@@ -2291,7 +2311,7 @@ async function smartRefresh(){
       fetches.push(
         fetch(`${SUPABASE_URL}/rest/v1/visits?grp=eq.${encodeURIComponent(grp)}&select=*&order=created_at.desc&limit=500`,
           {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-        fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=eq.${encodeURIComponent(grp)}&select=*&order=created_at.desc&limit=200`,
+        fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=eq.${encodeURIComponent(grp)}&select=*&order=date.desc&limit=200`,
           {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[])
       );
     }
@@ -2502,7 +2522,7 @@ async function runMissingStepsCheck(){
     // جيب كل البيانات دفعة واحدة
     const [attData, locData, rptData] = await Promise.all([
       // الحضور والانصراف اليوم
-      fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=in.(${grps.join(',')})&created_at=gte.${today}T00:00:00&select=name,type,time_in,time_out,time&order=created_at.desc&limit=500`,
+      fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=in.(${grps.join(',')})&date=eq.${today}&select=name,type,time_in,time_out,time&order=date.desc&limit=500`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
 
       // اللوكيشن (آخر تحديث)
@@ -2775,7 +2795,7 @@ async function loadRepDetail(){
 
     // جيب الحضور
     const attRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(name)}&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59&select=*&order=created_at.desc&limit=100`,
+      `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(name)}&date=gte.${from}&date=lte.${to}&select=*&order=date.desc&limit=100`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
     );
     const attendance = await attRes.json().catch(()=>[]);
@@ -2860,7 +2880,7 @@ async function loadRepLocations(){
       fetch(`${SUPABASE_URL}/rest/v1/location?grp=in.(${grps.join(',')})&select=*&order=id.desc`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
       // الحضور اليوم
-      fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=in.(${grps.join(',')})&created_at=gte.${today}T00:00:00&select=*&order=created_at.desc`,
+      fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=in.(${grps.join(',')})&date=eq.${today}&select=*&order=date.desc`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
       // آخر زيارة اليوم
       fetch(`${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&created_at=gte.${today}T00:00:00&select=name,branch,created_at&order=created_at.desc&limit=200`,
@@ -4130,9 +4150,18 @@ function updateBranchesFromSelectedRoutes(){
 
   const branches = _allBranchesCache.filter(b=>selectedRoutes.includes(b.route));
   branchesList.innerHTML = branches.map(b=>`
-    <div class="chip" data-branch="${b.branch_name}" onclick="this.classList.toggle('selected')">
-      ${b.branch_name}
+    <div style="display:flex;align-items:center;gap:6px;width:100%">
+      <div class="chip" data-branch="${b.branch_name}" data-rep="${b.rep_name||''}"
+        onclick="this.classList.toggle('selected'); showBranchRep(this)"
+        style="flex:1;justify-content:flex-start">
+        ${b.branch_name}
+      </div>
+      ${b.rep_name ? `<span style="font-size:11px;color:#5672B0;background:#EEF3FF;border:1px solid #B8C8F0;border-radius:20px;padding:2px 8px;white-space:nowrap">👤 ${b.rep_name}</span>` : ''}
     </div>`).join('') || '<div style="color:var(--text2);font-size:12px">لا توجد فروع</div>';
+}
+
+function showBranchRep(chipEl){
+  // لا شيء إضافي — الاسم ظاهر دايماً جنب الـ chip
 }
 
 function closePlanItemModal(){
@@ -4168,6 +4197,11 @@ async function addPlanItem(){
   const targetCoord = parseFloat(document.getElementById('pi-target-coord').value) || 0;
   const selectedRoutes   = [...document.querySelectorAll('#pi-routes-list .chip.selected')].map(c=>c.dataset.route);
   const selectedBranches = [...document.querySelectorAll('#pi-branches-list .chip.selected')].map(c=>c.dataset.branch);
+  // Map branch -> rep_name
+  const branchRepMap = {};
+  document.querySelectorAll('#pi-branches-list .chip[data-branch]').forEach(c=>{
+    if(c.dataset.branch && c.dataset.rep) branchRepMap[c.dataset.branch] = c.dataset.rep;
+  });
 
   if(!selectedRoutes.length){ showToast('⚠️ اختر خط السير أولاً'); return; }
   if(!selectedBranches.length){ showToast('⚠️ اختر فرع واحد على الأقل'); return; }
@@ -4198,7 +4232,8 @@ async function addPlanItem(){
           visit_plan:     visitPlan   || null,
           visit_purpose:  visitPurpose|| null,
           area_supervisor:areaSup     || null,
-          notes:          goal        || null
+          notes:          goal        || null,
+          rep_name:       branchRepMap[branch] || null
         })
       });
       if(res.ok){
@@ -6965,6 +7000,22 @@ async function rptOnRepChange(){
     if(info) info.style.display='none';
     rptLoadBranches();
   }
+}
+
+function loadRptGrpFilter(){
+  const container = document.getElementById('rpt-grp-checks');
+  if(!container) return;
+  const checked = [...container.querySelectorAll('.rpt-grp-cb:checked')].map(c=>c.value);
+  container.innerHTML = `<label class="rpt-cb-lbl ${checked.includes('all')||!checked.length?'active':''}">
+    <input type="checkbox" class="rpt-grp-cb" value="all" ${checked.includes('all')||!checked.length?'checked':''} onchange="rptGrpChange(this)"/> كل المجموعات
+  </label>`;
+  Object.entries(GROUPS).forEach(([key,v])=>{
+    const isChecked = checked.includes(key);
+    const lbl = document.createElement('label');
+    lbl.className = 'rpt-cb-lbl'+(isChecked?' active':'');
+    lbl.innerHTML = `<input type="checkbox" class="rpt-grp-cb" value="${key}" ${isChecked?'checked':''} onchange="rptGrpChange(this)"/> ${v.label}`;
+    container.appendChild(lbl);
+  });
 }
 
 function rptGrpChange(cb){
