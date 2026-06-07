@@ -2831,6 +2831,24 @@ h2,h3{color:#2C1F0A}
         </div>
 
         <div id="panel-settings" class="panel">
+
+          <!-- ══ إعادة ترتيب التابات ══ -->
+          <div class="card" style="margin-bottom:16px;border:1.5px solid #E8D9C0">
+            <div class="card-title" style="margin-bottom:14px">
+              <i class="ti ti-layout-sidebar" style="color:#C55B48"></i>
+              ترتيب وإدارة التابات الجانبية
+            </div>
+            <div style="font-size:11px;color:#8B6F47;margin-bottom:12px;background:#FFF8E1;padding:8px 12px;border-radius:8px;border:1px solid #FFD54F">
+              💡 اسحب التاب لتغيير ترتيبه — أو استخدم أزرار ↑↓ — التغييرات تُحفظ تلقائياً
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:12px">
+              <button class="btn btn-sm btn-ghost" onclick="resetNavOrder()"><i class="ti ti-refresh"></i> استعادة الترتيب الافتراضي</button>
+              <button class="btn btn-sm" style="background:#1A7A4A;color:#fff" onclick="applyNavOrder()"><i class="ti ti-check"></i> تطبيق الترتيب</button>
+            </div>
+            <div id="nav-reorder-list" style="display:flex;flex-direction:column;gap:6px"></div>
+          </div>
+          <!-- ══ نهاية إعادة الترتيب ══ -->
+
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
             <div class="card">
               <div class="card-title"><i class="ti ti-calendar"></i> الإجازات الرسمية</div>
@@ -7283,7 +7301,7 @@ function renderCurrentPanel(){
     case 'branches': loadBranches(); qbInitReps(); loadBranchesMap(); loadGroupsDropdowns(); loadRoutesDropdown('cb-route'); loadRoutesDropdown('cs-route'); loadGroupsFilter(); break;
     case 'messages': renderMessages(); break;
     case 'orders': loadOrders(); break;
-    case 'settings': loadHolidays(); break;
+    case 'settings': loadHolidays(); loadNavReorder(); break;
     case 'upload': loadUploadPanel(); break;
     case 'routes':
       // migration: لو في بيانات في localStorage انقلهم لـ Supabase
@@ -10159,6 +10177,192 @@ async function addHoliday(){
   loadHolidays();
 }
 
+// ══════════════════════════════════════════════════════════════
+// إعادة ترتيب التابات الجانبية
+// ══════════════════════════════════════════════════════════════
+
+// الترتيب الافتراضي
+const NAV_DEFAULT = [
+  {id:'dashboard',      icon:'ti-layout-dashboard',  label:'الداشبورد',              visible:true},
+  {id:'leaderboard',    icon:'ti-trophy',             label:'الليدربورد',             visible:true},
+  {id:'location',       icon:'ti-map-pin',            label:'اللوكيشن المباشر',       visible:true},
+  {id:'visits',         icon:'ti-clipboard-list',     label:'الزيارات',               visible:true},
+  {id:'products',       icon:'ti-package',            label:'الأصناف',                visible:true},
+  {id:'missing',        icon:'ti-alert-triangle',     label:'النواقص',                visible:true},
+  {id:'returns',        icon:'ti-arrow-back-up',      label:'المرتجعات',              visible:true},
+  {id:'attendance',     icon:'ti-clock',              label:'الحضور والانصراف',       visible:true},
+  {id:'expiry-alert',   icon:'ti-alert-circle',       label:'تنبيهات الصلاحية',       visible:true},
+  {id:'attendance-export',icon:'ti-file-spreadsheet', label:'كشف الحضور والمرتبات',  visible:true},
+  {id:'checkout-exceptions',icon:'ti-clock-exclamation',label:'استثناءات الانصراف', visible:true},
+  {id:'goals',          icon:'ti-target',             label:'الأهداف',                visible:true},
+  {id:'orders',         icon:'ti-truck-delivery',     label:'الطلبيات',               visible:true},
+  {id:'messages',       icon:'ti-message-circle',     label:'الرسائل',                visible:true},
+  {id:'users',          icon:'ti-users',              label:'المنسقون',               visible:true},
+  {id:'supervisors',    icon:'ti-user-star',          label:'المشرفون والمديرون',     visible:true},
+  {id:'branches',       icon:'ti-building-store',     label:'الفروع والعملاء',        visible:true},
+  {id:'upload',         icon:'ti-upload',             label:'رفع البيانات',           visible:true},
+  {id:'routes',         icon:'ti-route',              label:'خطوط سير المنسقين',     visible:true},
+  {id:'products-db',    icon:'ti-package',            label:'قاعدة الأصناف',          visible:true},
+  {id:'holidays',       icon:'ti-calendar',           label:'الإجازات',               visible:true},
+  {id:'export-full',    icon:'ti-file-spreadsheet',   label:'تصدير شامل',             visible:true},
+  {id:'rep-report',     icon:'ti-report-analytics',   label:'تقرير المنسق',           visible:true},
+  {id:'products-report',icon:'ti-file-spreadsheet',   label:'تقرير الأصناف Excel',    visible:true},
+  {id:'activity',       icon:'ti-activity',           label:'سجل النشاط',             visible:true},
+  {id:'coord-plans',    icon:'ti-eye',                label:'متابعة المشرفين',        visible:true},
+  {id:'team-plans',     icon:'ti-table',              label:'خطط الفريق',             visible:true},
+  {id:'field-monitor',  icon:'ti-map-pin',            label:'متابعة الميدان',         visible:true},
+  {id:'field-support-report',icon:'ti-shield-check',  label:'تقارير دعم الميدان',     visible:true},
+  {id:'settings',       icon:'ti-settings',           label:'الإعدادات',              visible:true},
+];
+
+let navOrder = [];
+
+function getNavOrder(){
+  try{
+    const saved = localStorage.getItem('nav_order');
+    if(saved) return JSON.parse(saved);
+  }catch(e){}
+  return JSON.parse(JSON.stringify(NAV_DEFAULT));
+}
+
+function saveNavOrder(){
+  try{ localStorage.setItem('nav_order', JSON.stringify(navOrder)); }catch(e){}
+}
+
+function loadNavReorder(){
+  navOrder = getNavOrder();
+  renderNavReorderList();
+}
+
+function renderNavReorderList(){
+  const container = document.getElementById('nav-reorder-list');
+  if(!container) return;
+
+  container.innerHTML = navOrder.map((item,i)=>`
+    <div class="nav-reorder-item" id="nri-${item.id}" draggable="true"
+      ondragstart="navDragStart(event,'${item.id}')"
+      ondragover="navDragOver(event)"
+      ondrop="navDrop(event,'${item.id}')"
+      ondragleave="navDragLeave(event)"
+      style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:${item.visible?'#FFFDF8':'#F5F5F5'};
+        border:1.5px solid ${item.visible?'#E8D9C0':'#ddd'};border-radius:10px;cursor:grab;
+        opacity:${item.visible?1:.5};transition:all .15s;user-select:none">
+      <!-- مقبض السحب -->
+      <i class="ti ti-grip-vertical" style="color:#C4B49A;font-size:16px;cursor:grab;flex-shrink:0"></i>
+      <!-- أيقونة -->
+      <i class="ti ${item.icon}" style="font-size:15px;color:${item.visible?'#C55B48':'#aaa'};flex-shrink:0"></i>
+      <!-- الاسم -->
+      <span style="flex:1;font-size:13px;font-weight:600;color:${item.visible?'#2C1F0A':'#aaa'}">${item.label}</span>
+      <!-- أزرار ↑↓ -->
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <button onclick="navMoveUp(${i})" ${i===0?'disabled':''} title="أعلى"
+          style="padding:2px 6px;border:1px solid #D4C4A8;border-radius:4px;background:#F5F0E8;cursor:pointer;font-size:10px;${i===0?'opacity:.3':''}">▲</button>
+        <button onclick="navMoveDown(${i})" ${i===navOrder.length-1?'disabled':''} title="أسفل"
+          style="padding:2px 6px;border:1px solid #D4C4A8;border-radius:4px;background:#F5F0E8;cursor:pointer;font-size:10px;${i===navOrder.length-1?'opacity:.3':''}">▼</button>
+      </div>
+      <!-- إخفاء/إظهار -->
+      <button onclick="navToggleVisible('${item.id}')" title="${item.visible?'إخفاء':'إظهار'}"
+        style="padding:5px 10px;border:1px solid ${item.visible?'#D4C4A8':'#C55B48'};border-radius:6px;
+          background:${item.visible?'#F5F0E8':'#FFF0EE'};cursor:pointer;font-size:11px;font-weight:600;
+          color:${item.visible?'#8B6F47':'#C55B48'}">
+        ${item.visible?'👁️ ظاهر':'🚫 مخفي'}
+      </button>
+      <!-- حذف -->
+      <button onclick="navDeleteItem('${item.id}','${item.label}')" title="حذف"
+        style="padding:5px 8px;border:1px solid #FFCDD2;border-radius:6px;background:#FFEBEE;cursor:pointer;color:#B71C1C;font-size:12px">
+        <i class="ti ti-trash"></i>
+      </button>
+    </div>`).join('');
+
+  // Drag & Drop events
+  container.querySelectorAll('.nav-reorder-item').forEach(el=>{
+    el.addEventListener('dragstart', e=>{ e.dataTransfer.setData('text/plain', el.id.replace('nri-','')); el.style.opacity='.4'; });
+    el.addEventListener('dragend',   e=>{ el.style.opacity=''; });
+  });
+}
+
+// ── Drag & Drop ──
+let _dragId = null;
+function navDragStart(e, id){ _dragId=id; e.dataTransfer.effectAllowed='move'; }
+function navDragOver(e){ e.preventDefault(); e.currentTarget.style.background='#FFF0EE'; e.currentTarget.style.borderColor='#C55B48'; }
+function navDragLeave(e){ e.currentTarget.style.background=''; e.currentTarget.style.borderColor=''; }
+function navDrop(e, targetId){
+  e.preventDefault();
+  e.currentTarget.style.background='';
+  e.currentTarget.style.borderColor='';
+  if(!_dragId || _dragId===targetId) return;
+  const fromIdx = navOrder.findIndex(n=>n.id===_dragId);
+  const toIdx   = navOrder.findIndex(n=>n.id===targetId);
+  if(fromIdx===-1||toIdx===-1) return;
+  const [moved] = navOrder.splice(fromIdx,1);
+  navOrder.splice(toIdx,0,moved);
+  renderNavReorderList();
+}
+
+// ── أعلى/أسفل ──
+function navMoveUp(i){
+  if(i===0) return;
+  [navOrder[i-1],navOrder[i]]=[navOrder[i],navOrder[i-1]];
+  renderNavReorderList();
+}
+function navMoveDown(i){
+  if(i>=navOrder.length-1) return;
+  [navOrder[i],navOrder[i+1]]=[navOrder[i+1],navOrder[i]];
+  renderNavReorderList();
+}
+
+// ── إخفاء/إظهار ──
+function navToggleVisible(id){
+  const item = navOrder.find(n=>n.id===id);
+  if(item) item.visible=!item.visible;
+  renderNavReorderList();
+}
+
+// ── حذف ──
+function navDeleteItem(id, label){
+  confirmDelete('التاب', label, ()=>{
+    navOrder = navOrder.filter(n=>n.id!==id);
+    saveNavOrder();
+    renderNavReorderList();
+    applyNavOrder();
+    showToast(`🗑️ تم حذف تاب: ${label}`);
+  });
+}
+
+// ── تطبيق الترتيب على الـ nav الفعلي ──
+function applyNavOrder(){
+  saveNavOrder();
+  const navSection = document.getElementById('nav-admin-section');
+  if(!navSection) return;
+
+  const allNavItems = navSection.querySelectorAll('.nav-item');
+  const itemsMap = {};
+  allNavItems.forEach(el=>{
+    const match = el.getAttribute('onclick')?.match(/showPanel\('([^']+)'\)/);
+    if(match) itemsMap[match[1]] = el;
+  });
+
+  // أعد ترتيب + إخفاء/إظهار
+  navOrder.forEach(item=>{
+    const el = itemsMap[item.id];
+    if(!el) return;
+    el.style.display = item.visible ? '' : 'none';
+    navSection.appendChild(el); // يعيد الترتيب
+  });
+
+  showToast('✅ تم تطبيق الترتيب الجديد!');
+}
+
+// ── استعادة الافتراضي ──
+function resetNavOrder(){
+  if(!confirm('استعادة الترتيب الافتراضي؟')) return;
+  navOrder = JSON.parse(JSON.stringify(NAV_DEFAULT));
+  saveNavOrder();
+  renderNavReorderList();
+  applyNavOrder();
+  showToast('✅ تم استعادة الترتيب الافتراضي');
+}
+
 async function loadHolidays(){
   const data=await sb('holidays',{},{order:'date.asc'});
   const today=new Date().setHours(0,0,0,0);
@@ -11909,6 +12113,11 @@ function hmFillTable(data){
 document.addEventListener('DOMContentLoaded', ()=>{
   const sel = document.getElementById('hm-metric');
   if(sel) sel.addEventListener('change', ()=>{ if(_hmRawData) hmRender(_hmRawData, sel.value); });
+  // تطبيق ترتيب التابات المحفوظ
+  setTimeout(()=>{ 
+    navOrder = getNavOrder();
+    applyNavOrder();
+  }, 500);
 });
 
 function hmExport(){
