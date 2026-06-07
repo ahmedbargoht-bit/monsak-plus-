@@ -16140,17 +16140,28 @@ async function buildSupInfoMap(plans){
   if(!plans.length) return;
 
   const levelLabel = {gm:'مدير عام', dm:'مدير منطقة', sup:'مشرف تنسيق', supervisor:'مشرف تنسيق'};
-  const grpLabel   = g => GROUPS[g]?.label || g || '—';
+
+  // دمج GROUPS الثابتة مع المجموعات الديناميكية من Supabase
+  const dynamicGroups = {...GROUPS};
+  try{
+    const dbGroups = await fetch(`${SUPABASE_URL}/rest/v1/groups?select=*&limit=200`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+    dbGroups.forEach(g=>{
+      if(!dynamicGroups[g.key_name]){
+        dynamicGroups[g.key_name] = {label:(g.emoji||'')+' '+(g.name||g.key_name), color:g.color||'#888'};
+      }
+    });
+  }catch(e){}
+
+  const grpLabel = g => dynamicGroups[g]?.label || g || '—';
 
   try{
-    // جيب بيانات المشرفين من users
     const supNames = [...new Set(plans.map(p=>p.supervisor_name).filter(Boolean))];
     const supData  = await fetch(
       `${SUPABASE_URL}/rest/v1/users?name=in.(${supNames.map(n=>encodeURIComponent(n)).join(',')})&select=name,level,role,groups,route`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
     ).then(r=>r.ok?r.json():[]).catch(()=>[]);
 
-    // جيب عدد الفروع والمنسقين لكل مجموعة/خط سير
     const branchStats = await fetch(
       `${SUPABASE_URL}/rest/v1/branches?select=route,grp`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
@@ -16166,12 +16177,9 @@ async function buildSupInfoMap(plans){
       const groups = Array.isArray(u.groups) ? u.groups : (u.groups||'').split(',').filter(Boolean);
       const grpLabels = groups.map(grpLabel).join(' / ') || '—';
 
-      // عدد خطوط السير في مجموعاته
-      const routesSet = new Set(branchStats.filter(b=>groups.includes(b.grp)).map(b=>b.route));
-      // عدد المنسقين
-      const repsCount = repStats.filter(r=>groups.includes(r.grp)).length;
-      // عدد الفروع
-      const branchesCount = branchStats.filter(b=>groups.includes(b.grp)).length;
+      const routesSet    = new Set(branchStats.filter(b=>groups.includes(b.grp)).map(b=>b.route));
+      const repsCount    = repStats.filter(r=>groups.includes(r.grp)).length;
+      const branchesCount= branchStats.filter(b=>groups.includes(b.grp)).length;
 
       _supInfoMap[name] = {
         roleLabel    : levelLabel[u.level||u.role] || 'مشرف تنسيق',
