@@ -16132,6 +16132,58 @@ async function exportSelectedPDF(){
   window._teamBranches = orig_b;
 }
 
+// ── بيانات المشرفين للتصدير ────────────────────────────────────
+let _supInfoMap = {};
+
+async function buildSupInfoMap(plans){
+  _supInfoMap = {};
+  if(!plans.length) return;
+
+  const levelLabel = {gm:'مدير عام', dm:'مدير منطقة', sup:'مشرف تنسيق', supervisor:'مشرف تنسيق'};
+  const grpLabel   = g => GROUPS[g]?.label || g || '—';
+
+  try{
+    // جيب بيانات المشرفين من users
+    const supNames = [...new Set(plans.map(p=>p.supervisor_name).filter(Boolean))];
+    const supData  = await fetch(
+      `${SUPABASE_URL}/rest/v1/users?name=in.(${supNames.map(n=>encodeURIComponent(n)).join(',')})&select=name,level,role,groups,route`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    ).then(r=>r.ok?r.json():[]).catch(()=>[]);
+
+    // جيب عدد الفروع والمنسقين لكل مجموعة/خط سير
+    const branchStats = await fetch(
+      `${SUPABASE_URL}/rest/v1/branches?select=route,grp`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    ).then(r=>r.ok?r.json():[]).catch(()=>[]);
+
+    const repStats = await fetch(
+      `${SUPABASE_URL}/rest/v1/users?user_type=eq.rep&select=name,route,grp`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    ).then(r=>r.ok?r.json():[]).catch(()=>[]);
+
+    supNames.forEach(name=>{
+      const u = supData.find(s=>s.name===name) || {};
+      const groups = Array.isArray(u.groups) ? u.groups : (u.groups||'').split(',').filter(Boolean);
+      const grpLabels = groups.map(grpLabel).join(' / ') || '—';
+
+      // عدد خطوط السير في مجموعاته
+      const routesSet = new Set(branchStats.filter(b=>groups.includes(b.grp)).map(b=>b.route));
+      // عدد المنسقين
+      const repsCount = repStats.filter(r=>groups.includes(r.grp)).length;
+      // عدد الفروع
+      const branchesCount = branchStats.filter(b=>groups.includes(b.grp)).length;
+
+      _supInfoMap[name] = {
+        roleLabel    : levelLabel[u.level||u.role] || 'مشرف تنسيق',
+        groupLabel   : grpLabels,
+        routesCount  : routesSet.size,
+        repsCount,
+        branchesCount
+      };
+    });
+  }catch(e){ console.warn('buildSupInfoMap error:', e); }
+}
+
 async function teamPlansExportExcel(){
   if(typeof XLSX === 'undefined'){ showToast('جاري تحميل مكتبة Excel...','info'); return; }
   const plans    = window._teamPlans    || [];
@@ -16170,6 +16222,9 @@ async function teamPlansExportExcel(){
   const {start}  = teamGetWeekRange(weekType);
   const wb       = XLSX.utils.book_new();
 
+  // جيب بيانات المشرفين
+  await buildSupInfoMap(plans);
+
   plans.forEach(plan => {
     const planB = branches.filter(b=>b.plan_id===plan.id);
     const total = planB.length;
@@ -16192,6 +16247,8 @@ async function teamPlansExportExcel(){
       ['الطحان جولدن دايتس — Al Tahhan Golden Dates', ...Array(numCols-1).fill('')],
       [`خطة العمل الأسبوعية — ${plan.supervisor_name}`, ...Array(numCols-1).fill('')],
       [`الفترة: ${plan.week_start} ← ${plan.week_end}  |  إجمالي: ${total}  |  تم: ${done}  |  إنجاز: ${pct}%`, ...Array(numCols-1).fill('')],
+      // ── بيانات المشرف ──
+      [`المسمى الوظيفي: ${_supInfoMap[plan.supervisor_name]?.roleLabel||'مشرف تنسيق'}  |  المجموعة: ${_supInfoMap[plan.supervisor_name]?.groupLabel||'—'}  |  خطوط السير: ${_supInfoMap[plan.supervisor_name]?.routesCount||'—'}  |  المنسقون: ${_supInfoMap[plan.supervisor_name]?.repsCount||'—'}  |  الفروع: ${_supInfoMap[plan.supervisor_name]?.branchesCount||'—'}`, ...Array(numCols-1).fill('')],
       Array(numCols).fill(''),   // spacer
       COLS
     ];
@@ -16237,6 +16294,7 @@ async function teamPlansExportExcel(){
       {s:{r:1,c:0}, e:{r:1,c:numCols-1}},
       {s:{r:2,c:0}, e:{r:2,c:numCols-1}},
       {s:{r:3,c:0}, e:{r:3,c:numCols-1}},
+      {s:{r:4,c:0}, e:{r:4,c:numCols-1}},
       {s:{r:R-1,c:0}, e:{r:R-1,c:numCols-1}},
     ];
 
@@ -16249,12 +16307,15 @@ async function teamPlansExportExcel(){
     // Row 2 — week info
     sty(2,0,{font:font(0,10,C.caramel,true), fill:fill(C.lightCream), alignment:align('center'), border:border('thin',C.greyLine)});
 
-    // Row 3 — spacer
-    for(let c=0;c<numCols;c++) sty(3,c,{fill:fill(C.darkBrown)});
+    // Row 3 — supervisor info
+    sty(3,0,{font:font(1,10,C.darkBrown), fill:fill('FFF8E1'), alignment:align('center'), border:border('thin','FFD54F')});
 
-    // Row 4 — headers
+    // Row 4 — spacer
+    for(let c=0;c<numCols;c++) sty(4,c,{fill:fill(C.darkBrown)});
+
+    // Row 5 — headers
     for(let c=0;c<numCols;c++){
-      sty(4,c,{font:font(1,10,C.cream), fill:fill(C.caramel), alignment:align('center'), border:border('medium',C.darkBrown)});
+      sty(5,c,{font:font(1,10,C.cream), fill:fill(C.caramel), alignment:align('center'), border:border('medium',C.darkBrown)});
     }
 
     // Data rows
@@ -16296,8 +16357,9 @@ async function teamPlansExportExcel(){
     ws['!rows'][0] = {hpt:36};
     ws['!rows'][1] = {hpt:28};
     ws['!rows'][2] = {hpt:20};
-    ws['!rows'][3] = {hpt:8};
-    ws['!rows'][4] = {hpt:26};
+    ws['!rows'][3] = {hpt:22};
+    ws['!rows'][4] = {hpt:8};
+    ws['!rows'][5] = {hpt:26};
 
     const sheetName = (plan.supervisor_name||'مشرف').slice(0,28);
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
@@ -16308,10 +16370,13 @@ async function teamPlansExportExcel(){
 }
 
 // ── تصدير PDF ────────────────────────────────────────────────────────────────
-function teamPlansExportPDF(){
+async function teamPlansExportPDF(){
   const plans    = window._teamPlans    || [];
   const branches = window._teamBranches || [];
   if(!plans.length){ showToast('لا توجد بيانات للتصدير','err'); return; }
+
+  // جيب بيانات المشرفين
+  await buildSupInfoMap(plans);
 
   const weekType = document.getElementById('tp-week-filter')?.value || 'current';
   const {start, end} = teamGetWeekRange(weekType);
@@ -16357,6 +16422,13 @@ function teamPlansExportPDF(){
       <div class="hdr-co">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
       <div class="hdr-title">خطة العمل الأسبوعية — ${plan.supervisor_name}</div>
       <div class="hdr-info">الفترة: ${plan.week_start} ← ${plan.week_end} &nbsp;|&nbsp; الحالة: ${stLabel}</div>
+      <div style="background:#FFF8E1;border:1px solid #FFD54F;padding:6px 10px;font-size:10px;color:#4B3C1A;display:flex;gap:16px;flex-wrap:wrap;justify-content:center">
+        <span>👤 <b>المسمى:</b> ${_supInfoMap[plan.supervisor_name]?.roleLabel||'مشرف تنسيق'}</span>
+        <span>🗂️ <b>المجموعة:</b> ${_supInfoMap[plan.supervisor_name]?.groupLabel||'—'}</span>
+        <span>🛣️ <b>خطوط السير:</b> ${_supInfoMap[plan.supervisor_name]?.routesCount||'—'}</span>
+        <span>👥 <b>المنسقون:</b> ${_supInfoMap[plan.supervisor_name]?.repsCount||'—'}</span>
+        <span>🏪 <b>الفروع:</b> ${_supInfoMap[plan.supervisor_name]?.branchesCount||'—'}</span>
+      </div>
       <div class="kpi-bar">
         <div class="kpi" style="background:#EEF4FF;color:#1565C0">إجمالي: ${total}</div>
         <div class="kpi" style="background:#E8F5E9;color:#2E7D32">تم: ${done}</div>
