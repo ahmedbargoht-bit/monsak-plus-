@@ -1752,6 +1752,19 @@ h2,h3{color:#2C1F0A}
               </div>
             </div>
 
+            <!-- أزرار التصدير -->
+            <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+              <button onclick="exportBranchesExcel()"
+                style="display:flex;align-items:center;gap:6px;padding:8px 16px;background:#1A7A4A;color:#fff;border:none;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;font-weight:700;cursor:pointer">
+                <i class="ti ti-file-spreadsheet"></i> تصدير Excel
+              </button>
+              <button onclick="exportBranchesPDF()"
+                style="display:flex;align-items:center;gap:6px;padding:8px 16px;background:#731E2E;color:#EDE5D8;border:none;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;font-weight:700;cursor:pointer">
+                <i class="ti ti-file-type-pdf"></i> تصدير PDF
+              </button>
+              <span id="br-export-msg" style="font-size:11px;color:#1A7A4A;align-self:center;display:none"></span>
+            </div>
+
             <!-- بحث -->
             <input type="text" id="br-search" placeholder="🔍 ابحث عن فرع أو خط سير..." oninput="loadBranches()" style="width:100%;margin-bottom:10px"/>
 
@@ -10244,6 +10257,261 @@ function brStatusChange(cb){
   cb.closest('.br-cb-lbl').classList.toggle('active',cb.checked);
   loadBranches();
 }
+
+// ══════════════════════════════════════════════════════════════
+// تصدير الفروع والعملاء — Excel و PDF
+// ══════════════════════════════════════════════════════════════
+
+// جيب البيانات المفلترة الحالية
+async function getBranchesFiltered(){
+  const selGrps   = [...document.querySelectorAll('.br-grp-cb:checked')].map(c=>c.value).filter(v=>v!=='all');
+  const selStatus = [...document.querySelectorAll('.br-status-cb:checked')].map(c=>c.value).filter(v=>v!=='all');
+  const search    = (document.getElementById('br-search')?.value||'').toLowerCase();
+
+  let data = [];
+  try{
+    const res = await sb('branches',{},{limit:2000});
+    if(res && res.length) data = res;
+  }catch(e){}
+
+  if(selGrps.length)   data = data.filter(b=>selGrps.includes(b.grp));
+  if(selStatus.length) data = data.filter(b=>selStatus.includes(b.status));
+  if(search)           data = data.filter(b=>
+    (b.branch_name||'').toLowerCase().includes(search)||
+    (b.route||'').toLowerCase().includes(search)
+  );
+  return data;
+}
+
+// ── تصدير Excel ───────────────────────────────────────────────
+async function exportBranchesExcel(){
+  const msgEl = document.getElementById('br-export-msg');
+  if(msgEl){ msgEl.style.display='inline'; msgEl.textContent='⏳ جارٍ التصدير...'; }
+
+  const data = await getBranchesFiltered();
+  if(!data.length){ alert('لا توجد بيانات للتصدير'); if(msgEl) msgEl.style.display='none'; return; }
+
+  // تجميع حسب المجموعة ثم خط السير
+  const grouped = {};
+  data.forEach(b=>{
+    const grpLabel = GROUPS[b.grp]?.label || b.grp || 'غير محدد';
+    const route    = b.route || 'غير محدد';
+    if(!grouped[grpLabel]) grouped[grpLabel] = {};
+    if(!grouped[grpLabel][route]) grouped[grpLabel][route] = [];
+    grouped[grpLabel][route].push(b);
+  });
+
+  const wb  = XLSX.utils.book_new();
+  const now = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
+
+  // شيت "كل الفروع"
+  const allRows = [
+    ['الطحان جولدن دايتس — قائمة الفروع والعملاء','','','',''],
+    [`تاريخ التصدير: ${now}  |  إجمالي: ${data.length} فرع`,'','','',''],
+    [''],
+    ['اسم الفرع','خط السير','المجموعة','صنف العميل','الحالة'],
+  ];
+
+  // مرتبة حسب المجموعة ثم خط السير
+  Object.entries(grouped).sort().forEach(([grp, routes])=>{
+    Object.entries(routes).sort().forEach(([route, branches])=>{
+      branches.forEach(b=>{
+        const statusAr = b.status==='active'?'نشط': b.status==='suspended'?'متوقف':'مغلق';
+        allRows.push([b.branch_name||'—', route, grp, b.client_type||'—', statusAr]);
+      });
+    });
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(allRows);
+
+  // عرض الأعمدة
+  ws['!cols'] = [{wch:30},{wch:28},{wch:20},{wch:14},{wch:10}];
+
+  // Merges للهيدر
+  ws['!merges'] = [
+    {s:{r:0,c:0},e:{r:0,c:4}},
+    {s:{r:1,c:0},e:{r:1,c:4}},
+  ];
+
+  // ستايل الهيدر
+  const headerStyle = {
+    font:{bold:true,sz:14,color:{rgb:'EDE5D8'}},
+    fill:{fgColor:{rgb:'2C1F0A'}},
+    alignment:{horizontal:'center',readingOrder:2}
+  };
+  const subStyle = {
+    font:{sz:10,color:{rgb:'4B3C1A'}},
+    fill:{fgColor:{rgb:'F5F0E8'}},
+    alignment:{horizontal:'center',readingOrder:2}
+  };
+  const colStyle = {
+    font:{bold:true,sz:10,color:{rgb:'EDE5D8'}},
+    fill:{fgColor:{rgb:'4B3C1A'}},
+    alignment:{horizontal:'center',readingOrder:2}
+  };
+
+  ['A1','B1','C1','D1','E1'].forEach(k=>{ if(ws[k]) ws[k].s = headerStyle; });
+  ['A2','B2','C2','D2','E2'].forEach(k=>{ if(ws[k]) ws[k].s = subStyle; });
+  ['A4','B4','C4','D4','E4'].forEach(k=>{ if(ws[k]) ws[k].s = colStyle; });
+
+  // تلوين صفوف البيانات بالتبادل
+  for(let r=4; r<allRows.length; r++){
+    const rowBg = r%2===0 ? 'FFF8F0' : 'FFFFFF';
+    ['A','B','C','D','E'].forEach(c=>{
+      const cell = ws[`${c}${r+1}`];
+      if(cell){ cell.s = {fill:{fgColor:{rgb:rowBg}}, alignment:{horizontal:'right',readingOrder:2}, font:{sz:10}}; }
+    });
+    // لون عمود الحالة
+    const statusCell = ws[`E${r+1}`];
+    if(statusCell && allRows[r]){
+      const st = allRows[r][4];
+      const stColor = st==='نشط'?'1A7A4A': st==='متوقف'?'E65100':'B71C1C';
+      if(statusCell.s) statusCell.s.font = {bold:true, color:{rgb:stColor}, sz:10};
+    }
+  }
+
+  XLSX.utils.book_append_sheet(wb, ws, 'كل الفروع');
+
+  // شيت لكل مجموعة
+  Object.entries(grouped).sort().forEach(([grpName, routes])=>{
+    const grpRows = [
+      [`الطحان جولدن دايتس — ${grpName}`,'','','',''],
+      [`تاريخ: ${now}`,'','','',''],
+      [''],
+      ['اسم الفرع','خط السير','المجموعة','صنف العميل','الحالة'],
+    ];
+
+    // فاصل لكل خط سير
+    Object.entries(routes).sort().forEach(([route, branches])=>{
+      grpRows.push([`📍 خط السير: ${route}`, '', '', `(${branches.length} فروع)`, '']);
+      branches.forEach(b=>{
+        const statusAr = b.status==='active'?'نشط': b.status==='suspended'?'متوقف':'مغلق';
+        grpRows.push([b.branch_name||'—', route, grpName, b.client_type||'—', statusAr]);
+      });
+    });
+
+    const wsGrp = XLSX.utils.aoa_to_sheet(grpRows);
+    wsGrp['!cols'] = [{wch:30},{wch:28},{wch:18},{wch:14},{wch:10}];
+    wsGrp['!merges'] = [{s:{r:0,c:0},e:{r:0,c:4}},{s:{r:1,c:0},e:{r:1,c:4}}];
+
+    // ستايل هيدر المجموعة
+    ['A1','B1','C1','D1','E1'].forEach(k=>{ if(wsGrp[k]) wsGrp[k].s = headerStyle; });
+    ['A4','B4','C4','D4','E4'].forEach(k=>{ if(wsGrp[k]) wsGrp[k].s = colStyle; });
+
+    const sheetName = grpName.replace(/[^a-zA-Z؀-ۿ\s]/g,'').slice(0,28) || 'مجموعة';
+    XLSX.utils.book_append_sheet(wb, wsGrp, sheetName);
+  });
+
+  XLSX.writeFile(wb, `فروع_العملاء_${now}.xlsx`);
+  if(msgEl){ msgEl.textContent='✅ تم التصدير'; setTimeout(()=>msgEl.style.display='none', 2000); }
+}
+
+// ── تصدير PDF ─────────────────────────────────────────────────
+async function exportBranchesPDF(){
+  const msgEl = document.getElementById('br-export-msg');
+  if(msgEl){ msgEl.style.display='inline'; msgEl.textContent='⏳ جارٍ إنشاء PDF...'; }
+
+  const data = await getBranchesFiltered();
+  if(!data.length){ alert('لا توجد بيانات للتصدير'); if(msgEl) msgEl.style.display='none'; return; }
+
+  // تجميع حسب المجموعة ثم خط السير
+  const grouped = {};
+  data.forEach(b=>{
+    const grpLabel = GROUPS[b.grp]?.label || b.grp || 'غير محدد';
+    const route    = b.route || 'غير محدد';
+    if(!grouped[grpLabel]) grouped[grpLabel] = {};
+    if(!grouped[grpLabel][route]) grouped[grpLabel][route] = [];
+    grouped[grpLabel][route].push(b);
+  });
+
+  const now = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
+
+  // بناء HTML للـ PDF
+  let html = `
+  <!DOCTYPE html>
+  <html dir="rtl" lang="ar">
+  <head>
+  <meta charset="UTF-8"/>
+  <style>
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { font-family:'Cairo','Arial',sans-serif; font-size:11px; color:#2C1F0A; background:#fff; direction:rtl; }
+    .page-header { background:#2C1F0A; color:#EDE5D8; padding:14px 20px; text-align:center; }
+    .page-header h1 { font-size:16px; font-weight:900; margin-bottom:4px; }
+    .page-header p  { font-size:10px; opacity:.7; }
+    .group-header { background:#4B3C1A; color:#EDE5D8; padding:8px 16px; font-size:13px; font-weight:700; margin-top:16px; }
+    .route-header { background:#C8A96E22; color:#4B3C1A; padding:6px 14px; font-size:11px; font-weight:700; border-right:4px solid #C8A96E; margin:6px 0 0; }
+    table { width:100%; border-collapse:collapse; margin-bottom:4px; }
+    thead tr { background:#4B3C1A; color:#EDE5D8; }
+    thead th { padding:6px 8px; font-size:10px; font-weight:700; text-align:right; }
+    tbody tr:nth-child(even) { background:#FFF8F0; }
+    tbody tr:hover { background:#F5EDE0; }
+    tbody td { padding:5px 8px; font-size:10px; border-bottom:1px solid #EEE8DE; }
+    .badge-active   { color:#1A7A4A; font-weight:700; }
+    .badge-suspended{ color:#E65100; font-weight:700; }
+    .badge-closed   { color:#B71C1C; font-weight:700; }
+    .summary { background:#F5F0E8; padding:8px 16px; font-size:11px; color:#4B3C1A; margin-top:4px; }
+    .footer { text-align:center; font-size:9px; color:#aaa; margin-top:20px; padding:8px; border-top:1px solid #eee; }
+    @media print {
+      .group-header { page-break-before: auto; }
+      table { page-break-inside: avoid; }
+    }
+  </style>
+  </head>
+  <body>
+  <div class="page-header">
+    <h1>🌴 الطحان جولدن دايتس — قائمة الفروع والعملاء</h1>
+    <p>تاريخ التصدير: ${now} | إجمالي: ${data.length} فرع | ${Object.keys(grouped).length} مجموعة</p>
+  </div>`;
+
+  // ملخص سريع
+  html += `<div class="summary">
+    📊 إجمالي الفروع: <b>${data.length}</b> |
+    🟢 نشط: <b>${data.filter(b=>b.status==='active').length}</b> |
+    🟡 متوقف: <b>${data.filter(b=>b.status==='suspended').length}</b> |
+    🔴 مغلق: <b>${data.filter(b=>b.status==='closed').length}</b>
+  </div>`;
+
+  // كل مجموعة
+  Object.entries(grouped).sort().forEach(([grpName, routes])=>{
+    const grpTotal = Object.values(routes).reduce((s,r)=>s+r.length,0);
+    html += `<div class="group-header">📍 ${grpName} — (${grpTotal} فرع | ${Object.keys(routes).length} خطوط سير)</div>`;
+
+    Object.entries(routes).sort().forEach(([route, branches])=>{
+      html += `<div class="route-header">🚗 ${route} &nbsp;(${branches.length} فرع)</div>`;
+      html += `<table><thead><tr>
+        <th>#</th><th>اسم الفرع</th><th>صنف العميل</th><th>الحالة</th>
+      </tr></thead><tbody>`;
+      branches.forEach((b,i)=>{
+        const stCls = b.status==='active'?'badge-active':b.status==='suspended'?'badge-suspended':'badge-closed';
+        const stAr  = b.status==='active'?'🟢 نشط':b.status==='suspended'?'🟡 متوقف':'🔴 مغلق';
+        html += `<tr>
+          <td style="color:#aaa;width:30px">${i+1}</td>
+          <td><b>${b.branch_name||'—'}</b></td>
+          <td style="color:#555">${b.client_type||'—'}</td>
+          <td class="${stCls}">${stAr}</td>
+        </tr>`;
+      });
+      html += `</tbody></table>`;
+    });
+  });
+
+  html += `<div class="footer">Al Tahhan Golden Dates © ${new Date().getFullYear()} — نظام إدارة التنسيق الميداني</div>`;
+  html += `</body></html>`;
+
+  // افتح نافذة طباعة
+  const printWin = window.open('','_blank','width=900,height=700');
+  if(!printWin){ alert('يرجى السماح بالـ popups'); if(msgEl) msgEl.style.display='none'; return; }
+  printWin.document.write(html);
+  printWin.document.close();
+  printWin.onload = ()=>{
+    printWin.focus();
+    printWin.print();
+  };
+
+  if(msgEl){ msgEl.textContent='✅ تم فتح نافذة الطباعة'; setTimeout(()=>msgEl.style.display='none', 2000); }
+}
+
+// ══════════════════════════════════════════════════════════════
 
 async function loadBranches(){
   const selGrps    = [...document.querySelectorAll('.br-grp-cb:checked')].map(c=>c.value).filter(v=>v!=='all');
