@@ -6138,18 +6138,15 @@ const SPP_ST = {
 };
 
 function sppAppInit(){
-  // ✅ إصلاح: التطبيق بيستخدم المتغير cu مش currentUser
-  _sppAppUser = (typeof cu !== 'undefined' && cu)
-    ? { name: cu.name, level: cu.level, role: cu.level, sector: cu.groups?cu.groups.join(','):'', grp: cu.groups?.[0]||'' }
-    : (typeof currentUser !== 'undefined' ? currentUser : (window._salesUser || null));
-
+  _sppAppUser = (typeof cu !== 'undefined' && cu) ? cu : null;
+  
   const nameEl = document.getElementById('spp-app-name');
-  if(nameEl) nameEl.textContent = _sppAppUser?.name || cu?.name || 'مشرف المبيعات';
+  if(nameEl) nameEl.textContent = cu?.name || 'مشرف المبيعات';
 
-  // تعيين تاريخ بداية ونهاية الأسبوع الحالي (السبت → الجمعة)
+  // تعيين تاريخ الأسبوع الحالي (السبت → الجمعة)
   const today = new Date();
-  const day = today.getDay(); // 0=أحد .. 6=سبت
-  const diff = day === 6 ? 0 : -(day + 1); // اللي فات السبت
+  const day = today.getDay();
+  const diff = day === 6 ? 0 : -(day + 1);
   const sat = new Date(today); sat.setDate(today.getDate() + diff);
   const fri = new Date(sat);   fri.setDate(sat.getDate() + 6);
   const fmt = d => d.toISOString().slice(0,10);
@@ -6158,16 +6155,16 @@ function sppAppInit(){
   if(fromEl && !fromEl.value) fromEl.value = fmt(sat);
   if(toEl   && !toEl.value)   toEl.value   = fmt(fri);
 }
+}
 
 async function sppAppLoad(){
-  const list   = document.getElementById('spp-app-list');
+  const list = document.getElementById('spp-app-list');
   if(!list) return;
   list.innerHTML=`<div style="text-align:center;padding:2rem;color:#aaa">⏳ جارٍ التحميل...</div>`;
 
   const week   = document.getElementById('spp-app-week')?.value || 'current';
   const status = document.getElementById('spp-app-status')?.value || 'all';
-  // ✅ إصلاح: جيب الاسم من cu لو _sppAppUser null
-  const userName = _sppAppUser?.name || (typeof cu !== 'undefined' ? cu?.name : '') || '';
+  const userName = (typeof cu !== 'undefined' && cu?.name) ? cu.name : '';
 
   // نطاق التاريخ
   const today = new Date();
@@ -6347,18 +6344,29 @@ async function saveSppNewPlan(status){
   const to      = document.getElementById('spp-new-to')?.value;
   const notes   = document.getElementById('spp-new-notes')?.value||'';
   const msg     = document.getElementById('spp-new-msg');
-  // ✅ إصلاح: fallback على cu
-  const user = _sppAppUser || (typeof cu !== 'undefined' && cu ? {name:cu.name, level:cu.level, role:cu.level, sector:cu.groups?.[0]||'', grp:cu.groups?.[0]||''} : {});
+  const user    = (typeof cu !== 'undefined' && cu) ? cu : {};
 
   if(!from||!to){ msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';msg.textContent='❌ التاريخ مطلوب'; return; }
+  if(!user.name){ msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';msg.textContent='❌ خطأ في بيانات المستخدم — أعد تسجيل الدخول'; return; }
+
+  // جيب staff_id من sales_staff
+  let staffId = user.staff_id || null;
+  if(!staffId){
+    try{
+      const sr = await fetch(`${SUPABASE_URL}/rest/v1/sales_staff?name=eq.${encodeURIComponent(user.name)}&select=id&limit=1`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+      if(sr.ok){ const sd=await sr.json(); staffId=sd[0]?.id||null; }
+    }catch(e){}
+  }
 
   const planPayload = {
-    staff_name: user.name||'',
-    sector: user.sector||user.grp||'',
-    role: user.role||'sales_sup',
-    week_start: from,
-    week_end: to,
-    month: from.slice(0,7),
+    staff_id:     staffId,
+    staff_name:   user.name,
+    sector:       user.sector || (user.groups||[]).join(',') || '',
+    role:         user.role || 'sales_sup',
+    week_start:   from,
+    week_end:     to,
+    month:        from.slice(0,7),
     target_amount: target,
     target_visits: visits,
     notes,
@@ -6373,7 +6381,9 @@ async function saveSppNewPlan(status){
   });
 
   if(!planRes.ok){
-    msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';msg.textContent='❌ فشل الحفظ';
+    const err = await planRes.text();
+    msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';
+    msg.textContent='❌ فشل الحفظ: '+err.substring(0,80);
     return;
   }
 
@@ -6392,6 +6402,11 @@ async function saveSppNewPlan(status){
   }
 
   document.getElementById('modal-spp-new').style.display='none';
+  // reset form
+  document.getElementById('spp-new-target').value='';
+  document.getElementById('spp-new-visits').value='';
+  document.getElementById('spp-new-notes').value='';
+  _sppItems=[];
   sppAppLoad();
   showToast(status==='submitted'?'📤 تم رفع الخطة للاعتماد':'💾 تم حفظ الخطة كمسودة');
 }
