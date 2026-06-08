@@ -9076,9 +9076,123 @@ async function loadSalesUsersPanel(){
   if(!tbody) return;
   tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:1rem">جاري التحميل...</td></tr>';
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&select=*&order=name.asc`,
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/sales_staff?select=*&order=name.asc`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     const data = await res.json();
+    if(!Array.isArray(data)||!data.length){
+      tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:1rem;color:#aaa">لا يوجد مشرفو مبيعات — اضغط "إضافة مستخدم"</td></tr>';
+      return;
+    }
+    const roleLabel = r => r==='sales_gm'
+      ? '<span class="badge b-gold">GM</span>'
+      : r==='sales_manager'
+        ? '<span class="badge b-orange">مدير بيع</span>'
+        : '<span class="badge b-blue">مشرف بيع</span>';
+
+    const sectorBadges = s => (s||'').split(',').filter(Boolean).map(g=>`
+      <span class="badge" style="background:${GROUPS[g]?.color||'#888'}22;color:${GROUPS[g]?.color||'#555'};margin-left:3px">
+        ${GROUPS[g]?.label||g}
+      </span>`).join('');
+
+    tbody.innerHTML=data.map((u,i)=>`<tr>
+      <td>${i+1}</td>
+      <td><b>${u.name}</b></td>
+      <td>${roleLabel(u.role)}</td>
+      <td style="font-size:12px;font-family:monospace">${u.pass_hash||'—'}</td>
+      <td style="max-width:220px">${sectorBadges(u.sector)||'—'}</td>
+      <td><span class="badge ${u.active?'b-green':'b-gray'}">${u.active?'نشط':'موقوف'}</span></td>
+      <td>
+        <div style="display:flex;gap:4px">
+          <button onclick="editSalesStaff('${u.id}')" class="btn btn-sm" style="background:#E3F2FD;color:#1565C0"><i class="ti ti-edit"></i></button>
+          <button onclick="toggleSalesStaff('${u.id}',${u.active})" class="btn btn-sm" style="background:${u.active?'#FFF8E1':'#E8F5E9'};color:${u.active?'#E65100':'#1A7A4A'}">
+            <i class="ti ti-${u.active?'pause':'player-play'}"></i>
+          </button>
+          <button onclick="deleteSalesStaff('${u.id}','${u.name.replace(/'/g,"\\'")}' )" class="btn btn-sm" style="background:#FFEBEE;color:#C0392B"><i class="ti ti-trash"></i></button>
+        </div>
+      </td>
+    </tr>`).join('');
+  }catch(e){
+    tbody.innerHTML=`<tr><td colspan="7" style="text-align:center;color:var(--red)">تعذر التحميل: ${e.message}</td></tr>`;
+  }
+}
+
+async function editSalesStaff(id){
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/sales_staff?id=eq.${id}&select=*`,
+    {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+  const data = await res.json();
+  const u = data[0]; if(!u) return;
+
+  // تعبئة modal التعديل الموجود
+  document.getElementById('sale-edit-id').value   = id;
+  document.getElementById('sale-edit-name').value = u.name||'';
+  document.getElementById('sale-edit-pass').value = u.pass_hash||'';
+  document.getElementById('sale-edit-level').value = u.role==='sales_gm'?'gm':u.role==='sales_manager'?'manager':'sup';
+
+  // المجموعات
+  const grps = (u.sector||'').split(',').map(g=>g.trim());
+  document.querySelectorAll('.sale-edit-grp-cb').forEach(c=>c.checked=grps.includes(c.value));
+
+  // إخفاء قسم المشرفين (غير متعلق بـ sales_staff)
+  const wrap = document.getElementById('sale-edit-sups-wrap');
+  if(wrap) wrap.innerHTML='<div style="color:#aaa;font-size:12px">— غير متاح في هذا النظام —</div>';
+
+  openModal('modal-edit-sales');
+}
+
+async function saveSalesUser(){
+  const id    = document.getElementById('sale-edit-id').value;
+  const name  = document.getElementById('sale-edit-name').value.trim();
+  const pass  = document.getElementById('sale-edit-pass').value.trim();
+  const level = document.getElementById('sale-edit-level').value;
+  const grps  = [...document.querySelectorAll('.sale-edit-grp-cb:checked')].map(c=>c.value).join(',');
+  const ok    = document.getElementById('sale-edit-ok');
+  if(!name||!pass){alert('أدخل الاسم وكلمة المرور');return;}
+
+  const roleMap = {gm:'sales_gm', manager:'sales_manager', sup:'sales_sup'};
+
+  // حدّث في sales_staff
+  const r1 = await fetch(`${SUPABASE_URL}/rest/v1/sales_staff?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({name, pass_hash:pass, role:roleMap[level]||'sales_sup', sector:grps})
+  });
+
+  // حدّث في users أيضاً للتزامن
+  await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(name)}&role=eq.sales`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({pass_hash:pass, level, groups:grps})
+  });
+
+  if(r1.ok){
+    ok.style.display='block'; ok.textContent='✅ تم الحفظ';
+    setTimeout(()=>{closeModal('modal-edit-sales'); loadSalesUsersPanel();},1000);
+  }
+}
+
+async function toggleSalesStaff(id, currentActive){
+  const newActive = !currentActive;
+  const label = newActive?'تفعيل':'إيقاف';
+  if(!confirm(`${label} هذا المشرف؟`)) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/sales_staff?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({active:newActive})
+  });
+  loadSalesUsersPanel();
+}
+
+async function deleteSalesStaff(id, name){
+  confirmDelete('مشرف المبيعات', name, async()=>{
+    // احذف من sales_staff
+    await fetch(`${SUPABASE_URL}/rest/v1/sales_staff?id=eq.${id}`,{
+      method:'DELETE', headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    showToast('🗑️ تم حذف المشرف: '+name);
+    loadSalesUsersPanel();
+    loadSppStaffDropdowns();
+  });
+}
     if(!Array.isArray(data)||!data.length){
       tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:1rem;color:#aaa">لا يوجد مستخدمون — اضغط "إضافة مستخدم"</td></tr>';
       return;
@@ -9122,102 +9236,32 @@ async function addSalesUser(){
   const ok    = document.getElementById('sale-add-ok');
   ok.style.display='none';
   if(!name||!pass){alert('أدخل الاسم وكلمة المرور');return;}
-  if(!grps){alert('اختر منطقة واحدة على الأقل');return;}
-  const res=await fetch(`${SUPABASE_URL}/rest/v1/users`,{
+
+  const roleMap = {gm:'sales_gm', manager:'sales_manager', sup:'sales_sup'};
+
+  // احفظ في users
+  const r1 = await fetch(`${SUPABASE_URL}/rest/v1/users`,{
     method:'POST',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body:JSON.stringify({name, pass_hash:pass, role:'sales', level, groups:grps, status:'active'})
   });
-  if(res.ok||res.status===201){
+
+  // احفظ في sales_staff
+  await fetch(`${SUPABASE_URL}/rest/v1/sales_staff`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({name, pass_hash:pass, role:roleMap[level]||'sales_sup', sector:grps, active:true})
+  });
+
+  if(r1.ok||r1.status===201){
     ok.style.display='block'; ok.textContent='✅ تم إضافة '+name;
     document.getElementById('sale-name').value='';
     document.getElementById('sale-pass').value='';
     document.querySelectorAll('.sale-grp-cb').forEach(c=>c.checked=false);
-    setTimeout(()=>{closeModal('modal-add-sales'); loadSalesUsersPanel();},1200);
+    setTimeout(()=>{closeModal('modal-add-sales'); loadSalesUsersPanel(); loadSppStaffDropdowns();},1200);
   } else {
     alert('خطأ في الإضافة — تحقق من الاسم');
   }
-}
-
-async function editSalesUser(id){
-  const res=await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${id}&select=*`,
-    {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-  const data=await res.json();
-  const u=data[0]; if(!u)return;
-  document.getElementById('sale-edit-id').value=id;
-  document.getElementById('sale-edit-name').value=u.name||'';
-  document.getElementById('sale-edit-pass').value=u.pass_hash||'';
-  document.getElementById('sale-edit-level').value=u.level||'sup';
-  const grps=(u.groups||'').split(',').map(g=>g.trim());
-  document.querySelectorAll('.sale-edit-grp-cb').forEach(c=>c.checked=grps.includes(c.value));
-
-  // تحميل المشرفين لصلاحيات الأهداف
-  const allowedSups = (u.supervisors||'').split(',').map(s=>s.trim()).filter(Boolean);
-  const wrap = document.getElementById('sale-edit-sups-wrap');
-  wrap.innerHTML = '<div style="color:#aaa;font-size:12px">جاري التحميل...</div>';
-  try{
-    const sRes = await fetch(`${SUPABASE_URL}/rest/v1/sales_targets?select=supervisor_name&order=supervisor_name`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    const sData = sRes.ok ? await sRes.json() : [];
-    const supNames = [...new Set(sData.map(x=>x.supervisor_name).filter(Boolean))];
-    if(!supNames.length){
-      wrap.innerHTML='<div style="color:#aaa;font-size:12px">لا يوجد مشرفون في جدول الأهداف</div>';
-    } else {
-      wrap.innerHTML = supNames.map(s=>`
-        <label style="display:flex;align-items:center;gap:5px;font-size:12px;background:#f9f9f9;border:1px solid #eee;border-radius:6px;padding:4px 8px;cursor:pointer">
-          <input type="checkbox" class="sale-edit-sup-cb" value="${s}" ${allowedSups.includes(s)?'checked':''}/>
-          ${s}
-        </label>`).join('');
-    }
-  }catch(e){ wrap.innerHTML='<div style="color:#C62828;font-size:12px">خطأ في التحميل</div>'; }
-
-  openModal('modal-edit-sales');
-}
-
-async function saveSalesUser(){
-  const id    = document.getElementById('sale-edit-id').value;
-  const name  = document.getElementById('sale-edit-name').value.trim();
-  const pass  = document.getElementById('sale-edit-pass').value.trim();
-  const level = document.getElementById('sale-edit-level').value;
-  const grps  = [...document.querySelectorAll('.sale-edit-grp-cb:checked')].map(c=>c.value).join(',');
-  const sups  = [...document.querySelectorAll('.sale-edit-sup-cb:checked')].map(c=>c.value).join(',');
-  const ok    = document.getElementById('sale-edit-ok');
-  if(!name||!pass){alert('أدخل الاسم وكلمة المرور');return;}
-  if(!grps && level!=='gm'){alert('اختر منطقة واحدة على الأقل');return;}
-  const res=await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${id}`,{
-    method:'PATCH',
-    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-    body:JSON.stringify({name, pass_hash:pass, level, groups:grps, supervisors:sups})
-  });
-  if(res.ok){
-    ok.style.display='block'; ok.textContent='✅ تم الحفظ';
-    setTimeout(()=>{closeModal('modal-edit-sales'); loadSalesUsersPanel();},1000);
-  }
-}
-
-async function toggleSalesUser(id, currentStatus){
-  const newStatus=currentStatus==='inactive'?'active':'inactive';
-  const label=newStatus==='active'?'تفعيل':'إيقاف';
-  if(!confirm(`${label} هذا المستخدم؟`))return;
-  await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${id}`,{
-    method:'PATCH',
-    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-    body:JSON.stringify({status:newStatus})
-  });
-  loadSalesUsersPanel();
-}
-
-async function deleteSalesUser(id, name){
-  if(!confirm(`حذف المستخدم "${name}" نهائياً؟`))return;
-  await fetch(`${SUPABASE_URL}/rest/v1/rpc/delete_attendance_ids`,{
-    method:'POST',headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`},
-    body:JSON.stringify({ids:[id]})
-  });
-  // fallback مباشر
-  await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${id}&role=eq.sales`,{
-    method:'DELETE',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
-  });
-  loadSalesUsersPanel();
 }
 
 // ══════════════════════════════════════════════════════════════
