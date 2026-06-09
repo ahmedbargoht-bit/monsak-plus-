@@ -3964,7 +3964,7 @@ h2,h3{color:#2C1F0A}
           <div class="page-header">
             <div>
               <h2><i class="ti ti-package" style="color:#4B3C1A"></i> أصناف المبيعات</h2>
-              <p>كميات ورصيد الأصناف من تقارير مشرفي المبيعات</p>
+              <p>حركة رصيد الأصناف عبر الزيارات — بيع / توريد / لا حركة</p>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn btn-ghost btn-sm" onclick="sprodLoad()"><i class="ti ti-refresh"></i> تحديث</button>
@@ -3990,13 +3990,13 @@ h2,h3{color:#2C1F0A}
               </div>
               <div class="fld" style="margin:0">
                 <label class="lbl">الفرع</label>
-                <select id="sprod-branch" onchange="sprodLoad()">
+                <select id="sprod-branch" onchange="sprodOnBranchChange()">
                   <option value="all">كل الفروع</option>
                 </select>
               </div>
               <div class="fld" style="margin:0">
-                <label class="lbl">الصنف</label>
-                <input type="text" id="sprod-snf" placeholder="بحث بالصنف..." oninput="sprodLoad()"/>
+                <label class="lbl">المنسق</label>
+                <div id="sprod-rep" style="padding:8px;background:#f9f6f1;border-radius:8px;font-size:12px;color:#4B3C1A;font-weight:700;min-height:36px;border:1.5px solid var(--border)">—</div>
               </div>
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end;margin-top:10px">
@@ -4015,16 +4015,11 @@ h2,h3{color:#2C1F0A}
           <!-- KPI -->
           <div id="sprod-kpi" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px"></div>
 
-          <!-- الجدول -->
+          <!-- الجدول الديناميكي -->
           <div class="card">
-            <div class="tbl-wrap">
-              <table>
-                <thead>
-                  <tr style="background:#4B3C1A;color:#EDE5D8">
-                    <th>#</th><th>المجموعة</th><th>خط السير</th><th>الفرع</th>
-                    <th>المنسق</th><th>الصنف</th><th>رصيد الرف</th><th>رصيد المخزن</th><th>التاريخ</th>
-                  </tr>
-                </thead>
+            <div class="tbl-wrap" id="sprod-tbl-wrap">
+              <table id="sprod-table">
+                <thead id="sprod-thead"></thead>
                 <tbody id="sprod-tbody"></tbody>
               </table>
             </div>
@@ -13015,6 +13010,7 @@ function sprodOnGrpChange(){
   routeSel.innerHTML  = '<option value="all">كل الخطوط</option>' +
     adminGetRoutes(grp).map(r=>`<option value="${r}">${r}</option>`).join('');
   branchSel.innerHTML = '<option value="all">كل الفروع</option>';
+  document.getElementById('sprod-rep').textContent = '—';
   sprodLoad();
 }
 
@@ -13026,6 +13022,21 @@ function sprodOnRouteChange(){
   adminGetBranches(grp, route).forEach(b=>{
     const o=document.createElement('option'); o.value=b; o.textContent=b; branchSel.appendChild(o);
   });
+  document.getElementById('sprod-rep').textContent = '—';
+  sprodLoad();
+}
+
+function sprodOnBranchChange(){
+  const grp    = document.getElementById('sprod-grp').value;
+  const route  = document.getElementById('sprod-route').value;
+  const branch = document.getElementById('sprod-branch').value;
+  const repEl  = document.getElementById('sprod-rep');
+  if(branch && branch !== 'all'){
+    const rd = ADMIN_ROUTES_DATA.find(r=>r.grp===(grp==='all'?r.grp:grp) && r.branch_name===branch);
+    repEl.textContent = rd?.rep_name || '—';
+  } else {
+    repEl.textContent = '—';
+  }
   sprodLoad();
 }
 
@@ -13033,19 +13044,19 @@ async function sprodLoad(){
   const grp    = document.getElementById('sprod-grp')?.value||'all';
   const route  = document.getElementById('sprod-route')?.value||'all';
   const branch = document.getElementById('sprod-branch')?.value||'all';
-  const snf    = (document.getElementById('sprod-snf')?.value||'').trim();
   const from   = document.getElementById('sprod-from')?.value;
   const to     = document.getElementById('sprod-to')?.value;
   if(!from||!to) return;
 
+  const thead = document.getElementById('sprod-thead');
   const tbody = document.getElementById('sprod-tbody');
-  tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:20px"><div class="spinner" style="margin:0 auto"></div></td></tr>';
+  tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:20px"><div class="spinner" style="margin:0 auto"></div></td></tr>`;
 
+  // جيب البيانات من products
   const grpStr = grp==='all' ? Object.keys(GROUPS).join(',') : grp;
-  let url = `${SUPABASE_URL}/rest/v1/products?grp=in.(${grpStr})&select=*&order=created_at.desc&limit=2000`;
+  let url = `${SUPABASE_URL}/rest/v1/products?grp=in.(${grpStr})&select=*&order=branch.asc,snf.asc,created_at.asc&limit=5000`;
   url += `&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`;
   if(branch!=='all') url += `&branch=eq.${encodeURIComponent(branch)}`;
-  if(snf) url += `&snf=ilike.*${encodeURIComponent(snf)}*`;
 
   let data = [];
   try{
@@ -13053,70 +13064,117 @@ async function sprodLoad(){
     data = await r.json(); if(!Array.isArray(data)) data=[];
   }catch(e){}
 
-  // فلتر خط السير من ADMIN_ROUTES_DATA
+  // فلتر خط السير
   if(route!=='all'){
     const branches = adminGetBranches(grp, route);
     data = data.filter(p=>branches.includes(p.branch));
   }
 
+  if(!data.length){
+    thead.innerHTML=''; tbody.innerHTML='<tr><td colspan="6" style="text-align:center;padding:20px;color:#888">لا توجد بيانات</td></tr>';
+    document.getElementById('sprod-kpi').innerHTML='';
+    return;
+  }
+
+  // استخرج كل التواريخ الفريدة مرتبة
+  const allDates = [...new Set(data.map(p=>p.created_at?.slice(0,10)))].filter(Boolean).sort();
+
+  // حوّل البيانات لـ pivot: branch+snf → {تاريخ: shelf_qty}
+  const pivot = {}; // key: branch|snf
+  const meta  = {}; // key: branch|snf → {grp, branch, snf, name}
+  data.forEach(p=>{
+    const key = `${p.branch}|${p.snf}`;
+    const dt  = p.created_at?.slice(0,10);
+    if(!pivot[key]) pivot[key] = {};
+    if(!meta[key])  meta[key]  = {grp:p.grp, branch:p.branch, snf:p.snf, name:p.name||'—'};
+    pivot[key][dt] = p.shelf_qty ?? 0;
+  });
+
   // KPI
+  const keys = Object.keys(pivot);
   document.getElementById('sprod-kpi').innerHTML = `
     <div class="stat-card"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي السجلات</div></div>
     <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.snf)).size}</div><div class="stat-l">أصناف مختلفة</div></div>
     <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.branch)).size}</div><div class="stat-l">فروع</div></div>
-    <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.name)).size}</div><div class="stat-l">مشرفون</div></div>`;
+    <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.name)).size}</div><div class="stat-l">منسقون</div></div>`;
 
-  tbody.innerHTML = data.map((p,i)=>{
-    const grpInfo = GROUPS[p.grp]||{label:p.grp,color:'#888'};
-    const routeName = _sprodRoutes.find(r=>r.route===p.route)?.route || p.route || '—';
-    const dt = p.created_at ? new Date(p.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'2-digit'}) : '—';
+  // بناء الهيدر الديناميكي
+  const fmtDt = d => {
+    const [y,m,day] = d.split('-');
+    return `${parseInt(day)}/${parseInt(m)}`;
+  };
+
+  thead.innerHTML = `<tr style="background:#4B3C1A;color:#EDE5D8">
+    <th>المجموعة</th>
+    <th>الفرع</th>
+    <th>الصنف</th>
+    ${allDates.map(d=>`<th style="min-width:60px;text-align:center">${fmtDt(d)}</th>`).join('')}
+    <th style="min-width:70px;text-align:center;background:#2C5F2E;color:#fff">آخر رصيد</th>
+    <th style="min-width:80px;text-align:center">الحركة</th>
+  </tr>`;
+
+  // بناء الصفوف
+  const rows = keys.map(key=>{
+    const m   = meta[key];
+    const grpInfo = GROUPS[m.grp]||{label:m.grp,color:'#888'};
+    const vals = allDates.map(d => pivot[key][d] ?? null);
+
+    // احسب الحركة: قارن أول وآخر رصيد
+    const filled = vals.filter(v=>v!==null);
+    const first  = filled[0];
+    const last   = filled[filled.length-1];
+    const diff   = (first!=null && last!=null) ? (last - first) : null;
+
+    let movBadge = '<span style="color:#888;font-size:11px">—</span>';
+    if(diff !== null){
+      if(diff < 0)       movBadge = `<span style="background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700">📉 بيع ${Math.abs(diff)}</span>`;
+      else if(diff > 0)  movBadge = `<span style="background:#D1FAE5;color:#065F46;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700">📦 توريد ${diff}</span>`;
+      else               movBadge = `<span style="background:#F3F4F6;color:#6B7280;padding:2px 8px;border-radius:10px;font-size:11px">لا حركة</span>`;
+    }
+
+    const lastVal = last ?? '—';
+
     return `<tr>
-      <td>${i+1}</td>
-      <td><span style="background:${grpInfo.color}22;color:${grpInfo.color};padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700">${grpInfo.label}</span></td>
-      <td style="font-size:11px">${routeName}</td>
-      <td style="font-size:11px;font-weight:700">${p.branch||'—'}</td>
-      <td style="font-size:11px">${p.name||'—'}</td>
-      <td style="font-size:12px;font-weight:700">${p.snf||'—'}</td>
-      <td style="text-align:center;font-weight:700;color:#1A7A4A">${p.shelf_qty??'—'}</td>
-      <td style="text-align:center;font-weight:700;color:#005CBF">${p.stock_qty??'—'}</td>
-      <td style="font-size:11px;color:#888">${dt}</td>
+      <td><span style="background:${grpInfo.color}22;color:${grpInfo.color};padding:2px 6px;border-radius:8px;font-size:10px;font-weight:700">${grpInfo.label}</span></td>
+      <td style="font-size:11px;font-weight:700">${m.branch}</td>
+      <td style="font-size:11px;max-width:200px">${m.snf}</td>
+      ${vals.map(v=>`<td style="text-align:center;font-size:12px;font-weight:700;color:${v===null?'#ccc':'#2C1F0A'}">${v??'—'}</td>`).join('')}
+      <td style="text-align:center;font-size:13px;font-weight:900;color:#2C5F2E">${lastVal}</td>
+      <td style="text-align:center">${movBadge}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="9" style="text-align:center;padding:20px;color:#888">لا توجد بيانات</td></tr>';
+  });
+
+  tbody.innerHTML = rows.join('');
 }
 
 function sprodExportExcel(){
-  const tbody = document.getElementById('sprod-tbody');
-  if(!tbody||!tbody.rows.length||tbody.rows[0].cells.length<2){ alert('لا توجد بيانات'); return; }
+  const table = document.getElementById('sprod-table');
+  if(!table) return;
   const from = document.getElementById('sprod-from')?.value||'';
   const to   = document.getElementById('sprod-to')?.value||'';
-  const headers = ['#','المجموعة','خط السير','الفرع','المشرف','الصنف','رصيد الرف','رصيد المخزن','التاريخ'];
-  const rows = [...tbody.rows].map(r=>[...r.cells].map(c=>c.innerText.trim()));
-  const aoa = [['الطحان جولدن دايتس — أصناف المبيعات','','','','','','','',''],
-    [`الفترة: ${from} — ${to}`,'','','','','','','',''],[''],headers,...rows];
   const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{wch:4},{wch:18},{wch:24},{wch:24},{wch:18},{wch:30},{wch:10},{wch:10},{wch:12}];
-  ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:8}},{s:{r:1,c:0},e:{r:1,c:8}}];
+  const ws = XLSX.utils.table_to_sheet(table);
   XLSX.utils.book_append_sheet(wb,ws,'أصناف المبيعات');
   XLSX.writeFile(wb,`sales_products_${from}_${to}.xlsx`);
 }
 
 function sprodExportPDF(){
-  const tbody = document.getElementById('sprod-tbody');
-  if(!tbody||!tbody.rows.length) return;
+  const table = document.getElementById('sprod-table');
+  if(!table) return;
   const from = document.getElementById('sprod-from')?.value||'';
   const to   = document.getElementById('sprod-to')?.value||'';
-  const rows = [...tbody.rows].map(r=>`<tr>${[...r.cells].map(c=>`<td>${c.innerText.trim()}</td>`).join('')}</tr>`).join('');
   const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><style>
-    body{font-family:Cairo,Arial,sans-serif;font-size:11px;padding:16px}
-    .hdr{background:#4B3C1A;color:#EDE5D8;padding:12px;border-radius:8px;margin-bottom:10px}
-    table{width:100%;border-collapse:collapse}th{background:#4B3C1A;color:#EDE5D8;padding:6px 8px;text-align:right}
-    td{padding:5px 8px;border-bottom:1px solid #eee}tr:nth-child(even){background:#FFFDF8}
+    body{font-family:Cairo,Arial,sans-serif;font-size:10px;padding:12px}
+    .hdr{background:#4B3C1A;color:#EDE5D8;padding:10px;border-radius:8px;margin-bottom:10px}
+    table{width:100%;border-collapse:collapse}
+    th{background:#4B3C1A;color:#EDE5D8;padding:5px 6px;text-align:right;font-size:10px}
+    td{padding:4px 6px;border-bottom:1px solid #eee;font-size:10px}
+    tr:nth-child(even){background:#FFFDF8}
   </style></head><body>
-  <div class="hdr"><h2 style="margin:0">📦 أصناف المبيعات — ${from} إلى ${to}</h2></div>
-  <table><thead><tr><th>#</th><th>المجموعة</th><th>الفرع</th><th>الصنف</th><th>رصيد الرف</th><th>رصيد المخزن</th><th>التاريخ</th></tr></thead>
-  <tbody>${rows}</tbody></table></body></html>`;
-  const w = window.open('','_blank','width=1100,height=700');
+  <div class="hdr"><h2 style="margin:0">📦 حركة أصناف المبيعات — ${from} إلى ${to}</h2></div>
+  ${table.outerHTML}
+  </body></html>`;
+  const w=window.open('','_blank','width=1200,height=700');
   w.document.write(html); w.document.close(); setTimeout(()=>{w.focus();w.print();},600);
 }
 
