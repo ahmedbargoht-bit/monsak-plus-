@@ -1,4 +1,4 @@
-<!-- mansek-admin v3.9 — missing: date range from/to 2026-06-05 -->
+<!-- mansek-admin v4.2 — spp: week fix + styled Excel+PDF with items 2026-06-09 -->
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -10725,15 +10725,18 @@ async function loadSppPlans(){
 
   // حساب نطاق التاريخ
   const today = new Date();
-  const sunday = new Date(today); sunday.setDate(today.getDate() - today.getDay());
+  // الأسبوع يبدأ السبت
+  const day = today.getDay();
+  const diffToSat = day === 6 ? 0 : day + 1;
+  const saturday = new Date(today); saturday.setDate(today.getDate() - diffToSat); saturday.setHours(0,0,0,0);
   const getRange = ()=>{
-    if(week==='current') return [sunday, new Date(sunday.getTime()+6*864e5)];
-    if(week==='last')    return [new Date(sunday.getTime()-7*864e5), new Date(sunday.getTime()-864e5)];
-    if(week==='next')    return [new Date(sunday.getTime()+7*864e5), new Date(sunday.getTime()+13*864e5)];
+    if(week==='current') return [saturday, new Date(saturday.getTime()+6*864e5)];
+    if(week==='last')    return [new Date(saturday.getTime()-7*864e5), new Date(saturday.getTime()-864e5)];
+    if(week==='next')    return [new Date(saturday.getTime()+7*864e5), new Date(saturday.getTime()+13*864e5)];
     return [null,null];
   };
   const [from,to] = getRange();
-  const fmt = d => d?.toISOString().slice(0,10);
+  const fmt = d => { if(!d) return null; const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),dd=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${dd}`; };
 
   let url = `${SUPABASE_URL}/rest/v1/sales_plans_plus?select=*&order=created_at.desc&limit=200`;
   if(from) url += `&week_start=gte.${fmt(from)}&week_start=lte.${fmt(to)}`;
@@ -11031,62 +11034,199 @@ async function sppViewPlan(id){
     {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]);
 
   const stMap={planned:'مخطط',done:'✅ تم',skipped:'⏭️ تخطى'};
-  document.getElementById('spp-plan-items').outerHTML = items.length ? `
-    <div class="tbl-wrap">
-      <table><thead><tr><th>التاريخ</th><th>العميل</th><th>النوع</th><th>المنطقة</th><th>مخطط (ج)</th><th>فعلي (ج)</th><th>الحالة</th></tr></thead>
-      <tbody>${items.map(it=>`<tr>
-        <td style="font-size:11px">${it.visit_date}</td>
-        <td style="font-weight:600">${it.client_name||'—'}</td>
-        <td style="font-size:11px">${it.client_type||'—'}</td>
-        <td style="font-size:11px">${it.area||'—'}</td>
-        <td style="color:#1565C0">${(+it.planned_amount||0).toLocaleString('en-US')}</td>
-        <td style="color:#1A7A4A">${(+it.actual_amount||0).toLocaleString('en-US')}</td>
-        <td><span class="badge b-gray">${stMap[it.visit_status]||it.visit_status}</span></td>
-      </tr>`).join('')}</tbody></table>
-    </div>` : `<div style="text-align:center;padding:1rem;color:#aaa">لا توجد بنود</div>`;
+  // تجميع حسب اليوم
+  const byDay = {};
+  items.forEach(it=>{ const d=it.visit_date||'—'; if(!byDay[d]) byDay[d]=[]; byDay[d].push(it); });
+  const DAYS_AR=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+  const stStyles={planned:{bg:'#FFF8F0',color:'#E65100',label:'⏳ مخطط'},done:{bg:'#E8F5E9',color:'#1A7A4A',label:'✅ تم'},skipped:{bg:'#FFEBEE',color:'#B71C1C',label:'❌ تخطى'}};
+
+  const itemsHtml = items.length ? `
+    <div style="margin-top:8px">
+      ${Object.entries(byDay).map(([date,dayItems])=>{
+        const d=new Date(date+'T00:00:00');
+        const dayName=DAYS_AR[d.getDay()];
+        const totalPlan=dayItems.reduce((s,i)=>s+(+i.planned_amount||0),0);
+        const totalActual=dayItems.reduce((s,i)=>s+(+i.actual_amount||0),0);
+        return `<div style="margin-bottom:12px">
+          <div style="background:linear-gradient(135deg,#4B3C1A,#2C1F0A);color:#EDE5D8;padding:8px 12px;border-radius:8px 8px 0 0;display:flex;justify-content:space-between;align-items:center">
+            <span style="font-weight:700;font-size:12px">📅 ${dayName} — ${date}</span>
+            <span style="font-size:10px;color:rgba(237,229,216,.7)">${dayItems.length} زيارة | مخطط: ${totalPlan.toLocaleString()} ج | فعلي: ${totalActual.toLocaleString()} ج</span>
+          </div>
+          <div style="border:1px solid #E8D9C0;border-top:none;border-radius:0 0 8px 8px;overflow:hidden">
+            ${dayItems.map((it,i)=>{
+              const st=stStyles[it.visit_status]||{bg:'#F5F5F5',color:'#888',label:it.visit_status};
+              return `<div style="padding:10px 12px;background:${i%2?'#FAF7F0':'#fff'};border-bottom:1px solid #F0EAE0;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center">
+                <div>
+                  <div style="font-weight:700;font-size:12px;color:#2C1F0A">${it.client_name||'—'}</div>
+                  <div style="font-size:10px;color:#8B6F47;margin-top:2px">${it.area||'—'} ${it.rep_name?'· 👤 '+it.rep_name:''} ${it.purpose?'· 🎯 '+it.purpose:''}</div>
+                  ${it.notes?`<div style="font-size:10px;color:#aaa;margin-top:2px">📝 ${it.notes}</div>`:''}
+                  <div style="display:flex;gap:8px;margin-top:4px">
+                    <span style="font-size:10px;color:#1565C0;font-weight:700">مخطط: ${(+it.planned_amount||0).toLocaleString()} ج</span>
+                    <span style="font-size:10px;color:#1A7A4A;font-weight:700">فعلي: ${(+it.actual_amount||0).toLocaleString()} ج</span>
+                  </div>
+                </div>
+                <span style="background:${st.bg};color:${st.color};padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700;white-space:nowrap">${st.label}</span>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>` : `<div style="text-align:center;padding:1rem;color:#aaa">لا توجد بنود في هذه الخطة</div>`;
+
+  document.getElementById('spp-plan-items').outerHTML = itemsHtml;
 }
 
-function sppExportExcel(){
-  if(!_sppPlans.length){ alert('لا توجد بيانات — اضغط تحديث أولاً'); return; }
+async function sppExportExcel(){
+  if(!_sppPlans.length){ showToast('لا توجد بيانات — اضغط تحديث أولاً','err'); return; }
+  if(typeof XLSX==='undefined'){ showToast('جاري تحميل مكتبة Excel...'); return; }
 
-  const aoa = [
-    ['الطحان جولدن دايتس — خطط مبيعات بلس','','','','','','','',''],
-    [`تاريخ التصدير: ${new Date().toLocaleDateString('en-US')}`,'','','','','','','',''],
-    [''],
-    ['#','المشرف','القطاع','الدور','الأسبوع من','الأسبوع إلى','الهدف (ج)','المحقق (ج)','الزيارات مخططة','الزيارات فعلية','الحالة','ملاحظات'],
+  const C={dark:'2C1F0A',caramel:'4B3C1A',gold:'C8A96E',cream:'EDE5D8',light:'F5F0E8',
+    red:'731E2E',green:'1A7A4A',greenBg:'E8F5E9',blue:'1565C0',blueBg:'E3F2FD',
+    orange:'E65100',orangeBg:'FFF3E0',white:'FFFFFF',line:'E0D8CC'};
+  const fill=c=>({patternType:'solid',fgColor:{rgb:c}});
+  const font=(bold,sz,color,italic)=>({bold:!!bold,sz:sz||11,color:{rgb:color||C.dark},italic:!!italic,name:'Arial'});
+  const aln=(h,v,wrap)=>({horizontal:h||'right',vertical:v||'center',wrapText:!!wrap,readingOrder:2});
+  const brd=(s,c)=>{const b={style:s||'thin',color:{rgb:c||C.line}};return{left:b,right:b,top:b,bottom:b};};
+  const now = new Date().toLocaleDateString('ar-EG');
+  const wb = XLSX.utils.book_new();
+
+  // جيب كل البنود دفعة واحدة
+  const ids = _sppPlans.map(p=>`"${p.id}"`).join(',');
+  let allItems = [];
+  try{
+    const iRes = await fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items?plan_id=in.(${ids})&select=*&order=visit_date.asc&limit=5000`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    allItems = iRes.ok ? await iRes.json().catch(()=>[]) : [];
+  }catch(e){}
+
+  // ── Sheet 1: ملخص الخطط ───────────────────────────────────────
+  const SUMCOLS = ['#','المشرف','القطاع','الأسبوع من','الأسبوع إلى','الهدف (ج)','المحقق (ج)','زيارات مخططة','زيارات فعلية','الحالة','ملاحظات'];
+  const aoa=[
+    ['الطحان جولدن دايتس — Al Tahhan Golden Dates',...Array(SUMCOLS.length-1).fill('')],
+    ['خطط مبيعات بلس — ملخص أسبوعي',...Array(SUMCOLS.length-1).fill('')],
+    [`تاريخ التصدير: ${now}  |  إجمالي الخطط: ${_sppPlans.length}`,...Array(SUMCOLS.length-1).fill('')],
+    Array(SUMCOLS.length).fill(''),
+    SUMCOLS,
     ..._sppPlans.map((p,i)=>[
-      i+1,
-      p.staff_name,
-      p.sector||'—',
-      SPP_ROLES[p.role]||p.role||'—',
-      p.week_start,
-      p.week_end,
-      +p.target_amount||0,
-      +p.achieved_amount||0,
-      +p.target_visits||0,
-      +p.actual_visits||0,
-      SPP_STATUS[p.status]?.label||p.status,
-      p.notes||''
+      i+1, p.staff_name, p.sector||'—', p.week_start, p.week_end,
+      +p.target_amount||0, +p.achieved_amount||0,
+      +p.target_visits||0, +p.actual_visits||0,
+      SPP_STATUS[p.status]?.label||p.status, p.notes||''
     ]),
-    [''],
-    ['الإجمالي','','','','','',
+    Array(SUMCOLS.length).fill(''),
+    ['الإجمالي','','','','',
       _sppPlans.reduce((s,p)=>s+(+p.target_amount||0),0),
       _sppPlans.reduce((s,p)=>s+(+p.achieved_amount||0),0),
-      '','','',''
-    ]
+      _sppPlans.reduce((s,p)=>s+(+p.target_visits||0),0),
+      _sppPlans.reduce((s,p)=>s+(+p.actual_visits||0),0),'','']
   ];
 
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:4},{wch:22},{wch:16},{wch:16},{wch:12},{wch:12},{wch:14},{wch:14},{wch:12},{wch:12},{wch:16},{wch:20}];
-  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:11}},{s:{r:1,c:0},e:{r:1,c:11}}];
-  XLSX.utils.book_append_sheet(wb, ws, 'خطط مبيعات بلس');
-  XLSX.writeFile(wb, `sales_plans_plus_${new Date().toISOString().slice(0,10)}.xlsx`);
-  showToast('✅ تم تصدير Excel');
+  const ws=XLSX.utils.aoa_to_sheet(aoa,{cellStyles:true});
+  const nc=SUMCOLS.length;
+  const enc=(r,c)=>XLSX.utils.encode_cell({r,c});
+  const sty=(r,c,s)=>{if(!ws[enc(r,c)])ws[enc(r,c)]={t:'z',v:''};ws[enc(r,c)].s=s;};
+
+  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:nc-1}},{s:{r:1,c:0},e:{r:1,c:nc-1}},{s:{r:2,c:0},e:{r:2,c:nc-1}},{s:{r:3,c:0},e:{r:3,c:nc-1}}];
+  sty(0,0,{font:font(1,15,C.cream),fill:fill(C.dark),alignment:aln('center'),border:brd('medium',C.dark)});
+  sty(1,0,{font:font(1,13,C.dark),fill:fill(C.gold),alignment:aln('center'),border:brd('medium',C.caramel)});
+  sty(2,0,{font:font(0,10,C.caramel,true),fill:fill(C.light),alignment:aln('center'),border:brd('thin',C.line)});
+  for(let c=0;c<nc;c++) sty(3,c,{fill:fill(C.dark)});
+  for(let c=0;c<nc;c++) sty(4,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:aln('center'),border:brd('medium',C.dark)});
+
+  const dataStart=5;
+  for(let ri=dataStart;ri<aoa.length-2;ri++){
+    const p=_sppPlans[ri-dataStart];
+    const rowBg=ri%2?'FAF7F0':C.white;
+    for(let c=0;c<nc;c++){
+      let s={font:font(0,9,C.dark),fill:fill(rowBg),alignment:aln(c===0?'center':'right',undefined,true),border:brd('thin',C.line)};
+      if(c===5) s={...s,font:font(1,10,C.blue)};
+      if(c===6) s={...s,font:font(1,10,C.green)};
+      if(c===9 && p){
+        const st=SPP_STATUS[p.status];
+        if(st) s={...s,font:font(1,9,p.status==='approved'?C.green:p.status==='rejected'?C.red:C.orange)};
+      }
+      sty(ri,c,s);
+    }
+  }
+  // footer total
+  const lastR=aoa.length-1;
+  for(let c=0;c<nc;c++) sty(lastR,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:aln('center'),border:brd('medium',C.dark)});
+
+  ws['!cols']=[{wch:4},{wch:20},{wch:16},{wch:12},{wch:12},{wch:14},{wch:14},{wch:12},{wch:12},{wch:16},{wch:20}];
+  ws['!rows']=[{hpt:36},{hpt:28},{hpt:20},{hpt:8},{hpt:26}];
+  XLSX.utils.book_append_sheet(wb,ws,'ملخص الخطط');
+
+  // ── Sheet لكل مشرف ────────────────────────────────────────────
+  const byStaff = {};
+  _sppPlans.forEach(p=>{ if(!byStaff[p.staff_name]) byStaff[p.staff_name]=[]; byStaff[p.staff_name].push(p); });
+
+  for(const [staffName, staffPlans] of Object.entries(byStaff)){
+    const ICOLS=['اليوم','التاريخ','العميل','المنطقة','النوع','المندوب','مخطط (ج)','فعلي (ج)','الحالة','الغرض','ملاحظات'];
+    const saoa=[
+      ['الطحان جولدن دايتس',...Array(ICOLS.length-1).fill('')],
+      [staffName,...Array(ICOLS.length-1).fill('')],
+      Array(ICOLS.length).fill(''),
+      ICOLS
+    ];
+    const DAYS_AR=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+    staffPlans.forEach(plan=>{
+      saoa.push([`📅 الأسبوع: ${plan.week_start} ← ${plan.week_end}  |  الهدف: ${(+plan.target_amount||0).toLocaleString()} ج`,...Array(ICOLS.length-1).fill('')]);
+      const planItems=allItems.filter(i=>i.plan_id===plan.id);
+      if(planItems.length){
+        planItems.forEach(it=>{
+          const d=new Date((it.visit_date||'')+'T00:00:00');
+          const dayName=isNaN(d)?'—':DAYS_AR[d.getDay()];
+          saoa.push([dayName,it.visit_date||'—',it.client_name||'—',it.area||'—',it.client_type||'—',it.rep_name||'—',+it.planned_amount||0,+it.actual_amount||0,SPP_STATUS[it.visit_status]?.label||it.visit_status||'مخطط',it.purpose||'—',it.notes||'']);
+        });
+      } else {
+        saoa.push(['لا توجد بنود','','','','','','','','','','']);
+      }
+    });
+
+    const sw=XLSX.utils.aoa_to_sheet(saoa,{cellStyles:true});
+    const se=(r,c)=>XLSX.utils.encode_cell({r,c});
+    const ss=(r,c,s)=>{if(!sw[se(r,c)])sw[se(r,c)]={t:'z',v:''};sw[se(r,c)].s=s;};
+    sw['!merges']=[{s:{r:0,c:0},e:{r:0,c:ICOLS.length-1}},{s:{r:1,c:0},e:{r:1,c:ICOLS.length-1}},{s:{r:2,c:0},e:{r:2,c:ICOLS.length-1}}];
+    ss(0,0,{font:font(1,13,C.cream),fill:fill(C.dark),alignment:aln('center'),border:brd('medium',C.dark)});
+    ss(1,0,{font:font(1,12,C.dark),fill:fill(C.gold),alignment:aln('center'),border:brd('medium',C.caramel)});
+    for(let c=0;c<ICOLS.length;c++) ss(2,c,{fill:fill(C.dark)});
+    for(let c=0;c<ICOLS.length;c++) ss(3,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:aln('center'),border:brd('medium',C.dark)});
+    for(let ri=4;ri<saoa.length;ri++){
+      const isWeekHdr=typeof saoa[ri][0]==='string'&&saoa[ri][0].includes('📅');
+      if(isWeekHdr){
+        sw['!merges'].push({s:{r:ri,c:0},e:{r:ri,c:ICOLS.length-1}});
+        ss(ri,0,{font:font(1,10,'4B3C1A'),fill:fill('EDE5D8'),alignment:aln('right'),border:brd('thin',C.line)});
+      } else {
+        for(let c=0;c<ICOLS.length;c++){
+          let s={font:font(0,9,C.dark),fill:fill(ri%2?'FAF7F0':C.white),alignment:aln(c===0?'center':'right',undefined,true),border:brd('thin',C.line)};
+          if(c===6) s={...s,font:font(1,9,C.blue)};
+          if(c===7) s={...s,font:font(1,9,C.green)};
+          ss(ri,c,s);
+        }
+      }
+    }
+    sw['!cols']=[{wch:10},{wch:12},{wch:24},{wch:16},{wch:10},{wch:16},{wch:12},{wch:12},{wch:14},{wch:14},{wch:18}];
+    sw['!rows']=[{hpt:36},{hpt:28},{hpt:8},{hpt:26}];
+    const sheetName=staffName.slice(0,28);
+    XLSX.utils.book_append_sheet(wb,sw,sheetName);
+  }
+
+  XLSX.writeFile(wb, `خطط_مبيعات_بلس_${new Date().toISOString().slice(0,10)}.xlsx`);
+  showToast('✅ تم تصدير Excel بألوان الطحان');
 }
 
-function sppExportPDF(){
-  if(!_sppPlans.length){ alert('لا توجد بيانات — اضغط تحديث أولاً'); return; }
+async function sppExportPDF(){
+  if(!_sppPlans.length){ showToast('لا توجد بيانات — اضغط تحديث أولاً','err'); return; }
+  showToast('⏳ جاري إعداد PDF...');
+
+  // جيب البنود
+  const ids = _sppPlans.map(p=>`"${p.id}"`).join(',');
+  let allItems = [];
+  try{
+    const iRes = await fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items?plan_id=in.(${ids})&select=*&order=visit_date.asc&limit=5000`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    allItems = iRes.ok ? await iRes.json().catch(()=>[]) : [];
+  }catch(e){}
 
   const rows = _sppPlans.map((p,i)=>{
     const st = SPP_STATUS[p.status]||{label:p.status,color:'#888',bg:'#f5f5f5'};
@@ -11108,6 +11248,41 @@ function sppExportPDF(){
   const totalTarget = _sppPlans.reduce((s,p)=>s+(+p.target_amount||0),0);
   const totalAchieved = _sppPlans.reduce((s,p)=>s+(+p.achieved_amount||0),0);
   const totalPct = totalTarget>0 ? Math.round((totalAchieved/totalTarget)*100) : 0;
+
+  const DAYS_AR_PDF=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+  const planDetails = _sppPlans.map(plan=>{
+    const items=allItems.filter(i=>i.plan_id===plan.id);
+    if(!items.length) return '';
+    const stStyles={planned:{bg:'#FFF8F0',color:'#E65100',lbl:'⏳ مخطط'},done:{bg:'#E8F5E9',color:'#1A7A4A',lbl:'✅ تم'},skipped:{bg:'#FFEBEE',color:'#B71C1C',lbl:'❌ تخطى'}};
+    return `<div style="margin-top:12px;page-break-inside:avoid">
+      <div style="background:#4B3C1A;color:#EDE5D8;padding:7px 12px;border-radius:6px 6px 0 0;font-size:11px;font-weight:700">
+        ${plan.staff_name} — ${plan.week_start} ← ${plan.week_end}
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:10px">
+        <thead><tr style="background:#C8A96E;color:#2C1F0A">
+          <th style="padding:5px;border:1px solid #E0D8CC">اليوم</th>
+          <th style="padding:5px;border:1px solid #E0D8CC">العميل</th>
+          <th style="padding:5px;border:1px solid #E0D8CC">المنطقة</th>
+          <th style="padding:5px;border:1px solid #E0D8CC">مخطط (ج)</th>
+          <th style="padding:5px;border:1px solid #E0D8CC">فعلي (ج)</th>
+          <th style="padding:5px;border:1px solid #E0D8CC">الحالة</th>
+        </tr></thead>
+        <tbody>${items.map((it,i)=>{
+          const d=new Date((it.visit_date||'')+'T00:00:00');
+          const dayName=isNaN(d)?'—':DAYS_AR_PDF[d.getDay()];
+          const st=stStyles[it.visit_status]||{bg:'#f5f5f5',color:'#888',lbl:it.visit_status||'—'};
+          return `<tr style="background:${i%2?'#FAF7F0':'#fff'}">
+            <td style="padding:5px;border:1px solid #E0D8CC;font-weight:700">${dayName}<br><span style="font-size:9px;color:#aaa">${it.visit_date||''}</span></td>
+            <td style="padding:5px;border:1px solid #E0D8CC;font-weight:600">${it.client_name||'—'}</td>
+            <td style="padding:5px;border:1px solid #E0D8CC">${it.area||'—'}</td>
+            <td style="padding:5px;border:1px solid #E0D8CC;color:#1565C0;font-weight:700;text-align:center">${(+it.planned_amount||0).toLocaleString()}</td>
+            <td style="padding:5px;border:1px solid #E0D8CC;color:#1A7A4A;font-weight:700;text-align:center">${(+it.actual_amount||0).toLocaleString()}</td>
+            <td style="padding:5px;border:1px solid #E0D8CC;background:${st.bg};color:${st.color};font-weight:700;text-align:center">${st.lbl}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
+  }).join('');
 
   const html=`<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8">
   <style>
@@ -11151,6 +11326,8 @@ function sppExportPDF(){
       <td>${totalPct}%</td>
     </tr></tfoot>
   </table>
+  <h3 style="margin:16px 0 8px;color:#4B3C1A;font-size:13px;border-bottom:2px solid #C8A96E;padding-bottom:6px">📋 تفاصيل الزيارات</h3>
+  ${planDetails}
   <div class="footer">Al Tahhan Golden Dates © ${new Date().getFullYear()} — نظام إدارة المبيعات</div>
   </body></html>`;
 
