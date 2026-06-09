@@ -12955,19 +12955,53 @@ function populateRepSelect(){
   });
 }
 
+// ══════════════════════════════════════════════════════════════
+// ADMIN ROUTES DATA — من route_assignments في Supabase
+// ══════════════════════════════════════════════════════════════
+let ADMIN_ROUTES_DATA = []; // [{grp, route, branch_name, rep_name, supervisor}]
+
+async function loadAdminRoutesData(){
+  if(ADMIN_ROUTES_DATA.length) return; // cached
+  try{
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/route_assignments?select=grp,route,branch_name,rep_name,supervisor&order=grp.asc,route.asc,branch_name.asc&limit=5000`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    );
+    if(r.ok){
+      const data = await r.json();
+      if(Array.isArray(data)) ADMIN_ROUTES_DATA = data;
+    }
+  }catch(e){ console.error('loadAdminRoutesData error',e); }
+}
+
+function adminGetRoutes(grp){
+  const rows = grp==='all' ? ADMIN_ROUTES_DATA : ADMIN_ROUTES_DATA.filter(r=>r.grp===grp);
+  return [...new Set(rows.map(r=>r.route))].sort((a,b)=>a.localeCompare(b,'ar'));
+}
+
+function adminGetBranches(grp, route){
+  let rows = grp==='all' ? ADMIN_ROUTES_DATA : ADMIN_ROUTES_DATA.filter(r=>r.grp===grp);
+  if(route && route!=='all') rows = rows.filter(r=>r.route===route);
+  return [...new Set(rows.map(r=>r.branch_name))].sort((a,b)=>a.localeCompare(b,'ar'));
+}
+
+function adminGetGrps(){
+  return [...new Set(ADMIN_ROUTES_DATA.map(r=>r.grp))].sort();
+}
+
+// ══════════════════════════════════════════════════════════════
+// SALES PRODUCTS FILTERS
+// ══════════════════════════════════════════════════════════════
 async function sprodInitFilters(){
-  // تعبئة المجموعات من SALES_ROUTES_DATA
+  await loadAdminRoutesData();
   const grpSel = document.getElementById('sprod-grp');
   if(grpSel && grpSel.options.length <= 1){
-    const grps = [...new Set(SALES_ROUTES_DATA.map(r=>r.grp))];
-    grps.forEach(g=>{
-      const label = GROUPS[g]?.label || g;
+    adminGetGrps().forEach(g=>{
       const o = document.createElement('option');
-      o.value=g; o.textContent=label;
+      o.value=g; o.textContent=GROUPS[g]?.label||g;
       grpSel.appendChild(o);
     });
   }
-  // تواريخ افتراضية
   const today = new Date().toISOString().slice(0,10);
   const past  = new Date(); past.setDate(past.getDate()-30);
   if(!document.getElementById('sprod-from').value) document.getElementById('sprod-from').value = past.toISOString().slice(0,10);
@@ -12975,37 +13009,23 @@ async function sprodInitFilters(){
 }
 
 function sprodOnGrpChange(){
-  const grp = document.getElementById('sprod-grp').value;
+  const grp       = document.getElementById('sprod-grp').value;
   const routeSel  = document.getElementById('sprod-route');
   const branchSel = document.getElementById('sprod-branch');
-  const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
   routeSel.innerHTML  = '<option value="all">كل الخطوط</option>' +
-    routes.map(r=>`<option value="${r.route}">${r.route}</option>`).join('');
+    adminGetRoutes(grp).map(r=>`<option value="${r}">${r}</option>`).join('');
   branchSel.innerHTML = '<option value="all">كل الفروع</option>';
   sprodLoad();
 }
 
 function sprodOnRouteChange(){
+  const grp       = document.getElementById('sprod-grp').value;
   const route     = document.getElementById('sprod-route').value;
   const branchSel = document.getElementById('sprod-branch');
   branchSel.innerHTML = '<option value="all">كل الفروع</option>';
-  if(route !== 'all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd){
-      rd.branches.forEach(b=>{
-        const o = document.createElement('option');
-        o.value=b; o.textContent=b; branchSel.appendChild(o);
-      });
-    }
-  } else {
-    const grp = document.getElementById('sprod-grp').value;
-    const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
-    const allBranches = [...new Set(routes.flatMap(r=>r.branches))].sort((a,b)=>a.localeCompare(b,'ar'));
-    allBranches.forEach(b=>{
-      const o = document.createElement('option');
-      o.value=b; o.textContent=b; branchSel.appendChild(o);
-    });
-  }
+  adminGetBranches(grp, route).forEach(b=>{
+    const o=document.createElement('option'); o.value=b; o.textContent=b; branchSel.appendChild(o);
+  });
   sprodLoad();
 }
 
@@ -13033,10 +13053,10 @@ async function sprodLoad(){
     data = await r.json(); if(!Array.isArray(data)) data=[];
   }catch(e){}
 
-  // فلتر خط السير من SALES_ROUTES_DATA
+  // فلتر خط السير من ADMIN_ROUTES_DATA
   if(route!=='all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd) data = data.filter(p=>rd.branches.includes(p.branch));
+    const branches = adminGetBranches(grp, route);
+    data = data.filter(p=>branches.includes(p.branch));
   }
 
   // KPI
@@ -13104,10 +13124,10 @@ function sprodExportPDF(){
 // SALES RETURNS — مرتجعات المبيعات
 // ══════════════════════════════════════════════════════════════
 async function sretInitFilters(){
+  await loadAdminRoutesData();
   const grpSel = document.getElementById('sret-grp');
   if(grpSel && grpSel.options.length<=1){
-    const grps = [...new Set(SALES_ROUTES_DATA.map(r=>r.grp))];
-    grps.forEach(g=>{ const o=document.createElement('option');o.value=g;o.textContent=GROUPS[g]?.label||g;grpSel.appendChild(o); });
+    adminGetGrps().forEach(g=>{ const o=document.createElement('option');o.value=g;o.textContent=GROUPS[g]?.label||g;grpSel.appendChild(o); });
   }
   const today = new Date().toISOString().slice(0,10);
   const past  = new Date(); past.setDate(past.getDate()-30);
@@ -13116,30 +13136,23 @@ async function sretInitFilters(){
 }
 
 function sretOnGrpChange(){
-  const grp = document.getElementById('sret-grp').value;
+  const grp       = document.getElementById('sret-grp').value;
   const routeSel  = document.getElementById('sret-route');
   const branchSel = document.getElementById('sret-branch');
-  const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
   routeSel.innerHTML  = '<option value="all">كل الخطوط</option>' +
-    routes.map(r=>`<option value="${r.route}">${r.route}</option>`).join('');
+    adminGetRoutes(grp).map(r=>`<option value="${r}">${r}</option>`).join('');
   branchSel.innerHTML = '<option value="all">كل الفروع</option>';
   sretLoad();
 }
 
 function sretOnRouteChange(){
+  const grp       = document.getElementById('sret-grp').value;
   const route     = document.getElementById('sret-route').value;
   const branchSel = document.getElementById('sret-branch');
   branchSel.innerHTML = '<option value="all">كل الفروع</option>';
-  if(route!=='all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd) rd.branches.forEach(b=>{ const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o); });
-  } else {
-    const grp = document.getElementById('sret-grp').value;
-    const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
-    [...new Set(routes.flatMap(r=>r.branches))].sort((a,b)=>a.localeCompare(b,'ar')).forEach(b=>{
-      const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o);
-    });
-  }
+  adminGetBranches(grp, route).forEach(b=>{
+    const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o);
+  });
   sretLoad();
 }
 
@@ -13169,8 +13182,8 @@ async function sretLoad(){
   }catch(e){}
 
   if(route!=='all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd) data = data.filter(p=>rd.branches.includes(p.branch));
+    const branches = adminGetBranches(grp, route);
+    data = data.filter(p=>branches.includes(p.branch));
   }
 
   const pending = data.filter(r=>!r.pulled);
@@ -13276,10 +13289,10 @@ function sretExportPDF(){
 // SALES MISSING — نواقص المبيعات
 // ══════════════════════════════════════════════════════════════
 async function smissInitFilters(){
+  await loadAdminRoutesData();
   const grpSel = document.getElementById('smiss-grp');
   if(grpSel && grpSel.options.length<=1){
-    const grps = [...new Set(SALES_ROUTES_DATA.map(r=>r.grp))];
-    grps.forEach(g=>{ const o=document.createElement('option');o.value=g;o.textContent=GROUPS[g]?.label||g;grpSel.appendChild(o); });
+    adminGetGrps().forEach(g=>{ const o=document.createElement('option');o.value=g;o.textContent=GROUPS[g]?.label||g;grpSel.appendChild(o); });
   }
   const today = new Date().toISOString().slice(0,10);
   const past  = new Date(); past.setDate(past.getDate()-30);
@@ -13288,30 +13301,23 @@ async function smissInitFilters(){
 }
 
 function smissOnGrpChange(){
-  const grp = document.getElementById('smiss-grp').value;
+  const grp       = document.getElementById('smiss-grp').value;
   const routeSel  = document.getElementById('smiss-route');
   const branchSel = document.getElementById('smiss-branch');
-  const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
   routeSel.innerHTML  = '<option value="all">كل الخطوط</option>' +
-    routes.map(r=>`<option value="${r.route}">${r.route}</option>`).join('');
+    adminGetRoutes(grp).map(r=>`<option value="${r}">${r}</option>`).join('');
   branchSel.innerHTML = '<option value="all">كل الفروع</option>';
   smissLoad();
 }
 
 function smissOnRouteChange(){
+  const grp       = document.getElementById('smiss-grp').value;
   const route     = document.getElementById('smiss-route').value;
   const branchSel = document.getElementById('smiss-branch');
   branchSel.innerHTML = '<option value="all">كل الفروع</option>';
-  if(route!=='all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd) rd.branches.forEach(b=>{ const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o); });
-  } else {
-    const grp = document.getElementById('smiss-grp').value;
-    const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
-    [...new Set(routes.flatMap(r=>r.branches))].sort((a,b)=>a.localeCompare(b,'ar')).forEach(b=>{
-      const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o);
-    });
-  }
+  adminGetBranches(grp, route).forEach(b=>{
+    const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o);
+  });
   smissLoad();
 }
 
@@ -13341,8 +13347,8 @@ async function smissLoad(){
   }catch(e){}
 
   if(route!=='all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd) data = data.filter(p=>rd.branches.includes(p.branch));
+    const branches = adminGetBranches(grp, route);
+    data = data.filter(p=>branches.includes(p.branch));
   }
 
   const pending = data.filter(m=>!m.delivered);
