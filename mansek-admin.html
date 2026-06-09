@@ -4103,7 +4103,7 @@ h2,h3{color:#2C1F0A}
                 <thead>
                   <tr style="background:#731E2E;color:#fff">
                     <th>#</th><th>المجموعة</th><th>خط السير</th><th>الفرع</th>
-                    <th>الصنف</th><th>الكمية</th><th>حالة الرفع</th><th>تاريخ الرفع</th><th>تأكيد الاستلام</th>
+                    <th>الصنف</th><th>الكمية</th><th>عدد الزيارات</th><th>حالة الرفع</th><th>تاريخ الرفع</th><th>تأكيد الاستلام</th>
                   </tr>
                 </thead>
                 <tbody id="sret-tbody"></tbody>
@@ -13376,13 +13376,28 @@ async function sretLoad(){
     data = data.filter(p=>branches.includes(p.branch));
   }
 
-  const pending = data.filter(r=>!r.pulled);
-  const done    = data.filter(r=>r.pulled);
-  const totalQty = data.reduce((s,r)=>s+(+r.qty||0),0);
+  // ── Deduplication: نفس الفرع + نفس الصنف + نفس الكمية = صف واحد ──
+  const dedupMap = {};
+  data.forEach(r=>{
+    const key = `${r.branch}|${r.snf}|${r.qty}`;
+    if(!dedupMap[key]){
+      dedupMap[key] = {...r, _visits: 1};
+    } else {
+      dedupMap[key]._visits++;
+      // احتفظ بأحدث حالة رفع وتأكيد
+      if(r.pulled)    { dedupMap[key].pulled=true; dedupMap[key].pulled_by=r.pulled_by; dedupMap[key].pulled_at=r.pulled_at; }
+      if(r.confirmed) { dedupMap[key].confirmed=true; dedupMap[key].confirmed_by=r.confirmed_by; dedupMap[key].confirmed_at=r.confirmed_at; }
+    }
+  });
+  const dedupData = Object.values(dedupMap);
+
+  const pending  = dedupData.filter(r=>!r.pulled);
+  const done     = dedupData.filter(r=>r.pulled);
+  const totalQty = dedupData.reduce((s,r)=>s+(+r.qty||0),0);
 
   // KPI
   document.getElementById('sret-kpi').innerHTML = `
-    <div class="stat-card red"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي المرتجعات</div></div>
+    <div class="stat-card red"><div class="stat-n">${dedupData.length}</div><div class="stat-l">إجمالي المرتجعات</div></div>
     <div class="stat-card red"><div class="stat-n">${totalQty}</div><div class="stat-l">إجمالي الوحدات</div></div>
     <div class="stat-card orange"><div class="stat-n">${pending.length}</div><div class="stat-l">⏳ لم يُسحب</div></div>
     <div class="stat-card green"><div class="stat-n">${done.length}</div><div class="stat-l">✅ تم السحب</div></div>`;
@@ -13396,7 +13411,7 @@ async function sretLoad(){
   // badge
   setBadgeEl('nav-sret-badge', pending.length);
 
-  tbody.innerHTML = data.map((r,i)=>{
+  tbody.innerHTML = dedupData.map((r,i)=>{
     const isPulled    = !!r.pulled;
     const isConfirmed = !!r.confirmed;
     const days   = Math.floor((Date.now()-new Date(r.created_at).getTime())/864e5);
@@ -13438,6 +13453,9 @@ async function sretLoad(){
       <td style="font-size:11px;font-weight:700">${r.branch||'—'}${isLate?`<div style="color:#DC2626;font-size:9px">⚠️ ${days} يوم</div>`:''}</td>
       <td style="font-size:11px;max-width:160px">${r.snf||'—'}</td>
       <td style="text-align:center;font-weight:700;color:#B91C1C">${r.qty||0}</td>
+      <td style="text-align:center">
+        <span style="background:#EFF6FF;color:#1D4ED8;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700">${r._visits} زيارة</span>
+      </td>
       <td>${pullStatus}</td>
       <td style="font-size:11px;color:#888;text-align:center">${pullDate}</td>
       <td style="text-align:center">${confirmCell}</td>
