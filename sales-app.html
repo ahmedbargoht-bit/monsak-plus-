@@ -1221,31 +1221,69 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
     <!-- ══ المرتجعات ══ -->
     <div class="panel" id="panel-returns">
       <div class="card" style="margin-bottom:8px">
-        <div class="card-title"><i class="ti ti-arrow-back-up" style="color:var(--red)"></i> المرتجعات</div>
-        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
-          <select id="ret-grp" onchange="loadReturns()" style="flex:1">
-            <option value="all">كل المجموعات</option>
-          </select>
-          <select id="ret-reason" onchange="loadReturns()" style="flex:1">
-            <option value="all">كل الأسباب</option>
-            <option>قرب انتهاء الصلاحية</option>
-            <option>تلف في التغليف</option>
-            <option>طلب العميل</option>
-            <option>خطأ في الكمية</option>
-            <option>تلف في المنتج</option>
-            <option>تغير شكل التمرة</option>
-            <option>العبوة غير صالحة للعرض</option>
-            <option>منتهي الصلاحية</option>
-            <option>كميات أكبر من استهلاك العميل</option>
-            <option>سبب آخر</option>
-          </select>
-          <input type="date" id="ret-date" onchange="loadReturns()" style="flex:1"/>
+        <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span><i class="ti ti-arrow-back-up" style="color:var(--red)"></i> المرتجعات</span>
+          <span id="ret-pending-badge" style="display:none;background:#B71C1C;color:#fff;border-radius:20px;padding:2px 10px;font-size:11px"></span>
         </div>
-        <div class="stat-grid" id="ret-stats"></div>
+
+        <!-- فلاتر -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+          <div>
+            <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">المجموعة</label>
+            <select id="ret-grp" onchange="retOnGrpChange()" style="width:100%">
+              <option value="all">كل المجموعات</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">خط السير</label>
+            <select id="ret-route" onchange="retOnRouteChange()" style="width:100%">
+              <option value="all">كل الخطوط</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+          <div>
+            <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">الفرع</label>
+            <select id="ret-branch" onchange="loadReturns()" style="width:100%">
+              <option value="all">كل الفروع</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">حالة السحب</label>
+            <select id="ret-pull-status" onchange="loadReturns()" style="width:100%">
+              <option value="all">الكل</option>
+              <option value="pending">⏳ لم يُسحب</option>
+              <option value="pulled">✅ تم السحب</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end">
+          <div>
+            <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">من تاريخ</label>
+            <input type="date" id="ret-from" onchange="loadReturns()" style="width:100%"/>
+          </div>
+          <div>
+            <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">إلى تاريخ</label>
+            <input type="date" id="ret-to" onchange="loadReturns()" style="width:100%"/>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="loadReturns()"><i class="ti ti-refresh"></i></button>
+        </div>
+        <div class="stat-grid" id="ret-stats" style="margin-top:8px"></div>
       </div>
+
       <div class="tbl-wrap">
         <table>
-          <thead><tr><th>#</th><th>المنسق</th><th>الفرع</th><th>المجموعة</th><th>الصنف</th><th>الكمية</th><th>السبب</th><th>التاريخ</th></tr></thead>
+          <thead><tr>
+            <th>#</th>
+            <th>خط السير</th>
+            <th>الفرع</th>
+            <th>الصنف</th>
+            <th>الكمية</th>
+            <th>السبب</th>
+            <th>حالة السحب</th>
+            <th>تأكيد المشرف</th>
+            <th>التاريخ</th>
+          </tr></thead>
           <tbody id="ret-tbody"></tbody>
         </table>
       </div>
@@ -2505,7 +2543,7 @@ function showPanel(id){
   if(id==='plan')     loadPlan();
   if(id==='all-plans') { apWeekStart=new Date(); apLoad(); }
   if(id==='products') loadProducts();
-  if(id==='returns')  loadReturns();
+  if(id==='returns')  { retOnGrpChange(); loadReturns(); }
   if(id==='missing')  loadMissing();
   if(id==='orders')   { loadOrders(); loadCoordOrders(); }
   if(id==='expiry')   loadExpiry();
@@ -4455,32 +4493,132 @@ function prodExportPDF(){
 // ══════════════════════════════════════════════════════════════
 // RETURNS
 // ══════════════════════════════════════════════════════════════
+function retOnGrpChange(){
+  const grp = document.getElementById('ret-grp')?.value||'all';
+  const routeSel = document.getElementById('ret-route');
+  const branchSel = document.getElementById('ret-branch');
+  if(!routeSel||!branchSel) return;
+
+  // فلتر خطوط السير
+  const grps = grp==='all' ? cu.groups : [grp];
+  const routes = [...new Set(
+    (SALES_ROUTES_DATA||[]).filter(r=>grps.some(g=>r.grp===g||r.groups?.includes(g))).map(r=>r.route)
+  )].sort((a,b)=>a.localeCompare(b,'ar'));
+
+  routeSel.innerHTML = '<option value="all">كل الخطوط</option>' +
+    routes.map(r=>`<option value="${r}">${r}</option>`).join('');
+  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
+  loadReturns();
+}
+
+function retOnRouteChange(){
+  const route = document.getElementById('ret-route')?.value||'all';
+  const branchSel = document.getElementById('ret-branch');
+  if(!branchSel) return;
+
+  const branches = route==='all' ? [] :
+    (SALES_ROUTES_DATA||[]).find(r=>r.route===route)?.branches || [];
+
+  branchSel.innerHTML = '<option value="all">كل الفروع</option>' +
+    branches.map(b=>`<option value="${b}">${b}</option>`).join('');
+  loadReturns();
+}
+
+async function confirmReturnPull(id, branchName){
+  if(!confirm(`تأكيد سحب المرتجع من:\n${branchName}؟`)) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/returns?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({pulled:true, pulled_at:new Date().toISOString(), pulled_by:cu?.name||'مشرف'})
+  });
+  showToast('✅ تم تأكيد سحب المرتجع');
+  loadReturns();
+}
+
 async function loadReturns(){
-  if(!cu)return;
-  const grp   =document.getElementById('ret-grp').value;
-  const reason=document.getElementById('ret-reason').value;
-  const date  =document.getElementById('ret-date').value;
-  const grps  =grp==='all'?cu.groups:[grp];
+  if(!cu) return;
+  const grp        = document.getElementById('ret-grp')?.value||'all';
+  const route      = document.getElementById('ret-route')?.value||'all';
+  const branch     = document.getElementById('ret-branch')?.value||'all';
+  const pullStatus = document.getElementById('ret-pull-status')?.value||'all';
+  const from       = document.getElementById('ret-from')?.value;
+  const to         = document.getElementById('ret-to')?.value;
+  const grps       = grp==='all' ? cu.groups : [grp];
+
+  // تواريخ افتراضية
+  if(!from||!to){
+    const today = new Date(); const week = new Date(today); week.setDate(today.getDate()-30);
+    const fmt = d=>d.toISOString().slice(0,10);
+    const fromEl=document.getElementById('ret-from'); const toEl=document.getElementById('ret-to');
+    if(fromEl&&!fromEl.value) fromEl.value=fmt(week);
+    if(toEl&&!toEl.value)     toEl.value=fmt(today);
+    if(!from) return loadReturns();
+  }
+
   let url=`${SUPABASE_URL}/rest/v1/returns?grp=in.(${grps.join(',')})&select=*&order=created_at.desc&limit=500`;
-  if(date) url+=`&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59`;
+  url+=`&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`;
+  if(branch!=='all') url+=`&branch=eq.${encodeURIComponent(branch)}`;
+  if(pullStatus==='pending') url+=`&pulled=eq.false`;
+  if(pullStatus==='pulled')  url+=`&pulled=eq.true`;
+
   const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-  let data=await res.json(); if(!Array.isArray(data))data=[];
-  if(reason!=='all') data=data.filter(r=>r.reason===reason);
+  let data=await res.json(); if(!Array.isArray(data)) data=[];
+
+  // فلتر خط السير
+  if(route!=='all'){
+    const rd=(SALES_ROUTES_DATA||[]).find(r=>r.route===route);
+    if(rd) data=data.filter(r=>rd.branches.includes(r.branch));
+  }
+
+  const pending = data.filter(r=>!r.pulled);
+  const badge   = document.getElementById('ret-pending-badge');
+  if(badge){
+    badge.style.display = pending.length ? '' : 'none';
+    badge.textContent = `⚠️ ${pending.length} مرتجع لم يُسحب`;
+  }
+
   const totalQty=data.reduce((s,r)=>s+(+r.qty||0),0);
   document.getElementById('ret-stats').innerHTML=`
     <div class="stat-c red"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي</div></div>
     <div class="stat-c red"><div class="stat-n">${totalQty}</div><div class="stat-l">وحدات</div></div>
-    <div class="stat-c"><div class="stat-n">${new Set(data.map(x=>x.branch)).size}</div><div class="stat-l">عملاء</div></div>
-    <div class="stat-c"><div class="stat-n">${new Set(data.map(x=>x.snf)).size}</div><div class="stat-l">أصناف</div></div>`;
-  document.getElementById('ret-tbody').innerHTML=data.map((r,i)=>`<tr>
-    <td>${i+1}</td><td style="font-size:11px"><b>${r.name||'—'}</b></td>
-    <td style="font-size:11px">${r.branch||'—'}</td>
-    <td><span class="badge" style="background:${GROUPS[r.grp]?.color||'#ccc'}22;color:${GROUPS[r.grp]?.color||'#555'}">${GROUPS[r.grp]?.label||r.grp||'—'}</span></td>
-    <td style="font-size:11px;max-width:130px">${r.snf||'—'}</td>
-    <td><b style="color:var(--red)">${r.qty||0}</b></td>
-    <td><span class="badge b-red" style="font-size:10px">${r.reason||'—'}</span></td>
-    <td style="font-size:10px">${r.created_at?new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'}):'—'}</td>
-  </tr>`).join('')||'<tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد مرتجعات</td></tr>';
+    <div class="stat-c"><div class="stat-n">${pending.length}</div><div class="stat-l">⏳ لم يُسحب</div></div>
+    <div class="stat-c"><div class="stat-n">${data.filter(r=>r.pulled).length}</div><div class="stat-l">✅ تم السحب</div></div>`;
+
+  const daysSince = d => {
+    const diff = Date.now() - new Date(d).getTime();
+    return Math.floor(diff/864e5);
+  };
+
+  document.getElementById('ret-tbody').innerHTML=data.map((r,i)=>{
+    const isPulled  = r.pulled;
+    const days      = daysSince(r.created_at);
+    const rowBg     = !isPulled && days>=3 ? 'background:#FFF0F0' : '';
+    const reminder  = !isPulled && days>=3 ?
+      `<div style="color:#B71C1C;font-size:9px;margin-top:2px">⚠️ منذ ${days} يوم</div>` : '';
+
+    const pullBtn = !isPulled
+      ? `<button onclick="confirmReturnPull(${r.id},'${(r.branch||'').replace(/'/g,"\\'")}' )"
+          style="background:#1A7A4A;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:Cairo,sans-serif;white-space:nowrap">
+          ✅ تأكيد السحب
+        </button>`
+      : `<div style="color:#1A7A4A;font-size:10px;font-weight:700">✅ تم<br><span style="color:#aaa;font-size:9px">${r.pulled_by||'—'}</span></div>`;
+
+    const statusBadge = isPulled
+      ? `<span style="background:#E8F5E9;color:#1A7A4A;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">✅ تم السحب</span>`
+      : `<span style="background:#FFEBEE;color:#B71C1C;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">⏳ لم يُسحب</span>`;
+
+    return `<tr style="${rowBg}">
+      <td>${i+1}</td>
+      <td style="font-size:10px">${r.route||'—'}</td>
+      <td style="font-size:11px"><b>${r.branch||'—'}</b>${reminder}</td>
+      <td style="font-size:10px;max-width:120px">${r.snf||'—'}</td>
+      <td style="text-align:center"><b style="color:var(--red)">${r.qty||0}</b></td>
+      <td style="font-size:10px">${r.reason||'—'}</td>
+      <td>${statusBadge}</td>
+      <td>${pullBtn}</td>
+      <td style="font-size:10px">${r.created_at?new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'}):'—'}</td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="9" style="text-align:center;padding:1rem;color:#aaa">لا توجد مرتجعات</td></tr>';
 }
 
 // ══════════════════════════════════════════════════════════════
