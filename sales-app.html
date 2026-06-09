@@ -1078,12 +1078,36 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
       <div id="ptab-content-qty">
         <div class="card" style="margin-bottom:8px">
           <div class="card-title"><i class="ti ti-package"></i> كميات الأصناف</div>
-          <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
-            <select id="prod-grp" onchange="loadProducts()" style="flex:1">
-              <option value="all">كل المجموعات</option>
-            </select>
-            <input type="date" id="prod-date" onchange="loadProducts()" style="flex:1"/>
-            <button class="btn btn-ghost btn-sm" onclick="loadProducts()"><i class="ti ti-refresh"></i></button>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+            <div>
+              <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">المجموعة</label>
+              <select id="prod-grp" onchange="prodOnGrpChange()" style="width:100%">
+                <option value="all">كل المجموعات</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">خط السير</label>
+              <select id="prod-route" onchange="prodOnRouteChange()" style="width:100%">
+                <option value="all">كل الخطوط</option>
+              </select>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:8px;align-items:end">
+            <div>
+              <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">الفرع</label>
+              <select id="prod-branch" onchange="loadProducts()" style="width:100%">
+                <option value="all">كل الفروع</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:6px">
+              <div>
+                <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">التاريخ</label>
+                <input type="date" id="prod-date" onchange="loadProducts()" style="width:130px"/>
+              </div>
+              <button class="btn btn-ghost btn-sm" onclick="loadProducts()" style="align-self:flex-end">
+                <i class="ti ti-refresh"></i>
+              </button>
+            </div>
           </div>
           <div class="stat-grid" id="prod-stats"></div>
         </div>
@@ -3828,28 +3852,22 @@ function movInit() {
 }
 
 // ── تغيير المجموعة → جيب خطوط السير ────────────────────────
-async function movOnGrpChange() {
+function movOnGrpChange() {
   const grp      = document.getElementById('mov-grp').value;
   const routeSel = document.getElementById('mov-route');
   routeSel.innerHTML = '<option value="all">كل الخطوط</option>';
 
-  if (grp !== 'all') {
-    // جيب خطوط السير من product_snapshots
-    const H = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/product_snapshots?grp=eq.${grp}&select=route&limit=1000`,
-      { headers: H }
-    );
-    if (res.ok) {
-      const rows = await res.json();
-      const routes = [...new Set(rows.map(r => r.route).filter(Boolean))].sort();
-      routes.forEach(r => {
-        const o = document.createElement('option');
-        o.value = r; o.textContent = r;
-        routeSel.appendChild(o);
-      });
-    }
-  }
+  // جيب الخطوط من SALES_ROUTES_DATA مباشرة (نفس مصدر تاب خطوط السير)
+  const routes = grp === 'all'
+    ? SALES_ROUTES_DATA.filter(r => (cu?.groups || []).includes(r.grp))
+    : SALES_ROUTES_DATA.filter(r => r.grp === grp);
+
+  routes.forEach(r => {
+    const o = document.createElement('option');
+    o.value = r.route; o.textContent = r.route;
+    routeSel.appendChild(o);
+  });
+
   loadMovement();
 }
 
@@ -4165,20 +4183,83 @@ function movExportPDF() {
 
 // ══════════════════════════════════════════════════════════════
 
+// ── فلاتر تاب كميات الأصناف ────────────────────────────────
+function prodOnGrpChange() {
+  const grp      = document.getElementById('prod-grp').value;
+  const routeSel = document.getElementById('prod-route');
+  const branchSel= document.getElementById('prod-branch');
+  routeSel.innerHTML  = '<option value="all">كل الخطوط</option>';
+  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
+
+  const routes = grp === 'all'
+    ? SALES_ROUTES_DATA.filter(r => (cu?.groups||[]).includes(r.grp))
+    : SALES_ROUTES_DATA.filter(r => r.grp === grp);
+
+  routes.forEach(r => {
+    const o = document.createElement('option');
+    o.value = r.route; o.textContent = r.route;
+    routeSel.appendChild(o);
+  });
+  loadProducts();
+}
+
+function prodOnRouteChange() {
+  const route     = document.getElementById('prod-route').value;
+  const branchSel = document.getElementById('prod-branch');
+  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
+
+  if (route !== 'all') {
+    const rd = SALES_ROUTES_DATA.find(r => r.route === route);
+    if (rd) {
+      rd.branches.forEach(b => {
+        const o = document.createElement('option');
+        o.value = b; o.textContent = b;
+        branchSel.appendChild(o);
+      });
+    }
+  } else {
+    // لو اختار كل الخطوط — اجمع كل الفروع من المجموعة المختارة
+    const grp = document.getElementById('prod-grp').value;
+    const routes = grp === 'all'
+      ? SALES_ROUTES_DATA.filter(r => (cu?.groups||[]).includes(r.grp))
+      : SALES_ROUTES_DATA.filter(r => r.grp === grp);
+    const allBranches = [...new Set(routes.flatMap(r => r.branches))].sort();
+    allBranches.forEach(b => {
+      const o = document.createElement('option');
+      o.value = b; o.textContent = b;
+      branchSel.appendChild(o);
+    });
+  }
+  loadProducts();
+}
+
 async function loadProducts(){
   if(!cu)return;
-  const grp  = document.getElementById('prod-grp').value;
-  const date = document.getElementById('prod-date').value;
-  const grps = grp==='all'?cu.groups:[grp];
-  let url=`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&select=*&order=created_at.desc&limit=500`;
-  if(date) url+=`&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59`;
+  const grp    = document.getElementById('prod-grp').value;
+  const route  = document.getElementById('prod-route')?.value  || 'all';
+  const branch = document.getElementById('prod-branch')?.value || 'all';
+  const date   = document.getElementById('prod-date').value;
+  const grps   = grp==='all' ? cu.groups : [grp];
+
+  let url=`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&select=*&order=created_at.desc&limit=1000`;
+  if(date)   url+=`&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59`;
+  if(branch !== 'all') url+=`&branch=eq.${encodeURIComponent(branch)}`;
+
   const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
   let data=await res.json(); if(!Array.isArray(data))data=[];
+
+  // فلتر خط السير من جانب العميل (products مش فيها route مباشرة)
+  if(route !== 'all'){
+    const rd = SALES_ROUTES_DATA.find(r => r.route === route);
+    if(rd) data = data.filter(p => rd.branches.includes(p.branch));
+  }
+
   document.getElementById('prod-stats').innerHTML=`
     <div class="stat-c"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي الأصناف</div></div>
     <div class="stat-c"><div class="stat-n">${new Set(data.map(x=>x.name)).size}</div><div class="stat-l">منسقون</div></div>
     <div class="stat-c"><div class="stat-n">${new Set(data.map(x=>x.branch)).size}</div><div class="stat-l">فروع</div></div>
     <div class="stat-c"><div class="stat-n">${new Set(data.map(x=>x.snf)).size}</div><div class="stat-l">أصناف مختلفة</div></div>`;
+
   document.getElementById('prod-tbody').innerHTML=data.map((p,i)=>`<tr>
     <td>${i+1}</td><td style="font-size:11px"><b>${p.name||'—'}</b></td>
     <td style="font-size:11px">${p.branch||'—'}</td>
