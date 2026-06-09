@@ -6038,6 +6038,105 @@ async function saveDayRep(){
 let achCurrentDay = null;
 let achCurrentTab = 'daily';
 
+function achRenderSppPlan(plan, items, today){
+  const DAYS=['السبت','الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة'];
+  const ST_SPP={draft:'⏳ مسودة',submitted:'📤 بانتظار الاعتماد',approved_manager:'🔄 بانتظار GM',approved:'🏆 معتمدة',rejected:'❌ مرفوضة'};
+  const stColor={draft:'#8B6F47',submitted:'#E65100',approved_manager:'#1565C0',approved:'#1A7A4A',rejected:'#B71C1C'};
+
+  // تحديث week label
+  const wl=document.getElementById('ach-week-label');
+  if(wl) wl.textContent=`${plan.week_start} ← ${plan.week_end}`;
+
+  // KPI
+  const done   = items.filter(i=>i.visit_status==='done').length;
+  const total  = items.length;
+  const pct    = total?Math.round(done/total*100):0;
+  const totalA = items.filter(i=>i.visit_status==='done').reduce((s,i)=>s+(+i.actual_amount||0),0);
+  document.getElementById('ach-kpi').innerHTML=`
+    <div class="stat-card green"><div class="stat-n">${done}</div><div class="stat-l">✅ تم تنفيذه</div></div>
+    <div class="stat-card orange"><div class="stat-n">${total-done}</div><div class="stat-l">⏳ متبقي</div></div>
+    <div class="stat-card blue"><div class="stat-n">${pct}%</div><div class="stat-l">نسبة الإنجاز</div></div>
+    <div class="stat-card purple"><div class="stat-n">${totalA.toLocaleString()}</div><div class="stat-l">💰 فعلي (ج)</div></div>`;
+
+  // chips الأيام
+  const dayChips=document.getElementById('ach-day-chips');
+  dayChips.innerHTML='';
+  const start=new Date(plan.week_start+'T00:00:00');
+  for(let i=0;i<7;i++){
+    const d=new Date(start); d.setDate(start.getDate()+i);
+    const ds=localDateStr(d);
+    const dayItems=items.filter(it=>it.visit_date===ds);
+    const dayDone=dayItems.filter(it=>it.visit_status==='done').length;
+    const isToday=ds===today;
+    const isSelected=ds===achCurrentDay;
+    const chip=document.createElement('div');
+    chip.style.cssText=`flex-shrink:0;padding:8px 12px;border-radius:10px;border:1.5px solid;cursor:pointer;text-align:center;font-family:Cairo,sans-serif;min-width:62px;
+      background:${isSelected?'var(--navy)':'#fff'};
+      border-color:${isSelected?'var(--navy)':isToday?'#1A7A4A':dayItems.length?'var(--gold)':'var(--border)'};
+      color:${isSelected?'#fff':'var(--navy)'};
+      ${isToday&&!isSelected?'box-shadow:0 0 0 2px #1A7A4A44':''};`;
+    chip.innerHTML=`<div style="font-size:10px;font-weight:700">${DAYS[d.getDay()]}</div>
+      <div style="font-size:9px;opacity:.7">${d.toLocaleDateString('ar-EG',{day:'numeric',month:'short'})}</div>
+      ${isToday?'<div style="font-size:8px;font-weight:700;color:'+(isSelected?'#C8F0D8':'#1A7A4A')+'">اليوم</div>':''}
+      ${dayItems.length?`<div style="font-size:10px;font-weight:900;margin-top:2px">${dayDone}/${dayItems.length}</div>`:'<div style="font-size:9px;opacity:.3">—</div>'}`;
+    chip.onclick=()=>{ achCurrentDay=ds; achRenderSppPlan(plan,items,today); };
+    dayChips.appendChild(chip);
+    if(isToday&&!achCurrentDay) achCurrentDay=ds;
+  }
+
+  // بنود اليوم المختار
+  const selDay=achCurrentDay||today;
+  const dayItems=items.filter(it=>it.visit_date===selDay);
+  const container=document.getElementById('ach-day-items');
+  if(!container) return;
+
+  // زرار تنفيذ اليوم + معلومات
+  const hdrHtml=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <div style="font-size:12px;font-weight:700;color:var(--navy)">
+      ${DAYS[new Date(selDay+'T00:00:00').getDay()]} — ${new Date(selDay+'T00:00:00').toLocaleDateString('ar-EG',{day:'numeric',month:'long'})}
+    </div>
+    <div style="display:flex;gap:6px">
+      <span style="font-size:10px;background:${stColor[plan.status]+'22'};color:${stColor[plan.status]};border-radius:20px;padding:2px 8px;font-weight:700">${ST_SPP[plan.status]||plan.status}</span>
+      ${selDay===today?`<button onclick="_tePlanId='${plan.id}';sppTodayExec('${plan.id}')"
+        style="padding:5px 10px;background:#1A7A4A;color:#fff;border:none;border-radius:8px;font-size:10px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+        📋 تنفيذ اليوم
+      </button>`:''}
+    </div>
+  </div>`;
+
+  if(!dayItems.length){
+    container.innerHTML=hdrHtml+`<div style="text-align:center;padding:20px;color:#aaa">
+      <i class="ti ti-calendar-off" style="font-size:24px;display:block;margin-bottom:6px;opacity:.3"></i>
+      لا توجد زيارات مخططة لهذا اليوم
+    </div>`;
+    return;
+  }
+
+  container.innerHTML=hdrHtml+dayItems.map(it=>{
+    const isDone=it.visit_status==='done';
+    const isSkip=it.visit_status==='skipped';
+    const borderC=isDone?'#1A7A4A':isSkip?'#B71C1C':'#E65100';
+    const bgC=isDone?'#F0FDF4':isSkip?'#FEF2F2':'#fff';
+    return `<div style="border:1.5px solid ${borderC};border-radius:12px;padding:12px;margin-bottom:8px;background:${bgC};border-right:4px solid ${borderC}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+        <div>
+          <div style="font-size:13px;font-weight:900;color:#2C1F0A">🏪 ${it.client_name||'—'}</div>
+          <div style="font-size:10px;color:#8B6F47">${it.area||'—'}${it.rep_name?' · 👤 '+it.rep_name:''}</div>
+          ${it.purpose?`<div style="font-size:10px;color:#1565C0">🎯 ${it.purpose}</div>`:''}
+        </div>
+        <div style="text-align:left">
+          <span style="background:${isDone?'#E8F5E9':isSkip?'#FFEBEE':'#FFF8F0'};color:${borderC};border-radius:20px;padding:2px 8px;font-size:10px;font-weight:700">
+            ${isDone?'✅ منجز':isSkip?'⏭️ فائت':'⏳ مخطط'}
+          </span>
+          <div style="font-size:10px;color:#1565C0;margin-top:3px;font-weight:700">مخطط: ${(+it.planned_amount||0).toLocaleString()} ج</div>
+          ${isDone?`<div style="font-size:10px;color:#1A7A4A;font-weight:700">فعلي: ${(+it.actual_amount||0).toLocaleString()} ج</div>`:''}
+        </div>
+      </div>
+      ${it.notes?`<div style="font-size:11px;color:#8B6F47;background:rgba(0,0,0,.04);border-radius:6px;padding:5px 8px">📝 ${it.notes}</div>`:''}
+    </div>`;
+  }).join('');
+}
+
 function achSwitchTab(tab){
   achCurrentTab = tab;
   document.getElementById('ach-daily-view').style.display  = tab==='daily'  ? '' : 'none';
@@ -6049,8 +6148,42 @@ function achSwitchTab(tab){
   if(tab==='weekly') achRenderWeekly();
 }
 
-function loadAchievedPanel(){
-  if(!currentPlan) return;
+async function loadAchievedPanel(){
+  // أولاً: حاول تجيب الخطة من sales_plans_plus (خطط بلس)
+  const today = localDateStr(new Date());
+  const userName = cu?.name||'';
+
+  // جيب خطط بلس الأسبوع الحالي
+  let sppPlan = null;
+  let sppItems = [];
+  try{
+    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const _d=new Date(); const _day=_d.getDay(); const _diff=_day===6?0:_day+1;
+    const _sat=new Date(_d); _sat.setDate(_d.getDate()-_diff); _sat.setHours(0,0,0,0);
+    const ws=localDateStr(_sat);
+    const r=await fetch(`${SUPABASE_URL}/rest/v1/sales_plans_plus?staff_name=eq.${encodeURIComponent(userName)}&week_start=eq.${ws}&select=*&limit=1`,{headers:H});
+    const data=r.ok?await r.json().catch(()=>[]):[];
+    if(data.length){
+      sppPlan=data[0];
+      const ir=await fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items?plan_id=eq.${sppPlan.id}&select=*&order=visit_date.asc&limit=500`,{headers:H});
+      sppItems=ir.ok?await ir.json().catch(()=>[]):[];
+    }
+  }catch(e){}
+
+  // لو عندنا خطة بلس — اعرضها في المنجز
+  if(sppPlan){
+    achRenderSppPlan(sppPlan, sppItems, today);
+    return;
+  }
+
+  // fallback: خطة weekly_plans
+  if(!currentPlan){ 
+    document.getElementById('ach-kpi').innerHTML='<div style="text-align:center;padding:1rem;color:#aaa;font-size:12px;grid-column:1/-1">لا توجد خطة للأسبوع الحالي</div>';
+    document.getElementById('ach-day-chips').innerHTML='';
+    document.getElementById('ach-day-items').innerHTML='<div style="text-align:center;padding:2rem;color:#aaa">لا توجد خطة — اذهب لتاب "خطط بلس" لإنشاء خطة جديدة</div>';
+    return;
+  }
+
   const we = new Date(currentWeekStart); we.setDate(we.getDate()+6);
   document.getElementById('ach-week-label').textContent =
     currentWeekStart.toLocaleDateString('ar-EG',{day:'numeric',month:'short'}) + ' ← ' +
@@ -6073,7 +6206,7 @@ function loadAchievedPanel(){
   // chips الأيام
   const dayChips = document.getElementById('ach-day-chips');
   dayChips.innerHTML = '';
-  const today = localDateStr(new Date());
+  const todayStr2 = localDateStr(new Date());
   for(let i=0;i<7;i++){
     const d=new Date(currentWeekStart); d.setDate(d.getDate()+i);
     const ds=d.toISOString().slice(0,10);
