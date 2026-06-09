@@ -12980,6 +12980,760 @@ function populateRepSelect(){
   });
 }
 
+// ══════════════════════════════════════════════════════════════
+// SALES PRODUCTS — أصناف المبيعات
+// ══════════════════════════════════════════════════════════════
+let _sprodRoutes = [];
+
+async function sprodInitFilters(){
+  // تعبئة المجموعات من SALES_ROUTES_DATA
+  const grpSel = document.getElementById('sprod-grp');
+  if(grpSel && grpSel.options.length <= 1){
+    const grps = [...new Set(SALES_ROUTES_DATA.map(r=>r.grp))];
+    grps.forEach(g=>{
+      const label = GROUPS[g]?.label || g;
+      const o = document.createElement('option');
+      o.value=g; o.textContent=label;
+      grpSel.appendChild(o);
+    });
+  }
+  // تواريخ افتراضية
+  const today = new Date().toISOString().slice(0,10);
+  const past  = new Date(); past.setDate(past.getDate()-30);
+  if(!document.getElementById('sprod-from').value) document.getElementById('sprod-from').value = past.toISOString().slice(0,10);
+  if(!document.getElementById('sprod-to').value)   document.getElementById('sprod-to').value   = today;
+}
+
+function sprodOnGrpChange(){
+  const grp = document.getElementById('sprod-grp').value;
+  const routeSel  = document.getElementById('sprod-route');
+  const branchSel = document.getElementById('sprod-branch');
+  const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
+  routeSel.innerHTML  = '<option value="all">كل الخطوط</option>' +
+    routes.map(r=>`<option value="${r.route}">${r.route}</option>`).join('');
+  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
+  sprodLoad();
+}
+
+function sprodOnRouteChange(){
+  const route     = document.getElementById('sprod-route').value;
+  const branchSel = document.getElementById('sprod-branch');
+  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
+  if(route !== 'all'){
+    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
+    if(rd){
+      rd.branches.forEach(b=>{
+        const o = document.createElement('option');
+        o.value=b; o.textContent=b; branchSel.appendChild(o);
+      });
+    }
+  } else {
+    const grp = document.getElementById('sprod-grp').value;
+    const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
+    const allBranches = [...new Set(routes.flatMap(r=>r.branches))].sort((a,b)=>a.localeCompare(b,'ar'));
+    allBranches.forEach(b=>{
+      const o = document.createElement('option');
+      o.value=b; o.textContent=b; branchSel.appendChild(o);
+    });
+  }
+  sprodLoad();
+}
+
+async function sprodLoad(){
+  const grp    = document.getElementById('sprod-grp')?.value||'all';
+  const route  = document.getElementById('sprod-route')?.value||'all';
+  const branch = document.getElementById('sprod-branch')?.value||'all';
+  const snf    = (document.getElementById('sprod-snf')?.value||'').trim();
+  const from   = document.getElementById('sprod-from')?.value;
+  const to     = document.getElementById('sprod-to')?.value;
+  if(!from||!to) return;
+
+  const tbody = document.getElementById('sprod-tbody');
+  tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:20px"><div class="spinner" style="margin:0 auto"></div></td></tr>';
+
+  const grpStr = grp==='all' ? Object.keys(GROUPS).join(',') : grp;
+  let url = `${SUPABASE_URL}/rest/v1/products?grp=in.(${grpStr})&select=*&order=created_at.desc&limit=2000`;
+  url += `&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`;
+  if(branch!=='all') url += `&branch=eq.${encodeURIComponent(branch)}`;
+  if(snf) url += `&snf=ilike.*${encodeURIComponent(snf)}*`;
+
+  let data = [];
+  try{
+    const r = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    data = await r.json(); if(!Array.isArray(data)) data=[];
+  }catch(e){}
+
+  // فلتر خط السير من SALES_ROUTES_DATA
+  if(route!=='all'){
+    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
+    if(rd) data = data.filter(p=>rd.branches.includes(p.branch));
+  }
+
+  // KPI
+  document.getElementById('sprod-kpi').innerHTML = `
+    <div class="stat-card"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي السجلات</div></div>
+    <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.snf)).size}</div><div class="stat-l">أصناف مختلفة</div></div>
+    <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.branch)).size}</div><div class="stat-l">فروع</div></div>
+    <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.name)).size}</div><div class="stat-l">مشرفون</div></div>`;
+
+  tbody.innerHTML = data.map((p,i)=>{
+    const grpInfo = GROUPS[p.grp]||{label:p.grp,color:'#888'};
+    const routeName = _sprodRoutes.find(r=>r.route===p.route)?.route || p.route || '—';
+    const dt = p.created_at ? new Date(p.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'2-digit'}) : '—';
+    return `<tr>
+      <td>${i+1}</td>
+      <td><span style="background:${grpInfo.color}22;color:${grpInfo.color};padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700">${grpInfo.label}</span></td>
+      <td style="font-size:11px">${routeName}</td>
+      <td style="font-size:11px;font-weight:700">${p.branch||'—'}</td>
+      <td style="font-size:11px">${p.name||'—'}</td>
+      <td style="font-size:12px;font-weight:700">${p.snf||'—'}</td>
+      <td style="text-align:center;font-weight:700;color:#1A7A4A">${p.shelf_qty??'—'}</td>
+      <td style="text-align:center;font-weight:700;color:#005CBF">${p.stock_qty??'—'}</td>
+      <td style="font-size:11px;color:#888">${dt}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="9" style="text-align:center;padding:20px;color:#888">لا توجد بيانات</td></tr>';
+}
+
+function sprodExportExcel(){
+  const tbody = document.getElementById('sprod-tbody');
+  if(!tbody||!tbody.rows.length||tbody.rows[0].cells.length<2){ alert('لا توجد بيانات'); return; }
+  const from = document.getElementById('sprod-from')?.value||'';
+  const to   = document.getElementById('sprod-to')?.value||'';
+  const headers = ['#','المجموعة','خط السير','الفرع','المشرف','الصنف','رصيد الرف','رصيد المخزن','التاريخ'];
+  const rows = [...tbody.rows].map(r=>[...r.cells].map(c=>c.innerText.trim()));
+  const aoa = [['الطحان جولدن دايتس — أصناف المبيعات','','','','','','','',''],
+    [`الفترة: ${from} — ${to}`,'','','','','','','',''],[''],headers,...rows];
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{wch:4},{wch:18},{wch:24},{wch:24},{wch:18},{wch:30},{wch:10},{wch:10},{wch:12}];
+  ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:8}},{s:{r:1,c:0},e:{r:1,c:8}}];
+  XLSX.utils.book_append_sheet(wb,ws,'أصناف المبيعات');
+  XLSX.writeFile(wb,`sales_products_${from}_${to}.xlsx`);
+}
+
+function sprodExportPDF(){
+  const tbody = document.getElementById('sprod-tbody');
+  if(!tbody||!tbody.rows.length) return;
+  const from = document.getElementById('sprod-from')?.value||'';
+  const to   = document.getElementById('sprod-to')?.value||'';
+  const rows = [...tbody.rows].map(r=>`<tr>${[...r.cells].map(c=>`<td>${c.innerText.trim()}</td>`).join('')}</tr>`).join('');
+  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><style>
+    body{font-family:Cairo,Arial,sans-serif;font-size:11px;padding:16px}
+    .hdr{background:#4B3C1A;color:#EDE5D8;padding:12px;border-radius:8px;margin-bottom:10px}
+    table{width:100%;border-collapse:collapse}th{background:#4B3C1A;color:#EDE5D8;padding:6px 8px;text-align:right}
+    td{padding:5px 8px;border-bottom:1px solid #eee}tr:nth-child(even){background:#FFFDF8}
+  </style></head><body>
+  <div class="hdr"><h2 style="margin:0">📦 أصناف المبيعات — ${from} إلى ${to}</h2></div>
+  <table><thead><tr><th>#</th><th>المجموعة</th><th>الفرع</th><th>الصنف</th><th>رصيد الرف</th><th>رصيد المخزن</th><th>التاريخ</th></tr></thead>
+  <tbody>${rows}</tbody></table></body></html>`;
+  const w = window.open('','_blank','width=1100,height=700');
+  w.document.write(html); w.document.close(); setTimeout(()=>{w.focus();w.print();},600);
+}
+
+// ══════════════════════════════════════════════════════════════
+// SALES RETURNS — مرتجعات المبيعات
+// ══════════════════════════════════════════════════════════════
+async function sretInitFilters(){
+  const grpSel = document.getElementById('sret-grp');
+  if(grpSel && grpSel.options.length<=1){
+    const grps = [...new Set(SALES_ROUTES_DATA.map(r=>r.grp))];
+    grps.forEach(g=>{ const o=document.createElement('option');o.value=g;o.textContent=GROUPS[g]?.label||g;grpSel.appendChild(o); });
+  }
+  const today = new Date().toISOString().slice(0,10);
+  const past  = new Date(); past.setDate(past.getDate()-30);
+  if(!document.getElementById('sret-from').value) document.getElementById('sret-from').value = past.toISOString().slice(0,10);
+  if(!document.getElementById('sret-to').value)   document.getElementById('sret-to').value   = today;
+}
+
+function sretOnGrpChange(){
+  const grp = document.getElementById('sret-grp').value;
+  const routeSel  = document.getElementById('sret-route');
+  const branchSel = document.getElementById('sret-branch');
+  const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
+  routeSel.innerHTML  = '<option value="all">كل الخطوط</option>' +
+    routes.map(r=>`<option value="${r.route}">${r.route}</option>`).join('');
+  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
+  sretLoad();
+}
+
+function sretOnRouteChange(){
+  const route     = document.getElementById('sret-route').value;
+  const branchSel = document.getElementById('sret-branch');
+  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
+  if(route!=='all'){
+    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
+    if(rd) rd.branches.forEach(b=>{ const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o); });
+  } else {
+    const grp = document.getElementById('sret-grp').value;
+    const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
+    [...new Set(routes.flatMap(r=>r.branches))].sort((a,b)=>a.localeCompare(b,'ar')).forEach(b=>{
+      const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o);
+    });
+  }
+  sretLoad();
+}
+
+async function sretLoad(){
+  const grp    = document.getElementById('sret-grp')?.value||'all';
+  const route  = document.getElementById('sret-route')?.value||'all';
+  const branch = document.getElementById('sret-branch')?.value||'all';
+  const status = document.getElementById('sret-status')?.value||'all';
+  const from   = document.getElementById('sret-from')?.value;
+  const to     = document.getElementById('sret-to')?.value;
+  if(!from||!to) return;
+
+  const tbody = document.getElementById('sret-tbody');
+  tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:20px"><div class="spinner" style="margin:0 auto"></div></td></tr>';
+
+  const grpStr = grp==='all' ? Object.keys(GROUPS).join(',') : grp;
+  let url = `${SUPABASE_URL}/rest/v1/returns?grp=in.(${grpStr})&select=*&order=created_at.desc&limit=2000`;
+  url += `&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`;
+  if(branch!=='all') url += `&branch=eq.${encodeURIComponent(branch)}`;
+  if(status==='pending') url += `&pulled=eq.false`;
+  if(status==='pulled')  url += `&pulled=eq.true`;
+
+  let data = [];
+  try{
+    const r = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    data = await r.json(); if(!Array.isArray(data)) data=[];
+  }catch(e){}
+
+  if(route!=='all'){
+    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
+    if(rd) data = data.filter(p=>rd.branches.includes(p.branch));
+  }
+
+  const pending = data.filter(r=>!r.pulled);
+  const done    = data.filter(r=>r.pulled);
+  const totalQty = data.reduce((s,r)=>s+(+r.qty||0),0);
+
+  // KPI
+  document.getElementById('sret-kpi').innerHTML = `
+    <div class="stat-card red"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي المرتجعات</div></div>
+    <div class="stat-card red"><div class="stat-n">${totalQty}</div><div class="stat-l">إجمالي الوحدات</div></div>
+    <div class="stat-card orange"><div class="stat-n">${pending.length}</div><div class="stat-l">⏳ لم يُسحب</div></div>
+    <div class="stat-card green"><div class="stat-n">${done.length}</div><div class="stat-l">✅ تم السحب</div></div>`;
+
+  // تنبيه المتأخر
+  const lateCount = pending.filter(r=>{ return (Date.now()-new Date(r.created_at).getTime())/864e5 >= 3; }).length;
+  const warnEl = document.getElementById('sret-warning');
+  if(lateCount>0){ warnEl.style.display=''; warnEl.textContent=`⚠️ ${lateCount} مرتجع منذ أكثر من 3 أيام لم يُسحب بعد`; }
+  else warnEl.style.display='none';
+
+  // badge
+  setBadgeEl('nav-sret-badge', pending.length);
+
+  tbody.innerHTML = data.map((r,i)=>{
+    const isPulled = !!r.pulled;
+    const days = Math.floor((Date.now()-new Date(r.created_at).getTime())/864e5);
+    const isLate = !isPulled && days>=3;
+    const grpInfo = GROUPS[r.grp]||{label:r.grp,color:'#888'};
+    const routeN  = _sprodRoutes.find(x=>x.route===r.route)?.route || r.route || '—';
+    const statusBadge = isPulled
+      ? `<span style="background:#D1FAE5;color:#065F46;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">✅ تم السحب</span>`
+      : `<span style="background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">⏳ لم يُسحب${isLate?` (${days}ي)`:''}</span>`;
+    const pullBtn = isPulled
+      ? `<span style="font-size:11px;color:#065F46">✅ ${r.pulled_by||'—'}</span>`
+      : `<button onclick="sretConfirmPull(${r.id},'${(r.branch||'').replace(/'/g,"\\'")}' )"
+          style="background:#1A7A4A;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif">✅ تأكيد السحب</button>`;
+    const dt = r.created_at ? new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'2-digit'}) : '—';
+    return `<tr style="${isLate?'background:#FFF0F0':''}">
+      <td>${i+1}</td>
+      <td><span style="background:${grpInfo.color}22;color:${grpInfo.color};padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">${grpInfo.label}</span></td>
+      <td style="font-size:11px">${routeN}</td>
+      <td style="font-size:11px;font-weight:700">${r.branch||'—'}${isLate?`<div style="color:#DC2626;font-size:9px">⚠️ منذ ${days} يوم</div>`:''}</td>
+      <td style="font-size:11px">${r.snf||'—'}</td>
+      <td style="text-align:center;font-weight:700;color:#B91C1C">${r.qty||0}</td>
+      <td style="font-size:11px">${r.reason||'—'}</td>
+      <td>${statusBadge}</td>
+      <td>${pullBtn}</td>
+      <td style="font-size:11px;color:#888">${dt}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="10" style="text-align:center;padding:20px;color:#888">لا توجد مرتجعات</td></tr>';
+}
+
+async function sretConfirmPull(id, branch){
+  if(!confirm(`تأكيد سحب المرتجع من:\n${branch}؟`)) return;
+  try{
+    await fetch(`${SUPABASE_URL}/rest/v1/returns?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify({pulled:true,pulled_at:new Date().toISOString(),pulled_by:CU?.name||'admin'})
+    });
+    showToast('✅ تم تأكيد سحب المرتجع'); sretLoad();
+  }catch(e){ showToast('❌ خطأ في التأكيد'); }
+}
+
+function sretExportExcel(){
+  const tbody = document.getElementById('sret-tbody');
+  if(!tbody||!tbody.rows.length) return;
+  const from = document.getElementById('sret-from')?.value||'';
+  const to   = document.getElementById('sret-to')?.value||'';
+  const headers = ['#','المجموعة','خط السير','الفرع','الصنف','الكمية','السبب','الحالة','تأكيد السحب','التاريخ'];
+  const rows = [...tbody.rows].map(r=>[...r.cells].map(c=>c.innerText.trim()));
+  const aoa = [['الطحان جولدن دايتس — مرتجعات المبيعات','','','','','','','','',''],
+    [`الفترة: ${from} — ${to}`,'','','','','','','','',''],[''],headers,...rows];
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:9}},{s:{r:1,c:0},e:{r:1,c:9}}];
+  XLSX.utils.book_append_sheet(wb,ws,'مرتجعات المبيعات');
+  XLSX.writeFile(wb,`sales_returns_${from}_${to}.xlsx`);
+}
+
+function sretExportPDF(){
+  const tbody = document.getElementById('sret-tbody');
+  if(!tbody||!tbody.rows.length) return;
+  const from = document.getElementById('sret-from')?.value||'';
+  const to   = document.getElementById('sret-to')?.value||'';
+  const rows = [...tbody.rows].map(r=>`<tr style="${r.style.background?'background:'+r.style.background:''}">${[...r.cells].map(c=>`<td>${c.innerText.trim()}</td>`).join('')}</tr>`).join('');
+  const pending = [...tbody.rows].filter(r=>r.innerText.includes('لم يُسحب')).length;
+  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><style>
+    body{font-family:Cairo,Arial,sans-serif;font-size:11px;padding:16px}
+    .hdr{background:#731E2E;color:#fff;padding:12px;border-radius:8px;margin-bottom:10px}
+    .warn{background:#FFEBEE;color:#B71C1C;padding:7px 12px;border-radius:6px;margin-bottom:10px;font-weight:700}
+    table{width:100%;border-collapse:collapse}th{background:#731E2E;color:#fff;padding:6px 8px;text-align:right}
+    td{padding:5px 8px;border-bottom:1px solid #eee}
+  </style></head><body>
+  <div class="hdr"><h2 style="margin:0">↩️ مرتجعات المبيعات — ${from} إلى ${to}</h2></div>
+  ${pending>0?`<div class="warn">⚠️ ${pending} مرتجع لم يُسحب بعد</div>`:''}
+  <table><thead><tr><th>#</th><th>المجموعة</th><th>الفرع</th><th>الصنف</th><th>الكمية</th><th>السبب</th><th>الحالة</th><th>التاريخ</th></tr></thead>
+  <tbody>${rows}</tbody></table></body></html>`;
+  const w=window.open('','_blank','width=1100,height=700');
+  w.document.write(html); w.document.close(); setTimeout(()=>{w.focus();w.print();},600);
+}
+
+// ══════════════════════════════════════════════════════════════
+// SALES MISSING — نواقص المبيعات
+// ══════════════════════════════════════════════════════════════
+async function smissInitFilters(){
+  const grpSel = document.getElementById('smiss-grp');
+  if(grpSel && grpSel.options.length<=1){
+    const grps = [...new Set(SALES_ROUTES_DATA.map(r=>r.grp))];
+    grps.forEach(g=>{ const o=document.createElement('option');o.value=g;o.textContent=GROUPS[g]?.label||g;grpSel.appendChild(o); });
+  }
+  const today = new Date().toISOString().slice(0,10);
+  const past  = new Date(); past.setDate(past.getDate()-30);
+  if(!document.getElementById('smiss-from').value) document.getElementById('smiss-from').value = past.toISOString().slice(0,10);
+  if(!document.getElementById('smiss-to').value)   document.getElementById('smiss-to').value   = today;
+}
+
+function smissOnGrpChange(){
+  const grp = document.getElementById('smiss-grp').value;
+  const routeSel  = document.getElementById('smiss-route');
+  const branchSel = document.getElementById('smiss-branch');
+  const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
+  routeSel.innerHTML  = '<option value="all">كل الخطوط</option>' +
+    routes.map(r=>`<option value="${r.route}">${r.route}</option>`).join('');
+  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
+  smissLoad();
+}
+
+function smissOnRouteChange(){
+  const route     = document.getElementById('smiss-route').value;
+  const branchSel = document.getElementById('smiss-branch');
+  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
+  if(route!=='all'){
+    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
+    if(rd) rd.branches.forEach(b=>{ const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o); });
+  } else {
+    const grp = document.getElementById('smiss-grp').value;
+    const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
+    [...new Set(routes.flatMap(r=>r.branches))].sort((a,b)=>a.localeCompare(b,'ar')).forEach(b=>{
+      const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o);
+    });
+  }
+  smissLoad();
+}
+
+async function smissLoad(){
+  const grp    = document.getElementById('smiss-grp')?.value||'all';
+  const route  = document.getElementById('smiss-route')?.value||'all';
+  const branch = document.getElementById('smiss-branch')?.value||'all';
+  const status = document.getElementById('smiss-status')?.value||'all';
+  const from   = document.getElementById('smiss-from')?.value;
+  const to     = document.getElementById('smiss-to')?.value;
+  if(!from||!to) return;
+
+  const tbody = document.getElementById('smiss-tbody');
+  tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:20px"><div class="spinner" style="margin:0 auto"></div></td></tr>';
+
+  const grpStr = grp==='all' ? Object.keys(GROUPS).join(',') : grp;
+  let url = `${SUPABASE_URL}/rest/v1/missing?grp=in.(${grpStr})&select=*&order=created_at.desc&limit=2000`;
+  url += `&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`;
+  if(branch!=='all') url += `&branch=eq.${encodeURIComponent(branch)}`;
+  if(status==='pending') url += `&delivered=eq.false`;
+  if(status==='done')    url += `&delivered=eq.true`;
+
+  let data = [];
+  try{
+    const r = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    data = await r.json(); if(!Array.isArray(data)) data=[];
+  }catch(e){}
+
+  if(route!=='all'){
+    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
+    if(rd) data = data.filter(p=>rd.branches.includes(p.branch));
+  }
+
+  const pending = data.filter(m=>!m.delivered);
+  const done    = data.filter(m=>m.delivered);
+
+  // KPI
+  document.getElementById('smiss-kpi').innerHTML = `
+    <div class="stat-card orange"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي النواقص</div></div>
+    <div class="stat-card red"><div class="stat-n">${pending.length}</div><div class="stat-l">⏳ لم يُوَرَّد</div></div>
+    <div class="stat-card green"><div class="stat-n">${done.length}</div><div class="stat-l">✅ تم التوريد</div></div>
+    <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.snf)).size}</div><div class="stat-l">أصناف مختلفة</div></div>`;
+
+  // تنبيه
+  const lateCount = pending.filter(m=>(Date.now()-new Date(m.created_at).getTime())/864e5>=3).length;
+  const warnEl = document.getElementById('smiss-warning');
+  if(lateCount>0){ warnEl.style.display=''; warnEl.textContent=`⚠️ ${lateCount} ناقص منذ أكثر من 3 أيام لم يُوَرَّد بعد — يحتاج متابعة عاجلة!`; }
+  else warnEl.style.display='none';
+
+  // badge
+  setBadgeEl('nav-smiss-badge', pending.length);
+
+  tbody.innerHTML = data.map((m,i)=>{
+    const isDelivered = !!m.delivered;
+    const days = Math.floor((Date.now()-new Date(m.created_at).getTime())/864e5);
+    const isLate = !isDelivered && days>=3;
+    const grpInfo = GROUPS[m.grp]||{label:m.grp,color:'#888'};
+    const routeN  = _sprodRoutes.find(x=>x.route===m.route)?.route || m.route || '—';
+    const statusBadge = isDelivered
+      ? `<span style="background:#D1FAE5;color:#065F46;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">✅ تم التوريد</span>`
+      : `<span style="background:#FEF3C7;color:#B45309;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">⏳ لم يُوَرَّد${isLate?` (${days}ي)`:''}</span>`;
+    const actionBtn = isDelivered
+      ? `<span style="font-size:11px;color:#065F46">✅ ${m.delivered_by||'—'}</span>`
+      : `<button onclick="smissConfirmDelivery(${m.id},'${(m.branch||'').replace(/'/g,"\\'")}','${(m.snf||'').replace(/'/g,"\\'")}' )"
+          style="background:#7C2D12;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif;font-weight:700">✅ تأكيد التوريد</button>`;
+    const dt = m.created_at ? new Date(m.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'2-digit'}) : '—';
+    return `<tr style="${isLate?'background:#FFF8E1':''}">
+      <td>${i+1}</td>
+      <td><span style="background:${grpInfo.color}22;color:${grpInfo.color};padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">${grpInfo.label}</span></td>
+      <td style="font-size:11px">${routeN}</td>
+      <td style="font-size:11px;font-weight:700">${m.branch||'—'}${isLate?`<div style="color:#E65100;font-size:9px">⚠️ منذ ${days} يوم</div>`:''}</td>
+      <td style="font-size:11px">${m.snf||'—'}</td>
+      <td style="font-size:11px;color:#888">${m.reason||'—'}</td>
+      <td>${statusBadge}</td>
+      <td>${actionBtn}</td>
+      <td style="font-size:11px;color:#888">${dt}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="9" style="text-align:center;padding:20px;color:#888">لا توجد نواقص</td></tr>';
+}
+
+async function smissConfirmDelivery(id, branch, snf){
+  if(!confirm(`تأكيد توريد الناقص:\n${snf}\nللفرع: ${branch}؟`)) return;
+  try{
+    await fetch(`${SUPABASE_URL}/rest/v1/missing?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify({delivered:true,delivered_at:new Date().toISOString(),delivered_by:CU?.name||'admin'})
+    });
+    showToast('✅ تم تأكيد التوريد'); smissLoad();
+  }catch(e){ showToast('❌ خطأ في التأكيد'); }
+}
+
+function smissExportExcel(){
+  const tbody = document.getElementById('smiss-tbody');
+  if(!tbody||!tbody.rows.length) return;
+  const from = document.getElementById('smiss-from')?.value||'';
+  const to   = document.getElementById('smiss-to')?.value||'';
+  const headers = ['#','المجموعة','خط السير','الفرع','الصنف','السبب','الحالة','تأكيد التوريد','التاريخ'];
+  const rows = [...tbody.rows].map(r=>[...r.cells].map(c=>c.innerText.trim()));
+  const aoa = [['الطحان جولدن دايتس — نواقص المبيعات','','','','','','','',''],
+    [`الفترة: ${from} — ${to}`,'','','','','','','',''],[''],headers,...rows];
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:8}},{s:{r:1,c:0},e:{r:1,c:8}}];
+  XLSX.utils.book_append_sheet(wb,ws,'نواقص المبيعات');
+  XLSX.writeFile(wb,`sales_missing_${from}_${to}.xlsx`);
+}
+
+function smissExportPDF(){
+  const tbody = document.getElementById('smiss-tbody');
+  if(!tbody||!tbody.rows.length) return;
+  const from = document.getElementById('smiss-from')?.value||'';
+  const to   = document.getElementById('smiss-to')?.value||'';
+  const pending = [...tbody.rows].filter(r=>r.innerText.includes('لم يُوَرَّد')).length;
+  const rows = [...tbody.rows].map(r=>`<tr>${[...r.cells].map(c=>`<td>${c.innerText.trim()}</td>`).join('')}</tr>`).join('');
+  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><style>
+    body{font-family:Cairo,Arial,sans-serif;font-size:11px;padding:16px}
+    .hdr{background:linear-gradient(135deg,#7C2D12,#B45309);color:#fff;padding:12px;border-radius:8px;margin-bottom:10px}
+    .warn{background:#FEF3C7;color:#B45309;padding:7px 12px;border-radius:6px;margin-bottom:10px;font-weight:700}
+    table{width:100%;border-collapse:collapse}th{background:#7C2D12;color:#fff;padding:6px 8px;text-align:right}
+    td{padding:5px 8px;border-bottom:1px solid #eee}tr:nth-child(even){background:#FFFDF8}
+  </style></head><body>
+  <div class="hdr"><h2 style="margin:0">⚠️ نواقص المبيعات — ${from} إلى ${to}</h2></div>
+  ${pending>0?`<div class="warn">⚠️ ${pending} ناقص لم يُوَرَّد بعد</div>`:''}
+  <table><thead><tr><th>#</th><th>المجموعة</th><th>الفرع</th><th>الصنف</th><th>السبب</th><th>الحالة</th><th>التاريخ</th></tr></thead>
+  <tbody>${rows}</tbody></table></body></html>`;
+  const w=window.open('','_blank','width=1100,height=700');
+  w.document.write(html); w.document.close(); setTimeout(()=>{w.focus();w.print();},600);
+}
+
+// helper — setBadge للادمن
+function setBadgeEl(id, count){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.textContent = count||'';
+  el.style.display = count ? '' : 'none';
+}
+
+<!-- Modal: استيراد أهداف من Excel -->
+<div class="modal-overlay" id="modal-st-import">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-header">
+      <h3><i class="ti ti-file-spreadsheet" style="color:#1A7A4A"></i> استيراد أهداف من Excel</h3>
+      <button class="modal-close" onclick="stImportClose()">✕</button>
+    </div>
+    <div class="modal-body">
+      <!-- تعليمات -->
+      <div style="background:#EFF8FF;border:1px solid #BFD7F0;border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.8">
+        <b>📋 تعليمات:</b><br>
+        الشيت لازم يحتوي على الأعمدة دي بالترتيب:<br>
+        <span style="background:#fff;border:1px solid #ddd;border-radius:4px;padding:1px 6px;font-size:11px;margin:2px;display:inline-block">اسم المشرف</span>
+        <span style="background:#fff;border:1px solid #ddd;border-radius:4px;padding:1px 6px;font-size:11px;margin:2px;display:inline-block">القطاع</span>
+        <span style="background:#fff;border:1px solid #ddd;border-radius:4px;padding:1px 6px;font-size:11px;margin:2px;display:inline-block">خط السير</span>
+        <span style="background:#fff;border:1px solid #ddd;border-radius:4px;padding:1px 6px;font-size:11px;margin:2px;display:inline-block">الهدف (جنيه)</span>
+        <span style="background:#fff;border:1px solid #ddd;border-radius:4px;padding:1px 6px;font-size:11px;margin:2px;display:inline-block">أيام العمل</span>
+      </div>
+
+      <!-- اختيار الشهر -->
+      <div class="fld">
+        <label class="lbl">الشهر المراد الاستيراد له *</label>
+        <input type="month" id="st-import-month" style="width:100%"/>
+      </div>
+
+      <!-- رفع الملف -->
+      <div class="fld">
+        <label class="lbl">ملف Excel (.xlsx / .xls) *</label>
+        <div id="st-drop-zone" onclick="document.getElementById('st-import-file').click()"
+          style="border:2px dashed #BFD7F0;border-radius:10px;padding:24px;text-align:center;cursor:pointer;transition:all .2s;background:#FAFCFF">
+          <i class="ti ti-upload" style="font-size:32px;color:#005CBF"></i>
+          <div style="font-size:12px;color:#555;margin-top:6px">اضغط أو اسحب الملف هنا</div>
+          <div style="font-size:10px;color:#aaa;margin-top:2px">xlsx, xls</div>
+        </div>
+        <input type="file" id="st-import-file" accept=".xlsx,.xls" style="display:none" onchange="stImportReadFile(this)"/>
+      </div>
+
+      <!-- معاينة -->
+      <div id="st-import-preview" style="display:none">
+        <div style="font-size:12px;font-weight:700;margin-bottom:8px;color:#003049">
+          📊 معاينة البيانات: <span id="st-import-count" style="color:#1A7A4A"></span>
+        </div>
+        <div style="max-height:220px;overflow-y:auto;border-radius:8px;border:1px solid #ddd">
+          <table style="width:100%;border-collapse:collapse;font-size:11px">
+            <thead>
+              <tr style="background:#003049;color:#fff;position:sticky;top:0">
+                <th style="padding:7px 10px;text-align:right">المشرف</th>
+                <th style="padding:7px 6px;text-align:right">القطاع</th>
+                <th style="padding:7px 6px;text-align:right">خط السير</th>
+                <th style="padding:7px 6px;text-align:center">الهدف (ج)</th>
+                <th style="padding:7px 6px;text-align:center">أيام</th>
+              </tr>
+            </thead>
+            <tbody id="st-import-preview-tbody"></tbody>
+          </table>
+        </div>
+
+        <!-- خيار الاستبدال -->
+        <div style="margin-top:10px;padding:10px;background:#FFF8E1;border-radius:8px;border:1px solid #FFD54F;font-size:12px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="st-import-replace" style="accent-color:#C62828;width:15px;height:15px"/>
+            <span>🗑️ <b>استبدال الأهداف الحالية</b> لنفس الشهر قبل الاستيراد (بدله هيضيف فوق البيانات الموجودة)</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- رسالة -->
+      <div id="st-import-msg" style="display:none;margin-top:10px;padding:10px;border-radius:8px;font-size:12px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-green" id="st-import-btn" onclick="stImportSave()" style="display:none">
+        <i class="ti ti-database-import"></i> استيراد الآن
+      </button>
+      <button class="btn btn-ghost" onclick="stImportClose()">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: أهداف المبيعات -->
+<div class="modal-overlay" id="modal-sales-target">
+  <div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <h3 id="st-form-title">إضافة هدف</h3>
+      <button class="modal-close" onclick="document.getElementById('modal-sales-target').classList.remove('open')">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="st-form-id"/>
+      <div class="fld">
+        <label class="lbl">اسم المشرف *</label>
+        <input type="text" id="st-form-sup" placeholder="مثال: محمد أحمد"/>
+      </div>
+      <div class="fld">
+        <label class="lbl">القطاع</label>
+        <select id="st-form-sector">
+          <option value="">اختر...</option>
+          <option value="موردن الجيزة">موردن الجيزة</option>
+          <option value="موردن القاهرة">موردن القاهرة</option>
+          <option value="موردن الإسكندرية">موردن الإسكندرية</option>
+          <option value="قطاع الأسواق الخاصة">الأسواق الخاصة</option>
+          <option value="هايبر ماركت">هايبر ماركت</option>
+        </select>
+      </div>
+      <div class="fld">
+        <label class="lbl">خط السير *</label>
+        <input type="text" id="st-form-route" placeholder="مثال: سلاسل المعادي"/>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div class="fld">
+          <label class="lbl">الهدف (جنيه) *</label>
+          <input type="number" id="st-form-target" placeholder="0"/>
+        </div>
+        <div class="fld">
+          <label class="lbl">أيام العمل</label>
+          <input type="number" id="st-form-days" value="24" min="1" max="31"/>
+        </div>
+      </div>
+      <div class="fld">
+        <label class="lbl">الشهر *</label>
+        <input type="month" id="st-form-month"/>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-blue" onclick="stSave()"><i class="ti ti-device-floppy"></i> حفظ</button>
+      <button class="btn btn-ghost" onclick="document.getElementById('modal-sales-target').classList.remove('open')">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- Modal: تعديل بيع قطاع -->
+<div class="modal-overlay" id="modal-edit-sector-sale">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-header">
+      <h3><i class="ti ti-edit" style="color:#005CBF"></i> إدخال بيع — <span id="st-edit-sector-name"></span></h3>
+      <button class="modal-close" onclick="document.getElementById('modal-edit-sector-sale').classList.remove('open')">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="st-edit-sector-val"/>
+      <div class="fld">
+        <label class="lbl">التاريخ</label>
+        <input type="date" id="st-edit-sale-date" style="width:100%"/>
+      </div>
+      <div class="fld">
+        <label class="lbl">المبلغ (جنيه)</label>
+        <input type="number" id="st-edit-sale-amount" placeholder="0" style="width:100%;font-size:18px;font-weight:700"/>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-blue" onclick="stSaveSectorSale()"><i class="ti ti-device-floppy"></i> حفظ</button>
+      <button class="btn btn-ghost" onclick="document.getElementById('modal-edit-sector-sale').classList.remove('open')">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- Modal: إضافة إجازة -->
+<div class="modal-overlay" id="modal-add-holiday">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-header">
+      <h3><i class="ti ti-calendar-off" style="color:#731E2E"></i> إضافة إجازة رسمية</h3>
+      <button class="modal-close" onclick="document.getElementById('modal-add-holiday').classList.remove('open')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="fld"><label class="lbl">التاريخ *</label><input type="date" id="hl-add-date" style="width:100%"/></div>
+      <div class="fld"><label class="lbl">اسم الإجازة *</label><input type="text" id="hl-add-name" placeholder="مثال: عيد الأضحى" style="width:100%"/></div>
+      <input type="hidden" id="hl-add-month"/>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-blue" onclick="hlSave()"><i class="ti ti-device-floppy"></i> حفظ</button>
+      <button class="btn btn-ghost" onclick="document.getElementById('modal-add-holiday').classList.remove('open')">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══ VERSION BADGE ══ -->
+
+
+
+<!-- ══ SQL لإنشاء الجداول — شغّلها في Supabase SQL Editor ══
+-- جدول المجموعات
+CREATE TABLE IF NOT EXISTS groups (
+  id          uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  key_name    text UNIQUE NOT NULL,
+  name        text NOT NULL,
+  color       text DEFAULT '#005CBF',
+  emoji       text DEFAULT '',
+  created_at  timestamptz DEFAULT now()
+);
+
+-- جدول خطوط السير
+CREATE TABLE IF NOT EXISTS routes (
+  id          uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  name        text UNIQUE NOT NULL,
+  grp         text REFERENCES groups(key_name),
+  created_at  timestamptz DEFAULT now()
+);
+
+-- جدول الفروع (موجود - تأكد من الأعمدة)
+ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS branch_name text;
+ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS route text;
+ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS grp text;
+ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS client_type text DEFAULT 'B';
+ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS status text DEFAULT 'active';
+ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+
+-- إنشاء الجدول لو مش موجود
+CREATE TABLE IF NOT EXISTS branches (
+  id          uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  branch_name text NOT NULL,
+  route       text,
+  grp         text,
+  client_type text DEFAULT 'B',
+  status      text DEFAULT 'active',
+  created_at  timestamptz DEFAULT now()
+);
+
+-- جدول المستخدمين/المنسقين (موجود - تأكد من الأعمدة)
+CREATE TABLE IF NOT EXISTS users (
+  id          uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  name        text NOT NULL,
+  username    text UNIQUE NOT NULL,
+  password    text NOT NULL,
+  route       text,
+  group       text,
+  role        text DEFAULT 'rep',
+  status      text DEFAULT 'active',
+  created_at  timestamptz DEFAULT now()
+);
+
+-- تفعيل RLS
+ALTER TABLE groups  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE routes  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE branches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE users   ENABLE ROW LEVEL SECURITY;
+
+-- Policies للـ anon key
+CREATE POLICY "allow_all_groups"   ON groups   FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "allow_all_routes"   ON routes   FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "allow_all_branches" ON branches FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "allow_all_users"    ON users    FOR ALL USING (true) WITH CHECK (true);
+══ نهاية SQL ══ -->
+
+<!-- VERSION BADGE -->
+<div style="position:fixed;bottom:6px;left:50%;transform:translateX(-50%);
+  font-size:10px;font-weight:700;color:#00BCD4;
+  background:rgba(0,0,0,.15);padding:2px 10px;border-radius:99px;
+  font-family:monospace;pointer-events:none;z-index:9999;
+  letter-spacing:1px;user-select:none;
+  border:1px solid #00BCD440;backdrop-filter:blur(4px)">
+  v1.1
+</div>
+</body>
 </script>
 <!-- ══ modal-add-route ══ -->
 <div class="modal-overlay" id="modal-add-route">
@@ -17900,758 +18654,3 @@ function supDeleteDispatch(idx){
   else deleteSup(idx);
 }
 
-// ══════════════════════════════════════════════════════════════
-// SALES PRODUCTS — أصناف المبيعات
-// ══════════════════════════════════════════════════════════════
-let _sprodRoutes = [];
-
-async function sprodInitFilters(){
-  // تعبئة المجموعات من SALES_ROUTES_DATA
-  const grpSel = document.getElementById('sprod-grp');
-  if(grpSel && grpSel.options.length <= 1){
-    const grps = [...new Set(SALES_ROUTES_DATA.map(r=>r.grp))];
-    grps.forEach(g=>{
-      const label = GROUPS[g]?.label || g;
-      const o = document.createElement('option');
-      o.value=g; o.textContent=label;
-      grpSel.appendChild(o);
-    });
-  }
-  // تواريخ افتراضية
-  const today = new Date().toISOString().slice(0,10);
-  const past  = new Date(); past.setDate(past.getDate()-30);
-  if(!document.getElementById('sprod-from').value) document.getElementById('sprod-from').value = past.toISOString().slice(0,10);
-  if(!document.getElementById('sprod-to').value)   document.getElementById('sprod-to').value   = today;
-}
-
-function sprodOnGrpChange(){
-  const grp = document.getElementById('sprod-grp').value;
-  const routeSel  = document.getElementById('sprod-route');
-  const branchSel = document.getElementById('sprod-branch');
-  const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
-  routeSel.innerHTML  = '<option value="all">كل الخطوط</option>' +
-    routes.map(r=>`<option value="${r.route}">${r.route}</option>`).join('');
-  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
-  sprodLoad();
-}
-
-function sprodOnRouteChange(){
-  const route     = document.getElementById('sprod-route').value;
-  const branchSel = document.getElementById('sprod-branch');
-  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
-  if(route !== 'all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd){
-      rd.branches.forEach(b=>{
-        const o = document.createElement('option');
-        o.value=b; o.textContent=b; branchSel.appendChild(o);
-      });
-    }
-  } else {
-    const grp = document.getElementById('sprod-grp').value;
-    const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
-    const allBranches = [...new Set(routes.flatMap(r=>r.branches))].sort((a,b)=>a.localeCompare(b,'ar'));
-    allBranches.forEach(b=>{
-      const o = document.createElement('option');
-      o.value=b; o.textContent=b; branchSel.appendChild(o);
-    });
-  }
-  sprodLoad();
-}
-
-async function sprodLoad(){
-  const grp    = document.getElementById('sprod-grp')?.value||'all';
-  const route  = document.getElementById('sprod-route')?.value||'all';
-  const branch = document.getElementById('sprod-branch')?.value||'all';
-  const snf    = (document.getElementById('sprod-snf')?.value||'').trim();
-  const from   = document.getElementById('sprod-from')?.value;
-  const to     = document.getElementById('sprod-to')?.value;
-  if(!from||!to) return;
-
-  const tbody = document.getElementById('sprod-tbody');
-  tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:20px"><div class="spinner" style="margin:0 auto"></div></td></tr>';
-
-  const grpStr = grp==='all' ? Object.keys(GROUPS).join(',') : grp;
-  let url = `${SUPABASE_URL}/rest/v1/products?grp=in.(${grpStr})&select=*&order=created_at.desc&limit=2000`;
-  url += `&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`;
-  if(branch!=='all') url += `&branch=eq.${encodeURIComponent(branch)}`;
-  if(snf) url += `&snf=ilike.*${encodeURIComponent(snf)}*`;
-
-  let data = [];
-  try{
-    const r = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    data = await r.json(); if(!Array.isArray(data)) data=[];
-  }catch(e){}
-
-  // فلتر خط السير من SALES_ROUTES_DATA
-  if(route!=='all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd) data = data.filter(p=>rd.branches.includes(p.branch));
-  }
-
-  // KPI
-  document.getElementById('sprod-kpi').innerHTML = `
-    <div class="stat-card"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي السجلات</div></div>
-    <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.snf)).size}</div><div class="stat-l">أصناف مختلفة</div></div>
-    <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.branch)).size}</div><div class="stat-l">فروع</div></div>
-    <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.name)).size}</div><div class="stat-l">مشرفون</div></div>`;
-
-  tbody.innerHTML = data.map((p,i)=>{
-    const grpInfo = GROUPS[p.grp]||{label:p.grp,color:'#888'};
-    const routeName = _sprodRoutes.find(r=>r.route===p.route)?.route || p.route || '—';
-    const dt = p.created_at ? new Date(p.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'2-digit'}) : '—';
-    return `<tr>
-      <td>${i+1}</td>
-      <td><span style="background:${grpInfo.color}22;color:${grpInfo.color};padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700">${grpInfo.label}</span></td>
-      <td style="font-size:11px">${routeName}</td>
-      <td style="font-size:11px;font-weight:700">${p.branch||'—'}</td>
-      <td style="font-size:11px">${p.name||'—'}</td>
-      <td style="font-size:12px;font-weight:700">${p.snf||'—'}</td>
-      <td style="text-align:center;font-weight:700;color:#1A7A4A">${p.shelf_qty??'—'}</td>
-      <td style="text-align:center;font-weight:700;color:#005CBF">${p.stock_qty??'—'}</td>
-      <td style="font-size:11px;color:#888">${dt}</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="9" style="text-align:center;padding:20px;color:#888">لا توجد بيانات</td></tr>';
-}
-
-function sprodExportExcel(){
-  const tbody = document.getElementById('sprod-tbody');
-  if(!tbody||!tbody.rows.length||tbody.rows[0].cells.length<2){ alert('لا توجد بيانات'); return; }
-  const from = document.getElementById('sprod-from')?.value||'';
-  const to   = document.getElementById('sprod-to')?.value||'';
-  const headers = ['#','المجموعة','خط السير','الفرع','المشرف','الصنف','رصيد الرف','رصيد المخزن','التاريخ'];
-  const rows = [...tbody.rows].map(r=>[...r.cells].map(c=>c.innerText.trim()));
-  const aoa = [['الطحان جولدن دايتس — أصناف المبيعات','','','','','','','',''],
-    [`الفترة: ${from} — ${to}`,'','','','','','','',''],[''],headers,...rows];
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{wch:4},{wch:18},{wch:24},{wch:24},{wch:18},{wch:30},{wch:10},{wch:10},{wch:12}];
-  ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:8}},{s:{r:1,c:0},e:{r:1,c:8}}];
-  XLSX.utils.book_append_sheet(wb,ws,'أصناف المبيعات');
-  XLSX.writeFile(wb,`sales_products_${from}_${to}.xlsx`);
-}
-
-function sprodExportPDF(){
-  const tbody = document.getElementById('sprod-tbody');
-  if(!tbody||!tbody.rows.length) return;
-  const from = document.getElementById('sprod-from')?.value||'';
-  const to   = document.getElementById('sprod-to')?.value||'';
-  const rows = [...tbody.rows].map(r=>`<tr>${[...r.cells].map(c=>`<td>${c.innerText.trim()}</td>`).join('')}</tr>`).join('');
-  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><style>
-    body{font-family:Cairo,Arial,sans-serif;font-size:11px;padding:16px}
-    .hdr{background:#4B3C1A;color:#EDE5D8;padding:12px;border-radius:8px;margin-bottom:10px}
-    table{width:100%;border-collapse:collapse}th{background:#4B3C1A;color:#EDE5D8;padding:6px 8px;text-align:right}
-    td{padding:5px 8px;border-bottom:1px solid #eee}tr:nth-child(even){background:#FFFDF8}
-  </style></head><body>
-  <div class="hdr"><h2 style="margin:0">📦 أصناف المبيعات — ${from} إلى ${to}</h2></div>
-  <table><thead><tr><th>#</th><th>المجموعة</th><th>الفرع</th><th>الصنف</th><th>رصيد الرف</th><th>رصيد المخزن</th><th>التاريخ</th></tr></thead>
-  <tbody>${rows}</tbody></table></body></html>`;
-  const w = window.open('','_blank','width=1100,height=700');
-  w.document.write(html); w.document.close(); setTimeout(()=>{w.focus();w.print();},600);
-}
-
-// ══════════════════════════════════════════════════════════════
-// SALES RETURNS — مرتجعات المبيعات
-// ══════════════════════════════════════════════════════════════
-async function sretInitFilters(){
-  const grpSel = document.getElementById('sret-grp');
-  if(grpSel && grpSel.options.length<=1){
-    const grps = [...new Set(SALES_ROUTES_DATA.map(r=>r.grp))];
-    grps.forEach(g=>{ const o=document.createElement('option');o.value=g;o.textContent=GROUPS[g]?.label||g;grpSel.appendChild(o); });
-  }
-  const today = new Date().toISOString().slice(0,10);
-  const past  = new Date(); past.setDate(past.getDate()-30);
-  if(!document.getElementById('sret-from').value) document.getElementById('sret-from').value = past.toISOString().slice(0,10);
-  if(!document.getElementById('sret-to').value)   document.getElementById('sret-to').value   = today;
-}
-
-function sretOnGrpChange(){
-  const grp = document.getElementById('sret-grp').value;
-  const routeSel  = document.getElementById('sret-route');
-  const branchSel = document.getElementById('sret-branch');
-  const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
-  routeSel.innerHTML  = '<option value="all">كل الخطوط</option>' +
-    routes.map(r=>`<option value="${r.route}">${r.route}</option>`).join('');
-  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
-  sretLoad();
-}
-
-function sretOnRouteChange(){
-  const route     = document.getElementById('sret-route').value;
-  const branchSel = document.getElementById('sret-branch');
-  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
-  if(route!=='all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd) rd.branches.forEach(b=>{ const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o); });
-  } else {
-    const grp = document.getElementById('sret-grp').value;
-    const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
-    [...new Set(routes.flatMap(r=>r.branches))].sort((a,b)=>a.localeCompare(b,'ar')).forEach(b=>{
-      const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o);
-    });
-  }
-  sretLoad();
-}
-
-async function sretLoad(){
-  const grp    = document.getElementById('sret-grp')?.value||'all';
-  const route  = document.getElementById('sret-route')?.value||'all';
-  const branch = document.getElementById('sret-branch')?.value||'all';
-  const status = document.getElementById('sret-status')?.value||'all';
-  const from   = document.getElementById('sret-from')?.value;
-  const to     = document.getElementById('sret-to')?.value;
-  if(!from||!to) return;
-
-  const tbody = document.getElementById('sret-tbody');
-  tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:20px"><div class="spinner" style="margin:0 auto"></div></td></tr>';
-
-  const grpStr = grp==='all' ? Object.keys(GROUPS).join(',') : grp;
-  let url = `${SUPABASE_URL}/rest/v1/returns?grp=in.(${grpStr})&select=*&order=created_at.desc&limit=2000`;
-  url += `&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`;
-  if(branch!=='all') url += `&branch=eq.${encodeURIComponent(branch)}`;
-  if(status==='pending') url += `&pulled=eq.false`;
-  if(status==='pulled')  url += `&pulled=eq.true`;
-
-  let data = [];
-  try{
-    const r = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    data = await r.json(); if(!Array.isArray(data)) data=[];
-  }catch(e){}
-
-  if(route!=='all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd) data = data.filter(p=>rd.branches.includes(p.branch));
-  }
-
-  const pending = data.filter(r=>!r.pulled);
-  const done    = data.filter(r=>r.pulled);
-  const totalQty = data.reduce((s,r)=>s+(+r.qty||0),0);
-
-  // KPI
-  document.getElementById('sret-kpi').innerHTML = `
-    <div class="stat-card red"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي المرتجعات</div></div>
-    <div class="stat-card red"><div class="stat-n">${totalQty}</div><div class="stat-l">إجمالي الوحدات</div></div>
-    <div class="stat-card orange"><div class="stat-n">${pending.length}</div><div class="stat-l">⏳ لم يُسحب</div></div>
-    <div class="stat-card green"><div class="stat-n">${done.length}</div><div class="stat-l">✅ تم السحب</div></div>`;
-
-  // تنبيه المتأخر
-  const lateCount = pending.filter(r=>{ return (Date.now()-new Date(r.created_at).getTime())/864e5 >= 3; }).length;
-  const warnEl = document.getElementById('sret-warning');
-  if(lateCount>0){ warnEl.style.display=''; warnEl.textContent=`⚠️ ${lateCount} مرتجع منذ أكثر من 3 أيام لم يُسحب بعد`; }
-  else warnEl.style.display='none';
-
-  // badge
-  setBadgeEl('nav-sret-badge', pending.length);
-
-  tbody.innerHTML = data.map((r,i)=>{
-    const isPulled = !!r.pulled;
-    const days = Math.floor((Date.now()-new Date(r.created_at).getTime())/864e5);
-    const isLate = !isPulled && days>=3;
-    const grpInfo = GROUPS[r.grp]||{label:r.grp,color:'#888'};
-    const routeN  = _sprodRoutes.find(x=>x.route===r.route)?.route || r.route || '—';
-    const statusBadge = isPulled
-      ? `<span style="background:#D1FAE5;color:#065F46;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">✅ تم السحب</span>`
-      : `<span style="background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">⏳ لم يُسحب${isLate?` (${days}ي)`:''}</span>`;
-    const pullBtn = isPulled
-      ? `<span style="font-size:11px;color:#065F46">✅ ${r.pulled_by||'—'}</span>`
-      : `<button onclick="sretConfirmPull(${r.id},'${(r.branch||'').replace(/'/g,"\\'")}' )"
-          style="background:#1A7A4A;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif">✅ تأكيد السحب</button>`;
-    const dt = r.created_at ? new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'2-digit'}) : '—';
-    return `<tr style="${isLate?'background:#FFF0F0':''}">
-      <td>${i+1}</td>
-      <td><span style="background:${grpInfo.color}22;color:${grpInfo.color};padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">${grpInfo.label}</span></td>
-      <td style="font-size:11px">${routeN}</td>
-      <td style="font-size:11px;font-weight:700">${r.branch||'—'}${isLate?`<div style="color:#DC2626;font-size:9px">⚠️ منذ ${days} يوم</div>`:''}</td>
-      <td style="font-size:11px">${r.snf||'—'}</td>
-      <td style="text-align:center;font-weight:700;color:#B91C1C">${r.qty||0}</td>
-      <td style="font-size:11px">${r.reason||'—'}</td>
-      <td>${statusBadge}</td>
-      <td>${pullBtn}</td>
-      <td style="font-size:11px;color:#888">${dt}</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="10" style="text-align:center;padding:20px;color:#888">لا توجد مرتجعات</td></tr>';
-}
-
-async function sretConfirmPull(id, branch){
-  if(!confirm(`تأكيد سحب المرتجع من:\n${branch}؟`)) return;
-  try{
-    await fetch(`${SUPABASE_URL}/rest/v1/returns?id=eq.${id}`,{
-      method:'PATCH',
-      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body:JSON.stringify({pulled:true,pulled_at:new Date().toISOString(),pulled_by:CU?.name||'admin'})
-    });
-    showToast('✅ تم تأكيد سحب المرتجع'); sretLoad();
-  }catch(e){ showToast('❌ خطأ في التأكيد'); }
-}
-
-function sretExportExcel(){
-  const tbody = document.getElementById('sret-tbody');
-  if(!tbody||!tbody.rows.length) return;
-  const from = document.getElementById('sret-from')?.value||'';
-  const to   = document.getElementById('sret-to')?.value||'';
-  const headers = ['#','المجموعة','خط السير','الفرع','الصنف','الكمية','السبب','الحالة','تأكيد السحب','التاريخ'];
-  const rows = [...tbody.rows].map(r=>[...r.cells].map(c=>c.innerText.trim()));
-  const aoa = [['الطحان جولدن دايتس — مرتجعات المبيعات','','','','','','','','',''],
-    [`الفترة: ${from} — ${to}`,'','','','','','','','',''],[''],headers,...rows];
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:9}},{s:{r:1,c:0},e:{r:1,c:9}}];
-  XLSX.utils.book_append_sheet(wb,ws,'مرتجعات المبيعات');
-  XLSX.writeFile(wb,`sales_returns_${from}_${to}.xlsx`);
-}
-
-function sretExportPDF(){
-  const tbody = document.getElementById('sret-tbody');
-  if(!tbody||!tbody.rows.length) return;
-  const from = document.getElementById('sret-from')?.value||'';
-  const to   = document.getElementById('sret-to')?.value||'';
-  const rows = [...tbody.rows].map(r=>`<tr style="${r.style.background?'background:'+r.style.background:''}">${[...r.cells].map(c=>`<td>${c.innerText.trim()}</td>`).join('')}</tr>`).join('');
-  const pending = [...tbody.rows].filter(r=>r.innerText.includes('لم يُسحب')).length;
-  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><style>
-    body{font-family:Cairo,Arial,sans-serif;font-size:11px;padding:16px}
-    .hdr{background:#731E2E;color:#fff;padding:12px;border-radius:8px;margin-bottom:10px}
-    .warn{background:#FFEBEE;color:#B71C1C;padding:7px 12px;border-radius:6px;margin-bottom:10px;font-weight:700}
-    table{width:100%;border-collapse:collapse}th{background:#731E2E;color:#fff;padding:6px 8px;text-align:right}
-    td{padding:5px 8px;border-bottom:1px solid #eee}
-  </style></head><body>
-  <div class="hdr"><h2 style="margin:0">↩️ مرتجعات المبيعات — ${from} إلى ${to}</h2></div>
-  ${pending>0?`<div class="warn">⚠️ ${pending} مرتجع لم يُسحب بعد</div>`:''}
-  <table><thead><tr><th>#</th><th>المجموعة</th><th>الفرع</th><th>الصنف</th><th>الكمية</th><th>السبب</th><th>الحالة</th><th>التاريخ</th></tr></thead>
-  <tbody>${rows}</tbody></table></body></html>`;
-  const w=window.open('','_blank','width=1100,height=700');
-  w.document.write(html); w.document.close(); setTimeout(()=>{w.focus();w.print();},600);
-}
-
-// ══════════════════════════════════════════════════════════════
-// SALES MISSING — نواقص المبيعات
-// ══════════════════════════════════════════════════════════════
-async function smissInitFilters(){
-  const grpSel = document.getElementById('smiss-grp');
-  if(grpSel && grpSel.options.length<=1){
-    const grps = [...new Set(SALES_ROUTES_DATA.map(r=>r.grp))];
-    grps.forEach(g=>{ const o=document.createElement('option');o.value=g;o.textContent=GROUPS[g]?.label||g;grpSel.appendChild(o); });
-  }
-  const today = new Date().toISOString().slice(0,10);
-  const past  = new Date(); past.setDate(past.getDate()-30);
-  if(!document.getElementById('smiss-from').value) document.getElementById('smiss-from').value = past.toISOString().slice(0,10);
-  if(!document.getElementById('smiss-to').value)   document.getElementById('smiss-to').value   = today;
-}
-
-function smissOnGrpChange(){
-  const grp = document.getElementById('smiss-grp').value;
-  const routeSel  = document.getElementById('smiss-route');
-  const branchSel = document.getElementById('smiss-branch');
-  const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
-  routeSel.innerHTML  = '<option value="all">كل الخطوط</option>' +
-    routes.map(r=>`<option value="${r.route}">${r.route}</option>`).join('');
-  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
-  smissLoad();
-}
-
-function smissOnRouteChange(){
-  const route     = document.getElementById('smiss-route').value;
-  const branchSel = document.getElementById('smiss-branch');
-  branchSel.innerHTML = '<option value="all">كل الفروع</option>';
-  if(route!=='all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd) rd.branches.forEach(b=>{ const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o); });
-  } else {
-    const grp = document.getElementById('smiss-grp').value;
-    const routes = grp==='all' ? SALES_ROUTES_DATA : SALES_ROUTES_DATA.filter(r=>r.grp===grp);
-    [...new Set(routes.flatMap(r=>r.branches))].sort((a,b)=>a.localeCompare(b,'ar')).forEach(b=>{
-      const o=document.createElement('option');o.value=b;o.textContent=b;branchSel.appendChild(o);
-    });
-  }
-  smissLoad();
-}
-
-async function smissLoad(){
-  const grp    = document.getElementById('smiss-grp')?.value||'all';
-  const route  = document.getElementById('smiss-route')?.value||'all';
-  const branch = document.getElementById('smiss-branch')?.value||'all';
-  const status = document.getElementById('smiss-status')?.value||'all';
-  const from   = document.getElementById('smiss-from')?.value;
-  const to     = document.getElementById('smiss-to')?.value;
-  if(!from||!to) return;
-
-  const tbody = document.getElementById('smiss-tbody');
-  tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:20px"><div class="spinner" style="margin:0 auto"></div></td></tr>';
-
-  const grpStr = grp==='all' ? Object.keys(GROUPS).join(',') : grp;
-  let url = `${SUPABASE_URL}/rest/v1/missing?grp=in.(${grpStr})&select=*&order=created_at.desc&limit=2000`;
-  url += `&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`;
-  if(branch!=='all') url += `&branch=eq.${encodeURIComponent(branch)}`;
-  if(status==='pending') url += `&delivered=eq.false`;
-  if(status==='done')    url += `&delivered=eq.true`;
-
-  let data = [];
-  try{
-    const r = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    data = await r.json(); if(!Array.isArray(data)) data=[];
-  }catch(e){}
-
-  if(route!=='all'){
-    const rd = SALES_ROUTES_DATA.find(r=>r.route===route);
-    if(rd) data = data.filter(p=>rd.branches.includes(p.branch));
-  }
-
-  const pending = data.filter(m=>!m.delivered);
-  const done    = data.filter(m=>m.delivered);
-
-  // KPI
-  document.getElementById('smiss-kpi').innerHTML = `
-    <div class="stat-card orange"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي النواقص</div></div>
-    <div class="stat-card red"><div class="stat-n">${pending.length}</div><div class="stat-l">⏳ لم يُوَرَّد</div></div>
-    <div class="stat-card green"><div class="stat-n">${done.length}</div><div class="stat-l">✅ تم التوريد</div></div>
-    <div class="stat-card"><div class="stat-n">${new Set(data.map(x=>x.snf)).size}</div><div class="stat-l">أصناف مختلفة</div></div>`;
-
-  // تنبيه
-  const lateCount = pending.filter(m=>(Date.now()-new Date(m.created_at).getTime())/864e5>=3).length;
-  const warnEl = document.getElementById('smiss-warning');
-  if(lateCount>0){ warnEl.style.display=''; warnEl.textContent=`⚠️ ${lateCount} ناقص منذ أكثر من 3 أيام لم يُوَرَّد بعد — يحتاج متابعة عاجلة!`; }
-  else warnEl.style.display='none';
-
-  // badge
-  setBadgeEl('nav-smiss-badge', pending.length);
-
-  tbody.innerHTML = data.map((m,i)=>{
-    const isDelivered = !!m.delivered;
-    const days = Math.floor((Date.now()-new Date(m.created_at).getTime())/864e5);
-    const isLate = !isDelivered && days>=3;
-    const grpInfo = GROUPS[m.grp]||{label:m.grp,color:'#888'};
-    const routeN  = _sprodRoutes.find(x=>x.route===m.route)?.route || m.route || '—';
-    const statusBadge = isDelivered
-      ? `<span style="background:#D1FAE5;color:#065F46;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">✅ تم التوريد</span>`
-      : `<span style="background:#FEF3C7;color:#B45309;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">⏳ لم يُوَرَّد${isLate?` (${days}ي)`:''}</span>`;
-    const actionBtn = isDelivered
-      ? `<span style="font-size:11px;color:#065F46">✅ ${m.delivered_by||'—'}</span>`
-      : `<button onclick="smissConfirmDelivery(${m.id},'${(m.branch||'').replace(/'/g,"\\'")}','${(m.snf||'').replace(/'/g,"\\'")}' )"
-          style="background:#7C2D12;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif;font-weight:700">✅ تأكيد التوريد</button>`;
-    const dt = m.created_at ? new Date(m.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'2-digit'}) : '—';
-    return `<tr style="${isLate?'background:#FFF8E1':''}">
-      <td>${i+1}</td>
-      <td><span style="background:${grpInfo.color}22;color:${grpInfo.color};padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">${grpInfo.label}</span></td>
-      <td style="font-size:11px">${routeN}</td>
-      <td style="font-size:11px;font-weight:700">${m.branch||'—'}${isLate?`<div style="color:#E65100;font-size:9px">⚠️ منذ ${days} يوم</div>`:''}</td>
-      <td style="font-size:11px">${m.snf||'—'}</td>
-      <td style="font-size:11px;color:#888">${m.reason||'—'}</td>
-      <td>${statusBadge}</td>
-      <td>${actionBtn}</td>
-      <td style="font-size:11px;color:#888">${dt}</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="9" style="text-align:center;padding:20px;color:#888">لا توجد نواقص</td></tr>';
-}
-
-async function smissConfirmDelivery(id, branch, snf){
-  if(!confirm(`تأكيد توريد الناقص:\n${snf}\nللفرع: ${branch}؟`)) return;
-  try{
-    await fetch(`${SUPABASE_URL}/rest/v1/missing?id=eq.${id}`,{
-      method:'PATCH',
-      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body:JSON.stringify({delivered:true,delivered_at:new Date().toISOString(),delivered_by:CU?.name||'admin'})
-    });
-    showToast('✅ تم تأكيد التوريد'); smissLoad();
-  }catch(e){ showToast('❌ خطأ في التأكيد'); }
-}
-
-function smissExportExcel(){
-  const tbody = document.getElementById('smiss-tbody');
-  if(!tbody||!tbody.rows.length) return;
-  const from = document.getElementById('smiss-from')?.value||'';
-  const to   = document.getElementById('smiss-to')?.value||'';
-  const headers = ['#','المجموعة','خط السير','الفرع','الصنف','السبب','الحالة','تأكيد التوريد','التاريخ'];
-  const rows = [...tbody.rows].map(r=>[...r.cells].map(c=>c.innerText.trim()));
-  const aoa = [['الطحان جولدن دايتس — نواقص المبيعات','','','','','','','',''],
-    [`الفترة: ${from} — ${to}`,'','','','','','','',''],[''],headers,...rows];
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:8}},{s:{r:1,c:0},e:{r:1,c:8}}];
-  XLSX.utils.book_append_sheet(wb,ws,'نواقص المبيعات');
-  XLSX.writeFile(wb,`sales_missing_${from}_${to}.xlsx`);
-}
-
-function smissExportPDF(){
-  const tbody = document.getElementById('smiss-tbody');
-  if(!tbody||!tbody.rows.length) return;
-  const from = document.getElementById('smiss-from')?.value||'';
-  const to   = document.getElementById('smiss-to')?.value||'';
-  const pending = [...tbody.rows].filter(r=>r.innerText.includes('لم يُوَرَّد')).length;
-  const rows = [...tbody.rows].map(r=>`<tr>${[...r.cells].map(c=>`<td>${c.innerText.trim()}</td>`).join('')}</tr>`).join('');
-  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><style>
-    body{font-family:Cairo,Arial,sans-serif;font-size:11px;padding:16px}
-    .hdr{background:linear-gradient(135deg,#7C2D12,#B45309);color:#fff;padding:12px;border-radius:8px;margin-bottom:10px}
-    .warn{background:#FEF3C7;color:#B45309;padding:7px 12px;border-radius:6px;margin-bottom:10px;font-weight:700}
-    table{width:100%;border-collapse:collapse}th{background:#7C2D12;color:#fff;padding:6px 8px;text-align:right}
-    td{padding:5px 8px;border-bottom:1px solid #eee}tr:nth-child(even){background:#FFFDF8}
-  </style></head><body>
-  <div class="hdr"><h2 style="margin:0">⚠️ نواقص المبيعات — ${from} إلى ${to}</h2></div>
-  ${pending>0?`<div class="warn">⚠️ ${pending} ناقص لم يُوَرَّد بعد</div>`:''}
-  <table><thead><tr><th>#</th><th>المجموعة</th><th>الفرع</th><th>الصنف</th><th>السبب</th><th>الحالة</th><th>التاريخ</th></tr></thead>
-  <tbody>${rows}</tbody></table></body></html>`;
-  const w=window.open('','_blank','width=1100,height=700');
-  w.document.write(html); w.document.close(); setTimeout(()=>{w.focus();w.print();},600);
-}
-
-// helper — setBadge للادمن
-function setBadgeEl(id, count){
-  const el = document.getElementById(id);
-  if(!el) return;
-  el.textContent = count||'';
-  el.style.display = count ? '' : 'none';
-}
-
-<!-- Modal: استيراد أهداف من Excel -->
-<div class="modal-overlay" id="modal-st-import">
-  <div class="modal" style="max-width:560px">
-    <div class="modal-header">
-      <h3><i class="ti ti-file-spreadsheet" style="color:#1A7A4A"></i> استيراد أهداف من Excel</h3>
-      <button class="modal-close" onclick="stImportClose()">✕</button>
-    </div>
-    <div class="modal-body">
-      <!-- تعليمات -->
-      <div style="background:#EFF8FF;border:1px solid #BFD7F0;border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.8">
-        <b>📋 تعليمات:</b><br>
-        الشيت لازم يحتوي على الأعمدة دي بالترتيب:<br>
-        <span style="background:#fff;border:1px solid #ddd;border-radius:4px;padding:1px 6px;font-size:11px;margin:2px;display:inline-block">اسم المشرف</span>
-        <span style="background:#fff;border:1px solid #ddd;border-radius:4px;padding:1px 6px;font-size:11px;margin:2px;display:inline-block">القطاع</span>
-        <span style="background:#fff;border:1px solid #ddd;border-radius:4px;padding:1px 6px;font-size:11px;margin:2px;display:inline-block">خط السير</span>
-        <span style="background:#fff;border:1px solid #ddd;border-radius:4px;padding:1px 6px;font-size:11px;margin:2px;display:inline-block">الهدف (جنيه)</span>
-        <span style="background:#fff;border:1px solid #ddd;border-radius:4px;padding:1px 6px;font-size:11px;margin:2px;display:inline-block">أيام العمل</span>
-      </div>
-
-      <!-- اختيار الشهر -->
-      <div class="fld">
-        <label class="lbl">الشهر المراد الاستيراد له *</label>
-        <input type="month" id="st-import-month" style="width:100%"/>
-      </div>
-
-      <!-- رفع الملف -->
-      <div class="fld">
-        <label class="lbl">ملف Excel (.xlsx / .xls) *</label>
-        <div id="st-drop-zone" onclick="document.getElementById('st-import-file').click()"
-          style="border:2px dashed #BFD7F0;border-radius:10px;padding:24px;text-align:center;cursor:pointer;transition:all .2s;background:#FAFCFF">
-          <i class="ti ti-upload" style="font-size:32px;color:#005CBF"></i>
-          <div style="font-size:12px;color:#555;margin-top:6px">اضغط أو اسحب الملف هنا</div>
-          <div style="font-size:10px;color:#aaa;margin-top:2px">xlsx, xls</div>
-        </div>
-        <input type="file" id="st-import-file" accept=".xlsx,.xls" style="display:none" onchange="stImportReadFile(this)"/>
-      </div>
-
-      <!-- معاينة -->
-      <div id="st-import-preview" style="display:none">
-        <div style="font-size:12px;font-weight:700;margin-bottom:8px;color:#003049">
-          📊 معاينة البيانات: <span id="st-import-count" style="color:#1A7A4A"></span>
-        </div>
-        <div style="max-height:220px;overflow-y:auto;border-radius:8px;border:1px solid #ddd">
-          <table style="width:100%;border-collapse:collapse;font-size:11px">
-            <thead>
-              <tr style="background:#003049;color:#fff;position:sticky;top:0">
-                <th style="padding:7px 10px;text-align:right">المشرف</th>
-                <th style="padding:7px 6px;text-align:right">القطاع</th>
-                <th style="padding:7px 6px;text-align:right">خط السير</th>
-                <th style="padding:7px 6px;text-align:center">الهدف (ج)</th>
-                <th style="padding:7px 6px;text-align:center">أيام</th>
-              </tr>
-            </thead>
-            <tbody id="st-import-preview-tbody"></tbody>
-          </table>
-        </div>
-
-        <!-- خيار الاستبدال -->
-        <div style="margin-top:10px;padding:10px;background:#FFF8E1;border-radius:8px;border:1px solid #FFD54F;font-size:12px">
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-            <input type="checkbox" id="st-import-replace" style="accent-color:#C62828;width:15px;height:15px"/>
-            <span>🗑️ <b>استبدال الأهداف الحالية</b> لنفس الشهر قبل الاستيراد (بدله هيضيف فوق البيانات الموجودة)</span>
-          </label>
-        </div>
-      </div>
-
-      <!-- رسالة -->
-      <div id="st-import-msg" style="display:none;margin-top:10px;padding:10px;border-radius:8px;font-size:12px"></div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-green" id="st-import-btn" onclick="stImportSave()" style="display:none">
-        <i class="ti ti-database-import"></i> استيراد الآن
-      </button>
-      <button class="btn btn-ghost" onclick="stImportClose()">إلغاء</button>
-    </div>
-  </div>
-</div>
-
-<!-- Modal: أهداف المبيعات -->
-<div class="modal-overlay" id="modal-sales-target">
-  <div class="modal" style="max-width:480px">
-    <div class="modal-header">
-      <h3 id="st-form-title">إضافة هدف</h3>
-      <button class="modal-close" onclick="document.getElementById('modal-sales-target').classList.remove('open')">✕</button>
-    </div>
-    <div class="modal-body">
-      <input type="hidden" id="st-form-id"/>
-      <div class="fld">
-        <label class="lbl">اسم المشرف *</label>
-        <input type="text" id="st-form-sup" placeholder="مثال: محمد أحمد"/>
-      </div>
-      <div class="fld">
-        <label class="lbl">القطاع</label>
-        <select id="st-form-sector">
-          <option value="">اختر...</option>
-          <option value="موردن الجيزة">موردن الجيزة</option>
-          <option value="موردن القاهرة">موردن القاهرة</option>
-          <option value="موردن الإسكندرية">موردن الإسكندرية</option>
-          <option value="قطاع الأسواق الخاصة">الأسواق الخاصة</option>
-          <option value="هايبر ماركت">هايبر ماركت</option>
-        </select>
-      </div>
-      <div class="fld">
-        <label class="lbl">خط السير *</label>
-        <input type="text" id="st-form-route" placeholder="مثال: سلاسل المعادي"/>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        <div class="fld">
-          <label class="lbl">الهدف (جنيه) *</label>
-          <input type="number" id="st-form-target" placeholder="0"/>
-        </div>
-        <div class="fld">
-          <label class="lbl">أيام العمل</label>
-          <input type="number" id="st-form-days" value="24" min="1" max="31"/>
-        </div>
-      </div>
-      <div class="fld">
-        <label class="lbl">الشهر *</label>
-        <input type="month" id="st-form-month"/>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-blue" onclick="stSave()"><i class="ti ti-device-floppy"></i> حفظ</button>
-      <button class="btn btn-ghost" onclick="document.getElementById('modal-sales-target').classList.remove('open')">إلغاء</button>
-    </div>
-  </div>
-</div>
-
-
-<!-- Modal: تعديل بيع قطاع -->
-<div class="modal-overlay" id="modal-edit-sector-sale">
-  <div class="modal" style="max-width:380px">
-    <div class="modal-header">
-      <h3><i class="ti ti-edit" style="color:#005CBF"></i> إدخال بيع — <span id="st-edit-sector-name"></span></h3>
-      <button class="modal-close" onclick="document.getElementById('modal-edit-sector-sale').classList.remove('open')">✕</button>
-    </div>
-    <div class="modal-body">
-      <input type="hidden" id="st-edit-sector-val"/>
-      <div class="fld">
-        <label class="lbl">التاريخ</label>
-        <input type="date" id="st-edit-sale-date" style="width:100%"/>
-      </div>
-      <div class="fld">
-        <label class="lbl">المبلغ (جنيه)</label>
-        <input type="number" id="st-edit-sale-amount" placeholder="0" style="width:100%;font-size:18px;font-weight:700"/>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-blue" onclick="stSaveSectorSale()"><i class="ti ti-device-floppy"></i> حفظ</button>
-      <button class="btn btn-ghost" onclick="document.getElementById('modal-edit-sector-sale').classList.remove('open')">إلغاء</button>
-    </div>
-  </div>
-</div>
-
-
-<!-- Modal: إضافة إجازة -->
-<div class="modal-overlay" id="modal-add-holiday">
-  <div class="modal" style="max-width:380px">
-    <div class="modal-header">
-      <h3><i class="ti ti-calendar-off" style="color:#731E2E"></i> إضافة إجازة رسمية</h3>
-      <button class="modal-close" onclick="document.getElementById('modal-add-holiday').classList.remove('open')">✕</button>
-    </div>
-    <div class="modal-body">
-      <div class="fld"><label class="lbl">التاريخ *</label><input type="date" id="hl-add-date" style="width:100%"/></div>
-      <div class="fld"><label class="lbl">اسم الإجازة *</label><input type="text" id="hl-add-name" placeholder="مثال: عيد الأضحى" style="width:100%"/></div>
-      <input type="hidden" id="hl-add-month"/>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-blue" onclick="hlSave()"><i class="ti ti-device-floppy"></i> حفظ</button>
-      <button class="btn btn-ghost" onclick="document.getElementById('modal-add-holiday').classList.remove('open')">إلغاء</button>
-    </div>
-  </div>
-</div>
-
-
-<!-- ══ VERSION BADGE ══ -->
-
-
-
-<!-- ══ SQL لإنشاء الجداول — شغّلها في Supabase SQL Editor ══
--- جدول المجموعات
-CREATE TABLE IF NOT EXISTS groups (
-  id          uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  key_name    text UNIQUE NOT NULL,
-  name        text NOT NULL,
-  color       text DEFAULT '#005CBF',
-  emoji       text DEFAULT '',
-  created_at  timestamptz DEFAULT now()
-);
-
--- جدول خطوط السير
-CREATE TABLE IF NOT EXISTS routes (
-  id          uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  name        text UNIQUE NOT NULL,
-  grp         text REFERENCES groups(key_name),
-  created_at  timestamptz DEFAULT now()
-);
-
--- جدول الفروع (موجود - تأكد من الأعمدة)
-ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
-ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS branch_name text;
-ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS route text;
-ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS grp text;
-ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS client_type text DEFAULT 'B';
-ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS status text DEFAULT 'active';
-ALTER TABLE IF EXISTS branches ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
-
--- إنشاء الجدول لو مش موجود
-CREATE TABLE IF NOT EXISTS branches (
-  id          uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  branch_name text NOT NULL,
-  route       text,
-  grp         text,
-  client_type text DEFAULT 'B',
-  status      text DEFAULT 'active',
-  created_at  timestamptz DEFAULT now()
-);
-
--- جدول المستخدمين/المنسقين (موجود - تأكد من الأعمدة)
-CREATE TABLE IF NOT EXISTS users (
-  id          uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  name        text NOT NULL,
-  username    text UNIQUE NOT NULL,
-  password    text NOT NULL,
-  route       text,
-  group       text,
-  role        text DEFAULT 'rep',
-  status      text DEFAULT 'active',
-  created_at  timestamptz DEFAULT now()
-);
-
--- تفعيل RLS
-ALTER TABLE groups  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE routes  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE branches ENABLE ROW LEVEL SECURITY;
-ALTER TABLE users   ENABLE ROW LEVEL SECURITY;
-
--- Policies للـ anon key
-CREATE POLICY "allow_all_groups"   ON groups   FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "allow_all_routes"   ON routes   FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "allow_all_branches" ON branches FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "allow_all_users"    ON users    FOR ALL USING (true) WITH CHECK (true);
-══ نهاية SQL ══ -->
-
-<!-- VERSION BADGE -->
-<div style="position:fixed;bottom:6px;left:50%;transform:translateX(-50%);
-  font-size:10px;font-weight:700;color:#00BCD4;
-  background:rgba(0,0,0,.15);padding:2px 10px;border-radius:99px;
-  font-family:monospace;pointer-events:none;z-index:9999;
-  letter-spacing:1px;user-select:none;
-  border:1px solid #00BCD440;backdrop-filter:blur(4px)">
-  v1.1
-</div>
-</body>
-</html>
