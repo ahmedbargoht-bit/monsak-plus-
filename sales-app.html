@@ -1905,6 +1905,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
               border-radius:8px;padding:6px 10px;font-family:Cairo,sans-serif;font-size:11px;font-weight:700;cursor:pointer">
               <i class="ti ti-file-spreadsheet"></i> Excel
             </button>
+            <button onclick="tgtExportPDF()" style="background:#fff;color:#6B1E2E;border:none;
+              border-radius:8px;padding:6px 10px;font-family:Cairo,sans-serif;font-size:11px;font-weight:700;cursor:pointer">
+              <i class="ti ti-file-type-pdf"></i> PDF
+            </button>
           </div>
         </div>
 
@@ -7281,42 +7285,41 @@ function tgtInitDate(){
 
 async function tgtLoadData(){
   if(!cu) return;
-  // جيب الأهداف — بناء على الصلاحيات
+  const supName = cu.name || '';
+  const lvl = (cu.level||'sup').trim().toLowerCase();
+  const now = new Date();
+  const monthStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+
+  // جيب الأهداف من sales_targets
   try{
     let url;
-    const allowedSups = cu.supervisors||[];
-    if(cu.level==='gm'){
-      // GM يشوف الكل بدون قيود
-      url = `${SUPABASE_URL}/rest/v1/sales_targets?select=*&limit=500`;
-    } else if(allowedSups.length){
-      // مشرف عنده قائمة مشرفين محددين
-      url = `${SUPABASE_URL}/rest/v1/sales_targets?select=*&supervisor_name=in.(${allowedSups.map(s=>`"${s}"`).join(',')})&limit=500`;
+    if(lvl==='gm'){
+      url = `${SUPABASE_URL}/rest/v1/sales_targets?select=*&month=eq.${monthStr}&limit=500`;
+    } else if(lvl==='manager'){
+      // مدير يشوف مجموعاته
+      url = `${SUPABASE_URL}/rest/v1/sales_targets?select=*&month=eq.${monthStr}&limit=200`;
     } else {
-      // مشرف عادي يشوف نفسه بس
-      url = `${SUPABASE_URL}/rest/v1/sales_targets?select=*&supervisor_name=eq.${encodeURIComponent(cu.name)}&limit=100`;
+      // مشرف يشوف نفسه بس
+      url = `${SUPABASE_URL}/rest/v1/sales_targets?select=*&supervisor_name=eq.${encodeURIComponent(supName)}&month=eq.${monthStr}&limit=10`;
     }
     const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     tgtTargets = res.ok ? await res.json() : [];
+    if(!Array.isArray(tgtTargets)) tgtTargets=[];
   }catch(e){ tgtTargets=[]; }
 
-  // جيب البيع اليومي — حسب الصلاحية
+  // جيب البيع اليومي من daily_sales
   try{
-    const now = new Date();
-    const monthStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
     let salesUrl;
-    if(cu.level==='gm'){
-      // GM يشوف كل البيع بدون فلتر
+    if(lvl==='gm'){
       salesUrl = `${SUPABASE_URL}/rest/v1/daily_sales?select=*&sale_date=gte.${monthStr}-01&order=sale_date.desc&limit=2000`;
-    } else if((cu.supervisors||[]).length){
-      // مدير عنده مشرفين
-      const sups = cu.supervisors.map(s=>`"${s}"`).join(',');
-      salesUrl = `${SUPABASE_URL}/rest/v1/daily_sales?select=*&supervisor_name=in.(${sups})&sale_date=gte.${monthStr}-01&order=sale_date.desc&limit=1000`;
+    } else if(lvl==='manager'){
+      salesUrl = `${SUPABASE_URL}/rest/v1/daily_sales?select=*&sale_date=gte.${monthStr}-01&order=sale_date.desc&limit=1000`;
     } else {
-      // مشرف عادي
-      salesUrl = `${SUPABASE_URL}/rest/v1/daily_sales?select=*&supervisor_name=eq.${encodeURIComponent(cu.name)}&sale_date=gte.${monthStr}-01&order=sale_date.desc&limit=200`;
+      salesUrl = `${SUPABASE_URL}/rest/v1/daily_sales?select=*&supervisor_name=eq.${encodeURIComponent(supName)}&sale_date=gte.${monthStr}-01&order=sale_date.desc&limit=200`;
     }
     const res = await fetch(salesUrl,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     tgtSales = res.ok ? await res.json() : [];
+    if(!Array.isArray(tgtSales)) tgtSales=[];
   }catch(e){ tgtSales=[]; }
 
   tgtRender();
@@ -7606,6 +7609,56 @@ async function tgtAddSale(){
   }finally{
     btn.disabled=false; btn.innerHTML='<i class="ti ti-device-floppy"></i> حفظ البيع';
   }
+}
+
+function tgtExportPDF(){
+  const now = new Date();
+  const monthNames=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+  const monthLabel = monthNames[now.getMonth()]+' '+now.getFullYear();
+  const fmt = n => Math.round(Math.abs(n)).toLocaleString('en-US');
+  const totalTarget   = tgtTargets.reduce((s,t)=>s+(+t.target_amount||0),0);
+  const totalAchieved = tgtSales.reduce((s,s2)=>s+(+s2.sale_amount||0),0);
+  const pct = totalTarget>0?Math.round(totalAchieved/totalTarget*100):0;
+  const remaining = totalTarget-totalAchieved;
+  const salesRows = tgtSales.slice(0,50).map(s=>`<tr>
+    <td>${s.sale_date||'—'}</td>
+    <td>${s.sector||s.route||'—'}</td>
+    <td style="font-weight:700;color:#1A7A4A;text-align:center">${Math.round(+(s.sale_amount||0)).toLocaleString('en-US')}</td>
+  </tr>`).join('');
+  const html=`<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8">
+  <style>body{font-family:Cairo,Arial,sans-serif;padding:16px;font-size:12px;color:#1A1A2E}
+  .hdr{background:linear-gradient(135deg,#6B1E2E,#3A0008);color:#fff;padding:16px;border-radius:12px;margin-bottom:12px}
+  .hdr h2{margin:0;font-size:18px}.hdr p{margin:4px 0 0;opacity:.7}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
+  .kpi{border:1px solid #E5E7EB;border-radius:10px;padding:10px;text-align:center}
+  .kpi .val{font-size:16px;font-weight:900}.kpi .lbl{font-size:9px;color:#888;margin-top:2px}
+  .prog-wrap{background:#F0F2F5;border-radius:99px;height:10px;overflow:hidden;margin-bottom:4px}
+  .prog{height:10px;background:linear-gradient(90deg,#6B1E2E,#F0C880);border-radius:99px}
+  table{width:100%;border-collapse:collapse;font-size:11px;margin-top:12px}
+  th{background:#6B1E2E;color:#fff;padding:7px 10px;text-align:right}
+  td{padding:6px 10px;border-bottom:1px solid #F0F2F5}
+  tr:nth-child(even){background:#FAFAFA}
+  .footer{margin-top:16px;font-size:9px;color:#aaa;text-align:center}
+  @media print{body{padding:8px}}</style></head><body>
+  <div class="hdr"><h2>🎯 تقرير الأهداف — ${cu?.name||'المشرف'}</h2>
+  <p>الطحان جولدن دايتس · ${monthLabel}</p></div>
+  <div class="kpis">
+    <div class="kpi"><div class="val" style="color:#6B1E2E">${fmt(totalTarget)}</div><div class="lbl">الهدف (ج)</div></div>
+    <div class="kpi"><div class="val" style="color:#15803D">${fmt(totalAchieved)}</div><div class="lbl">المحقق (ج)</div></div>
+    <div class="kpi"><div class="val" style="color:#DC2626">${fmt(remaining)}</div><div class="lbl">الباقي (ج)</div></div>
+    <div class="kpi"><div class="val" style="color:${pct>=100?'#15803D':pct>=70?'#D97706':'#DC2626'}">${pct}%</div><div class="lbl">الإنجاز</div></div>
+  </div>
+  <div class="prog-wrap"><div class="prog" style="width:${Math.min(pct,100)}%"></div></div>
+  <div style="text-align:center;font-size:11px;color:#666;margin-bottom:12px">${pct}% من الهدف</div>
+  <table><thead><tr><th>التاريخ</th><th>القطاع</th><th style="text-align:center">المبيعات (ج)</th></tr></thead>
+  <tbody>${salesRows}</tbody>
+  <tfoot><tr style="background:#F5F0E8;font-weight:700"><td colspan="2">الإجمالي</td>
+  <td style="text-align:center;color:#15803D">${fmt(totalAchieved)}</td></tr></tfoot></table>
+  <div class="footer">Al Tahhan Golden Dates © ${now.getFullYear()}</div>
+  </body></html>`;
+  const w=window.open('','_blank','width=900,height=700');
+  w.document.write(html); w.document.close();
+  setTimeout(()=>{ w.focus(); w.print(); },600);
 }
 
 async function tgtDeleteSale(id){
