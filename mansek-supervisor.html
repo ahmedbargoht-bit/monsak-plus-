@@ -758,7 +758,12 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
         <div class="alerts-title">
           <span id="alerts-count-badge" class="alerts-count-badge">0</span>
           <i class="ti ti-alert-triangle"></i> منسقون بخطوات ناقصة
-          <button id="alerts-refresh-btn" onclick="runMissingStepsCheck()" title="تحديث"><i class="ti ti-refresh"></i></button>
+          <div style="display:flex;gap:6px;align-items:center;margin-right:auto">
+            <input type="date" id="alerts-date" style="padding:4px 8px;border:1px solid #ddd;border-radius:6px;font-family:Cairo,sans-serif;font-size:11px;color:#2C1F0A"/>
+            <button id="alerts-refresh-btn" onclick="runMissingStepsCheck()" title="تحديث" style="padding:4px 10px;background:#C55B48;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif">
+              <i class="ti ti-refresh"></i> تحديث
+            </button>
+          </div>
         </div>
         <div id="alerts-list"></div>
       </div>
@@ -2522,67 +2527,56 @@ let _alertsTimer = null;
 let _notifiedToday = new Set(); // منسقين تم تنبيههم اليوم
 
 async function runMissingStepsCheck(){
-  const today = new Date().toISOString().slice(0,10);
-  const grps  = cu.groups || [];
+  // التاريخ من الـ dropdown أو اليوم
+  const dateEl = document.getElementById('alerts-date');
+  const today  = new Date().toISOString().slice(0,10);
+  if(dateEl && !dateEl.value) dateEl.value = today;
+  const checkDate = dateEl?.value || today;
+
+  const grps = cu.groups || [];
   if(!grps.length) return;
 
   try{
-    // جيب كل البيانات دفعة واحدة
-    const [attData, locData, rptData] = await Promise.all([
-      // الحضور والانصراف اليوم
-      fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=in.(${grps.join(',')})&date=eq.${today}&select=name,type,time_in,time_out,time&order=date.desc&limit=500`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    // جيب كل زيارات التاريخ المختار من visits
+    const visitsData = await fetch(
+      `${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&date=eq.${checkDate}&select=name,branch,time_in,time_out,lat,lng,shelf_total,sku_on&limit=1000`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    ).then(r=>r.ok?r.json():[]).catch(()=>[]);
 
-      // اللوكيشن (آخر تحديث)
-      fetch(`${SUPABASE_URL}/rest/v1/location?grp=in.(${grps.join(',')})&select=name,active,updated_at&order=id.desc`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    const visits = Array.isArray(visitsData) ? visitsData : [];
 
-      // تقارير الأصناف اليوم
-      fetch(`${SUPABASE_URL}/rest/v1/visit_results?created_at=gte.${today}T00:00:00&select=rep_name&limit=500`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-    ]);
+    if(!visits.length){
+      document.getElementById('alerts-section').style.display = 'block';
+      document.getElementById('alerts-list').innerHTML = `<div style="text-align:center;padding:12px;color:#aaa;font-size:12px">لا توجد زيارات في ${checkDate}</div>`;
+      document.getElementById('alerts-count-badge').textContent = '0';
+      updateTabBadge(0);
+      return;
+    }
 
-    const att  = Array.isArray(attData) ? attData : [];
-    const locs = Array.isArray(locData) ? locData : [];
-    const rpts = Array.isArray(rptData) ? rptData : [];
-
-    // بناء Maps سريعة
-    const attByRep = {};
-    att.forEach(a=>{
-      if(!attByRep[a.name]) attByRep[a.name] = {hasIn:false, hasOut:false};
-      if(a.type==='in'  || a.time_in)  attByRep[a.name].hasIn  = true;
-      if(a.type==='out' || a.time_out) attByRep[a.name].hasOut = true;
+    // تجميع الزيارات: name → [{branch, steps}]
+    const repBranches = {};
+    visits.forEach(v=>{
+      if(!v.name) return;
+      if(!repBranches[v.name]) repBranches[v.name] = [];
+      repBranches[v.name].push({
+        branch  : v.branch || '—',
+        حضور   : !!v.time_in,
+        لوكيشن : !!(v.lat && v.lng),
+        أصناف  : (+v.shelf_total||0) > 0 || (+v.sku_on||0) > 0,
+        انصراف : !!v.time_out,
+      });
     });
 
-    // اللوكيشن: نشط لو updated_at خلال آخر 3 ساعات اليوم
-    const locByRep = {};
-    const nowMs = Date.now();
-    locs.forEach(l=>{
-      const diffMin = (nowMs - new Date(l.updated_at||0).getTime()) / 60000;
-      locByRep[l.name] = diffMin < 180; // نشط لو آخر 3 ساعات
-    });
-
-    const rptReps = new Set(rpts.map(r=>r.rep_name).filter(Boolean));
-
-    // قائمة المنسقين من الحضور + اللوكيشن + الزيارات الكاشد
-    const allReps = new Set([
-      ...Object.keys(attByRep),
-      ...locs.map(l=>l.name).filter(Boolean),
-      ...cachedVisits.filter(v=>v.created_at?.startsWith(today)).map(v=>v.name).filter(Boolean),
-    ]);
-
+    // بناء التنبيهات — منسق فيه فرع ناقصه خطوة
     const alerts = [];
-    allReps.forEach(name=>{
-      if(!name) return;
-      const steps = {
-        حضور   : !!(attByRep[name]?.hasIn),
-        لوكيشن : !!(locByRep[name]),
-        أصناف  : rptReps.has(name),
-        انصراف : !!(attByRep[name]?.hasOut),
-      };
-      const missing = Object.entries(steps).filter(([,v])=>!v).map(([k])=>k);
-      if(missing.length > 0){
-        alerts.push({ name, steps, missing });
+    Object.entries(repBranches).forEach(([name, branches])=>{
+      const missingBranches = [];
+      branches.forEach(b=>{
+        const missing = ['حضور','لوكيشن','أصناف','انصراف'].filter(k=>!b[k]);
+        if(missing.length > 0) missingBranches.push({ branch: b.branch, missing, steps: b });
+      });
+      if(missingBranches.length > 0){
+        alerts.push({ name, missingBranches });
       }
     });
 
@@ -2600,29 +2594,44 @@ function renderMissingAlerts(alerts){
   const badge   = document.getElementById('alerts-count-badge');
   if(!section || !list) return;
 
-  if(!alerts.length){
-    section.style.display = 'none';
-    return;
-  }
-
   section.style.display = 'block';
   badge.textContent = alerts.length;
 
-  list.innerHTML = alerts.map(a => {
-    const stepsHTML = Object.entries(a.steps).map(([label, ok])=>
-      `<span class="alert-step ${ok?'ok':'missing'}">${ok?'✓':'✗'} ${label}</span>`
-    ).join('');
+  if(!alerts.length){
+    list.innerHTML = `<div style="text-align:center;padding:12px;color:#aaa;font-size:12px">✅ كل المنسقين أتموا خطواتهم</div>`;
+    return;
+  }
 
+  list.innerHTML = alerts.map(a => {
     const alreadyNotified = _notifiedToday.has(a.name);
+
+    // تفاصيل الفروع الناقصة
+    const branchDetails = a.missingBranches.map(b=>{
+      const stepsHTML = ['حضور','لوكيشن','أصناف','انصراف'].map(k=>`
+        <span class="alert-step ${b.steps[k]?'ok':'missing'}">${b.steps[k]?'✓':'✗'} ${k}</span>
+      `).join('');
+      return `<div style="background:#FFF8F8;border:1px solid #FFCDD2;border-radius:8px;padding:6px 10px;margin-top:6px">
+        <div style="font-size:11px;font-weight:700;color:#2C1F0A;margin-bottom:4px">🏪 ${b.branch}</div>
+        <div class="alert-card-steps">${stepsHTML}</div>
+      </div>`;
+    }).join('');
+
+    // ملخص الفروع الناقصة للتنبيه
+    const missingStr = a.missingBranches.map(b=>`${b.branch}: ${b.missing.join('،')}`).join(' | ');
+
     return `<div class="alert-card">
       <div class="alert-card-icon">⚠️</div>
       <div class="alert-card-body">
         <div class="alert-card-name">${a.name}</div>
-        <div class="alert-card-steps">${stepsHTML}</div>
+        <div style="font-size:10px;color:#E65100;margin-bottom:4px">
+          ${a.missingBranches.length} فرع بخطوات ناقصة
+        </div>
+        ${branchDetails}
         <button class="alert-notify-btn ${alreadyNotified?'sent':''}"
           id="notify-btn-${a.name.replace(/\s/g,'_')}"
-          onclick="notifyRepMissingSteps('${a.name.replace(/'/g,"\'")}','${a.missing.join('،')}')"
-          ${alreadyNotified?'disabled':''}>
+          onclick="notifyRepMissingSteps('${a.name.replace(/'/g,"\\'")}', ${JSON.stringify(a.missingBranches).replace(/</g,'&lt;')})"
+          ${alreadyNotified?'disabled':''}
+          style="margin-top:8px">
           ${alreadyNotified?'✓ تم التنبيه':'🔔 تنبيه المنسق'}
         </button>
       </div>
@@ -2648,36 +2657,56 @@ function updateTabBadge(count){
   }
 }
 
-async function notifyRepMissingSteps(repName, missingList){
+async function notifyRepMissingSteps(repName, missingBranches){
   const btn = document.getElementById('notify-btn-' + repName.replace(/\s/g,'_'));
-  if(btn){ btn.disabled = true; btn.textContent = 'جاري الإرسال...'; }
+  if(btn){ btn.disabled = true; btn.textContent = 'جارٍ الإرسال...'; }
 
-  const msg = `⚠️ تنبيه من المشرف ${cu.name}:\nلم تكتمل خطوات الزيارة اليوم:\n❌ الناقص: ${missingList}\nبرجاء إتمام الخطوات في أقرب وقت.`;
+  const dateEl = document.getElementById('alerts-date');
+  const checkDate = dateEl?.value || new Date().toISOString().slice(0,10);
+
+  // بناء تفاصيل الفروع الناقصة
+  const branchLines = missingBranches.map(b=>
+    `📍 ${b.branch}\n   ❌ ${b.missing.join(' | ')}`
+  ).join('\n');
+
+  const msg = `⚠️ تنبيه من المشرف ${cu.name}
+📅 التاريخ: ${checkDate}
+لم تكتمل خطوات الزيارة في الفروع التالية:
+
+${branchLines}
+
+برجاء إتمام الخطوات في أقرب وقت.`;
 
   try{
     await fetch(`${SUPABASE_URL}/rest/v1/messages`,{
       method:'POST',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
       body: JSON.stringify({
-        from_name   : cu.name,
-        to_rep      : repName,
-        to_all      : false,
-        message     : msg,
-        msg_type    : 'alert',
-        created_at  : new Date().toISOString()
+        from_name  : cu.name,
+        to_rep     : repName,
+        to_all     : false,
+        type       : 'warning',
+        notif_type : 'missing_steps',
+        message    : msg,
+        missing_steps: missingBranches.map(b=>b.branch),
+        is_read    : false,
+        created_at : new Date().toISOString()
       })
     });
     _notifiedToday.add(repName);
     if(btn){ btn.textContent = '✓ تم التنبيه'; btn.classList.add('sent'); }
-    showToast(`تم إرسال تنبيه للمنسق ${repName}`);
+    showToast(`✅ تم إرسال تنبيه للمنسق ${repName}`);
   } catch(e){
     if(btn){ btn.disabled = false; btn.textContent = '🔔 تنبيه المنسق'; }
-    showToast('تعذّر إرسال التنبيه');
+    showToast('❌ تعذّر إرسال التنبيه');
   }
 }
 
 // تشغيل الفحص الدوري كل 5 دقائق
 function startMissingStepsWatch(){
+  // تعيين تاريخ اليوم في الـ dropdown
+  const dateEl = document.getElementById('alerts-date');
+  if(dateEl && !dateEl.value) dateEl.value = new Date().toISOString().slice(0,10);
   runMissingStepsCheck();
   if(_alertsTimer) clearInterval(_alertsTimer);
   _alertsTimer = setInterval(runMissingStepsCheck, 5 * 60 * 1000);
