@@ -2888,185 +2888,103 @@ async function loadRepLocations(){
     const grps = cu.groups||[];
 
     const [locData, attData, visitData] = await Promise.all([
-      // اللوكيشن
+      // اللوكيشن — بالتاريخ المختار
       fetch(`${SUPABASE_URL}/rest/v1/location?grp=in.(${grps.join(',')})&updated_at=gte.${selectedDate}T00:00:00&updated_at=lte.${selectedDate}T23:59:59&select=*&order=updated_at.desc`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-      // الحضور
+          {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      // الحضور بالتاريخ المختار
       fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=in.(${grps.join(',')})&date=eq.${selectedDate}&select=*&order=date.desc`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-      // الزيارات — كاملة مع time_in, time_out, lat, lng, route
-      fetch(`${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&date=eq.${selectedDate}&select=name,branch,route,time_in,time_out,lat,lng,points&order=time_in.asc&limit=1000`,
+      // الزيارات بالتاريخ المختار
+      fetch(`${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&created_at=gte.${selectedDate}T00:00:00&created_at=lte.${selectedDate}T23:59:59&select=name,branch,created_at&order=created_at.desc&limit=500`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     ]);
 
-    const locs   = Array.isArray(locData)  ? locData  : [];
-    const atts   = Array.isArray(attData)  ? attData  : [];
-    const visits = Array.isArray(visitData)? visitData: [];
+    const locs  = Array.isArray(locData) ? locData : [];
+    const atts  = Array.isArray(attData) ? attData : [];
+    const visits= Array.isArray(visitData)? visitData: [];
 
-    if(!locs.length && !atts.length && !visits.length){
+    if(!locs.length && !atts.length){
       const dateLabel = selectedDate === today ? 'اليوم' : selectedDate;
       el.innerHTML=`<div class="empty" style="padding:1rem"><i class="ti ti-map-pin-off"></i><br>لا يوجد بيانات لـ ${dateLabel}</div>`;
       return;
     }
 
-    // ── جمع بيانات كل منسق ──────────────────────────────────
+    // جمع البيانات لكل منسق
     const repsMap = {};
-
-    // من location
     locs.forEach(l=>{
-      if(!repsMap[l.name]) repsMap[l.name]={name:l.name,grp:l.grp,active:false,lastSeen:null,timeIn:null,timeOut:null,lat:null,lng:null,visits:[]};
-      repsMap[l.name].lat = l.lat; repsMap[l.name].lng = l.lng;
+      repsMap[l.name] = repsMap[l.name]||{name:l.name,grp:l.grp,lat:null,lng:null,active:false,lastSeen:null,timeIn:null,timeOut:null,lastBranch:null};
+      repsMap[l.name].lat = l.lat;
+      repsMap[l.name].lng = l.lng;
       repsMap[l.name].active = l.active;
       repsMap[l.name].lastSeen = l.updated_at;
     });
-
-    // من attendance
     atts.forEach(a=>{
-      if(!repsMap[a.name]) repsMap[a.name]={name:a.name,grp:a.grp||'',active:false,lastSeen:null,timeIn:null,timeOut:null,lat:null,lng:null,visits:[]};
-      if(a.time_in  && !repsMap[a.name].timeIn)  repsMap[a.name].timeIn  = a.time_in;
-      if(a.time_out)                              repsMap[a.name].timeOut = a.time_out;
+      if(!repsMap[a.name]) repsMap[a.name]={name:a.name,grp:a.grp,lat:null,lng:null,active:false,lastSeen:null,timeIn:null,timeOut:null,lastBranch:null};
+      // أول time_in موجود
+      if(a.time_in && !repsMap[a.name].timeIn)  repsMap[a.name].timeIn  = a.time_in;
+      // آخر time_out موجود
+      if(a.time_out) repsMap[a.name].timeOut = a.time_out;
     });
+    // جيب آخر فرع لكل منسق اليوم
+    const lastVisitByRep = {};
+    visits.forEach(v=>{ if(!lastVisitByRep[v.name]) lastVisitByRep[v.name]=v.branch; });
+    Object.keys(repsMap).forEach(n=>{ repsMap[n].lastBranch = lastVisitByRep[n]||null; });
 
-    // من visits — كل زيارة لكل منسق
-    visits.forEach(v=>{
-      if(!repsMap[v.name]) repsMap[v.name]={name:v.name,grp:v.grp||'',active:false,lastSeen:null,timeIn:null,timeOut:null,lat:null,lng:null,visits:[]};
-      repsMap[v.name].visits.push(v);
-    });
-
-    // ── دالة حساب المدة بين وقتين ───────────────────────────
-    function calcDuration(tIn, tOut){
-      if(!tIn || !tOut) return null;
-      try{
-        const [h1,m1] = tIn.split(':').map(Number);
-        const [h2,m2] = tOut.split(':').map(Number);
-        const diffMin = (h2*60+m2) - (h1*60+m1);
-        if(diffMin <= 0) return null;
-        const h = Math.floor(diffMin/60), m = diffMin%60;
-        return h>0 ? `${h}س ${m}د` : `${m}د`;
-      }catch(e){ return null; }
-    }
-
-    // ── ترتيب: الأحدث نشاطاً أولاً ─────────────────────────
+    // ترتيب: نشط أولاً، بعدين باسم
     const sorted = Object.values(repsMap).sort((a,b)=>{
-      // أولاً: من عنده زيارات أكثر
-      if(b.visits.length !== a.visits.length) return b.visits.length - a.visits.length;
-      // ثانياً: نشط أولاً
-      if(a.active && !b.active) return -1;
-      if(!a.active && b.active) return 1;
-      // ثالثاً: آخر وقت زيارة
-      const aLast = a.visits[a.visits.length-1]?.time_in || a.timeIn || '';
-      const bLast = b.visits[b.visits.length-1]?.time_in || b.timeIn || '';
-      return bLast.localeCompare(aLast);
+      if(a.active&&!b.active) return -1;
+      if(!a.active&&b.active) return 1;
+      return (a.name||'').localeCompare(b.name||'','ar');
     });
 
     const now = Date.now();
-
     el.innerHTML = sorted.map(rep=>{
-      const grpColor  = GROUPS[rep.grp]?.color||'#888';
-      const grpLabel  = GROUPS[rep.grp]?.label||rep.grp||'—';
-      const totalVisits = rep.visits.length;
+      const grpColor = GROUPS[rep.grp]?.color||'#888';
+      const grpLabel = GROUPS[rep.grp]?.label||rep.grp||'—';
 
       // وقت آخر تحديث
       let lastSeenText = '—';
       if(rep.lastSeen){
         const diff = Math.floor((now - new Date(rep.lastSeen).getTime())/60000);
         if(diff < 1)       lastSeenText = 'الآن 🟢';
-        else if(diff < 5)  lastSeenText = `منذ ${diff}د 🟢`;
-        else if(diff < 30) lastSeenText = `منذ ${diff}د 🟡`;
-        else               lastSeenText = `منذ ${Math.floor(diff/60)}س 🔴`;
+        else if(diff < 5)  lastSeenText = `منذ ${diff} د 🟢`;
+        else if(diff < 30) lastSeenText = `منذ ${diff} د 🟡`;
+        else               lastSeenText = `منذ ${Math.floor(diff/60)} س 🔴`;
       }
 
-      // مدة الدوام الكلي
-      const totalDur = calcDuration(rep.timeIn, rep.timeOut);
+      // رابط الخريطة
+      const mapLink = rep.lat && rep.lng
+        ? `<a href="https://www.google.com/maps?q=${rep.lat},${rep.lng}" target="_blank"
+            style="display:inline-flex;align-items:center;gap:4px;background:#E3F2FD;color:#1565C0;
+            padding:3px 8px;border-radius:6px;font-size:10px;font-weight:700;text-decoration:none">
+            <i class="ti ti-map"></i> خريطة</a>`
+        : '';
 
-      // ── بناء سجل الزيارات مرتبة زمنياً ─────────────────
-      const visitsHTML = rep.visits.length
-        ? rep.visits.map((v, i)=>{
-            const dur     = calcDuration(v.time_in, v.time_out);
-            const mapLink = v.lat && v.lng
-              ? `<a href="https://www.google.com/maps?q=${v.lat},${v.lng}" target="_blank"
-                  style="display:inline-flex;align-items:center;gap:3px;background:#E3F2FD;color:#1565C0;
-                  padding:2px 7px;border-radius:6px;font-size:10px;font-weight:700;text-decoration:none">
-                  <i class="ti ti-map-pin"></i> لوكيشن</a>`
-              : '';
+      return `<div style="padding:10px;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:flex-start">
+        <!-- أيقونة الحالة -->
+        <div style="width:10px;height:10px;border-radius:50%;background:${rep.active?'#1A7A4A':'#9CA3AF'};
+          flex-shrink:0;margin-top:4px"></div>
 
-            return `<div style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;
-              border-bottom:1px dashed #f0ebe3;position:relative">
-              <!-- خط الترتيب -->
-              <div style="display:flex;flex-direction:column;align-items:center;gap:0;flex-shrink:0">
-                <div style="width:20px;height:20px;border-radius:50%;background:var(--caramel);
-                  color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;
-                  justify-content:center">${i+1}</div>
-                ${i < rep.visits.length-1 ? '<div style="width:2px;flex:1;min-height:10px;background:#e8ddd0;margin-top:2px"></div>' : ''}
-              </div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px">
+            <span style="font-size:13px;font-weight:700">${rep.name}</span>
+            <span style="background:${grpColor}22;color:${grpColor};padding:1px 6px;border-radius:999px;font-size:10px;font-weight:700">${grpLabel}</span>
+            <span style="font-size:10px;color:var(--text2)">${lastSeenText}</span>
+          </div>
 
-              <div style="flex:1;min-width:0">
-                <!-- اسم الفرع + خط السير -->
-                <div style="font-size:12px;font-weight:800;color:#2C1F0A;margin-bottom:3px">
-                  <i class="ti ti-building-store" style="color:var(--caramel);font-size:11px"></i>
-                  ${v.branch||'—'}
-                  ${v.route?`<span style="font-size:10px;color:#888;font-weight:500"> · ${v.route}</span>`:''}
-                </div>
+          <!-- آخر فرع -->
+          ${rep.lastBranch?`<div style="font-size:11px;color:#1565C0;margin-bottom:4px">
+            <i class="ti ti-building-store" style="font-size:11px"></i> ${rep.lastBranch}</div>`:''}
 
-                <!-- سجل الأوقات -->
-                <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">
-                  ${v.time_in
-                    ? `<span style="font-size:10px;background:#E8F5E9;color:#1A7A4A;padding:2px 7px;border-radius:6px;font-weight:700">
-                        🟢 حضور: ${v.time_in}</span>`
-                    : `<span style="font-size:10px;background:#F5F5F5;color:#aaa;padding:2px 7px;border-radius:6px">
-                        حضور: —</span>`}
-
-                  ${v.time_out
-                    ? `<span style="font-size:10px;background:#FFEBEE;color:#C0392B;padding:2px 7px;border-radius:6px;font-weight:700">
-                        🔴 انصراف: ${v.time_out}</span>`
-                    : `<span style="font-size:10px;background:#FFF8E1;color:#E65100;padding:2px 7px;border-radius:6px">
-                        ⏳ في الفرع</span>`}
-
-                  ${dur
-                    ? `<span style="font-size:10px;background:#EEF4FF;color:#1565C0;padding:2px 7px;border-radius:6px;font-weight:700">
-                        ⏱ ${dur}</span>`
-                    : ''}
-
-                  ${mapLink}
-                </div>
-              </div>
-            </div>`;
-          }).join('')
-        : `<div style="font-size:11px;color:#bbb;padding:6px 0;text-align:center">
-            لا توجد زيارات مسجلة بعد</div>`;
-
-      return `<div style="padding:12px;border-bottom:2px solid var(--border)">
-
-        <!-- ── رأس المنسق ── -->
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-          <div style="width:10px;height:10px;border-radius:50%;
-            background:${rep.active?'#1A7A4A':'#9CA3AF'};flex-shrink:0"></div>
-          <span style="font-size:13px;font-weight:900;color:#2C1F0A">${rep.name}</span>
-          <span style="background:${grpColor}22;color:${grpColor};padding:1px 7px;
-            border-radius:999px;font-size:10px;font-weight:700">${grpLabel}</span>
-          <span style="font-size:10px;color:var(--text2)">${lastSeenText}</span>
-          ${totalVisits>0?`<span style="background:#F5F0E8;color:var(--caramel);padding:1px 7px;
-            border-radius:999px;font-size:10px;font-weight:700">
-            ${totalVisits} زيارة</span>`:''}
+          <!-- حضور وانصراف -->
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <span style="font-size:11px;background:#E8F5E9;color:#1A7A4A;padding:2px 7px;border-radius:6px">
+              🟢 حضور: ${rep.timeIn||'لم يسجل'}</span>
+            ${rep.timeOut?`<span style="font-size:11px;background:#FFEBEE;color:#C0392B;padding:2px 7px;border-radius:6px">
+              🔴 انصراف: ${rep.timeOut}</span>`:''}
+            ${mapLink}
+          </div>
         </div>
-
-        <!-- ── شريط الدوام الكلي ── -->
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;
-          background:#F9F5F0;border-radius:8px;padding:6px 10px">
-          ${rep.timeIn
-            ? `<span style="font-size:11px;color:#1A7A4A;font-weight:700">🟢 حضور: ${rep.timeIn}</span>`
-            : `<span style="font-size:11px;color:#bbb">لم يسجل حضور</span>`}
-          ${rep.timeOut
-            ? `<span style="font-size:11px;color:#C0392B;font-weight:700"> · 🔴 انصراف: ${rep.timeOut}</span>`
-            : ''}
-          ${totalDur
-            ? `<span style="font-size:11px;color:#1565C0;font-weight:700"> · ⏱ إجمالي: ${totalDur}</span>`
-            : ''}
-        </div>
-
-        <!-- ── سجل الزيارات ── -->
-        <div style="padding-right:4px">${visitsHTML}</div>
-
       </div>`;
     }).join('');
 
@@ -4782,60 +4700,85 @@ function closeDeviationModal(){
 
 async function confirmDeviation(){
   const reason = document.getElementById('modal-dev-reason').value.trim();
-  const err = document.getElementById('modal-dev-err');
-  const oldBranchId = _deviationDay?.itemId || document.getElementById('modal-dev-branch-old').value;
-  const newBranch   = document.getElementById('modal-dev-branch-new').value;
-  const newRep      = document.getElementById('modal-dev-rep-new').value;
+  const err    = document.getElementById('modal-dev-err');
 
-  if(!oldBranchId){ err.textContent='اختر الفرع المراد تعديله'; err.style.display='block'; return; }
-  if(reason.length < 5){ err.textContent='اكتب سبب التعديل (5 أحرف على الأقل)'; err.style.display='block'; return; }
+  // ✅ تأكد إن الـ id bigint مش string
+  const oldBranchId = parseInt(_deviationDay?.itemId || document.getElementById('modal-dev-branch-old')?.value);
+  const newBranch   = document.getElementById('modal-dev-branch-new')?.value?.trim() || '';
+  const newRep      = document.getElementById('modal-dev-rep-new')?.value?.trim()    || '';
 
-  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  if(!oldBranchId || isNaN(oldBranchId)){
+    err.textContent='اختر الفرع المراد تعديله'; err.style.display='block'; return;
+  }
+  if(reason.length < 5){
+    err.textContent='اكتب سبب التعديل (5 أحرف على الأقل)'; err.style.display='block'; return;
+  }
+
+  err.style.display='none';
+  const H   = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
   const now = new Date().toISOString();
 
-  // تحديث plan_branches بالفرع/المنسق الجديد + تسجيل سبب التعديل
-  const patchData = { change_reason: reason, modified_at: now };
+  // ✅ PATCH plan_branches — الـ columns دلوقتي موجودة
+  const patchData = {
+    change_reason : reason,
+    modified_at   : now,
+  };
   if(newBranch) patchData.branch_name = newBranch;
-  if(newRep)    patchData.rep_name = newRep;
+  if(newRep)    patchData.rep_name    = newRep;
 
-  const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${oldBranchId}`,{
-    method:'PATCH', headers:H, body:JSON.stringify(patchData)
-  });
+  const patchRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${oldBranchId}`,
+    { method:'PATCH', headers:H, body:JSON.stringify(patchData) }
+  );
 
-  // تسجيل الانحراف في plan_deviations
-  const oldItem = planItems.find(i=>String(i.id)===String(oldBranchId));
-  await fetch(`${SUPABASE_URL}/rest/v1/plan_deviations`,{
-    method:'POST',
-    headers:H,
-    body: JSON.stringify({
-      supervisor_name: cu.name,
-      plan_id: currentPlan?.id||null,
-      day_date: _deviationDay.date,
-      day_name: _deviationDay.dayName,
-      original_routes: oldItem?.branch_name||'—',
-      actual_routes: newBranch||oldItem?.branch_name||'—',
-      reason,
-      status: 'pending'
-    })
-  });
-
-  if(patchRes.ok){
-    // تحديث الـ cache المحلي
-    const idx = planItems.findIndex(i=>String(i.id)===String(oldBranchId));
-    if(idx!==-1){
-      if(newBranch) planItems[idx].branch_name = newBranch;
-      if(newRep)    planItems[idx].rep_name = newRep;
-      planItems[idx].change_reason = reason;
-    }
-    closeDeviationModal();
-    // reload
-    const devs = await sbGet('plan_deviations',{supervisor_name:cu.name});
-    cachedDeviations = Array.isArray(devs)?devs:[];
-    loadDailyExecution();
-    showToast('✅ تم توثيق تغيير الخطة — بانتظار مراجعة الإدارة');
-  } else {
-    err.textContent='فشل الحفظ — حاول تاني'; err.style.display='block';
+  if(!patchRes.ok){
+    const errTxt = await patchRes.text().catch(()=>'');
+    err.textContent = `فشل الحفظ (${patchRes.status}) — ${errTxt.slice(0,80)}`;
+    err.style.display = 'block';
+    return;
   }
+
+  // ✅ POST plan_deviations — day_date كـ date مش string
+  const oldItem   = planItems.find(i => +i.id === oldBranchId);
+  const dayDate   = _deviationDay?.date || oldItem?.visit_date || null; // date فقط YYYY-MM-DD
+
+  const devRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/plan_deviations`,
+    {
+      method  : 'POST',
+      headers : H,
+      body    : JSON.stringify({
+        supervisor_name : cu.name,
+        plan_id         : currentPlan?.id || null,
+        day_date        : dayDate,         // ✅ date type
+        day_name        : _deviationDay?.dayName || '',
+        original_routes : oldItem?.branch_name || '—',
+        actual_routes   : newBranch || oldItem?.branch_name || '—',
+        reason,
+        status          : 'pending',
+      })
+    }
+  );
+
+  if(!devRes.ok){
+    console.warn('plan_deviations insert failed:', await devRes.text().catch(()=>''));
+    // مش نوقف العملية — الـ PATCH نجح
+  }
+
+  // ✅ تحديث الـ cache المحلي
+  const idx = planItems.findIndex(i => +i.id === oldBranchId);
+  if(idx !== -1){
+    if(newBranch) planItems[idx].branch_name  = newBranch;
+    if(newRep)    planItems[idx].rep_name     = newRep;
+    planItems[idx].change_reason = reason;
+    planItems[idx].modified_at   = now;
+  }
+
+  closeDeviationModal();
+  const devs = await sbGet('plan_deviations', {supervisor_name: cu.name});
+  cachedDeviations = Array.isArray(devs) ? devs : [];
+  loadDailyExecution();
+  showToast('✅ تم توثيق تغيير الخطة — بانتظار مراجعة الإدارة');
 }
 
 // ══════════════════════════════════════════════════════════════
