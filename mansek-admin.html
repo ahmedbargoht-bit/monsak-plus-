@@ -4338,11 +4338,16 @@ h2,h3{color:#2C1F0A}
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end">
               <div class="fld" style="margin:0">
                 <label class="lbl">الشهر</label>
-                <input type="month" id="st-month" style="width:100%" onchange="stLoad()"/>
+                <input type="month" id="st-month" style="width:100%" onchange="stOnMonthChange()"/>
               </div>
               <div class="fld" style="margin:0">
-                <label class="lbl">أيام العمل الفعلية</label>
-                <input type="number" id="st-work-days" value="26" min="1" max="31" style="width:100%" oninput="stLoad()"/>
+                <label class="lbl">أيام العمل الفعلية
+                  <span id="st-days-badge" style="background:#1A7A4A;color:#fff;padding:1px 8px;border-radius:10px;font-size:11px;margin-right:6px;font-weight:700">0 يوم</span>
+                </label>
+                <button onclick="stOpenCalendar()" style="width:100%;padding:9px 12px;background:#F9F6F1;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;cursor:pointer;text-align:right;color:#4B3C1A;font-weight:700">
+                  <i class="ti ti-calendar"></i> اختر أيام العمل...
+                </button>
+                <input type="hidden" id="st-work-days" value="26"/>
               </div>
               <div class="fld" style="margin:0">
                 <label class="lbl">المشرف</label>
@@ -4351,6 +4356,26 @@ h2,h3{color:#2C1F0A}
                 </select>
               </div>
               <button class="btn btn-blue btn-sm" onclick="stLoad()"><i class="ti ti-search"></i> بحث</button>
+            </div>
+          </div>
+
+          <!-- تقويم اختيار أيام العمل -->
+          <div id="st-calendar-wrap" style="display:none;margin-bottom:12px">
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <div style="font-size:13px;font-weight:700;color:#4B3C1A"><i class="ti ti-calendar-check"></i> اختر أيام العمل الفعلية</div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <span style="display:flex;align-items:center;gap:4px;font-size:11px"><span style="width:14px;height:14px;background:#1A7A4A;border-radius:3px;display:inline-block"></span> يوم عمل محدد</span>
+                  <span style="display:flex;align-items:center;gap:4px;font-size:11px"><span style="width:14px;height:14px;background:#E5E7EB;border-radius:3px;display:inline-block"></span> جمعة / إجازة</span>
+                  <button onclick="stSelectAllWorkDays()" style="background:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif">تحديد كل أيام العمل</button>
+                  <button onclick="stClearCalendar()" style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif">مسح الكل</button>
+                  <button onclick="stApplyCalendar()" style="background:#1A7A4A;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px;font-family:Cairo,sans-serif;font-weight:700">✅ تطبيق</button>
+                </div>
+              </div>
+              <div id="st-calendar-grid" style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;direction:rtl"></div>
+              <div style="margin-top:10px;text-align:center;font-size:12px;color:#4B3C1A">
+                إجمالي أيام العمل المختارة: <b id="st-cal-count" style="color:#1A7A4A;font-size:14px">0</b> يوم
+              </div>
             </div>
           </div>
 
@@ -16531,9 +16556,132 @@ let _stTargets   = [];  // البيانات من sales_targets
 let _stAchieved  = {};  // المحقق: key=supervisor|sector → amount
 let _stDailyInputs = {}; // إدخالات اليوم المؤقتة
 
+// ── تقويم أيام العمل ──────────────────────────────────────
+let _stWorkDays = new Set(); // التواريخ المختارة كـ YYYY-MM-DD
+
+function stOnMonthChange(){
+  _stWorkDays.clear();
+  stAutoSelectWorkDays();
+  stLoad();
+}
+
+function stAutoSelectWorkDays(){
+  const month = document.getElementById('st-month')?.value;
+  if(!month) return;
+  const [y,m] = month.split('-').map(Number);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  _stWorkDays.clear();
+  for(let d=1; d<=daysInMonth; d++){
+    const dt = new Date(y, m-1, d);
+    if(dt.getDay() !== 5) { // مش جمعة
+      _stWorkDays.add(`${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`);
+    }
+  }
+  stUpdateDaysBadge();
+}
+
+function stUpdateDaysBadge(){
+  const count = _stWorkDays.size;
+  document.getElementById('st-work-days').value = count;
+  const badge = document.getElementById('st-days-badge');
+  if(badge) badge.textContent = `${count} يوم`;
+}
+
+function stOpenCalendar(){
+  const month = document.getElementById('st-month')?.value;
+  if(!month){ alert('اختر الشهر أولاً'); return; }
+  if(_stWorkDays.size===0) stAutoSelectWorkDays();
+  stRenderCalendar(month);
+  const wrap = document.getElementById('st-calendar-wrap');
+  wrap.style.display = wrap.style.display==='none' ? '' : 'none';
+}
+
+function stRenderCalendar(month){
+  const [y,m] = month.split('-').map(Number);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const firstDay = new Date(y, m-1, 1).getDay(); // 0=أحد
+  const grid = document.getElementById('st-calendar-grid');
+
+  const dayNames = ['أحد','اثنين','ثلاثاء','أربعاء','خميس','جمعة','سبت'];
+  let html = dayNames.map(d=>
+    `<div style="text-align:center;font-size:10px;font-weight:700;color:#888;padding:4px">${d}</div>`
+  ).join('');
+
+  // فراغات قبل أول يوم
+  for(let i=0; i<firstDay; i++){
+    html += `<div></div>`;
+  }
+
+  const today = new Date().toISOString().slice(0,10);
+
+  for(let d=1; d<=daysInMonth; d++){
+    const dateStr = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const dt = new Date(y, m-1, d);
+    const isFriday = dt.getDay() === 5;
+    const isSelected = _stWorkDays.has(dateStr);
+    const isToday = dateStr === today;
+    const isPast = dateStr < today;
+
+    let bg, color, border, cursor;
+    if(isFriday){
+      bg='#F3F4F6'; color='#9CA3AF'; border='1px solid #E5E7EB'; cursor='default';
+    } else if(isSelected){
+      bg='#1A7A4A'; color='#fff'; border='2px solid #1A7A4A'; cursor='pointer';
+    } else {
+      bg='#FFF'; color='#4B3C1A'; border='1px solid #E5E7EB'; cursor='pointer';
+    }
+
+    const todayStyle = isToday ? 'font-weight:900;text-decoration:underline' : '';
+    const pastStyle  = isPast&&!isSelected&&!isFriday ? 'opacity:0.5' : '';
+
+    html += `<div
+      onclick="${isFriday?'':'stToggleDay(\"'+dateStr+'\")'}"
+      style="text-align:center;padding:8px 4px;border-radius:8px;background:${bg};color:${color};border:${border};cursor:${cursor};font-size:12px;font-family:Cairo,sans-serif;${todayStyle};${pastStyle}"
+      data-date="${dateStr}">
+      ${d}
+    </div>`;
+  }
+
+  grid.innerHTML = html;
+  document.getElementById('st-cal-count').textContent = _stWorkDays.size;
+}
+
+function stToggleDay(dateStr){
+  if(_stWorkDays.has(dateStr)){
+    _stWorkDays.delete(dateStr);
+  } else {
+    _stWorkDays.add(dateStr);
+  }
+  stUpdateDaysBadge();
+  const month = document.getElementById('st-month')?.value;
+  if(month) stRenderCalendar(month);
+}
+
+function stSelectAllWorkDays(){
+  stAutoSelectWorkDays();
+  const month = document.getElementById('st-month')?.value;
+  if(month) stRenderCalendar(month);
+}
+
+function stClearCalendar(){
+  _stWorkDays.clear();
+  stUpdateDaysBadge();
+  const month = document.getElementById('st-month')?.value;
+  if(month) stRenderCalendar(month);
+}
+
+function stApplyCalendar(){
+  stUpdateDaysBadge();
+  document.getElementById('st-calendar-wrap').style.display='none';
+  stLoad();
+}
+
 function stInitMonth(){
   const el = document.getElementById('st-month');
-  if(el && !el.value) el.value = new Date().toISOString().slice(0,7);
+  if(el && !el.value) {
+    el.value = new Date().toISOString().slice(0,7);
+    stAutoSelectWorkDays();
+  }
 }
 
 async function stInitSupFilter(){
@@ -16564,7 +16712,7 @@ async function stLoad(){
   stInitMonth();
   await stInitSupFilter();
   const month   = document.getElementById('st-month')?.value || new Date().toISOString().slice(0,7);
-  const days    = parseInt(document.getElementById('st-work-days')?.value||'26');
+  const days    = _stWorkDays.size || parseInt(document.getElementById('st-work-days')?.value||'26');
   const supFilt = document.getElementById('st-sup-filter')?.value||'all';
   const today   = new Date().getDate();
 
@@ -16596,14 +16744,18 @@ async function stLoad(){
   const todayLabel = document.getElementById('st-today-label');
   if(todayLabel) todayLabel.textContent = `اليوم: ${today} | أيام متبقية: ${days-today}`;
 
+  const todayStr   = new Date().toISOString().slice(0,10);
+  const daysWorked = [..._stWorkDays].filter(d=>d <= todayStr).length;
+  const daysLeft   = [..._stWorkDays].filter(d=>d > todayStr).length;
+
   // KPI
   const totalTarget   = _stTargets.reduce((s,t)=>s+(+t.target_amount||0),0);
   const totalAchieved = Object.values(_stAchieved).reduce((s,v)=>s+v,0);
   const dailyTarget   = days>0 ? totalTarget/days : 0;
-  const expectedToday = dailyTarget * today;
+  const expectedToday = dailyTarget * daysWorked;
   const pct           = expectedToday>0 ? totalAchieved/expectedToday : 0;
   const remaining     = totalTarget - totalAchieved;
-  const projected     = today>0 ? (totalAchieved/today)*days : 0;
+  const projected     = daysWorked>0 ? (totalAchieved/daysWorked)*days : 0;
 
   document.getElementById('st-kpi').innerHTML = `
     <div class="stat-card-admin"><div class="stat-n-admin" style="font-size:13px">${Number(totalTarget).toLocaleString('en-US')}</div><div class="stat-l-admin">الهدف الكلي</div></div>
@@ -16733,15 +16885,20 @@ function stBuildTable(days, today){
     const isTamraty = (t.sector||'').includes('تمراتي');
     const rowBg     = isTamraty ? '#F0FFF4' : (i%2===0?'#FFFDF8':'#fff');
     const target    = +t.target_amount||0;
+    const todayStr2 = new Date().toISOString().slice(0,10);
+    const daysLeft  = [..._stWorkDays].filter(d=>d > todayStr2).length;
+    const daysWorked= [..._stWorkDays].filter(d=>d <= todayStr2).length;
     const dailyT    = days>0 ? target/days : 0;
     const key       = `${t.supervisor_name}|${t.sector}`;
     const achieved  = _stAchieved[key]||0;
-    const expectedD = dailyT * today;
-    const diff      = achieved - expectedD;
+    const expectedD = dailyT * daysWorked;
     const pct       = expectedD>0 ? achieved/expectedD : 0;
-    const projected = today>0 ? (achieved/today)*days : 0;
+    const projected = daysWorked>0 ? (achieved/daysWorked)*days : 0;
     const remaining = target - achieved;
-    const daysLeft  = days - today;
+    // أيام العمل المتبقية = أيام العمل المختارة بعد اليوم
+    const todayStr2 = new Date().toISOString().slice(0,10);
+    const daysLeft  = [..._stWorkDays].filter(d=>d > todayStr2).length;
+    const daysWorked= [..._stWorkDays].filter(d=>d <= todayStr2).length;
 
     totTarget   += target;
     totAchieved += achieved;
