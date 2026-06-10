@@ -4898,31 +4898,49 @@ h2,h3{color:#2C1F0A}
 
 <!-- ══ Modal: إضافة مندوب بيع ══════════════════════════════════ -->
 <div class="modal-overlay" id="modal-add-rep">
-  <div class="modal">
+  <div class="modal" style="max-width:520px">
     <div class="modal-title">إضافة مندوب بيع جديد
       <button class="modal-close" onclick="closeModal('modal-add-rep')">✕</button>
     </div>
+
+    <!-- اسم + باسورد -->
     <div class="form-grid">
-      <div class="form-fld"><label class="form-lbl">الاسم كاملاً</label><input type="text" id="rep-name" placeholder="اسم المندوب"/></div>
-      <div class="form-fld"><label class="form-lbl">كلمة المرور</label><input type="text" id="rep-pass" placeholder="مثال: 1234"/></div>
+      <div class="form-fld"><label class="form-lbl">الاسم كاملاً *</label><input type="text" id="rep-name" placeholder="اسم المندوب"/></div>
+      <div class="form-fld"><label class="form-lbl">كلمة المرور *</label><input type="text" id="rep-pass" placeholder="مثال: 1234"/></div>
     </div>
-    <div class="form-fld"><label class="form-lbl">المنطقة / المجموعة</label>
-      <select id="rep-grp" onchange="repFillRoutes('rep-route')">
-        <option value="">اختر المنطقة...</option>
-        <option value="giza">🔵 مجموعة الجيزة</option>
-        <option value="cairo">🟢 وسط القاهرة</option>
-        <option value="south">🔴 جنوب وشرق القاهرة</option>
-        <option value="tajmuat">🟡 مجموعة التجمعات</option>
-        <option value="hyper">🟣 الهايبر ماركت</option>
-        <option value="alex">🌊 مجموعة الإسكندرية</option>
-        <option value="fuel_cairo">⛽ محطات وقود القاهرة</option>
-        <option value="fuel_alex">⛽ محطات وقود الإسكندرية</option>
+
+    <!-- المشرف -->
+    <div class="form-fld">
+      <label class="form-lbl">المشرف المسؤول *</label>
+      <select id="rep-supervisor" onchange="repOnSupChange()" style="width:100%">
+        <option value="">اختر المشرف...</option>
       </select>
     </div>
-    <div class="form-fld"><label class="form-lbl">خط السير</label>
-      <select id="rep-route"><option value="">اختر خط السير...</option></select>
+
+    <!-- المجموعة (تلقائي) -->
+    <div class="form-fld">
+      <label class="form-lbl">المجموعة *</label>
+      <select id="rep-grp" onchange="repOnGrpChange()" style="width:100%">
+        <option value="">اختر المجموعة...</option>
+      </select>
     </div>
+
+    <!-- خط السير -->
+    <div class="form-fld">
+      <label class="form-lbl">خط السير *</label>
+      <select id="rep-route" onchange="repOnRouteChange()" style="width:100%">
+        <option value="">اختر خط السير...</option>
+      </select>
+    </div>
+
+    <!-- الفروع (تظهر تلقائياً) -->
+    <div class="form-fld" id="rep-branches-wrap" style="display:none">
+      <label class="form-lbl">الفروع في خط السير</label>
+      <div id="rep-branches-list" style="background:#F9F6F1;border:1.5px solid var(--border);border-radius:8px;padding:10px;max-height:150px;overflow-y:auto;font-size:11px;color:#555;line-height:2"></div>
+    </div>
+
     <div class="ok" id="rep-add-ok"></div>
+    <div class="err" id="rep-add-err" style="display:none;color:#B71C1C;font-size:12px;padding:8px;background:#FEE2E2;border-radius:6px;margin-top:6px"></div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('modal-add-rep')">إلغاء</button>
       <button class="btn btn-blue" onclick="addRepUser()"><i class="ti ti-plus"></i> إضافة</button>
@@ -7915,7 +7933,7 @@ function renderCurrentPanel(){
     case 'users': loadAdminUsers().then(()=>loadUsers()); break;
     case 'supervisors': loadSupervisors(); break;
     case 'sales-users': loadSalesUsersPanel(); break;
-    case 'rep-users': loadRepUsersPanel(); break;
+    case 'rep-users': loadRepUsersPanel(); repInitModal(); break;
     case 'coord-plans': plansLoad('coord'); break;
     case 'team-plans': teamPlansLoad(); break;
     case 'sales-plans': plansLoad('sales'); break;
@@ -13782,6 +13800,218 @@ function setBadgeEl(id, count){
   if(!el) return;
   el.textContent = count||'';
   el.style.display = count ? '' : 'none';
+}
+
+// ══════════════════════════════════════════════════════════════
+// REP USERS — مناديب البيع
+// ══════════════════════════════════════════════════════════════
+let _repSupervisors = []; // [{name, groups:[]}]
+
+async function repInitModal(){
+  await loadAdminRoutesData();
+  // جيب المشرفين من users
+  if(_repSupervisors.length) return;
+  try{
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.sup&status=eq.active&select=name,groups&order=name.asc`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    );
+    if(r.ok){
+      const data = await r.json();
+      _repSupervisors = (Array.isArray(data)?data:[]).map(u=>({
+        name: u.name,
+        groups: (u.groups||'').split(',').map(g=>g.trim()).filter(Boolean)
+      }));
+    }
+  }catch(e){}
+
+  const supSel = document.getElementById('rep-supervisor');
+  if(supSel && supSel.options.length <= 1){
+    _repSupervisors.forEach(s=>{
+      const o = document.createElement('option');
+      o.value = s.name; o.textContent = s.name;
+      supSel.appendChild(o);
+    });
+  }
+}
+
+function repOnSupChange(){
+  const supName = document.getElementById('rep-supervisor').value;
+  const grpSel  = document.getElementById('rep-grp');
+  const routeSel= document.getElementById('rep-route');
+  grpSel.innerHTML  = '<option value="">اختر المجموعة...</option>';
+  routeSel.innerHTML= '<option value="">اختر خط السير...</option>';
+  document.getElementById('rep-branches-wrap').style.display='none';
+
+  const sup = _repSupervisors.find(s=>s.name===supName);
+  if(!sup) return;
+  sup.groups.forEach(g=>{
+    const o=document.createElement('option');
+    o.value=g; o.textContent=GROUPS[g]?.label||g;
+    grpSel.appendChild(o);
+  });
+  if(sup.groups.length===1){
+    grpSel.value = sup.groups[0];
+    repOnGrpChange();
+  }
+}
+
+function repOnGrpChange(){
+  const grp     = document.getElementById('rep-grp').value;
+  const routeSel= document.getElementById('rep-route');
+  routeSel.innerHTML = '<option value="">اختر خط السير...</option>';
+  document.getElementById('rep-branches-wrap').style.display='none';
+  if(!grp) return;
+  adminGetRoutes(grp).forEach(r=>{
+    const o=document.createElement('option');
+    o.value=r; o.textContent=r;
+    routeSel.appendChild(o);
+  });
+}
+
+function repOnRouteChange(){
+  const grp    = document.getElementById('rep-grp').value;
+  const route  = document.getElementById('rep-route').value;
+  const wrap   = document.getElementById('rep-branches-wrap');
+  const list   = document.getElementById('rep-branches-list');
+  if(!route){ wrap.style.display='none'; return; }
+
+  const branches = adminGetBranches(grp, route);
+  if(branches.length){
+    list.innerHTML = branches.map(b=>`<div>🏪 ${b}</div>`).join('');
+    wrap.style.display='';
+  } else {
+    wrap.style.display='none';
+  }
+}
+
+async function addRepUser(){
+  const name = document.getElementById('rep-name').value.trim();
+  const pass = document.getElementById('rep-pass').value.trim();
+  const sup  = document.getElementById('rep-supervisor').value;
+  const grp  = document.getElementById('rep-grp').value;
+  const route= document.getElementById('rep-route').value;
+  const okEl = document.getElementById('rep-add-ok');
+  const errEl= document.getElementById('rep-add-err');
+  okEl.textContent=''; errEl.style.display='none';
+
+  if(!name||!pass||!grp||!route){
+    errEl.style.display='block'; errEl.textContent='يرجى تعبئة كل الحقول المطلوبة'; return;
+  }
+
+  const payload = {
+    name, pass_hash: pass,
+    role: 'sales', level: 'rep',
+    grp, route,
+    groups: grp,
+    supervisors: sup,
+    status: 'active',
+    goal: 0,
+    created_at: new Date().toISOString()
+  };
+
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/users`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify(payload)
+    });
+    if(r.ok||r.status===201){
+      okEl.textContent='✅ تم إضافة المندوب بنجاح';
+      document.getElementById('rep-name').value='';
+      document.getElementById('rep-pass').value='';
+      setTimeout(()=>{ closeModal('modal-add-rep'); loadRepUsersPanel(); },1500);
+    } else {
+      const err = await r.json();
+      errEl.style.display='block';
+      errEl.textContent = err?.message||'❌ خطأ في الإضافة';
+    }
+  }catch(e){
+    errEl.style.display='block'; errEl.textContent='❌ خطأ في الاتصال';
+  }
+}
+
+async function loadRepUsersPanel(){
+  const search = (document.getElementById('rep-search')?.value||'').trim().toLowerCase();
+  const grpCbs = [...document.querySelectorAll('.rep-grp-cb:checked')].map(c=>c.value);
+  const routeCbs= [...document.querySelectorAll('.rep-route-cb:checked')].map(c=>c.value);
+  const tbody  = document.getElementById('rep-users-table');
+  if(!tbody) return;
+
+  let url = `${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&select=*&order=grp.asc,name.asc&limit=1000`;
+  const r = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+  let data = r.ok ? await r.json() : [];
+  if(!Array.isArray(data)) data=[];
+
+  // فلتر
+  if(!grpCbs.includes('all')) data = data.filter(u=>grpCbs.includes(u.grp));
+  if(!routeCbs.includes('all')) data = data.filter(u=>routeCbs.includes(u.route));
+  if(search) data = data.filter(u=>(u.name||'').toLowerCase().includes(search));
+
+  const statsEl = document.getElementById('rep-stats');
+  if(statsEl) statsEl.textContent = `إجمالي: ${data.length} مندوب`;
+
+  tbody.innerHTML = data.map((u,i)=>{
+    const grpInfo = GROUPS[u.grp]||{label:u.grp||'—',color:'#888'};
+    const status  = u.status==='active'
+      ? `<span style="background:#D1FAE5;color:#065F46;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">نشط</span>`
+      : `<span style="background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">موقوف</span>`;
+    return `<tr>
+      <td>${i+1}</td>
+      <td style="font-weight:700">${u.name}</td>
+      <td style="font-size:11px">${u.route||'—'}</td>
+      <td><span style="background:${grpInfo.color}22;color:${grpInfo.color};padding:2px 6px;border-radius:8px;font-size:10px;font-weight:700">${grpInfo.label}</span></td>
+      <td style="font-size:11px;color:#888">${u.pass_hash||'—'}</td>
+      <td>${status}</td>
+      <td style="display:flex;gap:4px">
+        <button onclick="repToggleStatus(${u.id},'${u.status}')"
+          style="background:${u.status==='active'?'#FFF3E0':'#E8F5E9'};color:${u.status==='active'?'#E65100':'#2E7D32'};border:1px solid currentColor;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">
+          ${u.status==='active'?'⏸ إيقاف':'▶ تفعيل'}
+        </button>
+        <button onclick="repDelete(${u.id},'${(u.name||'').replace(/'/g,"\\'")}')"
+          style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">🗑</button>
+      </td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="7" style="text-align:center;padding:20px;color:#888">لا يوجد مناديب بيع</td></tr>`;
+}
+
+async function repToggleStatus(id, currentStatus){
+  const newStatus = currentStatus==='active' ? 'inactive' : 'active';
+  await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({status:newStatus})
+  });
+  loadRepUsersPanel();
+}
+
+async function repDelete(id, name){
+  if(!confirm(`حذف المندوب: ${name}؟`)) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${id}`,{
+    method:'DELETE',
+    headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'}
+  });
+  showToast('✅ تم الحذف'); loadRepUsersPanel();
+}
+
+function repGrpCbChange(el){
+  if(el.value==='all' && el.checked){
+    document.querySelectorAll('.rep-grp-cb').forEach(cb=>{ if(cb.value!=='all') cb.checked=false; });
+  } else {
+    const allCb = document.querySelector('.rep-grp-cb[value="all"]');
+    if(allCb) allCb.checked=false;
+  }
+  loadRepUsersPanel();
+}
+
+function repRouteCbChange(el){
+  if(el.value==='all' && el.checked){
+    document.querySelectorAll('.rep-route-cb').forEach(cb=>{ if(cb.value!=='all') cb.checked=false; });
+  } else {
+    const allCb = document.querySelector('.rep-route-cb[value="all"]');
+    if(allCb) allCb.checked=false;
+  }
+  loadRepUsersPanel();
 }
 
 
