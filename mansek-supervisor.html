@@ -2527,7 +2527,6 @@ let _alertsTimer = null;
 let _notifiedToday = new Set(); // منسقين تم تنبيههم اليوم
 
 async function runMissingStepsCheck(){
-  // التاريخ من الـ dropdown أو اليوم
   const dateEl = document.getElementById('alerts-date');
   const today  = new Date().toISOString().slice(0,10);
   if(dateEl && !dateEl.value) dateEl.value = today;
@@ -2537,21 +2536,31 @@ async function runMissingStepsCheck(){
   if(!grps.length) return;
 
   try{
-    // جيب كل زيارات التاريخ المختار من visits
-    const visitsData = await fetch(
-      `${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&date=eq.${checkDate}&select=name,branch,time_in,time_out,lat,lng,shelf_total,sku_on&limit=1000`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
-    ).then(r=>r.ok?r.json():[]).catch(()=>[]);
+    const [visitsData, productsData] = await Promise.all([
+      fetch(
+        `${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&date=eq.${checkDate}&select=name,branch,time_in,time_out,lat,lng&limit=1000`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+      ).then(r=>r.ok?r.json():[]).catch(()=>[]),
 
-    const visits = Array.isArray(visitsData) ? visitsData : [];
+      fetch(
+        `${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&created_at=gte.${checkDate}T00:00:00&created_at=lte.${checkDate}T23:59:59&select=name,branch&limit=1000`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+      ).then(r=>r.ok?r.json():[]).catch(()=>[])
+    ]);
 
-    if(!visits.length){
+    const visits   = Array.isArray(visitsData)   ? visitsData   : [];
+    const products = Array.isArray(productsData) ? productsData : [];
+
+    if(!visits.length && !products.length){
       document.getElementById('alerts-section').style.display = 'block';
       document.getElementById('alerts-list').innerHTML = `<div style="text-align:center;padding:12px;color:#aaa;font-size:12px">لا توجد زيارات في ${checkDate}</div>`;
       document.getElementById('alerts-count-badge').textContent = '0';
       updateTabBadge(0);
       return;
     }
+
+    // Set لأصناف: "name|branch"
+    const prodSet = new Set(products.map(p=>`${p.name}|${p.branch}`));
 
     // تجميع الزيارات: name → [{branch, steps}]
     const repBranches = {};
@@ -2562,12 +2571,12 @@ async function runMissingStepsCheck(){
         branch  : v.branch || '—',
         حضور   : !!v.time_in,
         لوكيشن : !!(v.lat && v.lng),
-        أصناف  : (+v.shelf_total||0) > 0 || (+v.sku_on||0) > 0,
+        أصناف  : prodSet.has(`${v.name}|${v.branch}`),
         انصراف : !!v.time_out,
       });
     });
 
-    // بناء التنبيهات — منسق فيه فرع ناقصه خطوة
+    // بناء التنبيهات
     const alerts = [];
     Object.entries(repBranches).forEach(([name, branches])=>{
       const missingBranches = [];
@@ -2575,9 +2584,7 @@ async function runMissingStepsCheck(){
         const missing = ['حضور','لوكيشن','أصناف','انصراف'].filter(k=>!b[k]);
         if(missing.length > 0) missingBranches.push({ branch: b.branch, missing, steps: b });
       });
-      if(missingBranches.length > 0){
-        alerts.push({ name, missingBranches });
-      }
+      if(missingBranches.length > 0) alerts.push({ name, missingBranches });
     });
 
     renderMissingAlerts(alerts);
