@@ -2566,12 +2566,38 @@ async function addMissing(){
   if(!selectedReason){alert('اختر سبب الغياب');return;}
   const note=document.getElementById('m-note').value.trim();
   const r=REASON_LABELS[selectedReason];
+  const branch=document.getElementById('f-branch').value||'';
+
+  // تحقق من التكرار أولاً
+  const res = await apiPost({
+    action:'saveMissing',
+    name:cu.name, route:cu.route,
+    fea:document.getElementById('m-s1').value,
+    grp:document.getElementById('m-s3').value,
+    snf:v4, reasonText:r.text, note, branch
+  });
+
+  if(res && res.duplicate){
+    const ok=document.getElementById('miss-ok');
+    ok.textContent='⚠️ تم تسجيل هذا الصنف مسبقاً اليوم!';
+    ok.style.background='#FEF3C7';
+    ok.style.color='#B45309';
+    ok.style.display='block';
+    setTimeout(()=>{ ok.style.display='none'; ok.style.background=''; ok.style.color=''; },3000);
+    return;
+  }
+
   missing.push({fea:document.getElementById('m-s1').value,grp:document.getElementById('m-s3').value,snf:v4,reason:selectedReason,note,at:new Date()});
   updateMissBadge();
-  apiPost({action:'saveMissing',name:cu.name,route:cu.route,fea:document.getElementById('m-s1').value,grp:document.getElementById('m-s3').value,snf:v4,reasonText:r.text,note,branch:document.getElementById('f-branch').value||''});
-  const ok=document.getElementById('miss-ok');ok.textContent='✓ تم تسجيل الصنف الناقص!';ok.style.display='block';setTimeout(()=>ok.style.display='none',2500);
-  document.getElementById('m-s1').value='';['m-f2','m-f3','m-f4'].forEach(id=>document.getElementById(id).style.display='none');
-  document.getElementById('m-note').value='';selectedReason=null;[1,2,3,4].forEach(i=>document.getElementById('rb-'+i).className='reason-btn');
+  const ok=document.getElementById('miss-ok');
+  ok.textContent='✓ تم تسجيل الصنف الناقص!';
+  ok.style.display='block';
+  setTimeout(()=>ok.style.display='none',2500);
+  document.getElementById('m-s1').value='';
+  ['m-f2','m-f3','m-f4'].forEach(id=>document.getElementById(id).style.display='none');
+  document.getElementById('m-note').value='';
+  selectedReason=null;
+  [1,2,3,4].forEach(i=>document.getElementById('rb-'+i).className='reason-btn');
   renderMissing();
 }
 
@@ -3142,12 +3168,25 @@ async function apiPost(data){
         date_stock:d.dateStock||'', months_stock:d.monthsStock||''
       });
 
-    case 'saveMissing':
+    case 'saveMissing':{
+      // تحقق من التكرار — نفس الصنف في نفس الفرع في نفس اليوم
+      const today = new Date().toISOString().slice(0,10);
+      try{
+        const chk = await fetch(
+          `${SUPABASE_URL}/rest/v1/missing?branch=eq.${encodeURIComponent(d.branch||'')}&snf=eq.${encodeURIComponent(d.snf||'')}&name=eq.${encodeURIComponent(d.name||'')}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id&limit=1`,
+          {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+        );
+        const exists = chk.ok ? await chk.json() : [];
+        if(Array.isArray(exists) && exists.length > 0){
+          return {duplicate: true};
+        }
+      }catch(e){}
       return sbInsert('missing', {
         name:d.name, route:d.route, branch:d.branch||'',
         fea:d.fea, grp:(cu&&cu.group)||d.grp||'', snf:d.snf,
         reason:d.reasonText||'', note:d.note||''
       });
+    }
 
     case 'updateLocation':
       return sbUpsert('location', {
