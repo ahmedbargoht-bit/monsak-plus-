@@ -6480,44 +6480,106 @@ async function supLoadMissing(){
     document.getElementById('miss-export-bar').style.display='flex';
     document.getElementById('miss-export-sup-name').textContent = cu.name || '—';
 
-    list.innerHTML = data.map(m=>{
-      const dt = m.created_at ? new Date(m.created_at).toLocaleString('en-GB',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}) : '';
-      const transferred = m.status==='transferred';
-      const safeSnf    = (m.snf||'').replace(/'/g,"\'").replace(/"/g,'');
-      const safeBranch = (m.branch||'').replace(/'/g,"\'").replace(/"/g,'');
-      const safeName   = (m.name||m.rep_name||'').replace(/'/g,"\'").replace(/"/g,'');
-      return `<div style="background:#f9f9fb;border:1px solid var(--border);border-right:4px solid ${transferred?'#1A7A4A':'#F77F00'};border-radius:10px;padding:12px;margin-bottom:8px;display:flex;gap:10px;align-items:flex-start" id="miss-row-${m.id}">
-        ${!transferred ? `<input type="checkbox" class="row-check miss-row-cb" value="${m.id}"
-          data-snf="${(m.snf||'').replace(/"/g,'')}" data-branch="${(m.branch||'').replace(/"/g,'')}"
-          data-name="${(m.name||m.rep_name||'').replace(/"/g,'')}"
-          onchange="missUpdateSelection()" style="margin-top:4px"/>` : '<div style="width:18px"></div>'}
-        <div style="flex:1;min-width:0">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
-            <div>
-              <div style="font-weight:700;font-size:13px">${m.snf||'—'}</div>
-              <div style="font-size:11px;color:var(--text2)">${m.name||m.rep_name||''} · ${m.route||''}</div>
-            </div>
-            <span style="background:#FFF8E1;color:#F57F17;border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700">ناقص</span>
-          </div>
-          <div style="font-size:11px;margin-bottom:4px">📍 <b>${m.branch||'—'}</b></div>
-          ${m.reason?`<div style="font-size:11px;color:#E65100;margin-bottom:4px">⚠️ ${m.reason}</div>`:''}
-          ${m.note?`<div style="font-size:11px;color:var(--text2)">💬 ${m.note}</div>`:''}
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
-            <div style="font-size:10px;color:#aaa">${dt}</div>
-            ${transferred
-              ? `<span style="background:#E8F5E9;color:#1A7A4A;border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700">✅ محوّل لمشرف البيع</span>`
-              : `<button onclick="supTransferReturn(${m.id},'${safeSnf}','${safeBranch}','${safeName}','missing')"
-                  style="background:var(--navy);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif;display:flex;align-items:center;gap:4px">
-                  <i class="ti ti-send"></i> تحويل لمشرف البيع
+    list.innerHTML = (() => {
+      // جمّع النواقص بالفرع
+      const byBranch = {};
+      data.forEach(m=>{
+        const b = m.branch||'—';
+        if(!byBranch[b]) byBranch[b] = {route:m.route||'—', name:m.name||m.rep_name||'—', items:[]};
+        byBranch[b].items.push(m);
+      });
+
+      return Object.entries(byBranch).map(([branch, info])=>{
+        const total      = info.items.length;
+        const transferred= info.items.every(m=>m.status==='transferred');
+        const partTrans  = !transferred && info.items.some(m=>m.status==='transferred');
+        const borderClr  = transferred?'#1A7A4A': partTrans?'#1D4ED8':'#F77F00';
+        const cardId     = `miss-branch-${branch.replace(/[^a-zA-Z0-9]/g,'_')}`;
+
+        // أصناف داخل الكارت
+        const itemsHtml = info.items.map(m=>{
+          const isTrans = m.status==='transferred';
+          const safeSnf    = (m.snf||'').replace(/"/g,'');
+          const safeBranch = (m.branch||'').replace(/"/g,'');
+          const safeName   = (m.name||m.rep_name||'').replace(/"/g,'');
+          return `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #f0f0f0">
+            <div style="width:6px;height:6px;border-radius:50%;background:${isTrans?'#1A7A4A':'#F77F00'};flex-shrink:0"></div>
+            <div style="flex:1;font-size:12px;color:#2C1F0A">${m.snf||'—'}</div>
+            ${m.reason?`<span style="font-size:10px;color:#E65100;background:#FFF3E0;padding:2px 6px;border-radius:6px">${m.reason}</span>`:''}
+            ${isTrans
+              ? `<span style="font-size:10px;color:#1A7A4A;font-weight:700">✅</span>`
+              : `<button onclick="supTransferReturn(${m.id},'${safeSnf}','${safeBranch}','${safeName}','missing');event.stopPropagation()"
+                  style="background:var(--navy);color:#fff;border:none;border-radius:6px;padding:3px 8px;font-size:10px;cursor:pointer;font-family:Cairo,sans-serif;white-space:nowrap">
+                  إرسال
                 </button>`
             }
+          </div>`;
+        }).join('');
+
+        // زرار تحويل كل الفرع
+        const notTrans = info.items.filter(m=>m.status!=='transferred');
+        const bulkBtn = notTrans.length > 0
+          ? `<button onclick="missBranchTransferAll('${branch.replace(/'/g,"\\'")}');event.stopPropagation()"
+              style="background:var(--navy);color:#fff;border:none;border-radius:8px;padding:7px 14px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif;font-weight:700;display:flex;align-items:center;gap:4px">
+              <i class="ti ti-send"></i> تحويل الكل (${notTrans.length})
+            </button>`
+          : `<span style="background:#E8F5E9;color:#1A7A4A;border-radius:8px;padding:6px 12px;font-size:11px;font-weight:700">✅ تم التحويل</span>`;
+
+        return `<div style="background:#fff;border:1px solid var(--border);border-right:4px solid ${borderClr};border-radius:12px;margin-bottom:10px;overflow:hidden">
+          <!-- هيدر الكارت (قابل للضغط) -->
+          <div onclick="missToggleBranch('${cardId}')"
+            style="display:flex;align-items:center;gap:10px;padding:12px;cursor:pointer;user-select:none">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:700;color:#2C1F0A">📍 ${branch}</div>
+              <div style="font-size:11px;color:var(--text2);margin-top:2px">🛣️ ${info.route} · 👤 ${info.name}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+              <span style="background:${transferred?'#E8F5E9':'#FFF8E1'};color:${transferred?'#1A7A4A':'#F57F17'};border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700">
+                ${transferred?'✅ محوّل':'🔴 '+total+' ناقص'}
+              </span>
+              <i class="ti ti-chevron-down" id="ico-${cardId}" style="color:#aaa;transition:.2s"></i>
+            </div>
           </div>
-        </div>
-      </div>`;
-    }).join('');
+          <!-- تفاصيل الأصناف (مخفية افتراضياً) -->
+          <div id="${cardId}" style="display:none;padding:0 12px 12px">
+            <div style="border-top:1px solid #f0f0f0;padding-top:8px;margin-bottom:10px">
+              ${itemsHtml}
+            </div>
+            <div style="display:flex;justify-content:flex-end">
+              ${bulkBtn}
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+    })();
   }catch(e){
     list.innerHTML=`<div class="empty">تعذر التحميل: ${e.message}</div>`;
   }
+}
+
+function missToggleBranch(cardId){
+  const el  = document.getElementById(cardId);
+  const ico = document.getElementById('ico-'+cardId);
+  if(!el) return;
+  const open = el.style.display === 'none';
+  el.style.display  = open ? '' : 'none';
+  if(ico) ico.style.transform = open ? 'rotate(180deg)' : '';
+}
+
+async function missBranchTransferAll(branch){
+  if(!confirm(`تحويل كل نواقص فرع "${branch}" لمشرف البيع؟`)) return;
+  try{
+    const grps = (cu.groups||[]).join(',');
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/missing?grp=in.(${grps})&branch=eq.${encodeURIComponent(branch)}&status=neq.transferred`,
+      {method:'PATCH',
+       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+       body:JSON.stringify({status:'transferred'})
+      }
+    );
+    if(r.ok){ showToast('✅ تم التحويل'); supLoadMissing(); }
+    else showToast('❌ خطأ في التحويل');
+  }catch(e){ showToast('❌ خطأ'); }
 }
 
 // ══════════════════════════════════════════════════════════════
