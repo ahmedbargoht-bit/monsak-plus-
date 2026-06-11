@@ -904,8 +904,11 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 
     <!-- Attendance -->
     <div class="screen" id="screen-attendance">
-      <div class="filter-row">
-        <input type="date" class="filter-select" id="att-date" onchange="renderAttendance()"/>
+      <div class="filter-row" style="display:flex;gap:8px;align-items:center">
+        <input type="date" class="filter-select" id="att-date" onchange="loadAttendanceByDate()" style="flex:1"/>
+        <button onclick="loadAttendanceByDate()" style="background:var(--navy);color:#fff;border:none;border-radius:8px;padding:9px 14px;cursor:pointer;font-size:13px;font-family:Cairo,sans-serif;white-space:nowrap">
+          🔄 تحديث
+        </button>
       </div>
       <div id="att-list"></div>
     </div>
@@ -3234,42 +3237,70 @@ function renderVisits(){
 // ══════════════════════════════════════════════════════════════
 // ATTENDANCE
 // ══════════════════════════════════════════════════════════════
+async function loadAttendanceByDate(){
+  const dateVal = document.getElementById('att-date')?.value;
+  if(!dateVal) return renderAttendance();
+
+  document.getElementById('att-list').innerHTML = '<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>';
+
+  const grps = cu?.groups || [];
+  try{
+    const results = await Promise.all(grps.map(grp=>
+      fetch(`${SUPABASE_URL}/rest/v1/attendance?grp=eq.${encodeURIComponent(grp)}&date=eq.${dateVal}&select=*&order=time_in.asc&limit=500`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}})
+      .then(r=>r.ok?r.json():[])
+    ));
+    const freshData = results.flat();
+    // حدّث الكاش بالبيانات الجديدة لهذا التاريخ
+    cachedAttendance = cachedAttendance.filter(a=>a.date!==dateVal);
+    cachedAttendance.push(...freshData);
+  }catch(e){}
+
+  renderAttendance();
+}
+
 function renderAttendance(){
   const dateVal = document.getElementById('att-date').value;
-  let data = cachedAttendance;
-  if(dateVal){
-    data = data.filter(a=>
-      a.created_at?.startsWith(dateVal) ||
-      a.date === dateVal ||
-      a.date === new Date(dateVal).toLocaleDateString('en-GB')
-    );
+  let data = cachedAttendance.filter(a=> a.date === dateVal);
+
+  // لو مفيش بيانات بالتاريخ المباشر — جرب created_at
+  if(!data.length && dateVal){
+    data = cachedAttendance.filter(a=>a.created_at?.startsWith(dateVal));
   }
 
-  // لكل منسق: أول حضور وآخر انصراف
+  // لكل منسق: أول حضور (أصغر time_in) وآخر انصراف (أكبر time_out)
   const byName = {};
   data.forEach(a=>{
     const n = a.name;
     if(!byName[n]){
-      byName[n] = {first: a, last: a};
+      byName[n] = {
+        time_in:  a.time_in||null,
+        time_out: a.time_out||null,
+        lat_in:   a.lat_in||null,
+        lng_in:   a.lng_in||null,
+        route:    a.route||null
+      };
     } else {
-      // أول حضور = الأقدم time_in
-      if(a.time_in && (!byName[n].first.time_in || a.time_in < byName[n].first.time_in)){
-        byName[n].first = a;
+      // أول حضور = الأصغر
+      if(a.time_in && (!byName[n].time_in || a.time_in < byName[n].time_in)){
+        byName[n].time_in = a.time_in;
+        byName[n].lat_in  = a.lat_in||byName[n].lat_in;
+        byName[n].lng_in  = a.lng_in||byName[n].lng_in;
       }
-      // آخر انصراف = الأحدث time_out
-      if(a.time_out && (!byName[n].last.time_out || a.time_out > byName[n].last.time_out)){
-        byName[n].last = a;
+      // آخر انصراف = الأكبر
+      if(a.time_out && (!byName[n].time_out || a.time_out > byName[n].time_out)){
+        byName[n].time_out = a.time_out;
       }
     }
   });
 
-  // جيب خط السير من cachedVisits للتاريخ المختار
+  // جيب خط السير من cachedVisits
   const routeMap = {};
   cachedVisits.filter(v=>v.created_at?.startsWith(dateVal)||v.date===dateVal).forEach(v=>{
     if(v.name && v.route) routeMap[v.name] = v.route;
   });
 
-  const rows = repNames.map(n=>({name:n, rec:byName[n]||null, route:routeMap[n]||null}));
+  const rows = repNames.map(n=>({name:n, rec:byName[n]||null, route:routeMap[n]||byName[n]?.route||null}));
 
   if(!rows.length){
     document.getElementById('att-list').innerHTML='<div class="empty">لا توجد بيانات</div>';
@@ -3277,12 +3308,11 @@ function renderAttendance(){
   }
 
   document.getElementById('att-list').innerHTML = rows.map(r=>{
-    const first   = r.rec?.first;
-    const last    = r.rec?.last;
-    const timeIn  = first?.time_in  || null;
-    const timeOut = last?.time_out  || null;
-    const latIn   = first?.lat_in   || null;
-    const lngIn   = first?.lng_in   || null;
+    const rec     = r.rec;
+    const timeIn  = rec?.time_in  || null;
+    const timeOut = rec?.time_out || null;
+    const latIn   = rec?.lat_in   || null;
+    const lngIn   = rec?.lng_in   || null;
 
     // حساب ساعات العمل
     let workHours = null;
