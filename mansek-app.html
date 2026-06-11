@@ -677,6 +677,18 @@ textarea{width:100%;padding:8px 12px;border:1px solid var(--border);border-radiu
 
     <!-- طلبيات -->
     <div id="tab-orders" class="tab">
+      <!-- طلبيات مشرف البيع الموجهة للمنسق -->
+      <div class="card" style="margin-bottom:12px">
+        <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span><i class="ti ti-inbox" style="color:#B71C1C"></i> طلبيات التوريد
+            <span id="rep-orders-badge" style="background:#B71C1C;color:#fff;border-radius:999px;font-size:10px;padding:1px 7px;margin-right:4px;display:none">0</span>
+          </span>
+          <button onclick="loadRepOrders()" style="background:none;border:none;color:var(--navy);cursor:pointer;font-size:14px"><i class="ti ti-refresh"></i></button>
+        </div>
+        <div id="rep-orders-list"><div class="empty-state"><i class="ti ti-package"></i>لا توجد طلبيات</div></div>
+      </div>
+
+      <!-- الطلبيات القديمة -->
       <div id="orders-area"><div class="empty-state"><i class="ti ti-package"></i>مفيش طلبيات دلوقتي</div></div>
     </div>
 
@@ -1823,7 +1835,7 @@ function showTab(tab){
   document.getElementById('tab-'+tab).classList.add('active');
   document.getElementById('nav-'+tab).classList.add('active');
   if(tab==='dash'){updateDash();loadHolidays();}
-  if(tab==='orders')      renderOrders();
+  if(tab==='orders')      { renderOrders(); loadRepOrders(); }
   if(tab==='missing')     renderMissing();
   if(tab==='returns')     { renderRetList(); renderRetSaved(); }
   if(tab==='products')    {renderProdList();checkExpiryAlerts();}
@@ -1832,6 +1844,7 @@ function showTab(tab){
     srInitFea();
     renderSentSupplyReqs();
     // polling كل 30 ثانية للطلبيات
+    setInterval(()=>{ loadRepOrders(); }, 30000);
     if(window._supplyPolling) clearInterval(window._supplyPolling);
     window._supplyPolling = setInterval(()=>{
       if(document.getElementById('tab-supply-req')?.classList.contains('active'))
@@ -2587,6 +2600,100 @@ function renderOrders(){
     const dl=diff===0?'اليوم':diff===1?'غداً':'بعد '+diff+' أيام';
     return`<div class="order-card ${cls}"><div class="oc-tag">${tag}</div><div class="oc-title">📦 طلبية لفرعك</div><div class="oc-branch">📍 ${o.branch||'الكل'}</div><div class="oc-date">📅 ${dl}</div>${o.note?`<div style="font-size:11px;background:rgba(255,255,255,.15);border-radius:6px;padding:5px 8px;margin-top:5px">${o.note}</div>`:''}<button class="oc-confirm" onclick="confirmOrder('${o.id}')">تأكيد الاستلام ✓</button></div>`;
   }).join('');
+}
+
+// ══════════════════════════════════════════════════════════════
+// طلبيات التوريد الموجهة للمنسق من مشرف البيع
+// ══════════════════════════════════════════════════════════════
+async function loadRepOrders(){
+  const listEl = document.getElementById('rep-orders-list');
+  if(!listEl||!cu) return;
+
+  try{
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/supply_requests?to_name=eq.${encodeURIComponent(cu.name)}&deal_source=eq.sales_supervisor&select=*&order=created_at.desc&limit=100`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    );
+    const data = r.ok ? await r.json() : [];
+    if(!Array.isArray(data)||!data.length){
+      listEl.innerHTML='<div class="empty-state"><i class="ti ti-package"></i>لا توجد طلبيات موجهة لك</div>';
+      document.getElementById('rep-orders-badge').style.display='none';
+      return;
+    }
+
+    const pending = data.filter(d=>d.status==='assigned').length;
+    const badge = document.getElementById('rep-orders-badge');
+    badge.textContent = pending;
+    badge.style.display = pending ? '' : 'none';
+
+    // كمان حدّث badge الـ nav
+    const navBadge = document.getElementById('ord-badge');
+    if(navBadge){ navBadge.textContent = pending; navBadge.style.display = pending ? 'block' : 'none'; }
+
+    const sMap = {
+      assigned:     {label:'📥 في انتظار استلامك',  bg:'#FEF3C7', color:'#B45309'},
+      rep_received: {label:'✅ استلمت الطلبية',      bg:'#EFF6FF', color:'#1D4ED8'},
+      done:         {label:'🏪 تم التسليم للفرع',    bg:'#D1FAE5', color:'#065F46'},
+    };
+
+    listEl.innerHTML = data.map(d=>{
+      const s   = sMap[d.status]||{label:d.status, bg:'#f5f5f5', color:'#555'};
+      const del = d.delivery_date ? new Date(d.delivery_date).toLocaleDateString('en-GB',{day:'numeric',month:'short'}) : '—';
+      const dt  = d.created_at   ? new Date(d.created_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'2-digit'}) : '—';
+      return `<div style="background:#f9f9fb;border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+          <div style="font-weight:700;font-size:13px;color:#2C1F0A">📦 طلبية توريد</div>
+          <span style="background:${s.bg};color:${s.color};padding:3px 10px;border-radius:10px;font-size:10px;font-weight:700">${s.label}</span>
+        </div>
+        <div style="font-size:12px;color:#555;margin-bottom:4px">🏪 <b>${d.branch||'—'}</b></div>
+        <div style="font-size:11px;color:#888;margin-bottom:4px">🛣️ ${d.route||'—'}</div>
+        <div style="font-size:11px;color:#888;margin-bottom:4px">👔 من: ${d.from_name||'—'}</div>
+        ${d.note?`<div style="font-size:11px;background:#F9F6F1;border-radius:6px;padding:8px;margin-bottom:8px;color:#555">📝 ${d.note}</div>`:''}
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:#aaa;margin-bottom:10px">
+          <span>📅 أُرسل: ${dt}</span>
+          <span style="font-weight:700;color:#B45309">🚚 تسليم: ${del}</span>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          ${d.status==='assigned'?`
+            <button onclick="repOrderReceive(${d.id})"
+              style="flex:1;padding:10px;background:#1D4ED8;color:#fff;border:none;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;font-weight:700;cursor:pointer">
+              📥 تأكيد استلام الطلبية
+            </button>`:``}
+          ${d.status==='rep_received'?`
+            <button onclick="repOrderDelivered(${d.id})"
+              style="flex:1;padding:10px;background:#065F46;color:#fff;border:none;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;font-weight:700;cursor:pointer">
+              🏪 تأكيد تسليم الفرع
+            </button>`:``}
+          ${d.status==='done'?`
+            <div style="width:100%;text-align:center;padding:8px;background:#D1FAE5;border-radius:8px;color:#065F46;font-size:12px;font-weight:700">
+              ✅ تم التسليم للفرع
+            </div>`:``}
+        </div>
+      </div>`;
+    }).join('');
+  }catch(e){
+    listEl.innerHTML='<div class="empty-state">خطأ في التحميل</div>';
+  }
+}
+
+async function repOrderReceive(id){
+  await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({status:'rep_received'})
+  });
+  showToast('📥 تم تأكيد استلام الطلبية');
+  loadRepOrders();
+}
+
+async function repOrderDelivered(id){
+  await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({status:'done'})
+  });
+  showToast('🏪 تم تأكيد تسليم الفرع');
+  loadRepOrders();
 }
 
 function confirmOrder(id){
