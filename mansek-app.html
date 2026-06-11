@@ -2654,9 +2654,92 @@ async function changePassword(){
 
 function renderMessages(){
   const list=document.getElementById('msgs-list');
-  if(!messages.length){list.innerHTML='<div class="empty-state"><i class="ti ti-message-circle"></i>لا توجد رسائل</div>';return;}
-  list.innerHTML=messages.slice().reverse().map(m=>`<div class="msg-card ${m.type==='order'?'urgent':''}"><div class="msg-from"><i class="ti ti-user" style="font-size:10px"></i> ${m.from||m.from_name||''}</div><div class="msg-text">${m.message}</div><div class="msg-time">${m.sentAt||m.created_at||''}</div></div>`).join('');
-  messages.forEach(m=>{if(!(m.read_by||m.readBy||'').includes(cu?.name)) apiPost({action:'markMsgRead',id:m.id,name:cu?.name});});
+  if(!messages.length){
+    list.innerHTML='<div class="empty-state"><i class="ti ti-message-circle"></i>لا توجد رسائل</div>';
+    return;
+  }
+
+  list.innerHTML=messages.slice().reverse().map(m=>{
+    const isUnread = !(m.read_by||m.readBy||'').includes(cu?.name||'');
+    const date = m.created_at ? new Date(m.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}) : '';
+    const isVisitResult = m.notif_type === 'visit_result';
+    const isConfirmed   = m.is_read;
+
+    if(isVisitResult){
+      return `<div class="msg-card" style="border:1.5px solid ${isConfirmed?'#C8E6C9':'#FFE0B2'};background:${isConfirmed?'#F1FFF5':'#FFFBF5'};border-radius:12px;padding:12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div style="font-size:12px;font-weight:700;color:#1A3A5C">
+            <i class="ti ti-clipboard-list"></i> نتيجة زيارة — ${m.from||m.from_name||'المشرف'}
+          </div>
+          <span style="font-size:10px;padding:2px 8px;border-radius:20px;font-weight:700;
+            background:${isConfirmed?'#E8F5E9':'#FFF3E0'};color:${isConfirmed?'#1A7A4A':'#E65100'}">
+            ${isConfirmed?'✅ تم التأكيد':'⏳ بانتظار التأكيد'}
+          </span>
+        </div>
+        <div style="font-size:11px;color:#555;line-height:1.7;background:#F8F9FA;padding:8px;border-radius:8px;white-space:pre-line;margin-bottom:8px">
+          ${m.message||''}
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="font-size:10px;color:#aaa">${date}</div>
+          ${!isConfirmed?`
+            <button onclick="confirmVisitResultMsg(${m.id},'${(m.from||m.from_name||'').replace(/'/g,"\\'")}')"
+              style="background:linear-gradient(135deg,#1A3A5C,#0D2137);color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">
+              ✅ تأكيد الاستلام
+            </button>
+          `:`<div style="font-size:10px;color:#1A7A4A;font-weight:700">✅ تم التأكيد</div>`}
+        </div>
+      </div>`;
+    }
+
+    // رسائل عادية
+    return `<div class="msg-card ${m.type==='urgent'?'urgent':''}" style="${isUnread?'border-right:3px solid #C55B48':''};border-radius:10px;margin-bottom:6px">
+      <div class="msg-from"><i class="ti ti-user" style="font-size:10px"></i> ${m.from||m.from_name||''}</div>
+      <div class="msg-text">${m.message||''}</div>
+      <div class="msg-time">${date}</div>
+    </div>`;
+  }).join('');
+
+  // تحديث حالة القراءة
+  messages.forEach(m=>{
+    if(!(m.read_by||m.readBy||'').includes(cu?.name||'')){
+      fetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${m.id}`,{
+        method:'PATCH',
+        headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+        body:JSON.stringify({read_by:(m.read_by?m.read_by+',':'')+cu.name})
+      }).catch(()=>{});
+    }
+  });
+}
+
+async function confirmVisitResultMsg(msgId, fromName){
+  const btn = event?.target;
+  if(btn){ btn.disabled=true; btn.textContent='⏳ جارٍ...'; }
+
+  // حدّث الرسالة كـ مقروءة ومؤكدة
+  await fetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${msgId}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({is_read:true, read_at:new Date().toISOString()})
+  }).catch(()=>{});
+
+  // ابعت رسالة تأكيد للمشرف
+  await fetch(`${SUPABASE_URL}/rest/v1/messages`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({
+      from_name  : cu.name,
+      to_rep     : fromName,
+      to_all     : false,
+      type       : 'info',
+      notif_type : 'visit_result_confirmed',
+      message    : `✅ تأكيد استلام — ${cu.name}\nتم استلام ملاحظات الزيارة وتأكيدها\n📅 ${new Date().toLocaleDateString('ar-EG',{day:'numeric',month:'long',year:'numeric'})}`,
+      is_read    : false,
+      created_at : new Date().toISOString()
+    })
+  }).catch(()=>{});
+
+  showToast('✅ تم تأكيد الاستلام وإشعار المشرف');
+  fetchMessages();
 }
 
 // ── Dashboard ──────────────────────────────────────────────────
