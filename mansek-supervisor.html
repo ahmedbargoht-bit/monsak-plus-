@@ -7165,49 +7165,109 @@ async function supRptExportPDF(){
   if(!rows.length){ alert('لا توجد بيانات'); if(btn){ btn.disabled=false; btn.innerHTML='<i class="ti ti-file-type-pdf"></i> PDF'; } return; }
 
   const route      = document.getElementById('rpt-route')?.selectedOptions[0]?.text||'—';
-  const branch     = document.getElementById('rpt-branch-sel')?.value||'كل الفروع';
+  const branchSel  = document.getElementById('rpt-branch-sel')?.value||'كل الفروع';
   const rep        = document.getElementById('sup-rpt-rep')?.value||'كل المنسقين';
   const from       = document.getElementById('sup-rpt-from')?.value||'';
   const to         = document.getElementById('sup-rpt-to')?.value||'';
   const supervisor = window._rptSupervisorName || cu?.name || '—';
   const now        = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
 
-  // تجميع حسب الفرع
+  // ── تجميع حسب الفرع ──
   const grouped = {};
   rows.filter(r=>!r._noReport).forEach(r=>{
     const k = r.branch||'—';
-    if(!grouped[k]) grouped[k]={branch:k, rep:r.name||rep, route:r.route||route, items:[]};
+    if(!grouped[k]) grouped[k] = {branch:k, rep:r.name||rep, route:r.route||route, items:[]};
     grouped[k].items.push(r);
   });
   const noRptBranches = [...new Set(rows.filter(r=>r._noReport).map(r=>r.branch))];
 
-  const rowsHTML = Object.values(grouped).map(g=>`
-    <div style="margin-bottom:16px;page-break-inside:avoid">
-      <div style="background:#2C1F0A;color:#EDE5D8;padding:7px 12px;border-radius:6px 6px 0 0;display:flex;justify-content:space-between;align-items:center">
-        <span style="font-size:12px;font-weight:700">🏪 ${g.branch}</span>
-        <span style="font-size:10px;opacity:.8">المنسق: ${g.rep} · ${g.route}</span>
+  // ── بناء جدول Timeline لكل فرع (نفس شكل المعاينة) ──
+  function buildTimelinePDF(items){
+    const tl = {};
+    items.forEach(r=>{
+      if(!r.snf) return;
+      const d = r.created_at ? r.created_at.slice(0,10) : '—';
+      if(!tl[r.snf]) tl[r.snf] = {};
+      if(!tl[r.snf][d] || r.created_at > (tl[r.snf][d]._ts||'')){
+        tl[r.snf][d] = {shelf:+r.shelf_qty||0, stock:+r.stock_qty||0, _ts:r.created_at||''};
+      }
+    });
+    return tl;
+  }
+
+  const rowsHTML = Object.values(grouped).map(g=>{
+    const tl       = buildTimelinePDF(g.items);
+    const dates    = [...new Set(g.items.map(r=>r.created_at?.slice(0,10)).filter(Boolean))].sort();
+    const snfs     = Object.keys(tl).sort();
+    const hasStock = g.items.some(r=>(+r.stock_qty||0)>0);
+
+    // رأس التواريخ
+    const dateHeaders = dates.map(d=>{
+      const lbl = new Date(d).toLocaleDateString('ar-EG',{day:'numeric',month:'short'});
+      return hasStock
+        ? `<th colspan="2" style="padding:5px 8px;text-align:center;font-size:10px;border-left:1px solid rgba(255,255,255,.2)">${lbl}</th>`
+        : `<th style="padding:5px 8px;text-align:center;font-size:10px">${lbl}</th>`;
+    }).join('');
+
+    const subHeaders = hasStock
+      ? dates.map(()=>`<th style="padding:3px 6px;font-size:9px;font-weight:400;opacity:.8;color:#C8A96E">رف</th><th style="padding:3px 6px;font-size:9px;font-weight:400;opacity:.8;color:#C8A96E">مخزن</th>`).join('')
+      : '';
+
+    // صفوف الأصناف
+    const snfRows = snfs.map((snf,i)=>{
+      const cells = dates.map(d=>{
+        const v = tl[snf]?.[d];
+        const shelf = v ? v.shelf : '—';
+        const stock = v ? v.stock : '—';
+        const sc = v && v.shelf < 3 ? 'color:#C0392B;font-weight:700' : (v?'color:#1A7A4A;font-weight:700':'color:#bbb');
+        return hasStock
+          ? `<td style="padding:4px 6px;text-align:center;font-size:10px;${sc}">${shelf}</td>
+             <td style="padding:4px 6px;text-align:center;font-size:10px;color:#555">${stock!=='—'&&stock>0?stock:'—'}</td>`
+          : `<td style="padding:4px 6px;text-align:center;font-size:10px;${sc}">${shelf}</td>`;
+      }).join('');
+      return `<tr style="background:${i%2?'#FBF0F0':'#fff'}">
+        <td style="padding:5px 8px;font-size:10px;font-weight:600;max-width:200px">${snf}</td>
+        ${cells}
+      </tr>`;
+    }).join('');
+
+    // صف المجموع
+    const totCells = dates.map(d=>{
+      const sum = snfs.reduce((s,snf)=>s+(tl[snf]?.[d]?.shelf||0),0);
+      return hasStock
+        ? `<td style="padding:4px 6px;text-align:center;font-size:10px;font-weight:700;color:#EDE5D8">${sum}</td>
+           <td style="padding:4px 6px;text-align:center;font-size:10px;color:#C8A96E">${snfs.reduce((s,snf)=>s+(tl[snf]?.[d]?.stock||0),0)||'—'}</td>`
+        : `<td style="padding:4px 6px;text-align:center;font-size:10px;font-weight:700;color:#EDE5D8">${sum}</td>`;
+    }).join('');
+
+    return `
+    <div style="margin-bottom:20px;page-break-inside:avoid">
+      <!-- رأس الفرع -->
+      <div style="background:#2C1F0A;color:#EDE5D8;padding:8px 12px;border-radius:6px 6px 0 0;display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:12px;font-weight:900">🏪 ${g.branch}</span>
+        <span style="font-size:10px;opacity:.7">${snfs.length} صنف · ${dates.length} زيارة · المنسق: ${g.rep}</span>
       </div>
-      <table style="width:100%;border-collapse:collapse">
-        <thead>
-          <tr style="background:#C8A96E;color:#2C1F0A">
-            <th style="padding:5px 8px;font-size:10px;text-align:right">#</th>
-            <th style="padding:5px 8px;font-size:10px;text-align:right">الصنف</th>
-            <th style="padding:5px 8px;font-size:10px;text-align:center">رف</th>
-            <th style="padding:5px 8px;font-size:10px;text-align:center">مخزن</th>
-            <th style="padding:5px 8px;font-size:10px;text-align:center">التاريخ</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${g.items.map((r,i)=>`<tr style="background:${i%2?'#FFF8F0':'#fff'}">
-            <td style="padding:4px 8px;font-size:10px;color:#aaa">${i+1}</td>
-            <td style="padding:4px 8px;font-size:11px;font-weight:600">${r.snf||'—'}</td>
-            <td style="padding:4px 8px;font-size:11px;text-align:center;font-weight:700;color:${(+r.shelf_qty||0)<3?'#C0392B':'#1A7A4A'}">${r.shelf_qty||0}</td>
-            <td style="padding:4px 8px;font-size:11px;text-align:center;font-weight:700">${r.stock_qty||0}</td>
-            <td style="padding:4px 8px;font-size:10px;color:#888;text-align:center">${r.created_at?new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'}):'—'}</td>
-          </tr>`).join('')}
-        </tbody>
-      </table>
-    </div>`).join('');
+      <!-- الجدول -->
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead>
+            <tr style="background:#731E2E;color:#EDE5D8">
+              <th style="padding:6px 8px;text-align:right;font-size:10px;min-width:160px">الصنف</th>
+              ${dateHeaders}
+            </tr>
+            ${hasStock?`<tr style="background:#4B1020;color:#EDE5D8"><th></th>${subHeaders}</tr>`:''}
+          </thead>
+          <tbody>
+            ${snfRows}
+            <tr style="background:#2C1F0A">
+              <td style="padding:5px 8px;font-size:10px;font-weight:700;color:#C8A96E">إجمالي الرف</td>
+              ${totCells}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+  }).join('');
 
   const noRptHTML = noRptBranches.length
     ? `<div style="background:#FFF3E0;border:1px solid #FFE0B2;border-radius:8px;padding:10px 14px;margin-bottom:14px">
@@ -7219,17 +7279,21 @@ async function supRptExportPDF(){
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:'Cairo','Arial',sans-serif;font-size:11px;color:#2C1F0A;background:#fff;direction:rtl}
-    @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+    @media print{
+      body{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      div[style*="page-break-inside:avoid"]{page-break-inside:avoid}
+      @page{size:A4 landscape;margin:10mm}
+    }
   </style></head><body>
 
   <!-- هيدر الشركة -->
-  <div style="background:linear-gradient(135deg,#2C1F0A,#4B3C1A);color:#EDE5D8;padding:16px 20px;margin-bottom:14px">
+  <div style="background:linear-gradient(135deg,#2C1F0A,#4B3C1A);color:#EDE5D8;padding:14px 20px;margin-bottom:12px;border-radius:0 0 8px 8px">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
       <div>
-        <div style="font-size:16px;font-weight:900;letter-spacing:0.5px">🌴 الطحان جولدن دايتس</div>
-        <div style="font-size:10px;opacity:.7;margin-top:2px">Al Tahhan Golden Dates — نظام إدارة التنسيق الميداني</div>
+        <div style="font-size:18px;font-weight:900">🌴 الطحان جولدن دايتس</div>
+        <div style="font-size:10px;opacity:.6;margin-top:2px">Al Tahhan Golden Dates — نظام إدارة التنسيق الميداني</div>
       </div>
-      <div style="text-align:left;font-size:10px;opacity:.8">
+      <div style="text-align:left;font-size:10px;opacity:.8;line-height:1.6">
         <div>طُبع: ${now}</div>
         <div>الفترة: ${from} ← ${to}</div>
       </div>
@@ -7237,25 +7301,25 @@ async function supRptExportPDF(){
   </div>
 
   <!-- معلومات التقرير -->
-  <div style="background:#F5F0E8;border-radius:8px;padding:10px 14px;margin-bottom:14px;display:grid;grid-template-columns:repeat(2,1fr);gap:6px;font-size:11px">
+  <div style="background:#F5F0E8;border-radius:8px;padding:10px 14px;margin-bottom:12px;display:grid;grid-template-columns:repeat(2,1fr);gap:6px;font-size:11px">
     <div><b>خط السير:</b> ${route}</div>
-    <div><b>الفرع:</b> ${branch}</div>
+    <div><b>الفرع:</b> ${branchSel}</div>
     <div><b>المنسق:</b> ${rep}</div>
     <div><b>مشرف المجموعة:</b> ${supervisor}</div>
   </div>
 
   <!-- ملخص -->
-  <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+  <div style="display:flex;gap:8px;margin-bottom:12px">
     <div style="background:#E8F5E9;border-radius:8px;padding:8px 14px;text-align:center;flex:1">
-      <div style="font-size:20px;font-weight:900;color:#1A7A4A">${Object.keys(grouped).length}</div>
+      <div style="font-size:18px;font-weight:900;color:#1A7A4A">${Object.keys(grouped).length}</div>
       <div style="font-size:10px;color:#555">فروع برفع تقارير</div>
     </div>
     <div style="background:#FBF0F0;border-radius:8px;padding:8px 14px;text-align:center;flex:1">
-      <div style="font-size:20px;font-weight:900;color:#731E2E">${rows.filter(r=>!r._noReport).length}</div>
+      <div style="font-size:18px;font-weight:900;color:#731E2E">${rows.filter(r=>!r._noReport).length}</div>
       <div style="font-size:10px;color:#555">إجمالي الأصناف</div>
     </div>
     ${noRptBranches.length?`<div style="background:#FFF3E0;border-radius:8px;padding:8px 14px;text-align:center;flex:1">
-      <div style="font-size:20px;font-weight:900;color:#E65100">${noRptBranches.length}</div>
+      <div style="font-size:18px;font-weight:900;color:#E65100">${noRptBranches.length}</div>
       <div style="font-size:10px;color:#555">فروع بدون تقرير</div>
     </div>`:''}
   </div>
@@ -7263,14 +7327,14 @@ async function supRptExportPDF(){
   ${noRptHTML}
   ${rowsHTML}
 
-  <div style="text-align:center;font-size:9px;color:#aaa;margin-top:20px;padding:8px;border-top:1px solid #eee">
+  <div style="text-align:center;font-size:9px;color:#aaa;margin-top:16px;padding:8px;border-top:1px solid #eee">
     Al Tahhan Golden Dates © ${new Date().getFullYear()} — نظام إدارة التنسيق الميداني
   </div>
   </body></html>`;
 
-  const w = window.open('','_blank','width=900,height=700');
+  const w = window.open('','_blank','width=1100,height=750');
   if(!w){ alert('السماح بالـ popups مطلوب'); }
-  else {
+  else{
     w.document.write(html);
     w.document.close();
     w.onload=()=>{ w.focus(); w.print(); };
