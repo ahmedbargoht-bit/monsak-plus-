@@ -3236,19 +3236,40 @@ function renderVisits(){
 // ══════════════════════════════════════════════════════════════
 function renderAttendance(){
   const dateVal = document.getElementById('att-date').value;
-  const today = new Date().toLocaleDateString('ar-EG');
   let data = cachedAttendance;
   if(dateVal){
-    data = data.filter(a=>a.created_at?.startsWith(dateVal)||a.date===new Date(dateVal).toLocaleDateString('ar-EG'));
+    data = data.filter(a=>
+      a.created_at?.startsWith(dateVal) ||
+      a.date === dateVal ||
+      a.date === new Date(dateVal).toLocaleDateString('en-GB')
+    );
   }
 
-  // دمج وعرض
+  // لكل منسق: أول حضور وآخر انصراف
   const byName = {};
-  data.forEach(a=>{ if(!byName[a.name]) byName[a.name]=a; });
+  data.forEach(a=>{
+    const n = a.name;
+    if(!byName[n]){
+      byName[n] = {first: a, last: a};
+    } else {
+      // أول حضور = الأقدم time_in
+      if(a.time_in && (!byName[n].first.time_in || a.time_in < byName[n].first.time_in)){
+        byName[n].first = a;
+      }
+      // آخر انصراف = الأحدث time_out
+      if(a.time_out && (!byName[n].last.time_out || a.time_out > byName[n].last.time_out)){
+        byName[n].last = a;
+      }
+    }
+  });
 
-  const rows = repNames.map(n=>({
-    name:n, att:byName[n]||null
-  }));
+  // جيب خط السير من cachedVisits للتاريخ المختار
+  const routeMap = {};
+  cachedVisits.filter(v=>v.created_at?.startsWith(dateVal)||v.date===dateVal).forEach(v=>{
+    if(v.name && v.route) routeMap[v.name] = v.route;
+  });
+
+  const rows = repNames.map(n=>({name:n, rec:byName[n]||null, route:routeMap[n]||null}));
 
   if(!rows.length){
     document.getElementById('att-list').innerHTML='<div class="empty">لا توجد بيانات</div>';
@@ -3256,19 +3277,61 @@ function renderAttendance(){
   }
 
   document.getElementById('att-list').innerHTML = rows.map(r=>{
-    const hasIn = r.att?.time_in;
-    const hasOut = r.att?.time_out;
-    const dotClass = hasIn?'in':hasOut?'out':'none';
-    return`<div class="att-row">
-      <div class="att-dot ${dotClass}"></div>
-      <div class="att-info">
-        <div class="att-name">${r.name}</div>
-        <div class="att-time">
-          ${hasIn?`حضور: ${r.att.time_in}`:'لم يسجل حضور'}
-          ${hasOut?' · انصراف: '+r.att.time_out:''}
+    const first   = r.rec?.first;
+    const last    = r.rec?.last;
+    const timeIn  = first?.time_in  || null;
+    const timeOut = last?.time_out  || null;
+    const latIn   = first?.lat_in   || null;
+    const lngIn   = first?.lng_in   || null;
+
+    // حساب ساعات العمل
+    let workHours = null;
+    if(timeIn && timeOut){
+      const [h1,m1] = timeIn.split(':').map(Number);
+      const [h2,m2] = timeOut.split(':').map(Number);
+      const mins = (h2*60+m2) - (h1*60+m1);
+      if(mins > 0){
+        const hh = Math.floor(mins/60);
+        const mm = mins % 60;
+        workHours = `${hh}س ${mm}د`;
+      }
+    }
+
+    const dotColor = timeIn ? (timeOut ? '#1A7A4A' : '#E65100') : '#ccc';
+    const status   = timeIn ? (timeOut ? 'حاضر ✅' : 'في الميدان') : 'غائب';
+    const badgeBg  = timeIn ? (timeOut ? '#D1FAE5' : '#FEF3C7') : '#F3F4F6';
+    const badgeClr = timeIn ? (timeOut ? '#065F46' : '#B45309') : '#6B7280';
+
+    const locLink = latIn && lngIn
+      ? `<a href="https://maps.google.com/?q=${latIn},${lngIn}" target="_blank"
+          style="font-size:9px;background:#EFF6FF;color:#1D4ED8;padding:1px 6px;border-radius:8px;text-decoration:none">
+          📍 عرض الموقع
+         </a>`
+      : '';
+
+    return `<div class="att-row" style="padding:10px 0">
+      <div style="width:10px;height:10px;border-radius:50%;background:${dotColor};flex-shrink:0;margin-top:4px"></div>
+      <div style="flex:1;min-width:0;margin-right:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="font-size:13px;font-weight:700">${r.name}</div>
+          <span style="background:${badgeBg};color:${badgeClr};padding:2px 10px;border-radius:10px;font-size:10px;font-weight:700">${status}</span>
+        </div>
+        ${r.route ? `<div style="font-size:10px;color:var(--text2);margin-top:2px">🛣️ ${r.route}</div>` : ''}
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px">
+          ${timeIn
+            ? `<div style="display:flex;align-items:center;gap:4px">
+                <span style="font-size:10px;background:#E8F5E9;color:#1A7A4A;padding:2px 8px;border-radius:8px">⏰ حضور: ${timeIn}</span>
+                ${locLink}
+               </div>`
+            : `<span style="font-size:10px;color:#aaa">لم يسجل حضور</span>`}
+          ${timeOut
+            ? `<span style="font-size:10px;background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:8px">🚪 انصراف: ${timeOut}</span>`
+            : timeIn ? `<span style="font-size:10px;background:#FFF3E0;color:#E65100;padding:2px 8px;border-radius:8px">⏳ لم ينصرف</span>` : ''}
+          ${workHours
+            ? `<span style="font-size:10px;background:#EFF6FF;color:#1D4ED8;padding:2px 8px;border-radius:8px">⏱ ${workHours}</span>`
+            : ''}
         </div>
       </div>
-      <span class="badge ${hasIn?'b-green':'b-gray'}">${hasIn?'حاضر':'غائب'}</span>
     </div>`;
   }).join('');
 }
