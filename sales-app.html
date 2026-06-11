@@ -548,6 +548,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
     <button class="tnav" id="tnav-target" onclick="showPanel('target')">
       <i class="ti ti-target"></i>هدفي
     </button>
+    <button class="tnav" id="tnav-branch-notes" onclick="showPanel('branch-notes')">
+      <i class="ti ti-clipboard-list"></i>ملاحظات الفروع
+      <span class="tnav-badge" id="bn-badge"></span>
+    </button>
     <button class="tnav" id="tnav-settings" onclick="showPanel('settings')">
       <i class="ti ti-settings"></i>الإعدادات
     </button>
@@ -2012,6 +2016,58 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
 
     </div><!-- end panel-target -->
 
+    <!-- ══ ملاحظات الفروع ══════════════════════════════════════ -->
+    <div class="panel" id="panel-branch-notes">
+      <div style="background:linear-gradient(135deg,#1A3A5C,#0D2137);border-radius:14px;padding:14px;margin-bottom:12px;color:#fff">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-size:11px;opacity:.7">ملاحظات وتقارير الزيارات</div>
+            <div style="font-size:16px;font-weight:900">ملاحظات الفروع</div>
+          </div>
+          <button onclick="loadBranchNotes()" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:12px;font-family:Cairo,sans-serif">🔄 تحديث</button>
+        </div>
+        <!-- إحصائيات -->
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px">
+          <div style="background:rgba(255,255,255,.1);border-radius:10px;padding:10px;text-align:center">
+            <div style="font-size:20px;font-weight:900" id="bn-total">0</div>
+            <div style="font-size:9px;opacity:.7">إجمالي</div>
+          </div>
+          <div style="background:rgba(255,255,255,.1);border-radius:10px;padding:10px;text-align:center">
+            <div style="font-size:20px;font-weight:900;color:#fbbf24" id="bn-pending">0</div>
+            <div style="font-size:9px;opacity:.7">بانتظار التأكيد</div>
+          </div>
+          <div style="background:rgba(255,255,255,.1);border-radius:10px;padding:10px;text-align:center">
+            <div style="font-size:20px;font-weight:900;color:#4ade80" id="bn-confirmed">0</div>
+            <div style="font-size:9px;opacity:.7">تم التأكيد</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- فلتر -->
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <select id="bn-filter" onchange="loadBranchNotes()" style="flex:1;padding:9px 12px;border:1.5px solid var(--border);border-radius:10px;font-family:Cairo,sans-serif;font-size:12px;background:#fff">
+          <option value="all">كل الملاحظات</option>
+          <option value="pending">⏳ بانتظار التأكيد</option>
+          <option value="confirmed">✅ تم التأكيد</option>
+        </select>
+      </div>
+
+      <!-- قائمة الملاحظات -->
+      <div id="bn-list">
+        <div style="text-align:center;padding:2rem;color:#aaa">اضغط تحديث لتحميل الملاحظات</div>
+      </div>
+
+      <!-- Modal تفاصيل -->
+      <div id="modal-bn-detail" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;overflow-y:auto">
+        <div style="background:#fff;margin:16px;border-radius:16px;padding:20px;position:relative">
+          <button onclick="document.getElementById('modal-bn-detail').style.display='none'"
+            style="position:absolute;top:12px;left:12px;background:#f5f5f5;border:none;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12px;font-family:Cairo,sans-serif">✕ إغلاق</button>
+          <div id="bn-detail-body"></div>
+        </div>
+      </div>
+    </div>
+    <!-- ══ نهاية ملاحظات الفروع ══ -->
+
     <div class="panel" id="panel-settings">
         <div class="form-fld"><label class="form-lbl">الحالية</label><input type="password" id="cp-old" placeholder="كلمة المرور الحالية"/></div>
         <div class="form-fld"><label class="form-lbl">الجديدة</label><input type="password" id="cp-new1" placeholder="كلمة المرور الجديدة"/></div>
@@ -2756,7 +2812,8 @@ function showPanel(id){
   if(id==='field')    { initFieldGrpFilter(); loadFieldPanel(); }
   if(id==='target')   { tgtInitDate(); tgtLoadData(); }
   if(id==='plans-plus') { sppAppInit(); sppAppLoad(); }
-  if(id==='team-plans') { teamPlansLoad(); }
+  if(id==='branch-notes') { loadBranchNotes(); }
+  if(id==='dash') { setTimeout(()=>bnLoadBadge(),2000); }
 }
 
 function closeModal(id){ document.getElementById(id).classList.remove('active'); }
@@ -9392,6 +9449,147 @@ async function tpViewDetail(id){
           ${it.notes?`<div style="margin-top:4px;font-size:10px;color:#8B6F47;background:#FFF8E1;padding:4px 8px;border-radius:6px">📝 ${it.notes}</div>`:''}
         </div>`).join('')}
     </div>` : `<div style="text-align:center;padding:1rem;color:#aaa">لا توجد بنود</div>`;
+}
+async function bnLoadBadge(){
+  if(!cu) return;
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/messages?to_rep=eq.${encodeURIComponent(cu.name)}&notif_type=eq.visit_result&is_read=eq.false&select=id&limit=50`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    );
+    const data = res.ok ? await res.json() : [];
+    const badge = document.getElementById('bn-badge');
+    if(badge){ badge.style.display=data.length>0?'':'none'; badge.textContent=data.length; }
+  }catch(e){}
+}
+
+// ══════════════════════════════════════════════════════════════
+// ملاحظات الفروع — Branch Notes
+// ══════════════════════════════════════════════════════════════
+let _bnNotes = [];
+
+async function loadBranchNotes(){
+  const list   = document.getElementById('bn-list');
+  const filter = document.getElementById('bn-filter')?.value || 'all';
+  if(!list) return;
+  list.innerHTML = `<div style="text-align:center;padding:2rem;color:#aaa">⏳ جارٍ التحميل...</div>`;
+
+  // جيب الرسائل اللي نوعها visit_result وموجهة للمشرف الحالي
+  let url = `${SUPABASE_URL}/rest/v1/messages?to_rep=eq.${encodeURIComponent(cu.name)}&notif_type=eq.visit_result&select=*&order=created_at.desc&limit=100`;
+
+  try{
+    const res = await fetch(url, {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    _bnNotes = res.ok ? await res.json() : [];
+  }catch(e){ _bnNotes=[]; }
+
+  // فلتر
+  let filtered = _bnNotes;
+  if(filter==='pending')   filtered = _bnNotes.filter(n=>!n.is_read);
+  if(filter==='confirmed') filtered = _bnNotes.filter(n=>n.is_read);
+
+  // إحصائيات
+  document.getElementById('bn-total').textContent     = _bnNotes.length;
+  document.getElementById('bn-pending').textContent   = _bnNotes.filter(n=>!n.is_read).length;
+  document.getElementById('bn-confirmed').textContent = _bnNotes.filter(n=>n.is_read).length;
+
+  // badge في التاب
+  const badge = document.getElementById('bn-badge');
+  const pending = _bnNotes.filter(n=>!n.is_read).length;
+  if(badge){ badge.style.display = pending>0?'':'none'; badge.textContent = pending; }
+
+  if(!filtered.length){
+    list.innerHTML = `<div style="text-align:center;padding:2rem;color:#aaa;font-size:13px">لا توجد ملاحظات</div>`;
+    return;
+  }
+
+  list.innerHTML = filtered.map(n=>{
+    const isConfirmed = n.is_read;
+    const date = n.created_at ? new Date(n.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}) : '—';
+    const preview = (n.message||'').split('\n').slice(0,3).join(' · ');
+
+    return `
+    <div style="background:#fff;border:1.5px solid ${isConfirmed?'#C8E6C9':'#FFE0B2'};border-radius:14px;padding:14px;margin-bottom:10px;box-shadow:0 2px 8px rgba(0,0,0,.06)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+        <div>
+          <div style="font-size:13px;font-weight:900;color:#1A3A5C">📋 من: ${n.from_name||'—'}</div>
+          <div style="font-size:10px;color:#8B6F47;margin-top:2px">${date}</div>
+        </div>
+        <span style="padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700;
+          background:${isConfirmed?'#E8F5E9':'#FFF3E0'};color:${isConfirmed?'#1A7A4A':'#E65100'}">
+          ${isConfirmed?'✅ تم التأكيد':'⏳ بانتظار التأكيد'}
+        </span>
+      </div>
+      <div style="font-size:11px;color:#555;margin-bottom:10px;line-height:1.6;background:#F8F9FA;padding:8px;border-radius:8px">
+        ${preview}...
+      </div>
+      <div style="display:flex;gap:6px">
+        <button onclick="bnViewDetail('${n.id}')"
+          style="flex:1;padding:8px;background:#F5F0E8;color:#4B3C1A;border:1px solid #D4C4A8;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          👁️ عرض التفاصيل
+        </button>
+        ${!isConfirmed?`
+          <button onclick="bnConfirm('${n.id}','${(n.from_name||'').replace(/'/g,"\\'")}')"
+            style="flex:1;padding:8px;background:linear-gradient(135deg,#1A3A5C,#0D2137);color:#fff;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+            ✅ تأكيد الاستلام
+          </button>
+        `:'<div style="flex:1;text-align:center;font-size:10px;color:#1A7A4A;padding:8px">✅ تم التأكيد</div>'}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function bnViewDetail(id){
+  const note = _bnNotes.find(n=>String(n.id)===String(id));
+  if(!note) return;
+  const body = document.getElementById('bn-detail-body');
+  const date = note.created_at ? new Date(note.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+  body.innerHTML = `
+    <div style="margin-top:20px">
+      <div style="font-size:16px;font-weight:900;color:#1A3A5C;margin-bottom:4px">📋 تفاصيل الملاحظة</div>
+      <div style="font-size:11px;color:#8B6F47;margin-bottom:14px">من: ${note.from_name||'—'} · ${date}</div>
+      <div style="background:#F8F9FA;border-radius:10px;padding:14px;font-size:13px;line-height:2;white-space:pre-line;color:#2C1F0A">
+${note.message||'—'}
+      </div>
+      ${!note.is_read?`
+        <button onclick="bnConfirm('${note.id}','${(note.from_name||'').replace(/'/g,"\\'")}');document.getElementById('modal-bn-detail').style.display='none';"
+          style="width:100%;margin-top:14px;padding:12px;background:linear-gradient(135deg,#1A3A5C,#0D2137);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          ✅ تأكيد الاستلام
+        </button>
+      `:'<div style="margin-top:12px;text-align:center;color:#1A7A4A;font-weight:700">✅ تم تأكيد الاستلام</div>'}
+    </div>`;
+  document.getElementById('modal-bn-detail').style.display='block';
+}
+
+async function bnConfirm(id, fromName){
+  // حدّث الرسالة كـ مقروءة
+  await fetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body: JSON.stringify({is_read:true, read_at:new Date().toISOString()})
+  });
+
+  // ابعت رسالة تأكيد لمشرف التنسيق ولوحة التحكم
+  const confirmMsg = `✅ تأكيد استلام — ${cu.name}
+تم تأكيد استلام ملاحظات الزيارة
+📅 ${new Date().toLocaleDateString('ar-EG',{day:'numeric',month:'long',year:'numeric'})}`;
+
+  await fetch(`${SUPABASE_URL}/rest/v1/messages`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body: JSON.stringify({
+      from_name  : cu.name,
+      to_rep     : fromName,
+      to_all     : false,
+      type       : 'info',
+      notif_type : 'visit_result_confirmed',
+      message    : confirmMsg,
+      is_read    : false,
+      created_at : new Date().toISOString()
+    })
+  });
+
+  showToast('✅ تم تأكيد الاستلام وإرسال إشعار لمشرف التنسيق');
+  loadBranchNotes();
 }
 
 </script>
