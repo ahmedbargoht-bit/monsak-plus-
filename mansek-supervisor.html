@@ -852,7 +852,26 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 
     <!-- Sup Orders -->
     <div class="screen" id="screen-sup-orders">
-      <!-- إرسال ميعاد طلبية -->
+
+      <!-- ── طلبيات مشرفي البيع (جديد) ── -->
+      <div class="card" style="margin-bottom:12px">
+        <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span><i class="ti ti-inbox" style="color:#B71C1C"></i> طلبيات مشرفي البيع
+            <span id="sales-orders-badge" style="background:#B71C1C;color:#fff;border-radius:999px;font-size:10px;padding:1px 7px;margin-right:4px;display:none">0</span>
+          </span>
+          <div style="display:flex;gap:6px">
+            <button onclick="salesOrdersDeleteSelected()" style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif;font-weight:700">🗑 مسح المحدد</button>
+            <button onclick="loadSalesOrders()" style="background:none;border:none;color:var(--navy);cursor:pointer;font-size:13px"><i class="ti ti-refresh"></i></button>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">
+          <input type="checkbox" id="sales-orders-check-all" onchange="salesOrdersToggleAll(this)" style="width:16px;height:16px;cursor:pointer"/>
+          <label for="sales-orders-check-all" style="font-size:11px;color:#888;cursor:pointer">تحديد الكل</label>
+        </div>
+        <div id="sales-orders-list"><div class="empty"><div class="spinner"></div></div></div>
+      </div>
+
+      <!-- ── إرسال ميعاد طلبية ── -->
       <div class="card" style="margin-bottom:12px">
         <div class="card-title"><i class="ti ti-send"></i> إرسال ميعاد طلبية للمنسق</div>
         <div style="margin-bottom:10px">
@@ -2435,6 +2454,7 @@ function showTab(tab){
     renderVisitResults();
   }
   if(tab==='sup-orders'){
+    loadSalesOrders();
     loadSupOrders();
     if(window._supOrdersPolling) clearInterval(window._supOrdersPolling);
     window._supOrdersPolling = setInterval(()=>{
@@ -5196,6 +5216,136 @@ function selectShelf(btn){}
 let _supOrders = [];
 let _supOrderFilter = 'pending';
 let _approvingOrderId = null;
+
+// ══════════════════════════════════════════════════════════════
+// طلبيات مشرفي البيع
+// ══════════════════════════════════════════════════════════════
+async function loadSalesOrders(){
+  const listEl = document.getElementById('sales-orders-list');
+  if(!listEl) return;
+  listEl.innerHTML = '<div class="empty"><div class="spinner"></div></div>';
+
+  const supName = cu?.name || '';
+  try{
+    // جيب الطلبيات اللي مشرف التنسيق ده مسؤول عنها
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/supply_requests?supervisor=eq.${encodeURIComponent(supName)}&deal_source=eq.sales_supervisor&select=*&order=created_at.desc&limit=200`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    );
+    const data = r.ok ? await r.json() : [];
+    if(!Array.isArray(data)||!data.length){
+      listEl.innerHTML='<div class="empty">لا توجد طلبيات من مشرفي البيع</div>';
+      document.getElementById('sales-orders-badge').style.display='none';
+      return;
+    }
+
+    const pending = data.filter(d=>d.status==='pending').length;
+    const badge = document.getElementById('sales-orders-badge');
+    badge.textContent = pending;
+    badge.style.display = pending ? '' : 'none';
+
+    const sMap = {
+      pending:  {label:'⏳ بانتظار التحويل', bg:'#FEF3C7', color:'#B45309'},
+      received: {label:'📥 تم الاستلام',      bg:'#EFF6FF', color:'#1D4ED8'},
+      assigned: {label:'📋 حُوِّل للمنسق',    bg:'#F0FFF4', color:'#065F46'},
+      done:     {label:'✅ تم التوريد',        bg:'#D1FAE5', color:'#065F46'},
+    };
+
+    listEl.innerHTML = data.map(r=>{
+      const s   = sMap[r.status]||{label:r.status,bg:'#f5f5f5',color:'#555'};
+      const dt  = r.created_at ? new Date(r.created_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'2-digit'}) : '—';
+      const del = r.delivery_date ? new Date(r.delivery_date).toLocaleDateString('en-GB',{day:'numeric',month:'short'}) : '—';
+      return `<div style="background:#f9f9fb;border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px;display:flex;gap:8px;align-items:flex-start">
+        <input type="checkbox" class="sales-order-cb" data-id="${r.id}" style="width:16px;height:16px;cursor:pointer;flex-shrink:0;margin-top:3px"/>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+            <div style="font-weight:700;font-size:13px">${r.from_name||'—'}</div>
+            <span style="background:${s.bg};color:${s.color};padding:3px 10px;border-radius:10px;font-size:10px;font-weight:700;white-space:nowrap">${s.label}</span>
+          </div>
+          <div style="font-size:11px;color:var(--text2);margin-bottom:3px">🏪 ${r.branch||'—'} · 🛣️ ${r.route||'—'}</div>
+          <div style="font-size:11px;color:var(--text2);margin-bottom:3px">👤 المنسق: ${r.rep_name||'—'}</div>
+          ${r.note?`<div style="font-size:11px;color:#888;margin-bottom:3px">📝 ${r.note}</div>`:''}
+          ${r.to_name?`<div style="font-size:11px;color:#1D4ED8;margin-bottom:3px">📋 حُوِّل لـ: ${r.to_name}</div>`:''}
+          <div style="font-size:10px;color:#aaa;margin-bottom:8px">📅 أُرسل: ${dt} · 🚚 تسليم: ${del}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            ${r.status==='pending'?`
+              <button onclick="salesOrderReceive(${r.id})"
+                style="background:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif;font-weight:700">
+                📥 تم الاستلام
+              </button>`:``}
+            ${r.status==='pending'||r.status==='received'?`
+              <button onclick="salesOrderTransfer(${r.id},'${(r.branch||'').replace(/'/g,"\\'")}','${(r.rep_name||'').replace(/'/g,"\\'")}','${del}')"
+                style="background:#F0FFF4;color:#065F46;border:1px solid #86EFAC;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif;font-weight:700">
+                📋 تحويل للمنسق
+              </button>`:``}
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  }catch(e){
+    listEl.innerHTML='<div class="empty">خطأ في التحميل</div>';
+  }
+}
+
+async function salesOrderReceive(id){
+  await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({status:'received'})
+  });
+  showToast('📥 تم تأكيد الاستلام');
+  loadSalesOrders();
+}
+
+function salesOrderTransfer(id, branch, repName, deliveryDate){
+  document.getElementById('transfer-order-id').value = id;
+  document.getElementById('transfer-order-info').innerHTML =
+    `<b>🏪 الفرع:</b> ${branch}<br><b>👤 المنسق:</b> ${repName}<br><b>🚚 تاريخ التسليم:</b> ${deliveryDate}`;
+
+  // عبّي قائمة المنسقين من cachedData أو repNames
+  const sel = document.getElementById('transfer-rep-select');
+  sel.innerHTML = '<option value="">اختر المنسق...</option>';
+  (repNames||[]).forEach(n=>{
+    const o=document.createElement('option');
+    o.value=n; o.textContent=n;
+    if(n===repName) o.selected=true;
+    sel.appendChild(o);
+  });
+
+  document.getElementById('modal-transfer-order').style.display='flex';
+}
+
+async function confirmTransferOrder(){
+  const id  = document.getElementById('transfer-order-id').value;
+  const rep = document.getElementById('transfer-rep-select').value;
+  if(!rep){ showToast('اختر المنسق أولاً'); return; }
+
+  await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({status:'assigned', to_name:rep})
+  });
+  document.getElementById('modal-transfer-order').style.display='none';
+  showToast('✅ تم التحويل للمنسق: '+rep);
+  loadSalesOrders();
+}
+
+function salesOrdersToggleAll(el){
+  document.querySelectorAll('.sales-order-cb').forEach(cb=>cb.checked=el.checked);
+}
+
+async function salesOrdersDeleteSelected(){
+  const ids=[...document.querySelectorAll('.sales-order-cb:checked')].map(cb=>cb.dataset.id);
+  if(!ids.length){ showToast('لم تختر أي طلبية'); return; }
+  if(!confirm(`مسح ${ids.length} طلبية؟`)) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=in.(${ids.join(',')})`,{
+    method:'DELETE',
+    headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'}
+  });
+  showToast('✅ تم المسح');
+  document.getElementById('sales-orders-check-all').checked=false;
+  loadSalesOrders();
+}
 
 async function loadSupOrders(){
   // جيب طلبيات التوريد من supply_requests بمجموعات المشرف
@@ -8448,9 +8598,24 @@ async function supRejectPlan(planId){
   border:1px solid #4CAF5040;backdrop-filter:blur(4px)">
   v2.0
 </div>
+<!-- Modal: تحويل طلبية للمنسق -->
+<div id="modal-transfer-order" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:14px;padding:20px;width:90%;max-width:380px;direction:rtl">
+    <div style="font-size:14px;font-weight:700;margin-bottom:12px;color:#4B3C1A">📋 تحويل الطلبية للمنسق</div>
+    <input type="hidden" id="transfer-order-id"/>
+    <div id="transfer-order-info" style="background:#F9F6F1;border-radius:8px;padding:10px;margin-bottom:12px;font-size:12px;color:#555"></div>
+    <div style="font-size:12px;font-weight:600;color:#4B3C1A;margin-bottom:6px">اختر المنسق</div>
+    <select id="transfer-rep-select" style="width:100%;padding:9px;border:1.5px solid #E8D9C0;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;margin-bottom:14px">
+      <option value="">اختر المنسق...</option>
+    </select>
+    <div style="display:flex;gap:8px">
+      <button onclick="confirmTransferOrder()" style="flex:1;padding:11px;background:#4B3C1A;color:#fff;border:none;border-radius:8px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer">✅ تحويل</button>
+      <button onclick="document.getElementById('modal-transfer-order').style.display='none'" style="padding:11px 16px;background:#f5f5f5;color:#555;border:none;border-radius:8px;font-family:Cairo,sans-serif;cursor:pointer">إلغاء</button>
+    </div>
+  </div>
+</div>
+
 </body>
-</html>
-    <!-- ══ شاشة خطط الفريق (للمدير) ══ -->
     <div class="screen" id="screen-team-plans" style="padding:12px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
         <div>
