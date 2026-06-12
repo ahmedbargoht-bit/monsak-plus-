@@ -205,6 +205,7 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 .rd-stats-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:14px;padding-bottom:0}
 .rd-stat{background:var(--card);border-radius:12px;padding:14px 10px;text-align:center;box-shadow:var(--shadow)}
 .rd-stat-n{font-size:22px;font-weight:900;color:var(--navy)}
+.rd-stat-n.small{font-size:15px}
 .rd-stat-l{font-size:10px;color:var(--text2);margin-top:2px}
 .rd-section{padding:14px}
 .rd-section-title{font-size:13px;font-weight:700;color:var(--navy);margin-bottom:10px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);padding-bottom:8px}
@@ -714,12 +715,22 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
         </div>
       </div>
 
+      <!-- خطوط السير -->
+      <div class="rd-section" style="margin-top:8px">
+        <div class="rd-section-title"><i class="ti ti-route" style="color:var(--navy)"></i> خط السير</div>
+        <div id="rd-route-info" style="font-size:13px;font-weight:700;color:var(--navy);padding:4px 0">—</div>
+      </div>
+
       <!-- إحصائيات ذكية -->
       <div class="rd-stats-grid">
         <div class="rd-stat"><div class="rd-stat-n" id="rd-s-visits">—</div><div class="rd-stat-l">إجمالي الزيارات</div></div>
         <div class="rd-stat"><div class="rd-stat-n" id="rd-s-branches">—</div><div class="rd-stat-l">فروع مزارة</div></div>
-        <div class="rd-stat"><div class="rd-stat-n" id="rd-s-reports">—</div><div class="rd-stat-l">تقارير مرفوعة</div></div>
+        <div class="rd-stat"><div class="rd-stat-n" id="rd-s-reports">—</div><div class="rd-stat-l">تقارير غير مكررة</div></div>
         <div class="rd-stat"><div class="rd-stat-n" id="rd-s-pts">—</div><div class="rd-stat-l">إجمالي النقاط</div></div>
+        <div class="rd-stat"><div class="rd-stat-n" id="rd-s-hours">—</div><div class="rd-stat-l">ساعات العمل</div></div>
+        <div class="rd-stat"><div class="rd-stat-n" id="rd-s-holidays">—</div><div class="rd-stat-l">عدد الإجازات</div></div>
+        <div class="rd-stat"><div class="rd-stat-n small" id="rd-s-first-in">—</div><div class="rd-stat-l">أول حضور</div></div>
+        <div class="rd-stat"><div class="rd-stat-n small" id="rd-s-last-out">—</div><div class="rd-stat-l">آخر انصراف</div></div>
       </div>
 
       <div id="rd-loading" class="loading" style="display:none"><div class="spinner"></div><br>جاري التحميل...</div>
@@ -732,7 +743,7 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 
       <!-- سجل الزيارات -->
       <div class="rd-section">
-        <div class="rd-section-title"><i class="ti ti-map-pin" style="color:var(--navy)"></i> سجل الزيارات</div>
+        <div class="rd-section-title"><i class="ti ti-map-pin" style="color:var(--navy)"></i> الفروع المزارة خلال الفترة</div>
         <div id="rd-visits-list"><div class="empty">—</div></div>
       </div>
     </div>
@@ -2874,71 +2885,98 @@ async function loadRepDetail(){
   document.getElementById('rd-loading').style.display = 'block';
 
   try{
-    // جيب الزيارات من Supabase للفترة المحددة
+    // خط السير + بيانات المنسق من users
+    const userRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(name)}&select=route,grp&limit=1`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    );
+    const userData = await userRes.json().catch(()=>[]);
+    const repRoute = userData?.[0]?.route || '—';
+    document.getElementById('rd-route-info').textContent = repRoute;
+
+    // جيب الزيارات من visits للفترة المحددة (date نصي بصيغة YYYY-MM-DD)
     const visRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(name)}&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59&select=*&order=created_at.desc&limit=500`,
+      `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(name)}&date=gte.${from}&date=lte.${to}&select=*&order=date.desc&limit=1000`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
     );
     const visits = await visRes.json().catch(()=>[]);
 
-    // جيب الحضور
+    // جيب الحضور من attendance للفترة المحددة
     const attRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(name)}&date=gte.${from}&date=lte.${to}&select=*&order=date.desc&limit=100`,
+      `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(name)}&date=gte.${from}&date=lte.${to}&select=*&order=date.asc&limit=200`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
     );
     const attendance = await attRes.json().catch(()=>[]);
 
-    // جيب التقارير (visit_results)
-    const rptRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/visit_results?rep_name=eq.${encodeURIComponent(name)}&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59&select=id&limit=500`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
-    );
-    const reports = await rptRes.json().catch(()=>[]);
+    const visitsArr = Array.isArray(visits) ? visits : [];
+    const attArr    = Array.isArray(attendance) ? attendance : [];
 
-    // إحصائيات
-    const uniqueBranches = [...new Set(Array.isArray(visits)?visits.map(v=>v.branch).filter(Boolean):[])]
-    const totalPts = Array.isArray(visits)?visits.reduce((s,v)=>s+(+v.points||0),0):0;
+    // ── إحصائيات ──
+    const uniqueBranches = [...new Set(visitsArr.map(v=>v.branch).filter(Boolean))];
+    const totalPts = visitsArr.reduce((s,v)=>s+(+v.points||0),0);
 
-    document.getElementById('rd-s-visits').textContent   = Array.isArray(visits)?visits.length:0;
-    document.getElementById('rd-s-branches').textContent = uniqueBranches.length;
-    document.getElementById('rd-s-reports').textContent  = Array.isArray(reports)?reports.length:0;
-    document.getElementById('rd-s-pts').textContent      = totalPts;
+    // التقارير غير المكررة — DISTINCT (branch + date)
+    const uniqueReports = new Set(visitsArr.map(v=>`${v.branch}|${v.date}`)).size;
 
-    // سجل الحضور
+    // إجمالي ساعات العمل
+    const totalHours = attArr.reduce((s,a)=>s+(+a.hours||0),0);
+
+    // عدد الإجازات = (عدد أيام الفترة) - (عدد أيام attendance)
+    const fromD = new Date(from), toD = new Date(to);
+    const totalDays = Math.floor((toD - fromD) / 864e5) + 1;
+    const attDaysSet = new Set(attArr.map(a=>a.date));
+    const holidaysCount = Math.max(0, totalDays - attDaysSet.size);
+
+    // أول حضور وآخر انصراف (في الفترة كلها)
+    const sortedByDateIn  = [...attArr].filter(a=>a.time_in).sort((a,b)=>a.date.localeCompare(b.date));
+    const sortedByDateOut = [...attArr].filter(a=>a.time_out).sort((a,b)=>b.date.localeCompare(a.date));
+    const firstIn  = sortedByDateIn[0];
+    const lastOut  = sortedByDateOut[0];
+
+    document.getElementById('rd-s-visits').textContent    = visitsArr.length;
+    document.getElementById('rd-s-branches').textContent  = uniqueBranches.length;
+    document.getElementById('rd-s-reports').textContent   = uniqueReports;
+    document.getElementById('rd-s-pts').textContent       = totalPts;
+    document.getElementById('rd-s-hours').textContent     = totalHours.toFixed(1) + ' س';
+    document.getElementById('rd-s-holidays').textContent  = holidaysCount;
+    document.getElementById('rd-s-first-in').textContent  = firstIn  ? `${firstIn.time_in} (${firstIn.date.slice(5)})`  : '—';
+    document.getElementById('rd-s-last-out').textContent  = lastOut  ? `${lastOut.time_out} (${lastOut.date.slice(5)})` : '—';
+
+    // سجل الحضور والانصراف — لكل يوم من attendance مباشرة
     const attEl = document.getElementById('rd-att-list');
-    if(Array.isArray(attendance) && attendance.length){
-      // جمع حسب اليوم
-      const byDay = {};
-      attendance.forEach(a=>{
-        const d = (a.created_at||'').slice(0,10);
-        if(!byDay[d]) byDay[d]={date:d,timeIn:null,timeOut:null};
-        if(a.type==='in'  && !byDay[d].timeIn)  byDay[d].timeIn  = a.time_in||a.time||'—';
-        if(a.type==='out' && !byDay[d].timeOut) byDay[d].timeOut = a.time_out||a.time||'—';
-      });
-      attEl.innerHTML = Object.values(byDay).sort((a,b)=>b.date.localeCompare(a.date)).map(d=>`
+    if(attArr.length){
+      attEl.innerHTML = [...attArr].sort((a,b)=>b.date.localeCompare(a.date)).map(a=>`
         <div class="rd-att-row">
-          <span style="font-weight:600">${d.date}</span>
-          <span><span style="color:var(--green)">دخول: ${d.timeIn||'—'}</span></span>
-          <span><span style="color:var(--red)">خروج: ${d.timeOut||'—'}</span></span>
+          <span style="font-weight:600">${a.date}</span>
+          <span><span style="color:var(--green)">دخول: ${a.time_in||'—'}</span></span>
+          <span><span style="color:var(--red)">خروج: ${a.time_out||'—'}</span></span>
+          <span style="font-size:11px;color:var(--text2)">${a.hours?a.hours+' س':'—'}</span>
         </div>`).join('');
     } else {
       attEl.innerHTML = '<div class="empty">لا توجد سجلات حضور في هذه الفترة</div>';
     }
 
-    // سجل الزيارات
+    // الفروع المزارة — تجميع بـ branch مع عدد الزيارات وآخر تاريخ ونقاط
     const visEl = document.getElementById('rd-visits-list');
-    if(Array.isArray(visits) && visits.length){
-      visEl.innerHTML = visits.map(v=>{
-        const t = v.created_at ? new Date(v.created_at).toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'}) : '—';
-        const d = (v.created_at||'').slice(0,10);
-        return `<div class="rd-visit-row">
+    if(visitsArr.length){
+      const byBranch = {};
+      visitsArr.forEach(v=>{
+        const b = v.branch || '—';
+        if(!byBranch[b]) byBranch[b] = { branch:b, count:0, pts:0, lastDate:v.date, dates:new Set() };
+        byBranch[b].count++;
+        byBranch[b].pts += (+v.points||0);
+        byBranch[b].dates.add(v.date);
+        if(v.date > byBranch[b].lastDate) byBranch[b].lastDate = v.date;
+      });
+      visEl.innerHTML = Object.values(byBranch)
+        .sort((a,b)=>b.lastDate.localeCompare(a.lastDate))
+        .map(b=>`<div class="rd-visit-row">
           <div>
-            <div style="font-size:12px;font-weight:700">${v.branch||'—'}</div>
-            <div style="font-size:10px;color:var(--text2)">${d} · ${t}</div>
+            <div style="font-size:12px;font-weight:700">${b.branch}</div>
+            <div style="font-size:10px;color:var(--text2)">${b.dates.size} زيارة · آخر زيارة ${b.lastDate}</div>
           </div>
-          <span style="font-size:14px;font-weight:900;color:var(--navy)">${v.points||0} نقطة</span>
-        </div>`;
-      }).join('');
+          <span style="font-size:14px;font-weight:900;color:var(--navy)">${b.pts} نقطة</span>
+        </div>`).join('');
     } else {
       visEl.innerHTML = '<div class="empty">لا توجد زيارات في هذه الفترة</div>';
     }
