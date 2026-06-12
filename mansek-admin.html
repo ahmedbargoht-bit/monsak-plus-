@@ -1053,10 +1053,15 @@ h2,h3{color:#2C1F0A}
 
           <!-- ── الجدول ── -->
           <div class="card">
-            <div class="card-title"><i class="ti ti-clipboard-list"></i> سجل الزيارات</div>
+            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+              <span><i class="ti ti-clipboard-list"></i> سجل الزيارات</span>
+              <button class="btn btn-sm" onclick="exportVisitsPDF()" style="background:#B71C1C;color:#fff;display:flex;align-items:center;gap:5px">
+                <i class="ti ti-file-type-pdf"></i> تصدير PDF
+              </button>
+            </div>
             <div class="table-wrap">
-              <table>
-                <thead><tr><th>#</th><th>المنسق</th><th>الفرع</th><th>المجموعة</th><th>التاريخ</th><th>الحضور</th><th>الانصراف</th><th>أصناف</th><th>نواقص</th><th>مساحة</th><th>النقاط</th><th>إجراء</th></tr></thead>
+              <table id="visits-main-table">
+                <thead><tr><th>#</th><th>المنسق</th><th>المجموعة</th><th>التاريخ</th><th>أول حضور</th><th>آخر انصراف</th><th>سجل أصناف</th><th>سجل نواقص</th><th>مساحة</th><th>النقاط</th><th>إجراء</th></tr></thead>
                 <tbody id="visits-table"></tbody>
               </table>
             </div>
@@ -9031,30 +9036,149 @@ function loadVisits(){
     sumDiv.style.display = 'none';
   }
 
-  // ── الجدول ──
-  document.getElementById('visits-table').innerHTML = data.map((v,i)=>{
-    const spUtil = v.space_total>0 ? Math.round(v.space_used/v.space_total*100)+'%' : '—';
+  // ── تجميع الزيارات: منسق + يوم = صف واحد ──
+  const dayMap = {};
+  data.forEach(v=>{
+    const isoDate = (v.created_at||'').slice(0,10) || v.date || '';
+    const key = (v.name||'') + '||' + isoDate;
+    if(!dayMap[key]){
+      dayMap[key]={
+        name:v.name, grp:v.grp, date:isoDate,
+        skuOn:0, missingCount:0, spaceUsed:0, spaceTotal:0, points:0,
+        branches:new Set(), ids:[]
+      };
+    }
+    const r = dayMap[key];
+    r.skuOn       += (+v.sku_on||0);
+    r.missingCount+= (+v.missing_count||0);
+    r.spaceUsed   += (+v.space_used||0);
+    r.spaceTotal  += (+v.space_total||0);
+    r.points      += (+v.points||0);
+    if(v.branch) r.branches.add(v.branch);
+    r.ids.push(v.id);
+  });
+
+  // ── جيب attendance لنفس الفترة ──
+  const attData = (cachedData.attendance||[]).filter(a=>{
+    const d = (a.date||'').slice(0,10);
+    if(from && d < from) return false;
+    if(to   && d > to)   return false;
+    if(grp !== 'all' && a.grp !== grp) return false;
+    if(rep !== 'all' && a.name !== rep) return false;
+    return true;
+  });
+
+  // بناء map: name+date → {first_in, last_out}
+  const attMap = {};
+  attData.forEach(a=>{
+    const d   = (a.date||'').slice(0,10);
+    const key = (a.name||'') + '||' + d;
+    if(!attMap[key]) attMap[key] = {timeIn:null, timeOut:null};
+    const t = a.time_in || a.time || '';
+    if(t){
+      if(!attMap[key].timeIn || t < attMap[key].timeIn) attMap[key].timeIn = t;
+    }
+    const to2 = a.time_out || '';
+    if(to2){
+      if(!attMap[key].timeOut || to2 > attMap[key].timeOut) attMap[key].timeOut = to2;
+    }
+  });
+
+  const rows = Object.values(dayMap).sort((a,b)=> b.date.localeCompare(a.date) || a.name.localeCompare(b.name));
+
+  document.getElementById('visits-table').innerHTML = rows.map((r,i)=>{
+    const att     = attMap[r.name+'||'+r.date] || {};
+    const timeIn  = att.timeIn  || '—';
+    const timeOut = att.timeOut || '—';
+    const spUtil  = r.spaceTotal>0 ? Math.round(r.spaceUsed/r.spaceTotal*100)+'%' : '—';
+    const gc      = GROUPS[r.grp]?.color||'#ccc';
+    const skuBadge    = r.skuOn>0
+      ? `<span class="badge b-blue">${r.skuOn} صنف</span>`
+      : `<span style="color:#bbb;font-size:11px">—</span>`;
+    const missBadge   = r.missingCount>0
+      ? `<span class="badge b-red">${r.missingCount} ناقص</span>`
+      : `<span class="badge b-green">لا يوجد</span>`;
+    const ptsBadge    = `<span class="badge b-purple">${r.points}</span>`;
+    const inBadge     = timeIn!=='—'
+      ? `<span style="font-size:11px;background:#E8F5E9;color:#1B5E20;padding:2px 8px;border-radius:6px;font-weight:600">${timeIn}</span>`
+      : `<span style="color:#bbb;font-size:11px">—</span>`;
+    const outBadge    = timeOut!=='—'
+      ? `<span style="font-size:11px;background:#FFEBEE;color:#B71C1C;padding:2px 8px;border-radius:6px;font-weight:600">${timeOut}</span>`
+      : `<span style="color:#bbb;font-size:11px">—</span>`;
     return`<tr>
       <td>${i+1}</td>
-      <td><b>${v.name}</b></td>
-      <td>${v.branch||'—'}</td>
-      <td><span class="badge" style="background:${GROUPS[v.grp]?.color||'#ccc'}22;color:${GROUPS[v.grp]?.color||'#555'}">${GROUPS[v.grp]?.label||v.grp}</span></td>
-      <td>${fmtDate(v.date)||'—'}</td>
-      <td>${v.time_in||'—'}</td>
-      <td>${v.time_out||'—'}</td>
-      <td><span class="badge b-blue">${v.sku_on||0}</span></td>
-      <td><span class="badge ${(v.missing_count||0)>0?'b-red':'b-green'}">${v.missing_count||0}</span></td>
+      <td><b>${r.name}</b><div style="font-size:10px;color:#aaa;margin-top:2px">${r.branches.size} فرع</div></td>
+      <td><span class="badge" style="background:${gc}22;color:${gc}">${GROUPS[r.grp]?.label||r.grp}</span></td>
+      <td>${fmtDate(r.date)||r.date||'—'}</td>
+      <td>${inBadge}</td>
+      <td>${outBadge}</td>
+      <td>${skuBadge}</td>
+      <td>${missBadge}</td>
       <td>${spUtil}</td>
-      <td><span class="badge b-purple">${v.points||0}</span></td>
-      <td><button onclick="deleteRecord('visits',${v.id},'visits')" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px">🗑</button></td>
+      <td>${ptsBadge}</td>
+      <td><button onclick="deleteVisitDay(${JSON.stringify(r.ids)})" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px" title="حذف كل زيارات هذا اليوم">🗑</button></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="12" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد زيارات</td></tr>';
+  }).join('') || '<tr><td colspan="11" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد زيارات</td></tr>';
+}
+
+function deleteVisitDay(ids){
+  if(!ids||!ids.length) return;
+  if(!confirm(`هل تريد حذف ${ids.length} زيارة لهذا اليوم؟`)) return;
+  Promise.all(ids.map(id=>
+    fetch(`${SUPABASE_URL}/rest/v1/visits?id=eq.${id}`,{
+      method:'DELETE',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    })
+  )).then(()=>{ refreshData(); setTimeout(loadVisits,1000); });
+}
+
+function exportVisitsPDF(){
+  const rows = document.querySelectorAll('#visits-table tr');
+  if(!rows.length){ alert('لا توجد بيانات للتصدير'); return; }
+
+  const from  = document.getElementById('v-from').value || '—';
+  const to    = document.getElementById('v-to').value   || '—';
+  const grpEl = document.getElementById('v-group');
+  const grpLbl= grpEl.options[grpEl.selectedIndex]?.text || 'كل المجموعات';
+  const repEl = document.getElementById('v-rep');
+  const repLbl= repEl.options[repEl.selectedIndex]?.text || 'كل المنسقين';
+
+  let tRows = '';
+  rows.forEach(r=>{
+    const cells = Array.from(r.cells);
+    tRows += `<tr>${cells.map(c=>`<td>${c.innerText.trim()}</td>`).join('')}</tr>`;
+  });
+
+  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8">
+  <title>سجل الزيارات</title>
+  <style>
+    body{font-family:Arial,sans-serif;font-size:11px;direction:rtl;padding:20px}
+    h2{font-size:16px;margin-bottom:4px;color:#3A0800}
+    .info{font-size:11px;color:#666;margin-bottom:12px}
+    table{width:100%;border-collapse:collapse;font-size:10px}
+    th{background:#3A0800;color:#F5EDE0;padding:6px 8px;text-align:right;font-size:10px}
+    td{padding:5px 8px;border-bottom:0.5px solid #e0e0e0;text-align:right}
+    tr:nth-child(even){background:#FAF7F2}
+    @media print{body{padding:0}}
+  </style></head><body>
+  <h2>📋 سجل الزيارات — الطحان جولدن دايتس</h2>
+  <div class="info">الفترة: ${from} إلى ${to} | المجموعة: ${grpLbl} | المنسق: ${repLbl}</div>
+  <table>
+    <thead><tr><th>#</th><th>المنسق</th><th>المجموعة</th><th>التاريخ</th><th>أول حضور</th><th>آخر انصراف</th><th>سجل أصناف</th><th>سجل نواقص</th><th>مساحة</th><th>النقاط</th><th>إجراء</th></tr></thead>
+    <tbody>${tRows}</tbody>
+  </table>
+  <script>window.onload=()=>window.print();<\/script>
+  </body></html>`;
+
+  const w = window.open('','_blank');
+  w.document.write(html);
+  w.document.close();
 }
 
 function exportVisits(){
   const rows=document.querySelectorAll('#visits-table tr');
-  let csv='#,المنسق,الفرع,المجموعة,التاريخ,الحضور,الانصراف,أصناف,نواقص,مساحة,النقاط\n';
-  rows.forEach(r=>{csv+=Array.from(r.cells).map(c=>'"'+c.textContent.trim()+'"').join(',')+'\n';});
+  let csv='#,المنسق,المجموعة,التاريخ,أول حضور,آخر انصراف,سجل أصناف,سجل نواقص,مساحة,النقاط\n';
+  rows.forEach(r=>{csv+=Array.from(r.cells).slice(0,10).map(c=>'"'+c.innerText.trim()+'"').join(',')+'\n';});
   const a=document.createElement('a');a.href='data:text/csv;charset=utf-8,\uFEFF'+csv;a.download='visits.csv';a.click();
 }
 
