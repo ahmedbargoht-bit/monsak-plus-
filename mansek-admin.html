@@ -7901,7 +7901,7 @@ function getVisibleReps(){
 // ══════════════════════════════════════════════════════════════
 async function refreshAll(){
   document.getElementById('last-update').textContent='جاري التحديث...';
-  const [visits,missing,products,attendance,location,messages,orders] = await Promise.all([
+  const [visits,missing,products,attendance,location,messages,orders,snapshots] = await Promise.all([
     sb('visits',{},{order:'created_at.desc',limit:5000}),
     sb('missing',{},{order:'created_at.desc'}),
     sb('products',{},{order:'created_at.desc'}),
@@ -7909,8 +7909,9 @@ async function refreshAll(){
     sb('location'),
     sb('messages',{},{order:'created_at.desc'}),
     sb('orders',{},{order:'created_at.desc'}),
+    sb('product_snapshots',{},{order:'created_at.desc',limit:5000}),
   ]);
-  cachedData={visits,missing,products,attendance,location,messages,orders};
+  cachedData={visits,missing,products,attendance,location,messages,orders,snapshots};
   const now=new Date();
   document.getElementById('last-update').textContent='آخر تحديث: '+now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
   renderCurrentPanel();
@@ -8661,28 +8662,36 @@ function hsLoad(){
   const to   = document.getElementById('hs-to')?.value||'';
 
   // فروع الهايبر تتوزع على grp مختلفة: hyper (القاهرة) + alex (ثابت هايبر ماركت اسكندرية)
-  // فلتر أساسي: كل ما هو هايبر (grp='hyper' أو grp='alex' مع branch فيه "هايبر")
   const isHyperRow = v => {
-    const grp = v.grp||v.group||'';
+    const grp   = v.grp||v.group||'';
+    const route = v.route||'';
     if(grp==='hyper') return true;
-    if(grp==='alex' && (v.branch||'').includes('هايبر')) return true;
-    if(grp==='alex' && (v.route||'').includes('هايبر')) return true;
+    if(grp==='alex' && route.includes('ثابت هايبر')) return true;
+    if(grp==='alex' && route.includes('هايبر')) return true;
     return false;
   };
 
   let visits   = (cachedData.visits||[]).filter(isHyperRow);
   let missing  = (cachedData.missing||[]).filter(isHyperRow);
-  let products = (cachedData.products||[]).filter(isHyperRow);
+  // استخدام product_snapshots عشان يشمل المنسقين الثابتين صح
+  let snapshots= (cachedData.snapshots||cachedData.products||[]);
+  let products = snapshots.filter(p=>{
+    const grp   = p.grp||p.group||'';
+    const route = p.route||'';
+    if(grp==='hyper') return true;
+    if(grp==='alex' && route.includes('هايبر')) return true;
+    return false;
+  });
 
-  // فلتر المدينة (القاهرة vs اسكندرية) — بناءً على grp مباشرة
+  // فلتر المدينة (القاهرة vs اسكندرية)
   if(grpFilter==='cairo'){
     visits   = visits.filter(v=>(v.grp||v.group)==='hyper');
     missing  = missing.filter(v=>(v.grp||v.group)==='hyper');
     products = products.filter(v=>(v.grp||v.group)==='hyper');
   } else if(grpFilter==='alex'){
-    visits   = visits.filter(v=>(v.grp||v.group)==='alex');
-    missing  = missing.filter(v=>(v.grp||v.group)==='alex');
-    products = products.filter(v=>(v.grp||v.group)==='alex');
+    visits   = visits.filter(v=>(v.grp||v.group)==='alex' && (v.route||'').includes('هايبر'));
+    missing  = missing.filter(v=>(v.grp||v.group)==='alex' && (v.route||'').includes('هايبر'));
+    products = products.filter(v=>(v.grp||v.group)==='alex' && (v.route||'').includes('هايبر'));
   }
 
   // فلتر التاريخ
@@ -8720,8 +8729,8 @@ function hsRenderMatrix(products){
   products.forEach(p=>{
     const snf = p.snf||p.fea||'غير محدد';
     if(!snfMap[snf]) snfMap[snf]={name:snf,shelf:0,stock:0,count:0};
-    snfMap[snf].shelf += (+p.shelf_qty||+p.sku_on||0);
-    snfMap[snf].stock += (+p.stock_qty||+p.sku_stock||0);
+    snfMap[snf].shelf += (+p.shelf_qty||+p.shelf||+p.sku_on||0);
+    snfMap[snf].stock += (+p.stock_qty||+p.stock||+p.sku_stock||0);
     snfMap[snf].count++;
   });
   const items = Object.values(snfMap).map(s=>({
