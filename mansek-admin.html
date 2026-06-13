@@ -19705,6 +19705,22 @@ CREATE POLICY "allow_all_users"    ON users    FOR ALL USING (true) WITH CHECK (
 // تقرير تواريخ الأصناف (Sales Expiry Report)
 // ══════════════════════════════════════════════════════════════
 let _serData = [];
+let _serFilterOptions = []; // كاش لـ combos {grp,route,fea,cat,snf} من RPC
+
+// المجموعات الصحيحة فقط (استثناء بيانات تالفة في عمود grp)
+const SER_VALID_GROUPS = ['giza','cairo','south','hyper','alex','tajmuat','middle_giza'];
+
+async function serFetchOptions(p_grp, p_fea, p_cat){
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_distinct_products_filters`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`},
+      body: JSON.stringify({p_grp:p_grp||null, p_fea:p_fea||null, p_cat:p_cat||null})
+    });
+    if(res.ok) return await res.json();
+  }catch(e){}
+  return [];
+}
 
 async function serInit(){
   // تحديد التاريخ الافتراضي (آخر 30 يوم)
@@ -19715,32 +19731,20 @@ async function serInit(){
   if(toEl && !toEl.value)   toEl.value   = today.toISOString().slice(0,10);
   if(fromEl && !fromEl.value) fromEl.value = from.toISOString().slice(0,10);
 
-  // جيب المجموعات
   const grpSel = document.getElementById('ser-grp');
-  if(grpSel && grpSel.options.length <= 1){
-    try{
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/products?select=grp&order=grp.asc`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Range':'0-1999'}});
-      if(res.ok){
-        const data = await res.json();
-        const grps = [...new Set(data.map(r=>r.grp).filter(Boolean))].sort();
-        grps.forEach(g=>{ const o=document.createElement('option'); o.value=g; o.textContent=GROUPS[g]?.label||g; grpSel.appendChild(o); });
-      }
-    }catch(e){}
-  }
-
-  // جيب الفئات (fea)
   const feaSel = document.getElementById('ser-fea');
-  if(feaSel && feaSel.options.length <= 1){
-    try{
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/products?select=fea&order=fea.asc`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Range':'0-1999'}});
-      if(res.ok){
-        const data = await res.json();
-        const feas = [...new Set(data.map(r=>r.fea).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
-        feas.forEach(f=>{ const o=document.createElement('option'); o.value=f; o.textContent=f; feaSel.appendChild(o); });
-      }
-    }catch(e){}
+  if(grpSel && grpSel.options.length <= 1){
+    const data = await serFetchOptions(null,null,null);
+    _serFilterOptions = data;
+
+    const grps = [...new Set(data.map(r=>r.grp).filter(g=>g && SER_VALID_GROUPS.includes(g)))]
+      .sort((a,b)=>(GROUPS[a]?.label||a).localeCompare(GROUPS[b]?.label||b,'ar'));
+    grps.forEach(g=>{ const o=document.createElement('option'); o.value=g; o.textContent=GROUPS[g]?.label||g; grpSel.appendChild(o); });
+
+    if(feaSel){
+      const feas = [...new Set(data.map(r=>r.fea).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+      feas.forEach(f=>{ const o=document.createElement('option'); o.value=f; o.textContent=f; feaSel.appendChild(o); });
+    }
   }
 
   await serLoadFilters();
@@ -19748,23 +19752,19 @@ async function serInit(){
 
 async function serLoadFilters(){
   const grp = document.getElementById('ser-grp')?.value||'';
-  // جيب خطوط السير
-  try{
-    let url = `${SUPABASE_URL}/rest/v1/products?select=route&order=route.asc`;
-    if(grp) url += `&grp=eq.${encodeURIComponent(grp)}`;
-    const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Range':'0-1999'}});
-    if(res.ok){
-      const data = await res.json();
-      const routes = [...new Set(data.map(r=>r.route).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
-      const routeSel = document.getElementById('ser-route');
-      if(routeSel){
-        routeSel.innerHTML = '<option value="">كل الخطوط</option>';
-        routes.forEach(r=>{ const o=document.createElement('option'); o.value=r; o.textContent=r; routeSel.appendChild(o); });
-      }
-    }
-  }catch(e){}
 
-  // جيب التصنيفات (cat) — حسب المجموعة + الفئة
+  const data = await serFetchOptions(grp||null, null, null);
+  _serFilterOptions = data;
+
+  // خطوط السير
+  const routes = [...new Set(data.map(r=>r.route).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+  const routeSel = document.getElementById('ser-route');
+  if(routeSel){
+    routeSel.innerHTML = '<option value="">كل الخطوط</option>';
+    routes.forEach(r=>{ const o=document.createElement('option'); o.value=r; o.textContent=r; routeSel.appendChild(o); });
+  }
+
+  // التصنيفات (cat) — حسب المجموعة + الفئة
   await serLoadCat();
 }
 
@@ -19775,25 +19775,21 @@ async function serOnFeaChange(){
 async function serLoadCat(){
   const grp = document.getElementById('ser-grp')?.value||'';
   const fea = document.getElementById('ser-fea')?.value||'';
-  try{
-    let url = `${SUPABASE_URL}/rest/v1/products?select=cat&order=cat.asc`;
-    if(grp) url += `&grp=eq.${encodeURIComponent(grp)}`;
-    if(fea) url += `&fea=eq.${encodeURIComponent(fea)}`;
-    const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Range':'0-1999'}});
-    if(res.ok){
-      const data = await res.json();
-      const cats = [...new Set(data.map(r=>r.cat).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
-      const catSel = document.getElementById('ser-cat');
-      if(catSel){
-        const current = catSel.value;
-        catSel.innerHTML = '<option value="">كل التصنيفات</option>';
-        cats.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; catSel.appendChild(o); });
-        if(cats.includes(current)) catSel.value = current;
-      }
-    }
-  }catch(e){}
 
-  // جيب الأصناف
+  let data = _serFilterOptions;
+  if(fea){
+    data = await serFetchOptions(grp||null, fea, null);
+  }
+
+  const cats = [...new Set(data.map(r=>r.cat).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+  const catSel = document.getElementById('ser-cat');
+  if(catSel){
+    const current = catSel.value;
+    catSel.innerHTML = '<option value="">كل التصنيفات</option>';
+    cats.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; catSel.appendChild(o); });
+    if(cats.includes(current)) catSel.value = current;
+  }
+
   await serLoadSnf();
 }
 
@@ -19802,25 +19798,23 @@ async function serFilterCat(){
 }
 
 async function serLoadSnf(){
-  const grp   = document.getElementById('ser-grp')?.value||'';
-  const fea   = document.getElementById('ser-fea')?.value||'';
-  const cat   = document.getElementById('ser-cat')?.value||'';
-  try{
-    let url = `${SUPABASE_URL}/rest/v1/products?select=snf&order=snf.asc`;
-    if(grp) url += `&grp=eq.${encodeURIComponent(grp)}`;
-    if(fea) url += `&fea=eq.${encodeURIComponent(fea)}`;
-    if(cat) url += `&cat=eq.${encodeURIComponent(cat)}`;
-    const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Range':'0-1999'}});
-    if(res.ok){
-      const data = await res.json();
-      const snfs = [...new Set(data.map(r=>r.snf).filter(Boolean))].sort();
-      const snfSel = document.getElementById('ser-snf');
-      if(snfSel){
-        snfSel.innerHTML = '<option value="">كل الأصناف</option>';
-        snfs.forEach(s=>{ const o=document.createElement('option'); o.value=s; o.textContent=s; snfSel.appendChild(o); });
-      }
-    }
-  }catch(e){}
+  const grp = document.getElementById('ser-grp')?.value||'';
+  const fea = document.getElementById('ser-fea')?.value||'';
+  const cat = document.getElementById('ser-cat')?.value||'';
+
+  let data;
+  if(fea || cat){
+    data = await serFetchOptions(grp||null, fea||null, cat||null);
+  } else {
+    data = _serFilterOptions;
+  }
+
+  const snfs = [...new Set(data.map(r=>r.snf).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+  const snfSel = document.getElementById('ser-snf');
+  if(snfSel){
+    snfSel.innerHTML = '<option value="">كل الأصناف</option>';
+    snfs.forEach(s=>{ const o=document.createElement('option'); o.value=s; o.textContent=s; snfSel.appendChild(o); });
+  }
 }
 
 async function serLoad(){
