@@ -19871,20 +19871,15 @@ async function serInit(){
   }
 
   const grpSel = document.getElementById('ser-grp');
-  const feaSel = document.getElementById('ser-fea');
   if(grpSel && grpSel.options.length <= 1){
-    const data = await serFetchOptions(null,null,null);
-    _serFilterOptions = data;
-
-    const grpRows = await serFetchGroups();
-    const grps = [...new Set(grpRows.map(r=>r.grp).filter(g=>g && SER_VALID_GROUPS.includes(g)))]
-      .sort((a,b)=>(GROUPS[a]?.label||a).localeCompare(GROUPS[b]?.label||b,'ar'));
-    grps.forEach(g=>{ const o=document.createElement('option'); o.value=g; o.textContent=GROUPS[g]?.label||g; grpSel.appendChild(o); });
-
-    if(feaSel){
-      const feas = [...new Set(data.map(r=>r.fea).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
-      feas.forEach(f=>{ const o=document.createElement('option'); o.value=f; o.textContent=f; feaSel.appendChild(o); });
-    }
+    try{
+      const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/product_snapshots?select=grp&limit=5000`,{headers:H});
+      const data = res.ok ? await res.json() : [];
+      const grps = [...new Set((Array.isArray(data)?data:[]).map(r=>r.grp).filter(Boolean))]
+        .sort((a,b)=>(GROUPS[a]?.label||a).localeCompare(GROUPS[b]?.label||b,'ar'));
+      grps.forEach(g=>{ const o=document.createElement('option'); o.value=g; o.textContent=GROUPS[g]?.label||g; grpSel.appendChild(o); });
+    }catch(e){}
   }
 
   await serLoadFilters();
@@ -19900,35 +19895,41 @@ async function serLoadBranches(){
   const branchSel = document.getElementById('ser-branch');
   if(!branchSel) return;
   branchSel.innerHTML = '<option value="">كل الفروع</option>';
-  if(!route && !grp) return;
 
   try{
-    const grbData = await serFetchGroupsRoutesBranches();
-    let filtered = grbData;
-    if(grp)   filtered = filtered.filter(r=>r.grp===grp);
-    if(route) filtered = filtered.filter(r=>r.route===route);
-    const branches = [...new Set(filtered.map(r=>r.branch_name).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    let url = `${SUPABASE_URL}/rest/v1/product_snapshots?select=branch&limit=5000`;
+    if(grp)   url += `&grp=eq.${encodeURIComponent(grp)}`;
+    if(route) url += `&route=eq.${encodeURIComponent(route)}`;
+    const res = await fetch(url,{headers:H});
+    const data = res.ok ? await res.json() : [];
+    const branches = [...new Set((Array.isArray(data)?data:[]).map(r=>r.branch).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
     branches.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=b; branchSel.appendChild(o); });
   }catch(e){}
 }
 
 async function serLoadFilters(){
   const grp = document.getElementById('ser-grp')?.value||'';
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
 
-  const data = await serFetchOptions(grp||null, null, null);
-  _serFilterOptions = data;
+  // جيب خطوط السير من product_snapshots
+  let routeUrl = `${SUPABASE_URL}/rest/v1/product_snapshots?select=route&limit=5000`;
+  if(grp) routeUrl += `&grp=eq.${encodeURIComponent(grp)}`;
+  try{
+    const res = await fetch(routeUrl,{headers:H});
+    const data = res.ok ? await res.json() : [];
+    const routes = [...new Set((Array.isArray(data)?data:[]).map(r=>r.route).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+    const routeSel = document.getElementById('ser-route');
+    if(routeSel){
+      const curRoute = routeSel.value;
+      routeSel.innerHTML = '<option value="">كل الخطوط</option>';
+      routes.forEach(r=>{ const o=document.createElement('option'); o.value=r; o.textContent=r; routeSel.appendChild(o); });
+      if(routes.includes(curRoute)) routeSel.value=curRoute;
+    }
+    // أعد تحميل الفروع
+    await serLoadBranches();
+  }catch(e){}
 
-  // خطوط السير — من get_groups_routes_branches (بدون LIMIT) مفلترة بالمجموعة المختارة
-  const grbData = await serFetchGroupsRoutesBranches();
-  const filteredGrb = grp ? grbData.filter(r=>r.grp===grp) : grbData;
-  const routes = [...new Set(filteredGrb.map(r=>r.route).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
-  const routeSel = document.getElementById('ser-route');
-  if(routeSel){
-    routeSel.innerHTML = '<option value="">كل الخطوط</option>';
-    routes.forEach(r=>{ const o=document.createElement('option'); o.value=r; o.textContent=r; routeSel.appendChild(o); });
-  }
-
-  // التصنيفات (cat) — حسب المجموعة + الفئة
   await serLoadCat();
 }
 
@@ -20005,17 +20006,15 @@ async function serLoad(){
   }
 
   try{
-    let url = `${SUPABASE_URL}/rest/v1/products?select=*&order=snf.asc,branch.asc`;
+    let url = `${SUPABASE_URL}/rest/v1/product_snapshots?select=snf,branch,route,grp,shelf_qty,stock_qty,snapshot_date&order=snf.asc,branch.asc&limit=5000`;
     if(grp)    url += `&grp=eq.${encodeURIComponent(grp)}`;
     if(route)  url += `&route=eq.${encodeURIComponent(route)}`;
     if(branch) url += `&branch=eq.${encodeURIComponent(branch)}`;
-    if(fea)    url += `&fea=eq.${encodeURIComponent(fea)}`;
-    if(cat)    url += `&cat=eq.${encodeURIComponent(cat)}`;
-    if(snf)   url += `&snf=eq.${encodeURIComponent(snf)}`;
-    if(from)  url += `&created_at=gte.${from}T00:00:00`;
-    if(to)    url += `&created_at=lte.${to}T23:59:59`;
+    if(snf)    url += `&snf=eq.${encodeURIComponent(snf)}`;
+    if(from)   url += `&snapshot_date=gte.${from}`;
+    if(to)     url += `&snapshot_date=lte.${to}`;
 
-    const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Range':'0-4999'}});
+    const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     if(!res.ok){ tbody.innerHTML=`<tr><td colspan="9" style="text-align:center;padding:30px;color:#E65100">خطأ في جلب البيانات</td></tr>`; return; }
     const data = await res.json();
     _serData = data;
@@ -20036,8 +20035,7 @@ async function serLoad(){
 
     const now = new Date();
     tbody.innerHTML = data.map((r,idx)=>{
-      const shelfStatus = serExpiryStatus(r.date_shelf);
-      const stockStatus = serExpiryStatus(r.date_stock);
+      const snapStatus = serExpiryStatus(r.snapshot_date);
       const rowBg = idx%2===0?'#fff':'#FAF6EE';
       return `<tr style="background:${rowBg};border-bottom:1px solid #F0E8DE">
         <td style="padding:8px;color:#aaa;text-align:right">${idx+1}</td>
@@ -20046,9 +20044,8 @@ async function serLoad(){
         <td style="padding:8px;color:#7B5C2A">${r.route||'—'}</td>
         <td style="padding:8px;text-align:center;font-weight:700;color:#1A5276">${r.shelf_qty||0}</td>
         <td style="padding:8px;text-align:center;font-weight:700;color:#145A32">${r.stock_qty||0}</td>
-        <td style="padding:8px;text-align:center">${r.date_shelf ? `<span style="background:${shelfStatus.bg};color:${shelfStatus.color};padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${r.date_shelf}</span>` : '—'}</td>
-        <td style="padding:8px;text-align:center">${r.date_stock ? `<span style="background:${stockStatus.bg};color:${stockStatus.color};padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${r.date_stock}</span>` : '—'}</td>
-        <td style="padding:8px;text-align:center">${shelfStatus.label ? `<span style="background:${shelfStatus.bg};color:${shelfStatus.color};padding:2px 6px;border-radius:5px;font-size:10px">${shelfStatus.label}</span>` : '—'}</td>
+        <td style="padding:8px;text-align:center" colspan="2">${r.snapshot_date ? `<span style="background:${snapStatus.bg};color:${snapStatus.color};padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${r.snapshot_date}</span>` : '—'}</td>
+        <td style="padding:8px;text-align:center">${snapStatus.label ? `<span style="background:${snapStatus.bg};color:${snapStatus.color};padding:2px 6px;border-radius:5px;font-size:10px">${snapStatus.label}</span>` : '—'}</td>
       </tr>`;
     }).join('');
   }catch(e){
