@@ -1619,13 +1619,19 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
 
         <!-- الفرع — تشيك بوكس ديناميكي -->
         <div style="margin-bottom:10px">
+          <!-- فلتر خط السير -->
+          <label class="form-lbl">خط السير</label>
+          <select id="rpt-route" onchange="rptOnRouteChange()" style="width:100%;margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
+            <option value="all">كل خطوط السير</option>
+          </select>
+
           <label class="form-lbl">الفروع</label>
           <div style="display:flex;gap:5px;margin-bottom:5px">
             <input type="text" id="rpt-branch-search" placeholder="🔍 بحث عن فرع..." oninput="rptFilterBranchCbs()" style="flex:1;font-size:12px"/>
             <button onclick="rptSelectAllBranches(true)" style="padding:4px 8px;background:#E8F5E9;color:#1A7A4A;border:1px solid #A5D6A7;border-radius:6px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif">كل</button>
             <button onclick="rptSelectAllBranches(false)" style="padding:4px 8px;background:#FFEBEE;color:#C0392B;border:1px solid #FFCDD2;border-radius:6px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif">مسح</button>
           </div>
-          <div id="rpt-branch-cbs" style="max-height:130px;overflow-y:auto;display:flex;flex-wrap:wrap;gap:4px;padding:4px;border:1px solid var(--border);border-radius:8px;background:#FDF8F0">
+          <div id="rpt-branch-cbs" style="max-height:160px;overflow-y:auto;display:flex;flex-wrap:wrap;gap:4px;padding:4px;border:1px solid var(--border);border-radius:8px;background:#FDF8F0">
             <div style="color:var(--text2);font-size:12px;padding:4px">اختر مجموعة أولاً...</div>
           </div>
         </div>
@@ -1656,6 +1662,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
           <button class="btn" onclick="rptExport()" id="rpt-btn"
             style="flex:2;background:linear-gradient(135deg,#8B5A2B,#B97837);color:#fff">
             <i class="ti ti-file-download"></i> تصدير Excel
+          </button>
+          <button class="btn" onclick="rptExportPDF()" id="rpt-pdf-btn"
+            style="flex:2;background:linear-gradient(135deg,#7B1500,#C0392B);color:#fff">
+            <i class="ti ti-file-type-pdf"></i> تصدير PDF
           </button>
         </div>
       </div>
@@ -5901,14 +5911,37 @@ async function rptLoadBranchCbs(){
   const grps=selGrps.length?selGrps:(cu?.groups||[]);
   if(!grps.length) return;
   const container=document.getElementById('rpt-branch-cbs');
+  const routeSel=document.getElementById('rpt-route');
   container.innerHTML='<div style="font-size:11px;color:var(--text2);padding:4px">جاري تحميل الفروع...</div>';
   try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&select=branch&order=branch.asc`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    // جيب الفروع من route_assignments
+    let url=`${SUPABASE_URL}/rest/v1/route_assignments?select=branch_name,route,grp&grp=in.(${grps.join(',')})&order=route.asc,branch_name.asc&limit=2000`;
+    const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     const data=await res.json();
-    _rptAllBranches=[...new Set((Array.isArray(data)?data:[]).map(x=>x.branch).filter(Boolean))].sort();
+    const rows=Array.isArray(data)?data:[];
+
+    // ملى قائمة خطوط السير
+    const routes=[...new Set(rows.map(r=>r.route).filter(Boolean))].sort();
+    if(routeSel){
+      const curRoute=routeSel.value||'all';
+      routeSel.innerHTML='<option value="all">كل خطوط السير</option>'
+        +routes.map(r=>`<option value="${r.replace(/"/g,'&quot;')}" ${r===curRoute?'selected':''}>${r}</option>`).join('');
+    }
+
+    // فلتر الفروع بخط السير المختار
+    const selRoute=routeSel?.value||'all';
+    const filtered=selRoute==='all'?rows:rows.filter(r=>r.route===selRoute);
+    _rptAllBranches=[...new Set(filtered.map(x=>x.branch_name).filter(Boolean))].sort();
     rptRenderBranchCbs(_rptAllBranches);
   }catch(e){container.innerHTML='<div style="color:#C0392B;font-size:11px">تعذر التحميل</div>';}
+}
+
+function rptOnRouteChange(){
+  // إعادة فلترة الفروع بناءً على الخط المختار
+  const routeSel=document.getElementById('rpt-route');
+  const selRoute=routeSel?.value||'all';
+  // نعيد تحميل عشان نفلتر
+  rptLoadBranchCbs();
 }
 
 function rptRenderBranchCbs(branches){
@@ -5940,6 +5973,33 @@ function rptGetSelBranches(){
 function rptGetSelGrps(){
   const sel=[...document.querySelectorAll('.rpt-grp-cb:checked')].map(c=>c.value).filter(v=>v!=='all');
   return sel.length?sel:(cu?.groups||[]);
+}
+
+async function rptFetchData(){
+  // wrapper لاستخدامها في PDF و Excel
+  const grps    = rptGetSelGrps();
+  const branches= rptGetSelBranches();
+  const rep     = document.getElementById('rpt-rep')?.value.trim()||'';
+  const from    = document.getElementById('rpt-from')?.value||'';
+  const to      = document.getElementById('rpt-to')?.value||'';
+
+  let url=`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&select=*&order=branch.asc,snf.asc&limit=5000`;
+  if(rep)  url+=`&name=eq.${encodeURIComponent(rep)}`;
+  if(from) url+=`&created_at=gte.${from}T00:00:00`;
+  if(to)   url+=`&created_at=lte.${to}T23:59:59`;
+
+  const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+  let rows=await res.json(); if(!Array.isArray(rows)) rows=[];
+  if(branches.length) rows=rows.filter(r=>branches.includes(r.branch));
+
+  const selGrpNames=[...document.querySelectorAll('.rpt-grp-cb:checked')].map(c=>c.value==='all'?'الكل':GROUPS[c.value]?.label||c.value).join(' · ')||'الكل';
+  const routeEl=document.getElementById('rpt-route');
+  const data={
+    منطقة: selGrpNames,
+    من: from?new Date(from).toLocaleDateString('ar-EG',{day:'2-digit',month:'2-digit',year:'numeric'}):'—',
+    إلى: to?new Date(to).toLocaleDateString('ar-EG',{day:'2-digit',month:'2-digit',year:'numeric'}):'—',
+  };
+  return {rows, data};
 }
 
 async function rptFetch(){
@@ -6199,9 +6259,88 @@ function rptGenerateExcel(data){
   document.getElementById('rpt-status').textContent=`✅ تم تصدير ${detailRows.length} صنف من ${new Set(detailRows.map(r=>r.branch)).size} فرع`;
 }
 // ══════════════════════════════════════════════════════════════
+async function rptExportPDF(){
+  const btn=document.getElementById('rpt-pdf-btn');
+  if(btn){btn.disabled=true;btn.innerHTML='<i class="ti ti-loader"></i> جاري...';}
+  try{
+    const {rows,data}=await rptFetchData();
+    if(!rows||!rows.length){
+      document.getElementById('rpt-status').textContent='⚠️ لا توجد بيانات';
+      return;
+    }
 
-// ══════════════════════════════════════════════════════════════
-// SALES ROUTES — خطوط سير مناديب البيع
+    const grpsMap={giza:'الجيزة',cairo:'وسط القاهرة',south:'جنوب وشرق',tajmuat:'التجمعات',hyper:'الهايبر',alex:'الإسكندرية'};
+    const now=new Date().toLocaleString('ar-EG');
+    const routeEl=document.getElementById('rpt-route');
+    const routeLbl=routeEl?.options[routeEl.selectedIndex]?.text||'كل خطوط السير';
+
+    // تجميع بالفرع
+    const byBranch={};
+    rows.forEach(r=>{
+      const k=r.branch||'غير محدد';
+      if(!byBranch[k]) byBranch[k]={branch:k,grp:r.grp,route:r.route||'',items:0,shelf:0,stock:0};
+      byBranch[k].items++;
+      byBranch[k].shelf+=+r.shelf_qty||0;
+      byBranch[k].stock+=+r.stock_qty||0;
+    });
+
+    let tRows='';
+    Object.values(byBranch).sort((a,b)=>a.branch.localeCompare(b.branch)).forEach((r,i)=>{
+      const bg=i%2===0?'#fff':'#fdf5ee';
+      tRows+=`<tr style="background:${bg}">
+        <td style="padding:5px 8px">${r.branch}</td>
+        <td style="padding:5px 8px;color:#555">${r.route||'—'}</td>
+        <td style="padding:5px 8px;text-align:center;font-weight:700">${r.items}</td>
+        <td style="padding:5px 8px;text-align:center">${r.shelf}</td>
+        <td style="padding:5px 8px;text-align:center">${r.stock}</td>
+      </tr>`;
+    });
+
+    const html=`<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8">
+    <title>تقرير الأصناف</title>
+    <style>
+      *{box-sizing:border-box}
+      body{font-family:Arial,sans-serif;font-size:11px;direction:rtl;margin:0;padding:16px}
+      .header{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3A0800,#8B5A2B);color:#F5EDE0;padding:14px 20px;border-radius:10px;margin-bottom:14px}
+      .header-title{font-size:16px;font-weight:700}
+      .header-sub{font-size:10px;opacity:.8;margin-top:3px}
+      .info-bar{display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+      .info-bar span{background:#fdf5ee;border:1px solid #e8d5b0;padding:3px 10px;border-radius:20px;font-size:10px}
+      table{width:100%;border-collapse:collapse;font-size:10px}
+      th{background:#3A0800;color:#F5EDE0;padding:6px 8px;text-align:right;font-weight:700}
+      td{border-bottom:.5px solid #f0e8e0;text-align:right}
+      .footer{margin-top:14px;text-align:center;font-size:9px;color:#aaa}
+      @media print{body{padding:0}}
+    </style></head><body>
+    <div class="header">
+      <div>
+        <div class="header-title">📦 تقرير الأصناف</div>
+        <div class="header-sub">الطحان جولدن دايتس — منظومة مشرف البيع</div>
+      </div>
+      <div style="text-align:left;font-size:10px;opacity:.8">${now}</div>
+    </div>
+    <div class="info-bar">
+      <span>📅 من: ${data.من||'—'} إلى: ${data.إلى||'—'}</span>
+      <span>📍 ${data.منطقة||'—'}</span>
+      <span>🛣️ ${routeLbl}</span>
+      <span>📊 ${rows.length} صنف | ${Object.keys(byBranch).length} فرع</span>
+    </div>
+    <table>
+      <thead><tr><th>الفرع</th><th>خط السير</th><th>عدد الأصناف</th><th>رصيد الرف</th><th>رصيد المخزن</th></tr></thead>
+      <tbody>${tRows}</tbody>
+    </table>
+    <div class="footer">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
+    <script>window.onload=()=>window.print();<\/script>
+    </body></html>`;
+
+    const w=window.open('','_blank'); w.document.write(html); w.document.close();
+    document.getElementById('rpt-status').textContent=`✅ تم تصدير ${rows.length} صنف من ${Object.keys(byBranch).length} فرع`;
+  }catch(e){
+    document.getElementById('rpt-status').textContent='❌ خطأ في التصدير';
+  }finally{
+    if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-file-type-pdf"></i> تصدير PDF';}
+  }
+}
 // ══════════════════════════════════════════════════════════════
 const SALES_ROUTES_DATA = [
   {route:'الهايبر ماركت',sector:'الهايبر ماركت',grp:'hyper',branches:['الهوارى ماركت - ميدان لبنان','سبينيس مول العرب','كارفور C F C','كارفور الشروق','كارفور العبور','كارفور الماظه','كارفور المعادى','كارفور داندى','كارفور مدينتى','كارفور مول مصر','هايبر وان - العاشر من رمضان','هايبر وان - مدينة بدر','هايبر وان - هايبر زايد','هايبر وان - هايبر سفنكس','جمله ماركت المنتزة','جمله ماركت جناكليس','كارفور سيتي سنتر اسكندرية','كارفور سيتي لايت']},
