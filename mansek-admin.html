@@ -3025,25 +3025,8 @@ h2,h3{color:#2C1F0A}
             </div>
 
             <!-- جدول الخطط -->
-            <div class="tbl-wrap">
-              <table>
-                <thead>
-                  <tr style="background:linear-gradient(135deg,#4B3C1A,#2C1F0A)">
-                    <th style="color:#EDE5D8">#</th>
-                    <th style="color:#EDE5D8">المشرف</th>
-                    <th style="color:#EDE5D8">القطاع</th>
-                    <th style="color:#EDE5D8">الأسبوع</th>
-                    <th style="color:#A8D5B5">الهدف (ج)</th>
-                    <th style="color:#A8C8F0">المحقق (ج)</th>
-                    <th style="color:#FFD49A">الزيارات</th>
-                    <th style="color:#EDE5D8">الحالة</th>
-                    <th style="color:#EDE5D8">إجراءات</th>
-                  </tr>
-                </thead>
-                <tbody id="spp-plans-tbody">
-                  <tr><td colspan="9" style="text-align:center;padding:2rem;color:#aaa">اضغط تحديث لتحميل البيانات</td></tr>
-                </tbody>
-              </table>
+            <div id="spp-plans-container">
+              <div style="text-align:center;padding:2rem;color:#aaa">اضغط تحديث لتحميل البيانات</div>
             </div>
           </div>
 
@@ -11482,17 +11465,15 @@ function initSppAchMonth(){
 }
 
 async function loadSppPlans(){
-  const tbody = document.getElementById('spp-plans-tbody');
-  if(!tbody) return;
-  tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:2rem"><i class="ti ti-loader spin"></i> جارٍ التحميل...</td></tr>`;
+  const container = document.getElementById('spp-plans-container');
+  if(!container) return;
+  container.innerHTML = `<div style="text-align:center;padding:2rem"><i class="ti ti-loader spin"></i> جارٍ التحميل...</div>`;
 
   const week   = document.getElementById('spp-week-filter')?.value || 'current';
   const status = document.getElementById('spp-status-filter')?.value || 'all';
   const staff  = document.getElementById('spp-staff-filter')?.value || 'all';
 
-  // حساب نطاق التاريخ
   const today = new Date();
-  // الأسبوع يبدأ السبت
   const day = today.getDay();
   const diffToSat = day === 6 ? 0 : day + 1;
   const saturday = new Date(today); saturday.setDate(today.getDate() - diffToSat); saturday.setHours(0,0,0,0);
@@ -11523,32 +11504,168 @@ async function loadSppPlans(){
   document.getElementById('spp-stat-target').textContent    = _sppPlans.reduce((s,p)=>s+(+p.target_amount||0),0).toLocaleString('en-US');
 
   if(!_sppPlans.length){
-    tbody.innerHTML=`<tr><td colspan="9" style="text-align:center;padding:2rem;color:#aaa">لا توجد خطط في هذه الفترة</td></tr>`;
+    container.innerHTML=`<div style="text-align:center;padding:2rem;color:#aaa">لا توجد خطط في هذه الفترة</div>`;
     return;
   }
 
-  tbody.innerHTML = _sppPlans.map((p,i)=>{
-    const st = SPP_STATUS[p.status]||{label:p.status,color:'#888',bg:'#f5f5f5'};
-    const pct = p.target_amount>0 ? Math.round((p.achieved_amount/p.target_amount)*100) : 0;
-    return `<tr style="${i%2===0?'background:#FFFDF8':''}">
-      <td style="color:var(--text2)">${i+1}</td>
-      <td style="font-weight:700">${p.staff_name}</td>
-      <td style="font-size:11px">${p.sector||'—'}</td>
-      <td style="font-size:11px">${p.week_start} ← ${p.week_end}</td>
-      <td style="text-align:center;font-weight:700;color:#1565C0">${(+p.target_amount||0).toLocaleString('en-US')}</td>
-      <td style="text-align:center;font-weight:700;color:#1A7A4A">${(+p.achieved_amount||0).toLocaleString('en-US')}</td>
-      <td style="text-align:center">${p.actual_visits||0}/${p.target_visits||0}</td>
-      <td><span style="padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;background:${st.bg};color:${st.color}">${st.label}</span></td>
-      <td style="display:flex;gap:4px">
-        <button class="btn btn-xs btn-ghost" onclick="sppViewPlan('${p.id}')"><i class="ti ti-eye"></i></button>
-        ${p.status==='submitted'?`
-          <button class="btn btn-xs" style="background:#E8F5E9;color:#1A7A4A" onclick="sppApprovePlan('${p.id}')"><i class="ti ti-check"></i> اعتماد</button>
-          <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="sppRejectPlan('${p.id}')"><i class="ti ti-x"></i> رفض</button>
-        `:''}
-        <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="sppDeletePlan('${p.id}','${p.staff_name}')"><i class="ti ti-trash"></i></button>
-      </td>
-    </tr>`;
+  // جيب كل البنود دفعة واحدة
+  const ids = _sppPlans.map(p=>`"${p.id}"`).join(',');
+  let allItems = [];
+  try{
+    const iRes = await fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items?plan_id=in.(${ids})&select=*&order=visit_date.asc&limit=5000`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    allItems = iRes.ok ? await iRes.json().catch(()=>[]) : [];
+  }catch(e){}
+
+  container.innerHTML = _sppPlans.map(p => sppPlanTable(p, allItems)).join('');
+}
+
+function sppPlanTable(plan, allItems){
+  const items = allItems.filter(it=>it.plan_id===plan.id);
+  const done  = items.filter(it=>it.visit_status==='done').length;
+  const total = items.length;
+  const pct   = total ? Math.round(done/total*100) : 0;
+  const pctClr= pct>=80?'#1A7A4A':pct>=50?'#E65100':'#B71C1C';
+
+  const st = SPP_STATUS[plan.status]||{label:plan.status,color:'#888',bg:'#f5f5f5'};
+
+  // جمع الأيام الفريدة وترتيبها
+  const datesSet = new Set(items.map(it=>it.visit_date).filter(Boolean));
+  const dates = [...datesSet].sort();
+
+  const DAYS_AR=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+  const fmtDate = d => {
+    const dt = new Date(d+'T00:00:00');
+    return dt.toLocaleDateString('en-US',{weekday:'short',day:'numeric',month:'short'});
+  };
+
+  // توزيع البنود على الأيام
+  const byDay = {};
+  dates.forEach(d=>{ byDay[d]=[]; });
+  items.forEach(it=>{ if(it.visit_date && byDay[it.visit_date]) byDay[it.visit_date].push(it); });
+
+  // هيدر الأيام
+  const dayHeaders = dates.map(d=>`<th style="padding:7px;min-width:110px;font-size:11px;background:#4B3C1A;color:#EDE5D8;text-align:center">${fmtDate(d)}</th>`).join('');
+
+  // صف الخطة المخططة
+  const plannedCells = dates.map(d=>{
+    const dayItems = byDay[d];
+    if(!dayItems.length) return `<td style="text-align:center;color:#aaa;font-size:12px">—</td>`;
+    return `<td style="padding:6px;vertical-align:top">
+      ${dayItems.map(it=>`<div style="font-size:11px;color:#2C1F0A;margin-bottom:3px;padding:3px 6px;background:#F5F0E8;border-radius:4px">${it.client_name||'—'}</div>`).join('')}
+    </td>`;
   }).join('');
+
+  // صف التفاصيل
+  const detailCells = dates.map(d=>{
+    const dayItems = byDay[d];
+    if(!dayItems.length) return `<td style="text-align:center;color:#aaa;font-size:12px">—</td>`;
+    return `<td style="padding:6px;vertical-align:top">
+      ${dayItems.map(it=>{
+        const parts=[];
+        if(it.rep_name)    parts.push(`<div style="font-size:10px;color:#1A7A4A;font-weight:700">👤 ${it.rep_name}</div>`);
+        if(it.area)        parts.push(`<div style="font-size:10px;color:#6B3D15">📍 ${it.area}</div>`);
+        if(it.purpose)     parts.push(`<div style="font-size:10px;color:#555">🎯 ${it.purpose}</div>`);
+        if(+it.planned_amount) parts.push(`<div style="font-size:10px;color:#1565C0;font-weight:700">💰 ${(+it.planned_amount).toLocaleString()} ج</div>`);
+        if(!parts.length) parts.push(`<div style="font-size:10px;color:#aaa">—</div>`);
+        return `<div style="margin-bottom:4px;padding:4px 6px;background:#EEF3FF;border-radius:4px;border-right:3px solid #1565C0">
+          <div style="font-size:11px;font-weight:700;color:#2C1F0A;margin-bottom:2px">${it.client_name||'—'}</div>
+          ${parts.join('')}
+        </div>`;
+      }).join('')}
+    </td>`;
+  }).join('');
+
+  // صف الإنجاز
+  const doneCells = dates.map(d=>{
+    const dayItems = byDay[d];
+    if(!dayItems.length) return `<td style="text-align:center;color:#aaa;font-size:12px">—</td>`;
+    return `<td style="padding:6px;vertical-align:top">
+      ${dayItems.map(it=>{
+        const isDone   = it.visit_status==='done';
+        const isSkip   = it.visit_status==='skipped';
+        const icon     = isDone?'✅':isSkip?'❌':'⏳';
+        const bg       = isDone?'#E8F5E9':isSkip?'#FFEBEE':'#FFF8E1';
+        const clr      = isDone?'#1A7A4A':isSkip?'#B71C1C':'#E65100';
+        const actual   = +it.actual_amount||0;
+        return `<div style="font-size:11px;color:${clr};margin-bottom:3px;padding:3px 6px;background:${bg};border-radius:4px">
+          ${icon} ${it.client_name||'—'}
+          ${actual?`<div style="font-size:10px;color:#1A7A4A;font-weight:700">✓ ${actual.toLocaleString()} ج</div>`:''}
+        </div>`;
+      }).join('')}
+    </td>`;
+  }).join('');
+
+  return `
+  <div class="card" style="margin-bottom:20px;padding:0;overflow:hidden;border:1px solid rgba(75,60,26,.2)">
+    <!-- هيدر الخطة -->
+    <div style="background:#4B3C1A;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <div>
+        <div style="font-size:15px;font-weight:900;color:#EDE5D8">📈 خطة المبيعات الأسبوعية — ${plan.staff_name}</div>
+        <div style="font-size:11px;color:rgba(237,229,216,.55);margin-top:2px">
+          الفترة: ${plan.week_start} — ${plan.week_end} &nbsp;|&nbsp; القطاع: ${plan.sector||'—'} &nbsp;|&nbsp; إنجاز: ${pct}%
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span style="background:${st.bg};color:${st.color};border:1px solid ${st.color}44;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700">${st.label}</span>
+        <span style="background:rgba(237,229,216,.1);color:#EDE5D8;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700">✅ ${pct}% إنجاز</span>
+        <span style="background:rgba(21,101,192,.2);color:#90CAF9;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700">💰 ${(+plan.target_amount||0).toLocaleString()} ج</span>
+        ${plan.status==='submitted'?`
+        <button onclick="sppApprovePlan('${plan.id}')"
+          style="background:rgba(26,122,74,.3);border:1.5px solid #1A7A4A;color:#A8D5B5;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:800;cursor:pointer;font-family:Cairo,sans-serif">
+          <i class="ti ti-check"></i> اعتماد
+        </button>
+        <button onclick="sppRejectPlan('${plan.id}')"
+          style="background:rgba(183,28,28,.3);border:1.5px solid #B71C1C;color:#FFCDD2;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:800;cursor:pointer;font-family:Cairo,sans-serif">
+          <i class="ti ti-x"></i> رفض
+        </button>`:''}
+        <button onclick="sppDeletePlan('${plan.id}','${plan.staff_name}')"
+          style="background:rgba(183,28,28,.2);border:1px solid rgba(183,28,28,.4);color:#FFCDD2;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
+          🗑️
+        </button>
+      </div>
+    </div>
+
+    ${dates.length ? `
+    <!-- الجدول الأسبوعي -->
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr>
+            <th style="padding:8px 12px;background:#6B3D15;color:#EDE5D8;min-width:90px;text-align:right">الأسبوع</th>
+            ${dayHeaders}
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="background:#FFFDF8">
+            <td style="padding:8px 12px;font-weight:700;color:#6B3D15;font-size:11px;white-space:nowrap;border-bottom:1px solid #E8D9C0">
+              الخطة المخططة
+              <div style="font-size:10px;color:#aaa;font-weight:400">${total} زيارة</div>
+            </td>
+            ${plannedCells}
+          </tr>
+          ${items.some(it=>it.rep_name||it.area||it.purpose||it.planned_amount)?`
+          <tr style="background:#F0F4FF">
+            <td style="padding:8px 12px;font-weight:700;color:#1565C0;font-size:11px;white-space:nowrap;border-bottom:1px solid #D0DCF0">
+              تفاصيل الزيارة
+              <div style="font-size:10px;color:#aaa;font-weight:400">عميل + منطقة + هدف</div>
+            </td>
+            ${detailCells}
+          </tr>`:''}
+          <tr style="background:#F8F5F0">
+            <td style="padding:8px 12px;font-weight:700;color:#1A7A4A;font-size:11px;white-space:nowrap">
+              ما تم إنجازه
+              <div style="font-size:10px;color:#aaa;font-weight:400">${done}/${total} — ${pct}%</div>
+              <div style="margin-top:4px;background:#E8E0D0;border-radius:99px;height:4px;width:60px;overflow:hidden">
+                <div style="height:4px;border-radius:99px;background:${pctClr};width:${pct}%"></div>
+              </div>
+            </td>
+            ${doneCells}
+          </tr>
+        </tbody>
+      </table>
+    </div>` : `<div style="padding:16px;text-align:center;color:#aaa;font-size:12px">لا توجد بنود في هذه الخطة</div>`}
+  </div>`;
 }
 
 async function loadSppAchievements(){

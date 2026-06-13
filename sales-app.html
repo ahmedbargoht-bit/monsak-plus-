@@ -6263,79 +6263,141 @@ async function rptExportPDF(){
   const btn=document.getElementById('rpt-pdf-btn');
   if(btn){btn.disabled=true;btn.innerHTML='<i class="ti ti-loader"></i> جاري...';}
   try{
-    const {rows,data}=await rptFetchData();
+    const {rows,meta}=await rptFetch();
     if(!rows||!rows.length){
       document.getElementById('rpt-status').textContent='⚠️ لا توجد بيانات';
+      if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-file-type-pdf"></i> تصدير PDF';}
       return;
     }
 
-    const grpsMap={giza:'الجيزة',cairo:'وسط القاهرة',south:'جنوب وشرق',tajmuat:'التجمعات',hyper:'الهايبر',alex:'الإسكندرية'};
-    const now=new Date().toLocaleString('ar-EG');
-    const routeEl=document.getElementById('rpt-route');
+    const now    = new Date().toLocaleString('ar-EG');
+    const supName= cu?.name || '—';
+    const routeEl= document.getElementById('rpt-route');
     const routeLbl=routeEl?.options[routeEl.selectedIndex]?.text||'كل خطوط السير';
+    const grpsMap= {giza:'الجيزة',cairo:'وسط القاهرة',south:'جنوب وشرق',tajmuat:'التجمعات',hyper:'الهايبر',alex:'الإسكندرية'};
 
-    // تجميع بالفرع
-    const byBranch={};
+    // جمع الأيام الفريدة وترتيبها
+    const datesSet = new Set();
+    rows.forEach(r=>{ if(r.created_at) datesSet.add(r.created_at.slice(0,10)); });
+    const dates = [...datesSet].sort();
+
+    // تجميع بالفرع → الصنف → التاريخ
+    const branchMap = {};
     rows.forEach(r=>{
-      const k=r.branch||'غير محدد';
-      if(!byBranch[k]) byBranch[k]={branch:k,grp:r.grp,route:r.route||'',items:0,shelf:0,stock:0};
-      byBranch[k].items++;
-      byBranch[k].shelf+=+r.shelf_qty||0;
-      byBranch[k].stock+=+r.stock_qty||0;
+      const br  = r.branch||'غير محدد';
+      const snf = r.snf||'—';
+      const dt  = r.created_at?.slice(0,10)||'';
+      if(!branchMap[br]) branchMap[br]={branch:br, snfs:{}, visitCount:0};
+      if(!branchMap[br].snfs[snf]) branchMap[br].snfs[snf]={};
+      if(!branchMap[br].snfs[snf][dt] || new Date(r.created_at)>new Date(branchMap[br].snfs[snf][dt].created_at)){
+        branchMap[br].snfs[snf][dt]=r;
+      }
     });
 
-    let tRows='';
-    Object.values(byBranch).sort((a,b)=>a.branch.localeCompare(b.branch)).forEach((r,i)=>{
-      const bg=i%2===0?'#fff':'#fdf5ee';
-      tRows+=`<tr style="background:${bg}">
-        <td style="padding:5px 8px">${r.branch}</td>
-        <td style="padding:5px 8px;color:#555">${r.route||'—'}</td>
-        <td style="padding:5px 8px;text-align:center;font-weight:700">${r.items}</td>
-        <td style="padding:5px 8px;text-align:center">${r.shelf}</td>
-        <td style="padding:5px 8px;text-align:center">${r.stock}</td>
-      </tr>`;
+    // احسب عدد الزيارات لكل فرع
+    const visitsByBranch={};
+    rows.forEach(r=>{
+      const br=r.branch||'';
+      const dt=r.created_at?.slice(0,10)||'';
+      if(br&&dt) visitsByBranch[br+'|'+dt]=true;
+    });
+    Object.keys(branchMap).forEach(br=>{
+      branchMap[br].visitCount=Object.keys(visitsByBranch).filter(k=>k.startsWith(br+'|')).length;
+    });
+
+    // فورمات التاريخ للهيدر
+    const fmtDate=d=>{
+      const dt=new Date(d);
+      return dt.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    };
+
+    // بناء HTML
+    let branchSections='';
+    Object.values(branchMap).sort((a,b)=>a.branch.localeCompare(b.branch,'ar')).forEach(br=>{
+      const snfList=Object.keys(br.snfs).sort();
+      // هيدر أعمدة الأيام
+      const dayHeaders=dates.map(d=>`<th colspan="2" style="background:#6B3D15;color:#EDE5D8;padding:5px;text-align:center;font-size:9px;min-width:60px">${fmtDate(d)}</th>`).join('');
+      const subHeaders=dates.map(()=>`<th style="background:#8B5A2B;color:#EDE5D8;padding:3px 4px;font-size:8px;text-align:center">رف</th><th style="background:#8B5A2B;color:#EDE5D8;padding:3px 4px;font-size:8px;text-align:center">مخزن</th>`).join('');
+
+      let snfRows='';
+      snfList.forEach((snf,i)=>{
+        const bg=i%2===0?'#fff':'#fdf5ee';
+        const cells=dates.map(d=>{
+          const r=br.snfs[snf][d];
+          if(!r) return '<td style="text-align:center;color:#ccc;font-size:9px">—</td><td style="text-align:center;color:#ccc;font-size:9px">—</td>';
+          const shelf=+r.shelf_qty||0;
+          const stock=+r.stock_qty||0;
+          const sc=shelf>0?'#C0392B':'#555';
+          return `<td style="text-align:center;font-weight:700;color:${sc};font-size:9px">${shelf||'—'}</td>
+                  <td style="text-align:center;color:#555;font-size:9px">${stock||'—'}</td>`;
+        }).join('');
+        snfRows+=`<tr style="background:${bg}">
+          <td style="padding:4px 6px;font-size:9px;max-width:160px">${snf}</td>
+          ${cells}
+        </tr>`;
+      });
+
+      branchSections+=`
+      <div style="margin-bottom:16px;page-break-inside:avoid">
+        <div style="background:#3A0800;color:#F5EDE0;padding:8px 12px;border-radius:6px 6px 0 0;display:flex;justify-content:space-between;align-items:center">
+          <span style="font-weight:700;font-size:12px">🏪 ${br.branch}</span>
+          <span style="font-size:10px;opacity:.75">${snfList.length} صنف · ${br.visitCount} زيارة</span>
+        </div>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:10px">
+            <thead>
+              <tr>
+                <th style="background:#4B3C1A;color:#EDE5D8;padding:5px 8px;text-align:right;min-width:140px;font-size:10px">الصنف</th>
+                ${dayHeaders}
+              </tr>
+              <tr>
+                <th style="background:#6B4C2A;color:#EDE5D8;padding:3px 8px;font-size:9px"></th>
+                ${subHeaders}
+              </tr>
+            </thead>
+            <tbody>${snfRows}</tbody>
+          </table>
+        </div>
+      </div>`;
     });
 
     const html=`<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8">
     <title>تقرير الأصناف</title>
     <style>
       *{box-sizing:border-box}
-      body{font-family:Arial,sans-serif;font-size:11px;direction:rtl;margin:0;padding:16px}
-      .header{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3A0800,#8B5A2B);color:#F5EDE0;padding:14px 20px;border-radius:10px;margin-bottom:14px}
-      .header-title{font-size:16px;font-weight:700}
-      .header-sub{font-size:10px;opacity:.8;margin-top:3px}
-      .info-bar{display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap}
-      .info-bar span{background:#fdf5ee;border:1px solid #e8d5b0;padding:3px 10px;border-radius:20px;font-size:10px}
-      table{width:100%;border-collapse:collapse;font-size:10px}
-      th{background:#3A0800;color:#F5EDE0;padding:6px 8px;text-align:right;font-weight:700}
-      td{border-bottom:.5px solid #f0e8e0;text-align:right}
-      .footer{margin-top:14px;text-align:center;font-size:9px;color:#aaa}
-      @media print{body{padding:0}}
+      body{font-family:Arial,sans-serif;font-size:10px;direction:rtl;margin:0;padding:12px}
+      .header{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3A0800,#8B5A2B);color:#F5EDE0;padding:12px 16px;border-radius:8px;margin-bottom:10px}
+      .info-bar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+      .info-bar span{background:#fdf5ee;border:1px solid #e8d5b0;padding:2px 8px;border-radius:20px;font-size:9px}
+      .footer{margin-top:12px;text-align:center;font-size:9px;color:#aaa;border-top:1px solid #e0d0c0;padding-top:8px}
+      td,th{border:0.5px solid #e8d9c0}
+      @media print{body{padding:0}@page{margin:10mm}}
     </style></head><body>
     <div class="header">
       <div>
-        <div class="header-title">📦 تقرير الأصناف</div>
-        <div class="header-sub">الطحان جولدن دايتس — منظومة مشرف البيع</div>
+        <div style="font-size:15px;font-weight:700">📦 تقرير الأصناف التفصيلي</div>
+        <div style="font-size:10px;opacity:.8;margin-top:3px">الطحان جولدن دايتس — منظومة مبيعات بلس</div>
       </div>
-      <div style="text-align:left;font-size:10px;opacity:.8">${now}</div>
+      <div style="text-align:left;font-size:9px;opacity:.8">${now}</div>
     </div>
     <div class="info-bar">
-      <span>📅 من: ${data.من||'—'} إلى: ${data.إلى||'—'}</span>
-      <span>📍 ${data.منطقة||'—'}</span>
+      <span>👤 مشرف البيع: <b>${supName}</b></span>
+      <span>📅 من: ${meta.من||'—'} إلى: ${meta.الى||'—'}</span>
+      <span>📍 ${meta.منطقة||'—'}</span>
       <span>🛣️ ${routeLbl}</span>
-      <span>📊 ${rows.length} صنف | ${Object.keys(byBranch).length} فرع</span>
+      <span>📊 ${rows.length} صنف | ${Object.keys(branchMap).length} فرع</span>
     </div>
-    <table>
-      <thead><tr><th>الفرع</th><th>خط السير</th><th>عدد الأصناف</th><th>رصيد الرف</th><th>رصيد المخزن</th></tr></thead>
-      <tbody>${tRows}</tbody>
-    </table>
-    <div class="footer">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
+    ${branchSections}
+    <div class="footer">
+      <b>مشرف البيع: ${supName}</b> &nbsp;|&nbsp; الطحان جولدن دايتس — Al Tahhan Golden Dates
+    </div>
     <script>window.onload=()=>window.print();<\/script>
     </body></html>`;
 
     const w=window.open('','_blank'); w.document.write(html); w.document.close();
-    document.getElementById('rpt-status').textContent=`✅ تم تصدير ${rows.length} صنف من ${Object.keys(byBranch).length} فرع`;
+    document.getElementById('rpt-status').textContent=`✅ تم تصدير ${rows.length} صنف من ${Object.keys(branchMap).length} فرع`;
   }catch(e){
+    console.error(e);
     document.getElementById('rpt-status').textContent='❌ خطأ في التصدير';
   }finally{
     if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-file-type-pdf"></i> تصدير PDF';}
@@ -9140,32 +9202,27 @@ async function sppViewDetail(id){
   const body = document.getElementById('spp-detail-body');
   const st = SPP_ST[plan.status]||{label:plan.status,color:'#888',bg:'#f5f5f5'};
   const pct = plan.target_amount>0 ? Math.round((plan.achieved_amount/plan.target_amount)*100) : 0;
+  const pctClr = pct>=80?'#1A7A4A':pct>=50?'#E65100':'#B71C1C';
 
   body.innerHTML=`
-    <div style="font-size:16px;font-weight:900;color:#1A3A5C;margin-bottom:4px">📋 تفاصيل الخطة</div>
-    <div style="font-size:11px;color:#8B6F47;margin-bottom:14px">${plan.week_start} ← ${plan.week_end}</div>
-    <span style="padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700;background:${st.bg};color:${st.color};display:inline-block;margin-bottom:14px">${st.label}</span>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px">
-      <div style="background:#F0F8FF;border-radius:10px;padding:12px;text-align:center">
-        <div style="font-size:18px;font-weight:900;color:#1565C0">${(+plan.target_amount||0).toLocaleString('ar-EG')}</div>
-        <div style="font-size:10px;color:#1565C0">الهدف (ج)</div>
+    <div style="font-size:16px;font-weight:900;color:#1A3A5C;margin-bottom:4px">📋 تفاصيل الخطة الأسبوعية</div>
+    <div style="font-size:11px;color:#8B6F47;margin-bottom:10px">${plan.week_start} ← ${plan.week_end}</div>
+    <span style="padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700;background:${st.bg};color:${st.color};display:inline-block;margin-bottom:12px">${st.label}</span>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
+      <div style="background:#F0F8FF;border-radius:10px;padding:10px;text-align:center">
+        <div style="font-size:16px;font-weight:900;color:#1565C0">${(+plan.target_amount||0).toLocaleString('ar-EG')}</div>
+        <div style="font-size:9px;color:#1565C0">الهدف (ج)</div>
       </div>
-      <div style="background:#F0FFF4;border-radius:10px;padding:12px;text-align:center">
-        <div style="font-size:18px;font-weight:900;color:#1A7A4A">${(+plan.achieved_amount||0).toLocaleString('ar-EG')}</div>
-        <div style="font-size:10px;color:#1A7A4A">المحقق (ج)</div>
+      <div style="background:#F0FFF4;border-radius:10px;padding:10px;text-align:center">
+        <div style="font-size:16px;font-weight:900;color:#1A7A4A">${(+plan.achieved_amount||0).toLocaleString('ar-EG')}</div>
+        <div style="font-size:9px;color:#1A7A4A">المحقق (ج)</div>
       </div>
-      <div style="background:#FFF8E1;border-radius:10px;padding:12px;text-align:center">
-        <div style="font-size:18px;font-weight:900;color:#E65100">${plan.target_visits||0}</div>
-        <div style="font-size:10px;color:#E65100">هدف الزيارات</div>
-      </div>
-      <div style="background:#F3E5F5;border-radius:10px;padding:12px;text-align:center">
-        <div style="font-size:18px;font-weight:900;color:#6A0DAD">${pct}%</div>
-        <div style="font-size:10px;color:#6A0DAD">نسبة الإنجاز</div>
+      <div style="background:#F5F0E8;border-radius:10px;padding:10px;text-align:center">
+        <div style="font-size:16px;font-weight:900;color:${pctClr}">${pct}%</div>
+        <div style="font-size:9px;color:${pctClr}">الإنجاز</div>
       </div>
     </div>
-    ${plan.notes?`<div style="background:#FFF8E1;border:1px solid #FFD54F;border-radius:8px;padding:10px;font-size:12px;margin-bottom:12px">📝 ${plan.notes}</div>`:''}
-    ${plan.approved_by?`<div style="background:#E8F5E9;border-radius:8px;padding:10px;font-size:12px;margin-bottom:12px;color:#1A7A4A">✅ اعتمد بواسطة: ${plan.approved_by}</div>`:''}
-    ${plan.reject_reason?`<div style="background:#FFEBEE;border-radius:8px;padding:10px;font-size:12px;margin-bottom:12px;color:#B71C1C">❌ سبب الرفض: ${plan.reject_reason}</div>`:''}
+    ${plan.notes?`<div style="background:#FFF8E1;border:1px solid #FFD54F;border-radius:8px;padding:8px;font-size:11px;margin-bottom:10px">📝 ${plan.notes}</div>`:''}
     <div id="spp-detail-items" style="text-align:center;padding:1rem;color:#aaa">⏳ جارٍ تحميل البنود...</div>`;
 
   document.getElementById('modal-spp-detail').style.display='block';
@@ -9174,23 +9231,98 @@ async function sppViewDetail(id){
   const items = await fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items?plan_id=eq.${id}&select=*&order=visit_date.asc`,
     {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]);
 
-  const stMap={planned:'⏳ مخطط',done:'✅ تم',skipped:'⏭️ تخطى'};
-  document.getElementById('spp-detail-items').outerHTML = items.length?`
-    <div style="font-size:13px;font-weight:700;color:#1A3A5C;margin-bottom:8px">📦 البنود (${items.length} عميل)</div>
-    <div style="display:flex;flex-direction:column;gap:6px">
-      ${items.map(it=>`
-        <div style="border:1.5px solid #E8D9C0;border-radius:10px;padding:10px;background:#FFFDF8">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <div style="font-size:13px;font-weight:700">${it.client_name||'—'}</div>
-            <span style="font-size:10px;color:#8B6F47">${stMap[it.visit_status]||it.visit_status}</span>
-          </div>
-          <div style="font-size:11px;color:#8B6F47;margin-top:4px">${it.area||''} ${it.visit_date?'• '+it.visit_date:''}</div>
-          <div style="display:flex;gap:8px;margin-top:6px;font-size:11px">
-            <span style="color:#1565C0">مخطط: ${(+it.planned_amount||0).toLocaleString('ar-EG')} ج</span>
-            <span style="color:#1A7A4A">فعلي: ${(+it.actual_amount||0).toLocaleString('ar-EG')} ج</span>
-          </div>
-        </div>`).join('')}
-    </div>` : `<div style="text-align:center;padding:1rem;color:#aaa">لا توجد بنود</div>`;
+  const detailEl = document.getElementById('spp-detail-items');
+  if(!detailEl) return;
+
+  if(!items.length){
+    detailEl.outerHTML=`<div style="text-align:center;padding:1rem;color:#aaa">لا توجد بنود</div>`;
+    return;
+  }
+
+  // جمع الأيام وترتيبها
+  const datesSet = new Set(items.map(it=>it.visit_date).filter(Boolean));
+  const dates = [...datesSet].sort();
+  const DAYS_AR=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+  const fmtDate = d => {
+    const dt = new Date(d+'T00:00:00');
+    return dt.toLocaleDateString('en-US',{weekday:'short',day:'numeric',month:'short'});
+  };
+
+  // توزيع البنود على الأيام
+  const byDay = {};
+  dates.forEach(d=>{ byDay[d]=[]; });
+  items.forEach(it=>{ if(it.visit_date && byDay[it.visit_date]) byDay[it.visit_date].push(it); });
+
+  // بناء الجدول الأسبوعي
+  let sectionsHtml = dates.map(date=>{
+    const dayItems = byDay[date];
+    const dayDone  = dayItems.filter(it=>it.visit_status==='done').length;
+    const dayTotal = dayItems.length;
+    const dayActual= dayItems.reduce((s,it)=>s+(+it.actual_amount||0),0);
+
+    return `<div style="margin-bottom:14px">
+      <!-- هيدر اليوم -->
+      <div style="background:linear-gradient(135deg,#1A3A5C,#0D2137);color:#fff;padding:8px 12px;border-radius:8px 8px 0 0;display:flex;justify-content:space-between;align-items:center">
+        <span style="font-weight:700;font-size:13px">📅 ${fmtDate(date)}</span>
+        <span style="font-size:10px;opacity:.8">${dayTotal} زيارة | تم: ${dayDone} | فعلي: ${dayActual.toLocaleString()} ج</span>
+      </div>
+      <!-- بنود اليوم -->
+      <div style="border:1.5px solid #E8D9C0;border-top:none;border-radius:0 0 8px 8px;overflow:hidden">
+        ${dayItems.map((it,i)=>{
+          const isDone   = it.visit_status==='done';
+          const isSkip   = it.visit_status==='skipped';
+          const stClr    = isDone?'#1A7A4A':isSkip?'#B71C1C':'#E65100';
+          const stBg     = isDone?'#E8F5E9':isSkip?'#FFEBEE':'#FFF8E1';
+          const stLabel  = isDone?'✅ تم':isSkip?'⏭️ تخطى':'⏳ مخطط';
+          const bg       = i%2===0?'#fff':'#FAF7F0';
+          return `<div style="padding:10px 12px;background:${bg};border-bottom:1px solid #F0EAE0">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+              <div>
+                <div style="font-size:13px;font-weight:700;color:#1A3A5C">${it.client_name||'—'}</div>
+                <div style="font-size:10px;color:#8B6F47;margin-top:2px">
+                  ${it.area?`📍 ${it.area}`:''} 
+                  ${it.purpose?`· 🎯 ${it.purpose}`:''}
+                  ${it.rep_name?`· 👤 ${it.rep_name}`:''}
+                </div>
+                <div style="font-size:11px;margin-top:4px">
+                  <span style="color:#1565C0;font-weight:700">مخطط: ${(+it.planned_amount||0).toLocaleString('ar-EG')} ج</span>
+                  ${isDone?`<span style="color:#1A7A4A;font-weight:700;margin-right:8px">فعلي: ${(+it.actual_amount||0).toLocaleString('ar-EG')} ج</span>`:''}
+                </div>
+              </div>
+              <span style="background:${stBg};color:${stClr};padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700;white-space:nowrap;flex-shrink:0">${stLabel}</span>
+            </div>
+            <!-- ملاحظات + تحديث -->
+            <div style="display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center">
+              <input type="text" id="note-${it.id}" value="${(it.notes||'').replace(/"/g,'&quot;')}" 
+                placeholder="أضف ملاحظة..."
+                style="padding:6px 8px;border:1.5px solid #ddd;border-radius:8px;font-family:Cairo,sans-serif;font-size:11px;width:100%;box-sizing:border-box"/>
+              <button onclick="saveDetailNote('${it.id}')"
+                style="padding:6px 10px;background:#1A3A5C;color:#fff;border:none;border-radius:8px;font-size:10px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif;white-space:nowrap">
+                💾 حفظ
+              </button>
+            </div>
+            ${it.notes?`<div style="font-size:10px;color:#8B6F47;margin-top:4px;padding:4px 6px;background:#FFF8E1;border-radius:4px">📝 ${it.notes}</div>`:''}
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }).join('');
+
+  detailEl.outerHTML = `<div>
+    <div style="font-size:12px;font-weight:700;color:#1A3A5C;margin-bottom:10px">📦 البنود (${items.length} زيارة في ${dates.length} يوم)</div>
+    ${sectionsHtml}
+  </div>`;
+}
+
+async function saveDetailNote(itemId){
+  const notes = document.getElementById('note-'+itemId)?.value||'';
+  await fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items?id=eq.${itemId}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({notes})
+  });
+  const btn = document.querySelector(`button[onclick="saveDetailNote('${itemId}')"]`);
+  if(btn){ btn.textContent='✅'; btn.style.background='#1A7A4A'; setTimeout(()=>{btn.textContent='💾 حفظ';btn.style.background='#1A3A5C';},2000); }
 }
 // ── تحديث المنجز وملاحظات الزيارة ──
 async function sppUpdateAchieved(planId){
@@ -9569,27 +9701,65 @@ async function tpViewDetail(id){
   const pct   = plan.target_amount>0?Math.round((plan.achieved_amount/plan.target_amount)*100):0;
   const pctColor = pct>=100?'#1A7A4A':pct>=70?'#E65100':'#B71C1C';
 
+  const SPP_ST_L = {
+    draft:            {label:'⏳ مسودة',                  color:'#8B6F47', bg:'#F5F0E8'},
+    submitted:        {label:'📤 بانتظار الاعتماد',       color:'#E65100', bg:'#FFF3E0'},
+    approved_manager: {label:'✅ معتمدة — بانتظار GM',    color:'#1565C0', bg:'#EEF4FF'},
+    approved:         {label:'🏆 معتمدة نهائياً',         color:'#1A7A4A', bg:'#E8F5E9'},
+    rejected:         {label:'❌ مرفوضة',                color:'#B71C1C', bg:'#FFEBEE'},
+  };
+  const st = SPP_ST_L[plan.status]||{label:plan.status,color:'#888',bg:'#f5f5f5'};
+
   body.innerHTML=`
-    <div style="font-size:16px;font-weight:900;color:#2C1F0A;margin-bottom:4px;margin-top:20px">📋 ${plan.staff_name}</div>
-    <div style="font-size:11px;color:#8B6F47;margin-bottom:12px">${plan.week_start} ← ${plan.week_end} · ${plan.sector||'—'}</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px">
-      <div style="background:#F0F8FF;border-radius:10px;padding:12px;text-align:center">
-        <div style="font-size:18px;font-weight:900;color:#1565C0">${(+plan.target_amount||0).toLocaleString('ar-EG')}</div>
-        <div style="font-size:10px;color:#1565C0">الهدف (ج)</div>
+    <!-- هيدر الخطة -->
+    <div style="background:linear-gradient(135deg,#1A3A5C,#0D2137);color:#fff;padding:14px 16px;border-radius:10px;margin-bottom:12px;margin-top:20px">
+      <div style="font-size:16px;font-weight:900">${plan.staff_name}</div>
+      <div style="font-size:11px;opacity:.75;margin-top:3px">${plan.sector||'—'} · ${plan.week_start} ← ${plan.week_end}</div>
+    </div>
+
+    <!-- KPIs -->
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
+      <div style="background:#F0F8FF;border-radius:10px;padding:10px;text-align:center">
+        <div style="font-size:16px;font-weight:900;color:#1565C0">${(+plan.target_amount||0).toLocaleString('ar-EG')}</div>
+        <div style="font-size:9px;color:#1565C0">الهدف (ج)</div>
       </div>
-      <div style="background:#F0FFF4;border-radius:10px;padding:12px;text-align:center">
-        <div style="font-size:18px;font-weight:900;color:#1A7A4A">${(+plan.achieved_amount||0).toLocaleString('ar-EG')}</div>
-        <div style="font-size:10px;color:#1A7A4A">المحقق (ج)</div>
+      <div style="background:#F0FFF4;border-radius:10px;padding:10px;text-align:center">
+        <div style="font-size:16px;font-weight:900;color:#1A7A4A">${(+plan.achieved_amount||0).toLocaleString('ar-EG')}</div>
+        <div style="font-size:9px;color:#1A7A4A">المحقق (ج)</div>
       </div>
-      <div style="background:#FFF8E1;border-radius:10px;padding:12px;text-align:center">
-        <div style="font-size:18px;font-weight:900;color:#E65100">${plan.target_visits||0}</div>
-        <div style="font-size:10px;color:#E65100">هدف الزيارات</div>
-      </div>
-      <div style="background:#F3E5F5;border-radius:10px;padding:12px;text-align:center">
-        <div style="font-size:18px;font-weight:900;color:${pctColor}">${pct}%</div>
-        <div style="font-size:10px;color:${pctColor}">الإنجاز</div>
+      <div style="background:#F5F0E8;border-radius:10px;padding:10px;text-align:center">
+        <div style="font-size:16px;font-weight:900;color:${pctColor}">${pct}%</div>
+        <div style="font-size:9px;color:${pctColor}">الإنجاز</div>
       </div>
     </div>
+
+    <!-- شريط التقدم -->
+    <div style="background:#E8E8E8;border-radius:99px;height:6px;margin-bottom:12px;overflow:hidden">
+      <div style="height:100%;width:${Math.min(pct,100)}%;background:${pctColor};border-radius:99px"></div>
+    </div>
+
+    <!-- الحالة + أزرار الاعتماد -->
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+      <span style="padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700;background:${st.bg};color:${st.color}">${st.label}</span>
+      ${plan.status==='submitted' && (cu?.level==='manager'||cu?.level==='gm') ? `
+        <button onclick="tpApprovePlan('${plan.id}','manager');this.closest('[style*=fixed]')?.querySelector('[onclick*=tpViewDetail]')?.click()"
+          style="flex:1;padding:8px 14px;background:#1A7A4A;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          ✅ اعتماد مدير البيع
+        </button>
+        <button onclick="tpRejectPlan('${plan.id}')"
+          style="padding:8px 14px;background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          ❌ رفض
+        </button>` : ''}
+      ${plan.status==='approved_manager' && cu?.level==='gm' ? `
+        <button onclick="tpApprovePlan('${plan.id}','gm')"
+          style="flex:1;padding:8px 14px;background:#1565C0;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          🏆 اعتماد GM
+        </button>` : ''}
+    </div>
+
+    ${plan.notes?`<div style="background:#FFF8E1;border:1px solid #FFD54F;border-radius:8px;padding:8px;font-size:11px;margin-bottom:10px">📝 ${plan.notes}</div>`:''}
+    ${plan.reject_reason?`<div style="background:#FFEBEE;border:1px solid #FFCDD2;border-radius:8px;padding:8px;font-size:11px;margin-bottom:10px;color:#B71C1C">❌ سبب الرفض: ${plan.reject_reason}</div>`:''}
+
     <div id="tp-detail-items" style="text-align:center;padding:1rem;color:#aaa">⏳ جارٍ تحميل البنود...</div>`;
 
   modal.style.display='block';
@@ -9597,26 +9767,70 @@ async function tpViewDetail(id){
   const items = await fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items?plan_id=eq.${id}&select=*&order=visit_date.asc`,
     {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]);
 
-  const stMap={planned:'⏳ مخطط',done:'✅ تم',skipped:'⏭️ تخطى'};
   const itemsEl = document.getElementById('tp-detail-items');
   if(!itemsEl) return;
-  itemsEl.outerHTML = items.length?`
-    <div style="font-size:13px;font-weight:700;color:#2C1F0A;margin-bottom:8px">📦 البنود (${items.length} عميل)</div>
-    <div style="display:flex;flex-direction:column;gap:6px">
-      ${items.map(it=>`
-        <div style="border:1.5px solid #E8D9C0;border-radius:10px;padding:10px;background:#FFFDF8">
-          <div style="display:flex;justify-content:space-between">
-            <div style="font-size:13px;font-weight:700">${it.client_name||'—'}</div>
-            <span style="font-size:10px;color:#8B6F47">${stMap[it.visit_status]||it.visit_status}</span>
-          </div>
-          <div style="font-size:11px;color:#8B6F47;margin-top:2px">${it.area||''} ${it.visit_date?'· '+it.visit_date:''}</div>
-          <div style="display:flex;gap:10px;margin-top:6px;font-size:11px">
-            <span style="color:#1565C0">مخطط: ${(+it.planned_amount||0).toLocaleString('ar-EG')} ج</span>
-            <span style="color:#1A7A4A">فعلي: ${(+it.actual_amount||0).toLocaleString('ar-EG')} ج</span>
-          </div>
-          ${it.notes?`<div style="margin-top:4px;font-size:10px;color:#8B6F47;background:#FFF8E1;padding:4px 8px;border-radius:6px">📝 ${it.notes}</div>`:''}
-        </div>`).join('')}
-    </div>` : `<div style="text-align:center;padding:1rem;color:#aaa">لا توجد بنود</div>`;
+
+  if(!items.length){
+    itemsEl.outerHTML=`<div style="text-align:center;padding:1rem;color:#aaa">لا توجد بنود</div>`;
+    return;
+  }
+
+  // جمع الأيام وترتيبها
+  const datesSet = new Set(items.map(it=>it.visit_date).filter(Boolean));
+  const dates = [...datesSet].sort();
+  const fmtDate = d => {
+    const dt = new Date(d+'T00:00:00');
+    return dt.toLocaleDateString('en-US',{weekday:'short',day:'numeric',month:'short'});
+  };
+
+  // توزيع البنود على الأيام
+  const byDay = {};
+  dates.forEach(d=>{ byDay[d]=[]; });
+  items.forEach(it=>{ if(it.visit_date && byDay[it.visit_date]) byDay[it.visit_date].push(it); });
+
+  const sectionsHtml = dates.map(date=>{
+    const dayItems  = byDay[date];
+    const dayDone   = dayItems.filter(it=>it.visit_status==='done').length;
+    const dayActual = dayItems.reduce((s,it)=>s+(+it.actual_amount||0),0);
+
+    return `<div style="margin-bottom:14px">
+      <div style="background:linear-gradient(135deg,#1A3A5C,#0D2137);color:#fff;padding:8px 12px;border-radius:8px 8px 0 0;display:flex;justify-content:space-between;align-items:center">
+        <span style="font-weight:700;font-size:13px">📅 ${fmtDate(date)}</span>
+        <span style="font-size:10px;opacity:.8">${dayItems.length} زيارة · تم: ${dayDone} · فعلي: ${dayActual.toLocaleString()} ج</span>
+      </div>
+      <div style="border:1.5px solid #E8D9C0;border-top:none;border-radius:0 0 8px 8px;overflow:hidden">
+        ${dayItems.map((it,i)=>{
+          const isDone  = it.visit_status==='done';
+          const isSkip  = it.visit_status==='skipped';
+          const stClr   = isDone?'#1A7A4A':isSkip?'#B71C1C':'#E65100';
+          const stBg    = isDone?'#E8F5E9':isSkip?'#FFEBEE':'#FFF8E1';
+          const stLabel = isDone?'✅ تم':isSkip?'⏭️ تخطى':'⏳ مخطط';
+          const bg      = i%2===0?'#fff':'#FAF7F0';
+          return `<div style="padding:10px 12px;background:${bg};border-bottom:1px solid #F0EAE0">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start">
+              <div style="flex:1">
+                <div style="font-size:13px;font-weight:700;color:#1A3A5C">${it.client_name||'—'}</div>
+                <div style="font-size:10px;color:#8B6F47;margin-top:2px">
+                  ${it.area?`📍 ${it.area}`:''} ${it.purpose?`· 🎯 ${it.purpose}`:''} ${it.rep_name?`· 👤 ${it.rep_name}`:''}
+                </div>
+                <div style="display:flex;gap:10px;margin-top:4px;font-size:11px">
+                  <span style="color:#1565C0;font-weight:700">مخطط: ${(+it.planned_amount||0).toLocaleString('ar-EG')} ج</span>
+                  ${isDone?`<span style="color:#1A7A4A;font-weight:700">فعلي: ${(+it.actual_amount||0).toLocaleString('ar-EG')} ج</span>`:''}
+                </div>
+                ${it.notes?`<div style="margin-top:4px;font-size:10px;background:#FFF8E1;padding:3px 8px;border-radius:4px;color:#8B6F47">📝 ${it.notes}</div>`:''}
+              </div>
+              <span style="background:${stBg};color:${stClr};padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700;white-space:nowrap;margin-right:6px;flex-shrink:0">${stLabel}</span>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }).join('');
+
+  itemsEl.outerHTML = `<div>
+    <div style="font-size:12px;font-weight:700;color:#1A3A5C;margin-bottom:10px">📦 البنود — ${items.length} زيارة في ${dates.length} يوم</div>
+    ${sectionsHtml}
+  </div>`;
 }
 async function bnLoadBadge(){
   if(!cu) return;
