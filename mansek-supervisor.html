@@ -2532,49 +2532,26 @@ function renderDashboard(){
   const dateVisits = cachedVisits.filter(v=>
     v.created_at?.startsWith(selDate) || v.date === selDate
   );
-  const dateAttend = cachedAttendance.filter(a=>
-    a.date === selDate ||
-    a.date === new Date(selDate).toLocaleDateString('en-GB') ||
-    a.created_at?.startsWith(selDate)
-  );
 
-  // خريطة الانصراف
-  const attendMap = {};
-  dateAttend.forEach(a=>{ attendMap[a.name] = a; });
-
-  // تجميع كل الفروع لكل منسق
-  const repMap = {};
+  // الفروع اللي اتزارت في التاريخ المحدد لكل منسق
+  const visitedBranchesMap = {};
   dateVisits.forEach(v=>{
-    if(!repMap[v.name]) repMap[v.name] = { name:v.name, grp:v.grp||'', route:v.route||'', branches:[], points:0, lastTime:'' };
-    repMap[v.name].branches.push(v.branch||'—');
-    repMap[v.name].points += (+v.points||0);
-    if(!repMap[v.name].lastTime || v.created_at > repMap[v.name].lastTime)
-      repMap[v.name].lastTime = v.created_at||'';
+    if(!visitedBranchesMap[v.name]) visitedBranchesMap[v.name] = new Set();
+    if(v.branch) visitedBranchesMap[v.name].add(v.branch);
   });
 
-  const repList = Object.values(repMap).sort((a,b)=> b.lastTime.localeCompare(a.lastTime));
+  // جيب كل المنسقين من cachedVisits + attendance
+  const allReps = [...new Set([
+    ...cachedVisits.map(v=>v.name),
+    ...cachedAttendance.map(a=>a.name)
+  ].filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
 
-  document.getElementById('dash-activity').innerHTML = repList.length ? repList.map(r=>{
-    const att     = attendMap[r.name];
-    const timeOut = att?.time_out || null;
-    const timeIn  = att?.time_in  || null;
-    return `
-    <div style="padding:10px 0;border-bottom:1px solid var(--border)">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-        <div style="width:8px;height:8px;border-radius:50%;background:${GROUPS[r.grp]?.color||'#ccc'};flex-shrink:0"></div>
-        <div style="font-size:12px;font-weight:700;flex:1">${r.name}</div>
-        <span style="font-size:13px;font-weight:900;color:var(--navy)">${r.points}</span>
-      </div>
-      <div style="font-size:10px;color:var(--text2);margin-bottom:4px">📍 ${r.route||'—'} · ${r.branches.length} فرع</div>
-      <div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:5px">
-        ${r.branches.map(b=>`<span style="background:#F5EDE0;color:#5D4037;border-radius:5px;padding:1px 7px;font-size:10px">${b}</span>`).join('')}
-      </div>
-      <div style="display:flex;gap:6px">
-        ${timeIn  ? `<span style="font-size:9px;background:#E8F5E9;color:#2E7D32;padding:1px 6px;border-radius:8px">⏰ ${timeIn}</span>` : ''}
-        ${timeOut ? `<span style="font-size:9px;background:#FEE2E2;color:#B91C1C;padding:1px 6px;border-radius:8px">🚪 ${timeOut}</span>` : '<span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 6px;border-radius:8px">⏳ لم ينصرف</span>'}
-      </div>
-    </div>`;
-  }).join('') : '<div class="empty">لا توجد زيارات في هذا التاريخ</div>';
+  if(!allReps.length){
+    document.getElementById('dash-activity').innerHTML = '<div class="empty">لا توجد بيانات</div>';
+  } else {
+    // جيب فروع كل خط سير من branches (مجمّعة مسبقاً في cachedData لو موجودة أو fetch)
+    renderActivityWithBranches(allReps, visitedBranchesMap, selDate);
+  }
 
   // تحميل اللوكيشن
   const locDateEl = document.getElementById('dash-loc-date');
@@ -2586,6 +2563,58 @@ function renderDashboard(){
 // ══════════════════════════════════════════════════════════════
 // كروت المنسقين (v1.4)
 // ══════════════════════════════════════════════════════════════
+
+// جيب فروع خطوط السير وارسم الأنشطة
+let _cachedRouteBranches = {}; // cache: route -> [branch_name]
+
+async function renderActivityWithBranches(allReps, visitedBranchesMap, selDate){
+  const actEl = document.getElementById('dash-activity');
+  actEl.innerHTML = '<div class="empty">جاري التحميل...</div>';
+
+  // جيب خطوط السير لكل منسق
+  const repRouteMap = {};
+  cachedVisits.forEach(v=>{ if(v.name && v.route) repRouteMap[v.name] = v.route; });
+
+  // جيب الفروع من Supabase للـ routes اللي ما اتجبتش
+  const routesNeeded = [...new Set(Object.values(repRouteMap))].filter(r => r && !_cachedRouteBranches[r]);
+  for(const route of routesNeeded){
+    try{
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/branches?route=eq.${encodeURIComponent(route)}&select=branch_name&status=eq.active&order=branch_name.asc&limit=500`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+      );
+      const data = res.ok ? await res.json() : [];
+      _cachedRouteBranches[route] = Array.isArray(data) ? data.map(b=>b.branch_name) : [];
+    }catch(e){ _cachedRouteBranches[route] = []; }
+  }
+
+  // ارسم كل منسق
+  actEl.innerHTML = allReps.map(name=>{
+    const route = repRouteMap[name] || '—';
+    const routeBranches = _cachedRouteBranches[route] || [];
+    const visited = visitedBranchesMap[name] || new Set();
+    const visitedCount = visited.size;
+
+    return `<div style="padding:10px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <div style="width:8px;height:8px;border-radius:50%;background:${GROUPS[cachedVisits.find(v=>v.name===name)?.grp||'']?.color||'#ccc'};flex-shrink:0"></div>
+        <div style="font-size:12px;font-weight:700;flex:1">${name}</div>
+        <span style="font-size:10px;color:${visitedCount>0?'#2E7D32':'#999'};font-weight:700">${visitedCount}/${routeBranches.length} فرع</span>
+      </div>
+      <div style="font-size:10px;color:var(--text2);margin-bottom:5px">📍 ${route}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:3px">
+        ${routeBranches.length
+          ? routeBranches.map(b=>{
+              const isVisited = visited.has(b);
+              return `<span style="background:${isVisited?'#E8F5E9':'#F5F5F5'};color:${isVisited?'#1B5E20':'#999'};border:1px solid ${isVisited?'#A5D6A7':'#E0E0E0'};border-radius:5px;padding:2px 7px;font-size:10px;font-weight:${isVisited?'700':'400'}">${isVisited?'✓ ':''} ${b}</span>`;
+            }).join('')
+          : '<span style="font-size:10px;color:#bbb">لا توجد فروع مسجلة</span>'
+        }
+      </div>
+    </div>`;
+  }).join('') || '<div class="empty">لا توجد بيانات</div>';
+}
+
 const REP_COLORS = ['#6A0F0E','#B97D41','#1565C0','#1a7a4a','#e65100','#6A1B9A','#00838F','#AD1457'];
 
 // ══════════════════════════════════════════════════════════════
