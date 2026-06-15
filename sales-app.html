@@ -2537,6 +2537,56 @@ async function loadSalesUsers(){
   });
 }
 
+// ══════════════════════════════════════════════════════════════
+// مزامنة الفروع من Supabase — تحدّث SALES_ROUTES_DATA تلقائياً
+// ══════════════════════════════════════════════════════════════
+async function syncBranchesFromDB(){
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    // جيب كل الفروع النشطة من branches
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/branches?status=eq.active&select=branch_name,route,grp&order=branch_name.asc&limit=5000`,
+      {headers:H}
+    );
+    if(!res.ok) return;
+    const rows = await res.json();
+    if(!Array.isArray(rows) || !rows.length) return;
+
+    // بناء map: route → { grp, branches[] }
+    const routeMap = {};
+    rows.forEach(b=>{
+      if(!b.route || !b.branch_name) return;
+      if(!routeMap[b.route]) routeMap[b.route] = { route:b.route, grp:b.grp||'', branches:[] };
+      if(!routeMap[b.route].branches.includes(b.branch_name)){
+        routeMap[b.route].branches.push(b.branch_name);
+      }
+    });
+
+    // حدّث SALES_ROUTES_DATA — أبقِ الـ route entries الموجودة وأضف الجديدة وحدّث الفروع
+    const updatedRoutes = Object.values(routeMap);
+    updatedRoutes.forEach(dbRoute=>{
+      const existing = SALES_ROUTES_DATA.find(r=>r.route===dbRoute.route);
+      if(existing){
+        // حدّث الفروع بما في DB
+        existing.branches = dbRoute.branches;
+        if(dbRoute.grp) existing.grp = dbRoute.grp;
+      } else {
+        // أضف خط سير جديد مش موجود في الكود
+        SALES_ROUTES_DATA.push({
+          route : dbRoute.route,
+          sector: dbRoute.route,
+          grp   : dbRoute.grp||'',
+          branches: dbRoute.branches
+        });
+      }
+    });
+
+    console.log(`✅ syncBranchesFromDB: ${rows.length} فرع على ${updatedRoutes.length} خط سير`);
+  }catch(e){
+    console.warn('syncBranchesFromDB error:', e);
+  }
+}
+
 async function doLogin(){
   const name = document.getElementById('l-name').value;
   const pass = document.getElementById('l-pass').value;
@@ -2625,6 +2675,8 @@ function setupApp(){
   if(cu.level==='gm' && (!cu.groups||!cu.groups.length)){
     cu.groups = Object.keys(GROUPS);
   }
+  // ✅ مزامنة الفروع من Supabase
+  syncBranchesFromDB();
 
   // تحديث اسم المستخدم
   const topUser = document.getElementById('top-user');
