@@ -7517,7 +7517,8 @@ async function supRptExportPDF(){
   const btn = document.getElementById('sup-rpt-pdf-btn');
   if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader" style="animation:spin 1s linear infinite;display:inline-block"></i> جاري...'; }
 
-  const rows = _rptPreviewData.length ? _rptPreviewData : await rptFetchData();
+  let rows = _rptPreviewData;
+  if(!rows.length){ const r = await rptFetchData(); rows = r.rows; _rptVisitedDates = r.visitedDates; }
   if(!rows.length){ alert('لا توجد بيانات'); if(btn){ btn.disabled=false; btn.innerHTML='<i class="ti ti-file-type-pdf"></i> PDF'; } return; }
 
   const route      = document.getElementById('rpt-route')?.selectedOptions[0]?.text||'—';
@@ -7705,6 +7706,7 @@ const RPT_DARK_RED='731E2E', RPT_OLIVE='6B7A3B', RPT_MAX_B=8;
 // بيانات الفروع المحملة
 let _rptBranches = [];
 let _rptPreviewData = [];
+let _rptVisitedDates = new Set();
 let _rptVisitedBranches = new Set(); // (v1.7)
 
 function supRptInit(){
@@ -8031,15 +8033,23 @@ async function rptFetchData(){
     }
   });
 
-  return rows;
+  // بناء visitedDates: Set بـ 'branch|date' لكل زيارة فعلية
+  const visitedDates = new Set(
+    (Array.isArray(visitRows)?visitRows:[])
+      .filter(v=>v.branch && v.created_at)
+      .map(v=>v.branch+'|'+v.created_at.slice(0,10))
+  );
+  return { rows, visitedDates };
 }
 
 // ── helper: Timeline صنف × تاريخ ──────────────────────────────
-function rptBuildTimeline(rows){
+function rptBuildTimeline(rows, visitedDates){
   const timeline = {};
   rows.forEach(r=>{
     if(r._noReport || !r.snf) return;
     const d = r.created_at ? r.created_at.slice(0,10) : '—';
+    // عرض الصنف بس لو في زيارة فعلية لنفس الفرع في نفس اليوم
+    if(visitedDates && visitedDates.size && !visitedDates.has((r.branch||'')+'|'+d)) return;
     if(!timeline[r.snf]) timeline[r.snf] = {};
     if(!timeline[r.snf][d] || r.created_at > (timeline[r.snf][d]._ts||'')){
       timeline[r.snf][d] = {shelf:+r.shelf_qty||0, stock:+r.stock_qty||0, _ts:r.created_at||''};
@@ -8056,8 +8066,9 @@ async function supRptPreview(){
   status.textContent='⏳ تحميل البيانات...';
 
   try{
-    const rows = await rptFetchData();
+    const {rows, visitedDates} = await rptFetchData();
     _rptPreviewData = rows;
+    _rptVisitedDates = visitedDates;
 
     if(!rows.length){
       status.textContent='⚠️ لا توجد بيانات للفلتر المحدد';
@@ -8092,7 +8103,7 @@ async function supRptPreview(){
       if(isNoRpt) return;
 
       // ── Timeline لهذا الفرع ──
-      const timeline  = rptBuildTimeline(items);
+      const timeline  = rptBuildTimeline(items, _rptVisitedDates);
       const allDates  = [...new Set(items.map(r=>r.created_at?.slice(0,10)).filter(Boolean))].sort();
       const allSnfs   = Object.keys(timeline).sort();
       const hasStock  = items.some(r=>(+r.stock_qty||0)>0);
@@ -8163,7 +8174,8 @@ async function supRptExport(){
   btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري...';
   status.textContent='⏳ تصدير...';
   try{
-    const rows = _rptPreviewData.length ? _rptPreviewData : await rptFetchData();
+    let rows = _rptPreviewData;
+  if(!rows.length){ const r = await rptFetchData(); rows = r.rows; _rptVisitedDates = r.visitedDates; }
     if(!rows.length){showToast('لا توجد بيانات');return;}
 
     const rep    = document.getElementById('sup-rpt-rep')?.value.trim()||'الكل';
@@ -8193,7 +8205,7 @@ function rptBuildData(rows, meta){
 
   const branchData = {};
   Object.entries(grouped).forEach(([branch, items])=>{
-    const timeline = rptBuildTimeline ? rptBuildTimeline(items) : {};
+    const timeline = rptBuildTimeline ? rptBuildTimeline(items, _rptVisitedDates) : {};
     const dates    = [...new Set(items.map(r=>r.created_at?.slice(0,10)).filter(Boolean))].sort();
     const snfs     = Object.keys(timeline).sort();
     const hasStock = items.some(r=>(+r.stock_qty||0)>0);
