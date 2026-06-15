@@ -1791,8 +1791,13 @@ h2,h3{color:#2C1F0A}
             <!-- بحث -->
             <input type="text" id="br-search" placeholder="🔍 ابحث عن فرع أو خط سير..." oninput="loadBranches()" style="width:100%;margin-bottom:10px"/>
 
-            <!-- إحصاء -->
-            <div id="br-stats" style="font-size:12px;color:var(--text2);margin-bottom:8px"></div>
+            <!-- إحصاء + إصلاح -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <div id="br-stats" style="font-size:12px;color:var(--text2)"></div>
+              <button class="btn btn-sm" style="background:#FFF3E0;color:#E65100;font-size:11px" onclick="fixBadRoutes()">
+                <i class="ti ti-tools"></i> إصلاح خطوط السير الغلط
+              </button>
+            </div>
 
             <div class="table-wrap">
               <table>
@@ -4573,7 +4578,12 @@ h2,h3{color:#2C1F0A}
     <input type="hidden" id="eb-id"/>
     <input type="hidden" id="eb-old-name"/>
     <div class="form-fld"><label class="form-lbl">اسم الفرع</label><input type="text" id="eb-name"/></div>
-    <div class="form-fld"><label class="form-lbl">خط السير</label><input type="text" id="eb-route"/></div>
+    <div class="form-fld">
+      <label class="form-lbl">خط السير</label>
+      <select id="eb-route" onchange="ebOnRouteChange()">
+        <option value="">جاري التحميل...</option>
+      </select>
+    </div>
     <div class="form-grid">
       <div class="form-fld"><label class="form-lbl">المجموعة</label>
         <select id="eb-group">
@@ -10577,31 +10587,67 @@ async function loadBranches(){
   </tr>`).join('')||'<tr><td colspan="6" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات — ارفع شيت البيانات أولاً</td></tr>';
 }
 
-function openEditBranch(b){
+// كاش خطوط السير مع grp بتاعتها
+let _ebRoutesCache = null;
+async function ebLoadRoutes(){
+  if(_ebRoutesCache) return _ebRoutesCache;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/routes?select=name,grp&order=name.asc`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    if(res.ok){ _ebRoutesCache = await res.json(); return _ebRoutesCache; }
+  }catch(e){}
+  return [];
+}
+
+// لما يتغير خط السير — أوتو فيل المجموعة
+function ebOnRouteChange(){
+  const routeSel = document.getElementById('eb-route');
+  const grpSel   = document.getElementById('eb-group');
+  const selectedRoute = (_ebRoutesCache||[]).find(r=>r.name===routeSel.value);
+  if(selectedRoute?.grp) grpSel.value = selectedRoute.grp;
+}
+
+async function openEditBranch(b){
   document.getElementById('eb-id').value       = b.id||'';
   document.getElementById('eb-old-name').value = b.branch_name||'';
   document.getElementById('eb-name').value     = b.branch_name||'';
-  document.getElementById('eb-route').value    = b.route||'';
+  document.getElementById('eb-ok').style.display='none';
 
-  // ✅ المجموعة — تأكد إن القيمة موجودة كـ option، وإلا اختار أول واحدة
+  // تحميل خطوط السير من Supabase وتعبية القايمة
+  const routeSel = document.getElementById('eb-route');
+  routeSel.innerHTML = '<option value="">جاري التحميل...</option>';
+  const routes = await ebLoadRoutes();
+  routeSel.innerHTML = '<option value="">— اختر خط السير —</option>';
+  routes.forEach(r=>{
+    const o=document.createElement('option');
+    o.value=r.name; o.textContent=r.name;
+    if(r.name===b.route) o.selected=true;
+    routeSel.appendChild(o);
+  });
+  // لو الخط الحالي مش في القايمة — أضفه كـ option مؤقت
+  if(b.route && !routes.find(r=>r.name===b.route)){
+    const o=document.createElement('option');
+    o.value=b.route; o.textContent=b.route+' ⚠️ (غير مسجل)'; o.selected=true;
+    routeSel.insertBefore(o, routeSel.children[1]);
+  }
+
+  // المجموعة — أوتو من route أو من بيانات الفرع
   const grpSel = document.getElementById('eb-group');
-  const grpVal = b.grp || 'giza';
+  const grpVal = b.grp || routes.find(r=>r.name===b.route)?.grp || 'giza';
   if([...grpSel.options].some(o=>o.value===grpVal)) grpSel.value = grpVal;
   else grpSel.selectedIndex = 0;
 
-  // ✅ صنف العميل — معالجة القيم العربية القديمة (كبير/متوسط/صغير) أو A/B/C
+  // صنف العميل
   const typeSel = document.getElementById('eb-type');
   const typeMap = {'كبير':'A','متوسط':'B','صغير':'C','A':'A','B':'B','C':'C'};
-  const typeVal = typeMap[b.client_type] || 'B';
-  typeSel.value = typeVal;
+  typeSel.value = typeMap[b.client_type] || 'B';
 
-  // ✅ الحالة — معالجة القيم العربية القديمة (نشط/متوقف/مغلق) أو active/suspended/closed
+  // الحالة
   const statusSel = document.getElementById('eb-status');
   const statusMap = {'نشط':'active','متوقف':'suspended','مغلق':'closed','active':'active','suspended':'suspended','closed':'closed'};
-  const statusVal = statusMap[b.status] || 'active';
-  statusSel.value = statusVal;
+  statusSel.value = statusMap[b.status] || 'active';
 
-  document.getElementById('eb-ok').style.display='none';
   openModal('modal-edit-branch');
 }
 
@@ -10609,7 +10655,7 @@ async function saveBranchEdit(){
   const id      = document.getElementById('eb-id').value;
   const oldName = document.getElementById('eb-old-name').value;
   const name    = document.getElementById('eb-name').value.trim();
-  const route   = document.getElementById('eb-route').value.trim();
+  const route   = document.getElementById('eb-route').value;
   const grp     = document.getElementById('eb-group').value;
   const type    = document.getElementById('eb-type').value;
   const status  = document.getElementById('eb-status').value;
@@ -10617,24 +10663,82 @@ async function saveBranchEdit(){
 
   if(!name||!route){alert('أدخل اسم الفرع وخط السير');return;}
 
-  const filter = id ? `id=eq.${id}` : `branch_name=eq.${encodeURIComponent(oldName)}`;
+  const headers = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  const filter  = id ? `id=eq.${id}` : `branch_name=eq.${encodeURIComponent(oldName)}`;
+
+  // 1. تحديث branches
   const res = await fetch(`${SUPABASE_URL}/rest/v1/branches?${filter}`,{
-    method:'PATCH',
-    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    method:'PATCH', headers,
     body:JSON.stringify({branch_name:name, route, grp, client_type:type, status})
   });
-  if(res.ok){
-    ok.style.display='block'; ok.textContent='✅ تم الحفظ';
-    setTimeout(()=>{ closeModal('modal-edit-branch'); loadBranches(); rebuildBranchesMap(); },1000);
-  } else {
-    // ✅ إظهار سبب الفشل الحقيقي من Supabase
+
+  if(!res.ok){
     const errText = await res.text().catch(()=>'');
-    console.error('saveBranchEdit failed:', res.status, errText);
     alert(`فشل الحفظ (${res.status})\n${errText.slice(0,200)}`);
+    return;
   }
+
+  // 2. Cascade — تحديث كل الجداول اللي فيها اسم الفرع (لو الاسم أو الخط اتغير)
+  if(oldName && (oldName!==name || true)){
+    const routeFields = route ? { route, grp } : {};
+    const cascadeBody = { branch:name, ...routeFields };
+    const oldEnc = encodeURIComponent(oldName);
+    await Promise.allSettled([
+      fetch(`${SUPABASE_URL}/rest/v1/visits?branch=eq.${oldEnc}`,    {method:'PATCH',headers,body:JSON.stringify(cascadeBody)}),
+      fetch(`${SUPABASE_URL}/rest/v1/products?branch=eq.${oldEnc}`,  {method:'PATCH',headers,body:JSON.stringify({branch:name,...routeFields})}),
+      fetch(`${SUPABASE_URL}/rest/v1/missing?branch=eq.${oldEnc}`,   {method:'PATCH',headers,body:JSON.stringify({branch:name,...routeFields})}),
+      fetch(`${SUPABASE_URL}/rest/v1/returns?branch=eq.${oldEnc}`,   {method:'PATCH',headers,body:JSON.stringify({branch:name,...routeFields})}),
+      fetch(`${SUPABASE_URL}/rest/v1/location?name=eq.${oldEnc}`,    {method:'PATCH',headers,body:JSON.stringify({name,route,grp})}),
+    ]);
+  }
+
+  ok.style.display='block'; ok.textContent='✅ تم الحفظ وتحديث كل الجداول';
+  setTimeout(()=>{ closeModal('modal-edit-branch'); loadBranches(); rebuildBranchesMap(); _ebRoutesCache=null; },1200);
 }
 
-async function deleteBranchConfirm(id, name){
+// إصلاح الفروع اللي عندها route غلط (مش موجود في جدول routes)
+async function fixBadRoutes(){
+  const btn = document.querySelector('[onclick="fixBadRoutes()"]');
+  if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري الفحص...'; }
+
+  try{
+    // جيب كل الخطوط الصح من routes
+    const rtRes = await fetch(`${SUPABASE_URL}/rest/v1/routes?select=name,grp`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const validRoutes = rtRes.ok ? await rtRes.json() : [];
+    const validNames  = new Set(validRoutes.map(r=>r.name));
+    const routeGrpMap = Object.fromEntries(validRoutes.map(r=>[r.name,r.grp]));
+
+    // جيب كل الفروع
+    const brRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,route,grp&limit=5000`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const branches = brRes.ok ? await brRes.json() : [];
+
+    // فلتر الفروع اللي route بتاعتها غلط
+    const badBranches = branches.filter(b=>b.route && !validNames.has(b.route));
+
+    if(!badBranches.length){
+      showToast('✅ كل الفروع عندها خطوط سير صحيحة');
+      return;
+    }
+
+    // عرض قايمة الفروع الغلط للمستخدم
+    const badList = badBranches.map(b=>`• ${b.branch_name} (${b.route})`).join('\n');
+    const confirm_ = confirm(`وجدنا ${badBranches.length} فرع بخط سير غلط:\n\n${badList.slice(0,500)}\n\nهل تريد فتح كل فرع للتصحيح اليدوي؟`);
+    if(!confirm_) return;
+
+    // افتح أول فرع غلط للتعديل
+    openEditBranch(badBranches[0]);
+    showToast(`⚠️ ${badBranches.length} فرع محتاج تصحيح — صحح الأول وبعدين اضغط الزرار تاني`);
+
+  }catch(e){
+    alert('حدث خطأ: '+e.message);
+  }
+
+  if(btn){ btn.disabled=false; btn.innerHTML='<i class="ti ti-tools"></i> إصلاح خطوط السير الغلط'; }
+}
   // مودال تأكيد مخصص
   const overlay = document.createElement('div');
   overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center';
