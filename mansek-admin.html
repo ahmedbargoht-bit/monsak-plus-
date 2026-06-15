@@ -12633,9 +12633,10 @@ async function loadRoutes(){
       const statusBadge = r.status==='active'
         ? `<span class="badge b-green">نشط</span>`
         : `<span class="badge b-gray">موقوف</span>`;
-      return `<tr>
+      const routeEncoded = encodeURIComponent(r.name);
+      return `<tr style="cursor:pointer" onclick="openRouteDetail('${routeEncoded}')">
         <td>${i+1}</td>
-        <td><b>${r.name}</b></td>
+        <td><b style="color:var(--navy);text-decoration:underline dotted">${r.name}</b></td>
         <td><span class="badge" style="background:${grpColor}22;color:${grpColor}">${grpLabel}</span></td>
         <td style="font-size:11px;max-width:180px">${repNames}</td>
         <td><span class="badge b-navy">${branchCount} فرع</span></td>
@@ -12648,6 +12649,291 @@ async function loadRoutes(){
     tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:var(--red)">تعذر التحميل</td></tr>';
     console.warn('loadRoutes error:', e);
   }
+}
+
+// ══ تفاصيل خط السير ══════════════════════════════════════════
+let _rdCurrentRoute = null; // بيانات الخط المفتوح حالياً في المودال
+
+async function openRouteDetail(routeEncoded){
+  const routeName = decodeURIComponent(routeEncoded);
+  _rdCurrentRoute = { name: routeName };
+  document.getElementById('rd-title').textContent = routeName;
+  document.getElementById('rd-grp').innerHTML = '<span style="color:#aaa">جاري التحميل...</span>';
+  document.getElementById('rd-rep').innerHTML = '<span style="color:#aaa">جاري التحميل...</span>';
+  document.getElementById('rd-supervisor').innerHTML = '<span style="color:#aaa">جاري التحميل...</span>';
+  document.getElementById('rd-branches-tbody').innerHTML = '<tr><td colspan="5" style="text-align:center;padding:1rem"><div class="spinner"></div></td></tr>';
+  openModal('modal-route-detail');
+
+  try{
+    // جيب بيانات الخط من routes
+    const rtRes = await fetch(`${SUPABASE_URL}/rest/v1/routes?select=name,grp&name=eq.${encodeURIComponent(routeName)}`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const rtData = rtRes.ok ? await rtRes.json() : [];
+    const grp = rtData[0]?.grp || '';
+    _rdCurrentRoute.grp = grp;
+
+    // المجموعة
+    const grpLabel = GROUPS[grp]?.label || grp || '—';
+    const grpColor = GROUPS[grp]?.color || '#999';
+    document.getElementById('rd-grp').innerHTML = `<span style="color:${grpColor}">${grpLabel}</span>`;
+
+    // المنسق (من users)
+    const repRes = await fetch(`${SUPABASE_URL}/rest/v1/users?select=name,route&role=eq.rep&route=eq.${encodeURIComponent(routeName)}`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const repData = repRes.ok ? await repRes.json() : [];
+    const repNames = repData.map(r=>r.name).join('، ') || '—';
+    _rdCurrentRoute.reps = repData.map(r=>r.name);
+    document.getElementById('rd-rep').textContent = repNames;
+
+    // مشرف المنطقة (من grp_supervisors)
+    let supervisor = '—';
+    if(grp){
+      const supRes = await fetch(`${SUPABASE_URL}/rest/v1/grp_supervisors?select=supervisor&grp=eq.${encodeURIComponent(grp)}`,{
+        headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+      });
+      const supData = supRes.ok ? await supRes.json() : [];
+      supervisor = supData[0]?.supervisor || '—';
+    }
+    _rdCurrentRoute.supervisor = supervisor;
+    document.getElementById('rd-supervisor').textContent = supervisor;
+
+    // الفروع (من branches)
+    const brRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,client_type,status&route=eq.${encodeURIComponent(routeName)}&order=branch_name.asc`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const branches = brRes.ok ? await brRes.json() : [];
+    _rdCurrentRoute.branches = branches;
+    document.getElementById('rd-branch-count').textContent = `(${branches.length} فرع)`;
+
+    if(!branches.length){
+      document.getElementById('rd-branches-tbody').innerHTML = '<tr><td colspan="5" style="text-align:center;padding:1rem;color:#aaa">لا توجد فروع مسجلة</td></tr>';
+      return;
+    }
+
+    document.getElementById('rd-branches-tbody').innerHTML = branches.map((b,i)=>{
+      const statusBadge = b.status==='active'
+        ? `<span class="badge b-green">نشط</span>`
+        : `<span class="badge b-gray">موقوف</span>`;
+      const typeBadge = b.client_type
+        ? `<span class="badge" style="background:${b.client_type==='A'?'#E8F5E9':'#FFF3E0'};color:${b.client_type==='A'?'#1A7A4A':'#E65100'}">${b.client_type}</span>`
+        : '—';
+      return `<tr>
+        <td>${i+1}</td>
+        <td><b>${b.branch_name||'—'}</b></td>
+        <td>${typeBadge}</td>
+        <td>${statusBadge}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-xs btn-blue" onclick="openEditBranch(${b.id},'${(b.branch_name||'').replace(/'/g,"\\'")}','${b.status||'active'}','${b.client_type||''}','${routeName.replace(/'/g,"\\'")}')">
+            <i class="ti ti-edit"></i> تعديل
+          </button>
+          <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="toggleBranchStatus(${b.id},'${b.status==='active'?'inactive':'active'}','${routeName.replace(/'/g,"\\'")}')">
+            <i class="ti ti-power"></i> ${b.status==='active'?'إيقاف':'تفعيل'}
+          </button>
+          <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="deleteBranchFromRoute(${b.id},'${(b.branch_name||'').replace(/'/g,"\\'")}','${routeName.replace(/'/g,"\\'")}')">
+            <i class="ti ti-trash"></i>
+          </button>
+        </td>
+      </tr>`;
+    }).join('');
+
+  }catch(e){
+    console.error('openRouteDetail error:', e);
+    document.getElementById('rd-branches-tbody').innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:1rem">تعذر التحميل</td></tr>';
+  }
+}
+
+async function openEditBranch(id, name, status, clientType, currentRoute){
+  document.getElementById('eb-id').value = id;
+  document.getElementById('eb-name').value = name;
+  document.getElementById('eb-status').value = status;
+
+  // عبّي قايمة الخطوط
+  const routeSel = document.getElementById('eb-route');
+  routeSel.innerHTML = '<option value="">— نفس الخط —</option>';
+  const rtRes = await fetch(`${SUPABASE_URL}/rest/v1/routes?select=name&order=name.asc`,{
+    headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+  });
+  const routes = rtRes.ok ? await rtRes.json() : [];
+  routes.forEach(r=>{
+    const o = document.createElement('option');
+    o.value = r.name;
+    o.textContent = r.name;
+    if(r.name === currentRoute) o.selected = true;
+    routeSel.appendChild(o);
+  });
+
+  openModal('modal-edit-branch');
+}
+
+async function saveBranchEdit(){
+  const id     = document.getElementById('eb-id').value;
+  const name   = document.getElementById('eb-name').value.trim();
+  const route  = document.getElementById('eb-route').value;
+  const status = document.getElementById('eb-status').value;
+  if(!name){ alert('أدخل اسم الفرع'); return; }
+
+  try{
+    await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body: JSON.stringify({ branch_name:name, route:route||undefined, status })
+    });
+    closeModal('modal-edit-branch');
+    showToast('✅ تم تحديث الفرع');
+    // إعادة تحميل تفاصيل الخط
+    if(_rdCurrentRoute) openRouteDetail(encodeURIComponent(_rdCurrentRoute.name));
+  }catch(e){
+    alert('حدث خطأ: '+e.message);
+  }
+}
+
+async function toggleBranchStatus(id, newStatus, routeName){
+  try{
+    await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body: JSON.stringify({ status: newStatus })
+    });
+    showToast(newStatus==='active' ? '✅ تم تفعيل الفرع' : '⏸️ تم إيقاف الفرع');
+    openRouteDetail(encodeURIComponent(routeName));
+  }catch(e){ alert('حدث خطأ: '+e.message); }
+}
+
+async function deleteBranchFromRoute(id, name, routeName){
+  if(!confirm(`هل تريد حذف الفرع "${name}" نهائياً؟`)) return;
+  try{
+    await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${id}`,{
+      method:'DELETE',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    showToast('🗑️ تم حذف الفرع: '+name);
+    openRouteDetail(encodeURIComponent(routeName));
+  }catch(e){ alert('حدث خطأ: '+e.message); }
+}
+
+async function exportRouteDetailExcel(){
+  if(!_rdCurrentRoute) return;
+  const { name, grp, reps, supervisor, branches } = _rdCurrentRoute;
+  const grpLabel = GROUPS[grp]?.label?.replace(/[\u{1F300}-\u{1FFFF}]/gu,'')||grp||'—';
+  const today = new Date().toLocaleDateString('ar-EG');
+
+  // بناء HTML جدول يتحوّل لـ Excel
+  let rows = (branches||[]).map((b,i)=>
+    `<tr><td>${i+1}</td><td>${b.branch_name||''}</td><td>${b.client_type||''}</td><td>${b.status==='active'?'نشط':'موقوف'}</td></tr>`
+  ).join('');
+
+  const html = `<html dir="rtl"><head><meta charset="UTF-8"/>
+  <style>table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px 10px;font-family:Arial}</style>
+  </head><body>
+  <h2>${name}</h2>
+  <p>المجموعة: ${grpLabel} | المنسق: ${(reps||[]).join('، ')||'—'} | المشرف: ${supervisor||'—'} | التاريخ: ${today}</p>
+  <table><thead><tr><th>#</th><th>اسم الفرع</th><th>النوع</th><th>الحالة</th></tr></thead>
+  <tbody>${rows}</tbody></table>
+  </body></html>`;
+
+  const blob = new Blob(['\ufeff'+html],{type:'application/vnd.ms-excel;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `خط_سير_${name.replace(/\s/g,'_')}.xls`;
+  a.click();
+}
+
+function exportRouteDetailPDF(){
+  if(!_rdCurrentRoute) return;
+  const { name, grp, reps, supervisor, branches } = _rdCurrentRoute;
+  const grpLabel = GROUPS[grp]?.label?.replace(/[\u{1F300}-\u{1FFFF}]/gu,'')||grp||'—';
+  const grpColor = GROUPS[grp]?.color||'#731E2E';
+  const today = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
+
+  const rows = (branches||[]).map((b,i)=>`
+    <tr>
+      <td style="text-align:center;color:#8B6F47">${i+1}</td>
+      <td>${b.branch_name||'—'}</td>
+      <td style="text-align:center">
+        <span style="background:${b.client_type==='A'?'#E8F5E9':'#FFF3E0'};color:${b.client_type==='A'?'#1A7A4A':'#E65100'};padding:2px 8px;border-radius:12px;font-size:10px">${b.client_type||'—'}</span>
+      </td>
+      <td style="text-align:center">
+        <span style="background:${b.status==='active'?'#E8F5E9':'#FFEBEE'};color:${b.status==='active'?'#1A7A4A':'#B71C1C'};padding:2px 8px;border-radius:12px;font-size:10px">${b.status==='active'?'نشط':'موقوف'}</span>
+      </td>
+    </tr>`).join('');
+
+  const html = `<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"/>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Cairo',sans-serif;background:#FFFDF8;color:#2C1F0A;font-size:12px;padding:32px}
+  .header{border-bottom:3px solid ${grpColor};padding-bottom:16px;margin-bottom:24px;display:flex;justify-content:space-between;align-items:flex-end}
+  .logo{font-size:22px;font-weight:700;color:#731E2E}
+  .sub{font-size:11px;color:#8B6F47}
+  .info-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:24px}
+  .info-box{background:#F5F0E8;border-radius:8px;padding:10px 14px}
+  .info-label{font-size:10px;color:#8B6F47;margin-bottom:4px}
+  .info-val{font-weight:700;font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:11px}
+  th{background:${grpColor};color:#fff;padding:8px 10px;text-align:right}
+  td{padding:7px 10px;border-bottom:1px solid #F0E8D8}
+  tr:nth-child(even) td{background:#FDFAF5}
+  .signatures{display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;margin-top:40px;padding-top:20px;border-top:1px solid #E8D9C0}
+  .sig-box{text-align:center}
+  .sig-line{border-bottom:1px solid #2C1F0A;margin-bottom:8px;height:40px}
+  .sig-label{font-size:11px;color:#8B6F47}
+  .sig-name{font-weight:700;font-size:12px;margin-top:4px}
+  @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+</style></head><body>
+  <div class="header">
+    <div>
+      <div class="logo">🌿 الطحان للنور</div>
+      <div style="font-size:16px;font-weight:700;margin-top:4px">${name}</div>
+    </div>
+    <div style="text-align:left" class="sub">${today}</div>
+  </div>
+
+  <div class="info-grid">
+    <div class="info-box">
+      <div class="info-label">المجموعة</div>
+      <div class="info-val" style="color:${grpColor}">${grpLabel}</div>
+    </div>
+    <div class="info-box">
+      <div class="info-label">المنسق الحالي</div>
+      <div class="info-val">${(reps||[]).join('، ')||'—'}</div>
+    </div>
+    <div class="info-box">
+      <div class="info-label">مشرف المنطقة</div>
+      <div class="info-val">${supervisor||'—'}</div>
+    </div>
+  </div>
+
+  <div style="font-weight:700;margin-bottom:8px;color:${grpColor}">الفروع (${(branches||[]).length} فرع)</div>
+  <table>
+    <thead><tr><th style="width:35px">#</th><th>اسم الفرع</th><th style="width:60px;text-align:center">النوع</th><th style="width:70px;text-align:center">الحالة</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+
+  <div class="signatures">
+    <div class="sig-box">
+      <div class="sig-line"></div>
+      <div class="sig-label">توقيع مشرف المنطقة</div>
+      <div class="sig-name">${supervisor||'................'}</div>
+    </div>
+    <div class="sig-box">
+      <div class="sig-line"></div>
+      <div class="sig-label">توقيع مدير التنسيق</div>
+      <div class="sig-name">................</div>
+    </div>
+    <div class="sig-box">
+      <div class="sig-line"></div>
+      <div class="sig-label">توقيع مدير مبيعات المودرن تريد</div>
+      <div class="sig-name">................</div>
+    </div>
+  </div>
+</body></html>`;
+
+  const win = window.open('','_blank');
+  win.document.write(html);
+  win.document.close();
+  win.onload = ()=>{ win.focus(); win.print(); };
 }
 
 async function syncRoutesAndBranchesToSupabase(){
@@ -20373,5 +20659,75 @@ function serExportPDF(){
   border:1px solid #00BCD440;backdrop-filter:blur(4px)">
   v1.1
 </div>
+
+<!-- ══ MODAL: تفاصيل خط السير ══════════════════════════════════ -->
+<div id="modal-route-detail" class="modal-overlay" onclick="if(event.target===this)closeModal('modal-route-detail')">
+  <div class="modal-box" style="max-width:780px;width:95%;max-height:90vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+      <h3 id="rd-title" style="margin:0;color:var(--navy)"></h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('modal-route-detail')"><i class="ti ti-x"></i></button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:1rem">
+      <div style="background:var(--bg2);border-radius:8px;padding:12px">
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px">المجموعة</div>
+        <div id="rd-grp" style="font-weight:700"></div>
+      </div>
+      <div style="background:var(--bg2);border-radius:8px;padding:12px">
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px">المنسق الحالي</div>
+        <div id="rd-rep" style="font-weight:700"></div>
+      </div>
+      <div style="background:var(--bg2);border-radius:8px;padding:12px">
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px">مشرف المنطقة</div>
+        <div id="rd-supervisor" style="font-weight:700"></div>
+      </div>
+    </div>
+    <div style="font-weight:600;margin-bottom:8px;color:var(--navy)">
+      <i class="ti ti-building-store"></i> الفروع
+      <span id="rd-branch-count" style="font-size:12px;color:var(--text2);font-weight:400;margin-right:6px"></span>
+    </div>
+    <div class="table-wrap" style="margin-bottom:1rem">
+      <table>
+        <thead><tr><th>#</th><th>اسم الفرع</th><th>النوع</th><th>الحالة</th><th>إجراءات</th></tr></thead>
+        <tbody id="rd-branches-tbody"></tbody>
+      </table>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:1rem">
+      <button class="btn btn-sm" style="background:#1A7A4A;color:#fff" onclick="exportRouteDetailExcel()">
+        <i class="ti ti-file-spreadsheet"></i> تصدير Excel
+      </button>
+      <button class="btn btn-sm" style="background:#731E2E;color:#fff" onclick="exportRouteDetailPDF()">
+        <i class="ti ti-file-type-pdf"></i> تصدير PDF
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MODAL: تعديل فرع ════════════════════════════════════════ -->
+<div id="modal-edit-branch" class="modal-overlay" onclick="if(event.target===this)closeModal('modal-edit-branch')">
+  <div class="modal-box" style="max-width:420px;width:95%">
+    <h3 style="margin:0 0 1rem">تعديل الفرع</h3>
+    <input type="hidden" id="eb-id"/>
+    <div style="margin-bottom:12px">
+      <label style="font-size:12px;color:var(--text2)">اسم الفرع</label>
+      <input type="text" id="eb-name" style="width:100%;margin-top:4px"/>
+    </div>
+    <div style="margin-bottom:12px">
+      <label style="font-size:12px;color:var(--text2)">نقل إلى خط سير</label>
+      <select id="eb-route" style="width:100%;margin-top:4px"></select>
+    </div>
+    <div style="margin-bottom:16px">
+      <label style="font-size:12px;color:var(--text2)">الحالة</label>
+      <select id="eb-status" style="width:100%;margin-top:4px">
+        <option value="active">نشط</option>
+        <option value="inactive">موقوف</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('modal-edit-branch')">إلغاء</button>
+      <button class="btn btn-primary btn-sm" onclick="saveBranchEdit()">حفظ</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
