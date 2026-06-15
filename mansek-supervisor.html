@@ -2580,7 +2580,7 @@ async function renderActivityWithBranches(allReps, visitedBranchesMap, selDate){
   for(const route of routesNeeded){
     try{
       const res = await fetch(
-        `${SUPABASE_URL}/rest/v1/coord_route_assignments?route=eq.${encodeURIComponent(route)}&select=branch_name&order=branch_name.asc&limit=500`,
+        `${SUPABASE_URL}/rest/v1/branches?route=eq.${encodeURIComponent(route)}&select=branch_name&status=eq.active&order=branch_name.asc&limit=500`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
       );
       const data = res.ok ? await res.json() : [];
@@ -2940,7 +2940,7 @@ async function loadRepDetail(){
     const branchesEl = document.getElementById('rd-route-branches');
     if(repRoute && repRoute !== '—'){
       const brRes = await fetch(
-        `${SUPABASE_URL}/rest/v1/coord_route_assignments?route=eq.${encodeURIComponent(repRoute)}&select=branch_name&order=branch_name.asc&limit=200`,
+        `${SUPABASE_URL}/rest/v1/branches?route=eq.${encodeURIComponent(repRoute)}&select=branch_name,status&order=branch_name.asc&limit=200`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
       );
       const brData = await brRes.json().catch(()=>[]);
@@ -2950,7 +2950,7 @@ async function loadRepDetail(){
         branchesEl.innerHTML = `<div style="font-size:11px;color:var(--text2);width:100%;margin-bottom:2px">
           🏪 ${branches.length} فرع على هذا الخط:
         </div>` + branches.map(b=>{
-          const isActive = true; // coord_route_assignments كل الفروع نشطة
+          const isActive = b.status==='active';
           return `<span style="background:${isActive?'#F0F4FF':'#F5F5F5'};color:${isActive?'#1565C0':'#999'};
             padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;
             ${!isActive?'text-decoration:line-through;':''}">${b.branch_name}</span>`;
@@ -7517,8 +7517,7 @@ async function supRptExportPDF(){
   const btn = document.getElementById('sup-rpt-pdf-btn');
   if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader" style="animation:spin 1s linear infinite;display:inline-block"></i> جاري...'; }
 
-  let rows = _rptPreviewData;
-  if(!rows.length){ const result = await rptFetchData(); rows = result.rows; _rptVisitedDates = result.visitedDates; }
+  const rows = _rptPreviewData.length ? _rptPreviewData : await rptFetchData();
   if(!rows.length){ alert('لا توجد بيانات'); if(btn){ btn.disabled=false; btn.innerHTML='<i class="ti ti-file-type-pdf"></i> PDF'; } return; }
 
   const route      = document.getElementById('rpt-route')?.selectedOptions[0]?.text||'—';
@@ -7706,7 +7705,6 @@ const RPT_DARK_RED='731E2E', RPT_OLIVE='6B7A3B', RPT_MAX_B=8;
 // بيانات الفروع المحملة
 let _rptBranches = [];
 let _rptPreviewData = [];
-let _rptVisitedDates = new Set();
 let _rptVisitedBranches = new Set(); // (v1.7)
 
 function supRptInit(){
@@ -8033,25 +8031,15 @@ async function rptFetchData(){
     }
   });
 
-  // بناء visitedDates: Set بـ 'branch|date' لكل زيارة فعلية
-  const visitedDates = new Set(
-    (Array.isArray(visitRows)?visitRows:[])
-      .filter(v=>v.branch && v.created_at)
-      .map(v=>v.branch+'|'+v.created_at.slice(0,10))
-  );
-
-  return { rows, visitedDates };
+  return rows;
 }
 
 // ── helper: Timeline صنف × تاريخ ──────────────────────────────
-function rptBuildTimeline(rows, visitedDates){
-  // visitedDates: Set of 'branch|date' strings — بس عرض الصنف لو في زيارة في نفس اليوم
+function rptBuildTimeline(rows){
   const timeline = {};
   rows.forEach(r=>{
     if(r._noReport || !r.snf) return;
     const d = r.created_at ? r.created_at.slice(0,10) : '—';
-    // لو visitedDates موجود — تحقق إن المنسق زار الفرع في نفس اليوم
-    if(visitedDates && !visitedDates.has((r.branch||'')+'|'+d)) return;
     if(!timeline[r.snf]) timeline[r.snf] = {};
     if(!timeline[r.snf][d] || r.created_at > (timeline[r.snf][d]._ts||'')){
       timeline[r.snf][d] = {shelf:+r.shelf_qty||0, stock:+r.stock_qty||0, _ts:r.created_at||''};
@@ -8068,9 +8056,8 @@ async function supRptPreview(){
   status.textContent='⏳ تحميل البيانات...';
 
   try{
-    const {rows, visitedDates} = await rptFetchData();
+    const rows = await rptFetchData();
     _rptPreviewData = rows;
-    _rptVisitedDates = visitedDates;
 
     if(!rows.length){
       status.textContent='⚠️ لا توجد بيانات للفلتر المحدد';
@@ -8105,7 +8092,7 @@ async function supRptPreview(){
       if(isNoRpt) return;
 
       // ── Timeline لهذا الفرع ──
-      const timeline  = rptBuildTimeline(items, _rptVisitedDates);
+      const timeline  = rptBuildTimeline(items);
       const allDates  = [...new Set(items.map(r=>r.created_at?.slice(0,10)).filter(Boolean))].sort();
       const allSnfs   = Object.keys(timeline).sort();
       const hasStock  = items.some(r=>(+r.stock_qty||0)>0);
@@ -8176,8 +8163,7 @@ async function supRptExport(){
   btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري...';
   status.textContent='⏳ تصدير...';
   try{
-    let rows = _rptPreviewData;
-  if(!rows.length){ const result = await rptFetchData(); rows = result.rows; _rptVisitedDates = result.visitedDates; }
+    const rows = _rptPreviewData.length ? _rptPreviewData : await rptFetchData();
     if(!rows.length){showToast('لا توجد بيانات');return;}
 
     const rep    = document.getElementById('sup-rpt-rep')?.value.trim()||'الكل';
@@ -8207,7 +8193,7 @@ function rptBuildData(rows, meta){
 
   const branchData = {};
   Object.entries(grouped).forEach(([branch, items])=>{
-    const timeline = rptBuildTimeline ? rptBuildTimeline(items, _rptVisitedDates) : {};
+    const timeline = rptBuildTimeline ? rptBuildTimeline(items) : {};
     const dates    = [...new Set(items.map(r=>r.created_at?.slice(0,10)).filter(Boolean))].sort();
     const snfs     = Object.keys(timeline).sort();
     const hasStock = items.some(r=>(+r.stock_qty||0)>0);
