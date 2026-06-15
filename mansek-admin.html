@@ -1912,6 +1912,7 @@ h2,h3{color:#2C1F0A}
           <div class="page-header">
             <div><h2>خطوط السير</h2><p>إدارة خطوط السير وربطها بالمنسقين والفروع</p></div>
             <div class="page-actions">
+              <button class="btn btn-sm" style="background:#1A7A4A;color:#fff" onclick="syncRoutesAndBranchesToSupabase()"><i class="ti ti-cloud-upload"></i> مزامنة مع Supabase</button>
               <button class="btn btn-sm" style="background:#731E2E;color:#fff" onclick="exportRoutesPDF()"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
               <button class="btn btn-primary btn-sm" onclick="openModal('modal-add-route')"><i class="ti ti-plus"></i> خط سير جديد</button>
             </div>
@@ -12647,6 +12648,94 @@ async function loadRoutes(){
     tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:var(--red)">تعذر التحميل</td></tr>';
     console.warn('loadRoutes error:', e);
   }
+}
+
+async function syncRoutesAndBranchesToSupabase(){
+  const btn = document.querySelector('[onclick="syncRoutesAndBranchesToSupabase()"]');
+  if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري المزامنة...'; }
+
+  try{
+    // 1. جيب المنسقين من Supabase عشان نعرف grp لكل route
+    const usersRes = await fetch(`${SUPABASE_URL}/rest/v1/users?select=route,grp&role=eq.rep`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const usersList = usersRes.ok ? await usersRes.json() : [];
+
+    // بناء map: route → grp (من بيانات المنسقين)
+    const routeGrpMap = {};
+    usersList.forEach(u=>{
+      const r=(u.route||'').trim();
+      const g=(u.grp||'').trim();
+      if(r && g && !routeGrpMap[r]) routeGrpMap[r]=g;
+    });
+
+    // 2. تجميع كل الخطوط من BRANCHES_MAP
+    const allRouteNames = Object.keys(BRANCHES_MAP);
+
+    // 3. رفع الخطوط لجدول routes (upsert على name كـ unique key)
+    const routesPayload = allRouteNames.map(name=>({
+      name,
+      grp: routeGrpMap[name] || null
+    }));
+
+    const routesRes = await fetch(`${SUPABASE_URL}/rest/v1/routes`,{
+      method:'POST',
+      headers:{
+        'apikey':SUPABASE_KEY,
+        'Authorization':`Bearer ${SUPABASE_KEY}`,
+        'Content-Type':'application/json',
+        'Prefer':'resolution=merge-duplicates'
+      },
+      body: JSON.stringify(routesPayload)
+    });
+
+    // 4. رفع الفروع لجدول branches (upsert)
+    const branchesPayload = [];
+    allRouteNames.forEach(route=>{
+      const grp = routeGrpMap[route]||null;
+      (BRANCHES_MAP[route]||[]).forEach(branch_name=>{
+        branchesPayload.push({ branch_name, route, grp, status:'active' });
+      });
+    });
+
+    // نرفعهم على دفعات (كل 100 فرع) عشان ما نتجاوزش حجم الطلب
+    const BATCH = 100;
+    let branchesOk = true;
+    for(let i=0; i<branchesPayload.length; i+=BATCH){
+      const batch = branchesPayload.slice(i, i+BATCH);
+      const bRes = await fetch(`${SUPABASE_URL}/rest/v1/branches`,{
+        method:'POST',
+        headers:{
+          'apikey':SUPABASE_KEY,
+          'Authorization':`Bearer ${SUPABASE_KEY}`,
+          'Content-Type':'application/json',
+          'Prefer':'resolution=merge-duplicates'
+        },
+        body: JSON.stringify(batch)
+      });
+      if(!bRes.ok){ branchesOk=false; console.warn('branches batch failed', await bRes.text()); }
+    }
+
+    // 5. عرض النتيجة
+    const routesOk = routesRes.ok || routesRes.status===201;
+    const totalBranches = branchesPayload.length;
+    const totalRoutes = routesPayload.length;
+
+    if(routesOk && branchesOk){
+      showToast(`✅ تمت المزامنة: ${totalRoutes} خط سير و ${totalBranches} فرع`);
+      // تحديث الجدول
+      loadRoutes();
+    } else {
+      showToast('⚠️ تمت المزامنة جزئياً — تحقق من الـ console');
+      loadRoutes();
+    }
+
+  }catch(e){
+    alert('حدث خطأ أثناء المزامنة: '+e.message);
+    console.error(e);
+  }
+
+  if(btn){ btn.disabled=false; btn.innerHTML='<i class="ti ti-cloud-upload"></i> مزامنة مع Supabase'; }
 }
 
 async function exportRoutesPDF(){
