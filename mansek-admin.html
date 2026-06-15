@@ -1912,6 +1912,7 @@ h2,h3{color:#2C1F0A}
           <div class="page-header">
             <div><h2>خطوط السير</h2><p>إدارة خطوط السير وربطها بالمنسقين والفروع</p></div>
             <div class="page-actions">
+              <button class="btn btn-sm" style="background:#731E2E;color:#fff" onclick="exportRoutesPDF()"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
               <button class="btn btn-primary btn-sm" onclick="openModal('modal-add-route')"><i class="ti ti-plus"></i> خط سير جديد</button>
             </div>
           </div>
@@ -12566,38 +12567,56 @@ async function loadRoutes(){
   tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:1.5rem"><div class="spinner"></div></td></tr>';
 
   try{
-    // جيب كل المنسقين من REPS (محملين مسبقاً) أو من Supabase
+    // جيب خطوط السير من جدول routes (فيه name و grp الصح)
+    const routesRes = await fetch(`${SUPABASE_URL}/rest/v1/routes?select=name,grp&order=name.asc`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const routesList = routesRes.ok ? await routesRes.json() : [];
+
+    // جيب الفروع من جدول branches (عشان نعد عدد الفروع لكل route)
+    const branchesRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=route,status`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const branchesList = branchesRes.ok ? await branchesRes.json() : [];
+
+    // بناء map: route → عدد الفروع النشطة
+    const branchCountMap = {};
+    branchesList.forEach(b=>{
+      const r = (b.route||'').trim();
+      if(!r) return;
+      branchCountMap[r] = (branchCountMap[r]||0) + 1;
+    });
+
+    // جيب المنسقين لربطهم بخطوط السير
     let reps = [...(REPS||[])];
     if(!reps.length){
       const res = await sb('users',{});
       reps = (Array.isArray(res)?res:[]).filter(u=>u.role==='rep');
     }
 
-    // بناء خطوط السير: route واحد قد يكون فيه أكتر من منسق
-    const routeMap = {};
+    // بناء map: route → [أسماء المنسقين]
+    const repsMap = {};
     reps.forEach(u=>{
-      const route = (u.route||'').trim();
-      const grpVal = u.grp || u.groups || '';
-      if(!route) return;
-      if(!routeMap[route]){
-        routeMap[route] = {
-          name:   route,
-          group:  grpVal,
-          reps:   [],
-          status: u.active===false||u.status==='inactive' ? 'inactive' : 'active'
-        };
-      }
-      routeMap[route].reps.push(u.name||'');
+      const r = (u.route||'').trim();
+      if(!r) return;
+      if(!repsMap[r]) repsMap[r] = [];
+      repsMap[r].push(u.name||'');
     });
 
-    let data = Object.values(routeMap);
+    // بناء البيانات من جدول routes كمصدر أساسي
+    let data = routesList.map(rt=>({
+      name:   rt.name,
+      group:  rt.grp||'',
+      reps:   repsMap[rt.name]||[],
+      status: (repsMap[rt.name]||[]).length > 0 ? 'active' : 'inactive'
+    }));
 
     // فلترة
     if(grp!=='all')  data = data.filter(r=>r.group===grp);
     if(search)       data = data.filter(r=>r.name.toLowerCase().includes(search));
 
     // ترتيب: بالمجموعة ثم الاسم
-    data.sort((a,b)=>a.group.localeCompare(b.group)||a.name.localeCompare(b.name));
+    data.sort((a,b)=>(a.group||'').localeCompare(b.group||'')||a.name.localeCompare(b.name));
 
     if(!data.length){
       tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد خطوط سير مطابقة</td></tr>';
@@ -12605,11 +12624,11 @@ async function loadRoutes(){
     }
 
     tbody.innerHTML = data.map((r,i)=>{
-      const branchCount = (BRANCHES_MAP&&BRANCHES_MAP[r.name]) ? BRANCHES_MAP[r.name].length : '—';
-      const repNames = r.reps.join('، ')||'—';
-      const grpLabel = GROUPS[r.group]?.label||r.group||'—';
-      const grpColor = GROUPS[r.group]?.color||'#999';
-      const activeCount = (REPS||[]).filter(u=>(u.route===r.name)&&(u.active!==false)).length;
+      const branchCount = branchCountMap[r.name] ?? '—';
+      const repNames    = r.reps.join('، ')||'—';
+      const grpLabel    = GROUPS[r.group]?.label||r.group||'—';
+      const grpColor    = GROUPS[r.group]?.color||'#999';
+      const activeCount = (REPS||[]).filter(u=>(u.route===r.name)&&(u.active!==false)&&(u.status!=='inactive')).length;
       const statusBadge = r.status==='active'
         ? `<span class="badge b-green">نشط</span>`
         : `<span class="badge b-gray">موقوف</span>`;
@@ -12630,7 +12649,136 @@ async function loadRoutes(){
   }
 }
 
-async function saveRoutes(){
+async function exportRoutesPDF(){
+  const btn = document.querySelector('[onclick="exportRoutesPDF()"]');
+  if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري التحضير...'; }
+
+  try{
+    // جيب خطوط السير من Supabase
+    const routesRes = await fetch(`${SUPABASE_URL}/rest/v1/routes?select=name,grp&order=grp.asc,name.asc`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const routesList = routesRes.ok ? await routesRes.json() : [];
+
+    // جيب كل الفروع من Supabase
+    const branchesRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,grp,client_type,status&order=route.asc,branch_name.asc`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const branchesList = branchesRes.ok ? await branchesRes.json() : [];
+
+    // بناء map: route → [فروع]
+    const branchMap = {};
+    branchesList.forEach(b=>{
+      const r=(b.route||'').trim();
+      if(!r) return;
+      if(!branchMap[r]) branchMap[r]=[];
+      branchMap[r].push(b);
+    });
+
+    // تجميع خطوط السير حسب المجموعة
+    const byGroup = {};
+    routesList.forEach(rt=>{
+      const g = rt.grp||'other';
+      if(!byGroup[g]) byGroup[g]=[];
+      byGroup[g].push(rt);
+    });
+
+    // بناء محتوى PDF
+    const today = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
+    const totalRoutes = routesList.length;
+    const totalBranches = branchesList.length;
+
+    let routeSections = '';
+    routesList.forEach(rt=>{
+      const branches = branchMap[rt.name]||[];
+      const grpLabel = GROUPS[rt.grp]?.label?.replace(/[\u{1F300}-\u{1FFFF}]/gu,'')||rt.grp||'—';
+      const grpColor = GROUPS[rt.grp]?.color||'#731E2E';
+      const branchRows = branches.length
+        ? branches.map((b,i)=>`
+            <tr>
+              <td style="text-align:center;color:#8B6F47">${i+1}</td>
+              <td>${b.branch_name||'—'}</td>
+              <td style="text-align:center">
+                <span style="background:${b.client_type==='A'?'#E8F5E9':'#FFF3E0'};color:${b.client_type==='A'?'#1A7A4A':'#E65100'};padding:2px 8px;border-radius:12px;font-size:10px">${b.client_type||'—'}</span>
+              </td>
+              <td style="text-align:center">
+                <span style="background:${b.status==='active'?'#E8F5E9':'#FFEBEE'};color:${b.status==='active'?'#1A7A4A':'#B71C1C'};padding:2px 8px;border-radius:12px;font-size:10px">${b.status==='active'?'نشط':'موقوف'}</span>
+              </td>
+            </tr>`).join('')
+        : `<tr><td colspan="4" style="text-align:center;color:#aaa;padding:12px">لا توجد فروع مسجلة</td></tr>`;
+
+      routeSections += `
+        <div style="margin-bottom:28px;break-inside:avoid">
+          <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px 10px 0 0;background:${grpColor};color:#fff">
+            <div style="font-size:14px;font-weight:700">${rt.name}</div>
+            <div style="font-size:11px;opacity:.85;margin-right:auto">${grpLabel}</div>
+            <div style="font-size:11px;background:rgba(255,255,255,.2);padding:2px 10px;border-radius:20px">${branches.length} فرع</div>
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:11px;border:1px solid #E8D9C0;border-top:none">
+            <thead>
+              <tr style="background:#F5F0E8">
+                <th style="padding:7px;text-align:center;width:35px;border-bottom:1px solid #E8D9C0">#</th>
+                <th style="padding:7px;text-align:right;border-bottom:1px solid #E8D9C0">اسم الفرع</th>
+                <th style="padding:7px;text-align:center;width:60px;border-bottom:1px solid #E8D9C0">النوع</th>
+                <th style="padding:7px;text-align:center;width:60px;border-bottom:1px solid #E8D9C0">الحالة</th>
+              </tr>
+            </thead>
+            <tbody>${branchRows}</tbody>
+          </table>
+        </div>`;
+    });
+
+    const html = `<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+<meta charset="UTF-8"/>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  body{ font-family:'Cairo',sans-serif; background:#FFFDF8; color:#2C1F0A; font-size:12px; }
+  .cover{ text-align:center; padding:60px 40px 40px; border-bottom:3px solid #731E2E; margin-bottom:32px; }
+  .cover-logo{ font-size:48px; margin-bottom:8px; }
+  .cover-title{ font-size:26px; font-weight:700; color:#731E2E; margin-bottom:6px; }
+  .cover-sub{ font-size:13px; color:#8B6F47; margin-bottom:20px; }
+  .cover-stats{ display:flex; justify-content:center; gap:40px; }
+  .stat{ text-align:center; }
+  .stat-num{ font-size:28px; font-weight:700; color:#731E2E; }
+  .stat-lbl{ font-size:11px; color:#8B6F47; }
+  .content{ padding:0 32px 40px; }
+  tr:nth-child(even) td{ background:#FDFAF5; }
+  td{ padding:7px 10px; border-bottom:1px solid #F0E8D8; }
+  @media print{
+    body{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  }
+</style>
+</head>
+<body>
+  <div class="cover">
+    <div class="cover-logo">🌿</div>
+    <div class="cover-title">تقرير خطوط السير والفروع</div>
+    <div class="cover-sub">الطحان للنور — ${today}</div>
+    <div class="cover-stats">
+      <div class="stat"><div class="stat-num">${totalRoutes}</div><div class="stat-lbl">خط سير</div></div>
+      <div class="stat"><div class="stat-num">${totalBranches}</div><div class="stat-lbl">فرع</div></div>
+      <div class="stat"><div class="stat-num">${Object.keys(byGroup).length}</div><div class="stat-lbl">مجموعة</div></div>
+    </div>
+  </div>
+  <div class="content">${routeSections}</div>
+</body>
+</html>`;
+
+    const win = window.open('','_blank');
+    win.document.write(html);
+    win.document.close();
+    win.onload = ()=>{ win.focus(); win.print(); };
+
+  }catch(e){
+    alert('حدث خطأ أثناء التصدير: '+e.message);
+    console.error(e);
+  }
+
+  if(btn){ btn.disabled=false; btn.innerHTML='<i class="ti ti-file-type-pdf"></i> تصدير PDF'; }
+}
   try{
     await sbUpsert('products_db',{key:'routes_list',value:JSON.stringify(ROUTES_LIST),updated_at:new Date().toISOString()},'key');
     try{ localStorage.setItem('routes_list',JSON.stringify(ROUTES_LIST)); }catch(e){}
