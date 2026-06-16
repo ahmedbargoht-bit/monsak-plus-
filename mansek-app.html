@@ -1154,8 +1154,20 @@ async function sendFinalData(){
     }
 
     // إرسال كل الزيارات المحفوظة (لو فيه زيارات لم ترسل)
+    const todayISO = new Date().toISOString().slice(0,10);
     for(const v of visits){
       if(!v._sent){
+        // تحقق إن الزيارة من اليوم فقط — منع إرسال زيارات قديمة
+        if(v.date && v.date !== todayISO) { v._sent = true; continue; }
+        // تحقق من عدم وجود تكرار في Supabase
+        try{
+          const chk = await fetch(
+            `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(v.name)}&branch=eq.${encodeURIComponent(v.branch||'')}&date=eq.${todayISO}&select=id&limit=1`,
+            {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+          );
+          const existing = chk.ok ? await chk.json() : [];
+          if(Array.isArray(existing) && existing.length > 0){ v._sent = true; continue; }
+        }catch(e){}
         await apiPost({...v, action:'saveVisit'});
         v._sent = true;
       }
@@ -2265,6 +2277,26 @@ function calcPts(e){
 async function saveVisit(){
   const branch=document.getElementById('f-branch').value;
   if(!branch){alert('اختر الفرع أولاً');return;}
+
+  // ── تحقق من عدم وجود زيارة مسجلة بالفعل لنفس الفرع في نفس اليوم ──
+  const today = new Date().toISOString().slice(0,10);
+  try{
+    const chkRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&date=eq.${today}&select=id&limit=1`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    );
+    if(chkRes.ok){
+      const existing = await chkRes.json();
+      if(Array.isArray(existing) && existing.length > 0){
+        const ok=document.getElementById('entry-ok');
+        ok.textContent='⚠️ تم حفظ هذا الفرع مسبقاً اليوم!';
+        ok.style.background='#FEF3C7'; ok.style.color='#92400E';
+        ok.style.display='block';
+        setTimeout(()=>{ ok.style.display='none'; ok.style.background=''; ok.style.color=''; },3000);
+        return;
+      }
+    }
+  }catch(e){ console.warn('visit check error:', e); }
 
   // احفظ آخر فرع للمنسق الثابت
   if(cu?.coordType==='ثابت'){
