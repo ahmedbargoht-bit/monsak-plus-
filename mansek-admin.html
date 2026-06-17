@@ -15626,6 +15626,32 @@ function _wrBuildAndDownload(data, from, to, fname){
   document.addEventListener('DOMContentLoaded', initHmDates);
 })();
 
+// جيب كل الصفوف بدون حد أقصى عبر Pagination (Supabase بيحدد 1000 صف كحد أقصى لكل طلب،
+// فلو احتجنا أكتر بنكرر الطلب بـ Range header لحد ما نوصل لكل البيانات)
+async function fetchAllPaginated(baseUrl){
+  const pageSize = 1000;
+  let allRows = [];
+  let from = 0;
+  while(true){
+    const res = await fetch(baseUrl, {
+      headers:{
+        'apikey':SUPABASE_KEY,
+        'Authorization':`Bearer ${SUPABASE_KEY}`,
+        'Range-Unit':'items',
+        'Range': `${from}-${from+pageSize-1}`
+      }
+    });
+    if(!res.ok) break;
+    const chunk = await res.json();
+    if(!Array.isArray(chunk) || !chunk.length) break;
+    allRows = allRows.concat(chunk);
+    if(chunk.length < pageSize) break; // آخر صفحة
+    from += pageSize;
+    if(allRows.length > 600000) break; // حد أمان أقصى يمنع loop لا نهائي
+  }
+  return allRows;
+}
+
 const HM_COLORS = ['#EFF6FF','#BFDBFE','#60A5FA','#2563EB','#1D4ED8','#1E3A8A'];
 const HM_GRP_COLORS = {giza:'#D62828',cairo:'#005CBF',south:'#1A7A4A',tajmuat:'#F77F00',hyper:'#6A0DAD',alex:'#003049'};
 let _hmRawData = null;
@@ -15637,17 +15663,17 @@ async function hmLoad(){
   const metric = document.getElementById('hm-metric').value;
   if(!from||!to){ alert('اختر فترة زمنية'); return; }
 
-  document.getElementById('hm-container').innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner" style="margin:0 auto 10px"></div>جاري تحميل البيانات...</div>';
+  document.getElementById('hm-container').innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner" style="margin:0 auto 10px"></div>جاري تحميل كل البيانات (قد يستغرق بضع ثوانٍ مع الفترات الطويلة)...</div>';
   document.getElementById('hm-tbody').innerHTML = '<tr><td colspan="8" style="text-align:center;padding:20px;color:#888">—</td></tr>';
 
   const grpFilter  = grp==='all' ? '' : `&grp=eq.${grp}`;
   const dateFilter = `&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`;
 
   const [visits, products, returns_, missing_] = await Promise.all([
-    fetch(`${SUPABASE_URL}/rest/v1/visits?select=id,grp,branch,created_at${grpFilter}${dateFilter}&limit=10000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/products?select=id,grp,branch,snf,created_at${grpFilter}${dateFilter}&limit=10000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/returns?select=id,grp,branch,qty,created_at${grpFilter}${dateFilter}&limit=5000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/missing?select=id,grp,branch,created_at${grpFilter}${dateFilter}&limit=5000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
+    fetchAllPaginated(`${SUPABASE_URL}/rest/v1/visits?select=id,grp,branch,created_at${grpFilter}${dateFilter}&order=id.asc`).catch(()=>[]),
+    fetchAllPaginated(`${SUPABASE_URL}/rest/v1/products?select=id,grp,branch,snf,created_at${grpFilter}${dateFilter}&order=id.asc`).catch(()=>[]),
+    fetchAllPaginated(`${SUPABASE_URL}/rest/v1/returns?select=id,grp,branch,qty,created_at${grpFilter}${dateFilter}&order=id.asc`).catch(()=>[]),
+    fetchAllPaginated(`${SUPABASE_URL}/rest/v1/missing?select=id,grp,branch,created_at${grpFilter}${dateFilter}&order=id.asc`).catch(()=>[]),
   ]);
 
   const V = Array.isArray(visits)?visits:[];
