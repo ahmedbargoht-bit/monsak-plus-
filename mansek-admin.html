@@ -1937,7 +1937,7 @@ h2,h3{color:#2C1F0A}
           </div>
           <div class="tbl-wrap">
             <table>
-              <thead><tr><th>#</th><th>اسم خط السير</th><th>المجموعة</th><th>المنسقون</th><th>عدد الفروع</th><th>الحالة</th><th>نشطون</th></tr></thead>
+              <thead><tr><th>#</th><th>اسم خط السير</th><th>المجموعة</th><th>المنسقون</th><th>عدد الفروع</th><th>الحالة</th><th>نشطون</th><th>إجراءات</th></tr></thead>
               <tbody id="routes-tbody"></tbody>
             </table>
           </div>
@@ -12672,7 +12672,7 @@ async function loadRoutes(){
   const grp    = document.getElementById('rt-group')?.value||'all';
   const search = (document.getElementById('rt-search')?.value||'').trim().toLowerCase();
 
-  tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:1.5rem"><div class="spinner"></div></td></tr>';
+  tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:1.5rem"><div class="spinner"></div></td></tr>';
 
   try{
     // جيب خطوط السير من جدول routes (فيه name و grp الصح)
@@ -12727,7 +12727,7 @@ async function loadRoutes(){
     data.sort((a,b)=>(a.group||'').localeCompare(b.group||'')||a.name.localeCompare(b.name));
 
     if(!data.length){
-      tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد خطوط سير مطابقة</td></tr>';
+      tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد خطوط سير مطابقة</td></tr>';
       return;
     }
 
@@ -12741,20 +12741,67 @@ async function loadRoutes(){
         ? `<span class="badge b-green">نشط</span>`
         : `<span class="badge b-gray">موقوف</span>`;
       const routeEncoded = encodeURIComponent(r.name);
-      return `<tr style="cursor:pointer" onclick="openRouteDetail('${routeEncoded}')">
-        <td>${i+1}</td>
-        <td><b style="color:var(--navy);text-decoration:underline dotted">${r.name}</b></td>
-        <td><span class="badge" style="background:${grpColor}22;color:${grpColor}">${grpLabel}</span></td>
-        <td style="font-size:11px;max-width:180px">${repNames}</td>
-        <td><span class="badge b-navy">${branchCount} فرع</span></td>
-        <td>${statusBadge}</td>
-        <td><span style="font-size:11px;color:var(--text2)">${activeCount} منسق نشط</span></td>
+      return `<tr style="cursor:pointer">
+        <td onclick="openRouteDetail('${routeEncoded}')">${i+1}</td>
+        <td onclick="openRouteDetail('${routeEncoded}')"><b style="color:var(--navy);text-decoration:underline dotted">${r.name}</b></td>
+        <td onclick="openRouteDetail('${routeEncoded}')"><span class="badge" style="background:${grpColor}22;color:${grpColor}">${grpLabel}</span></td>
+        <td onclick="openRouteDetail('${routeEncoded}')" style="font-size:11px;max-width:180px">${repNames}</td>
+        <td onclick="openRouteDetail('${routeEncoded}')"><span class="badge b-navy">${branchCount} فرع</span></td>
+        <td onclick="openRouteDetail('${routeEncoded}')">${statusBadge}</td>
+        <td onclick="openRouteDetail('${routeEncoded}')"><span style="font-size:11px;color:var(--text2)">${activeCount} منسق نشط</span></td>
+        <td><button class="btn btn-xs" style="background:#731E2E;color:#fff" onclick="event.stopPropagation();deleteRouteCompletely('${routeEncoded}','${r.name.replace(/'/g,"\\'")}')"><i class="ti ti-trash"></i> حذف</button></td>
       </tr>`;
     }).join('');
 
   }catch(e){
-    tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:var(--red)">تعذر التحميل</td></tr>';
+    tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:1.5rem;color:var(--red)">تعذر التحميل</td></tr>';
     console.warn('loadRoutes error:', e);
+  }
+}
+
+// ── حذف خط سير بالكامل من النظام ومن Supabase ──────────────────
+async function deleteRouteCompletely(routeEncoded, routeName){
+  const confirmMsg = `⚠️ تحذير: حذف خط السير "${routeName}" نهائياً\n\n`+
+    `سيتم حذف:\n`+
+    `• خط السير من جدول routes\n`+
+    `• كل الفروع المرتبطة به من branches\n`+
+    `• كل الفروع المرتبطة به من coord_route_assignments\n`+
+    `• فك ربط المنسقين من هذا الخط (route سيصبح فاضي)\n\n`+
+    `⚠️ بيانات الزيارات والتقارير القديمة لن تُحذف، لكن لن يكون لها خط سير مرتبط.\n\n`+
+    `هل أنت متأكد؟ هذا الإجراء لا يمكن التراجع عنه!`;
+
+  if(!confirm(confirmMsg)) return;
+
+  // تأكيد ثانٍ بكتابة اسم الخط
+  const typed = prompt(`للتأكيد النهائي، اكتب اسم خط السير بالضبط:\n"${routeName}"`);
+  if(typed !== routeName){
+    showToast('❌ تم إلغاء الحذف — الاسم غير مطابق');
+    return;
+  }
+
+  const headers = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  const enc = encodeURIComponent(routeName);
+
+  try{
+    showToast('⏳ جاري الحذف من كل الجداول...');
+
+    await Promise.allSettled([
+      // 1. حذف من routes
+      fetch(`${SUPABASE_URL}/rest/v1/routes?name=eq.${enc}`,{method:'DELETE',headers}),
+      // 2. حذف الفروع من branches
+      fetch(`${SUPABASE_URL}/rest/v1/branches?route=eq.${enc}`,{method:'DELETE',headers}),
+      // 3. حذف الفروع من coord_route_assignments
+      fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?route=eq.${enc}`,{method:'DELETE',headers}),
+      // 4. فك ربط المنسقين (route يصبح فاضي بدل ما يبقى يشاور على خط محذوف)
+      fetch(`${SUPABASE_URL}/rest/v1/users?route=eq.${enc}`,{method:'PATCH',headers,body:JSON.stringify({route:null})}),
+    ]);
+
+    showToast(`✅ تم حذف خط السير "${routeName}" بالكامل من النظام`);
+    loadRoutes();
+    if(typeof refreshAll==='function') refreshAll();
+  }catch(e){
+    console.warn('deleteRouteCompletely error:', e);
+    showToast('❌ حدث خطأ أثناء الحذف — راجع الـ Console');
   }
 }
 
