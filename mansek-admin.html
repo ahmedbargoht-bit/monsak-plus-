@@ -3398,6 +3398,8 @@ h2,h3{color:#2C1F0A}
               <button class="btn btn-ghost btn-sm" onclick="sretLoad()"><i class="ti ti-refresh"></i> تحديث</button>
               <button class="btn btn-green btn-sm" onclick="sretExportExcel()"><i class="ti ti-file-spreadsheet"></i> Excel</button>
               <button class="btn btn-red btn-sm" onclick="sretExportPDF()"><i class="ti ti-file-type-pdf"></i> PDF</button>
+              <button class="btn btn-blue btn-sm" id="sret-transfer-btn" onclick="sretTransferToSupervisor()" disabled><i class="ti ti-send"></i> تحويل لمشرف البيع (<span id="sret-sel-count">0</span>)</button>
+              <button class="btn btn-sm" id="sret-delete-btn" style="background:#7C2D12;color:#fff" onclick="sretDeleteConfirmed()" disabled><i class="ti ti-trash"></i> مسح المؤكدين (<span id="sret-del-count">0</span>)</button>
             </div>
           </div>
 
@@ -3454,6 +3456,7 @@ h2,h3{color:#2C1F0A}
               <table>
                 <thead>
                   <tr style="background:#731E2E;color:#fff">
+                    <th><input type="checkbox" id="sret-select-all" onchange="sretToggleSelectAll()" style="width:16px;height:16px;cursor:pointer"/></th>
                     <th>#</th><th>المجموعة</th><th>خط السير</th><th>الفرع</th>
                     <th>الصنف</th><th>الكمية</th><th>عدد الزيارات</th><th>حالة الرفع</th><th>تاريخ الرفع</th><th>تأكيد الاستلام</th>
                   </tr>
@@ -14469,7 +14472,7 @@ async function sretLoad(){
   if(!from||!to) return;
 
   const tbody = document.getElementById('sret-tbody');
-  tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:20px"><div class="spinner" style="margin:0 auto"></div></td></tr>';
+  tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:20px"><div class="spinner" style="margin:0 auto"></div></td></tr>';
 
   const grpStr = grp==='all' ? Object.keys(GROUPS).join(',') : grp;
   let url = `${SUPABASE_URL}/rest/v1/returns?grp=in.(${grpStr})&select=*&order=created_at.desc&limit=2000`;
@@ -14494,9 +14497,10 @@ async function sretLoad(){
   data.forEach(r=>{
     const key = `${r.branch}|${r.snf}|${r.qty}`;
     if(!dedupMap[key]){
-      dedupMap[key] = {...r, _visits: 1};
+      dedupMap[key] = {...r, _visits: 1, _allIds: [r.id]};
     } else {
       dedupMap[key]._visits++;
+      dedupMap[key]._allIds.push(r.id);
       // احتفظ بأحدث حالة رفع وتأكيد
       if(r.pulled)    { dedupMap[key].pulled=true; dedupMap[key].pulled_by=r.pulled_by; dedupMap[key].pulled_at=r.pulled_at; }
       if(r.confirmed) { dedupMap[key].confirmed=true; dedupMap[key].confirmed_by=r.confirmed_by; dedupMap[key].confirmed_at=r.confirmed_at; }
@@ -14558,8 +14562,11 @@ async function sretLoad(){
         : `<span style="color:#ccc;font-size:11px">—</span>`;
 
     const dt = r.created_at ? fmtDate(r.created_at) : '—';
+    const canDelete = isConfirmed;
+    const rowDataAttr = `data-ids="${(r._allIds||[r.id]).join(',')}" data-branch="${(r.branch||'').replace(/"/g,'&quot;')}" data-grp="${r.grp||''}" data-confirmed="${isConfirmed?1:0}"`;
 
-    return `<tr style="${isLate?'background:#FFF0F0':''}">
+    return `<tr style="${isLate?'background:#FFF0F0':''}" ${rowDataAttr}>
+      <td><input type="checkbox" class="sret-row-chk" onchange="sretUpdateActionButtons()" style="width:16px;height:16px;cursor:pointer"/></td>
       <td>${i+1}</td>
       <td><span style="background:${grpInfo.color}22;color:${grpInfo.color};padding:2px 6px;border-radius:8px;font-size:10px;font-weight:700">${grpInfo.label}</span></td>
       <td style="font-size:11px">${routeN}</td>
@@ -14573,7 +14580,7 @@ async function sretLoad(){
       <td style="font-size:11px;color:#888;text-align:center">${pullDate}</td>
       <td style="text-align:center">${confirmCell}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="9" style="text-align:center;padding:20px;color:#888">لا توجد مرتجعات</td></tr>';
+  }).join('') || '<tr><td colspan="11" style="text-align:center;padding:20px;color:#888">لا توجد مرتجعات</td></tr>';
 }
 
 async function sretConfirmPull(id, branch){
@@ -14590,6 +14597,111 @@ async function sretConfirmPull(id, branch){
     });
     showToast('✅ تم تأكيد استلام المرتجع'); sretLoad();
   }catch(e){ showToast('❌ خطأ في التأكيد'); }
+}
+
+// ── تحديد الكل ──────────────────────────────────────────────────
+function sretToggleSelectAll(){
+  const all = document.getElementById('sret-select-all').checked;
+  document.querySelectorAll('.sret-row-chk').forEach(c=>c.checked=all);
+  sretUpdateActionButtons();
+}
+
+// ── تحديث حالة زراير التحويل والمسح حسب التحديد ──────────────────
+function sretUpdateActionButtons(){
+  const checked = [...document.querySelectorAll('.sret-row-chk:checked')];
+  const transferBtn = document.getElementById('sret-transfer-btn');
+  const deleteBtn    = document.getElementById('sret-delete-btn');
+
+  document.getElementById('sret-sel-count').textContent = checked.length;
+  transferBtn.disabled = checked.length===0;
+
+  // المسح يتاح بس لو كل المحدد مؤكد استلامه (confirmed=1)
+  const confirmedChecked = checked.filter(c=>{
+    const tr = c.closest('tr');
+    return tr?.dataset.confirmed === '1';
+  });
+  document.getElementById('sret-del-count').textContent = confirmedChecked.length;
+  deleteBtn.disabled = confirmedChecked.length===0 || confirmedChecked.length!==checked.length;
+}
+
+// ── تحويل رسالة لمشرف/ي البيع المرتبطين بفروع المرتجعات المحددة ──
+async function sretTransferToSupervisor(){
+  const checked = [...document.querySelectorAll('.sret-row-chk:checked')];
+  if(!checked.length){ showToast('⚠️ حدد مرتجعات أولاً'); return; }
+
+  const rows = checked.map(c=>{
+    const tr = c.closest('tr');
+    return { branch: tr?.dataset.branch||'', grp: tr?.dataset.grp||'' };
+  });
+  const branches = [...new Set(rows.map(r=>r.branch))];
+  const grps     = [...new Set(rows.map(r=>r.grp))];
+
+  if(!confirm(`تحويل تنبيه سحب ${branches.length} فرع لمشرف/ي البيع المختصين؟`)) return;
+
+  try{
+    // جيب مشرفي البيع (sales_sup + hyper_sales_sup) النشطين
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/sales_staff?role=in.(sales_sup,hyper_sales_sup)&active=eq.true&select=name,sector`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const staff = res.ok ? await res.json() : [];
+
+    // تحويل grp (giza/cairo/...) إلى اسم القطاع المستخدم في sales_staff.sector
+    const GRP_TO_SECTOR = {
+      giza:'موردن الجيزة', cairo:'موردن القاهرة', south:'موردن القاهرة',
+      tajmuat:'موردن القاهرة', alex:'موردن الإسكندرية', hyper:'هايبر ماركت'
+    };
+    const sectorNames = [...new Set(grps.map(g=>GRP_TO_SECTOR[g]).filter(Boolean))];
+
+    // مشرفو البيع المطابقين لقطاعات الفروع المحددة (أو الكل لو مفيش تطابق)
+    let targets = staff.filter(s=>sectorNames.includes(s.sector));
+    if(!targets.length) targets = staff; // fallback: لو مفيش تطابق بالقطاع، بلّغ كل مشرفي البيع
+
+    if(!targets.length){ showToast('⚠️ لا يوجد مشرفو بيع نشطون لإرسال التنبيه'); return; }
+
+    const branchList = branches.join('، ');
+    const msgText = `⚠️ يوجد ${branches.length} فرع لديه مرتجعات تحتاج سحب:\n${branchList}\n\nمن فضلك تابع السحب وتأكيد الاستلام.`;
+
+    await Promise.all(targets.map(s => sbInsert('messages', {
+      from_name: CU?.name || 'admin',
+      type: 'urgent',
+      to_all: false,
+      to_group: '',
+      to_rep: s.name,
+      message: msgText,
+      read_by: ''
+    })));
+
+    showToast(`✅ تم تحويل التنبيه لـ ${targets.length} مشرف بيع`);
+    checked.forEach(c=>c.checked=false);
+    document.getElementById('sret-select-all').checked=false;
+    sretUpdateActionButtons();
+  }catch(e){
+    console.warn('sretTransferToSupervisor error:', e);
+    showToast('❌ خطأ في تحويل التنبيه');
+  }
+}
+
+// ── مسح المرتجعات المؤكد استلامها نهائياً من النظام ──────────────
+async function sretDeleteConfirmed(){
+  const checked = [...document.querySelectorAll('.sret-row-chk:checked')];
+  const confirmedChecked = checked.filter(c=>c.closest('tr')?.dataset.confirmed==='1');
+  if(!confirmedChecked.length){ showToast('⚠️ لا يوجد مرتجعات مؤكدة محددة'); return; }
+
+  if(!confirm(`⚠️ مسح ${confirmedChecked.length} مرتجع نهائياً من النظام؟\nهذا الإجراء لا يمكن التراجع عنه!`)) return;
+
+  const ids = confirmedChecked.flatMap(c=>(c.closest('tr')?.dataset.ids||'').split(',')).filter(Boolean);
+  try{
+    await Promise.all(ids.map(id =>
+      fetch(`${SUPABASE_URL}/rest/v1/returns?id=eq.${id}`,{
+        method:'DELETE',
+        headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'}
+      })
+    ));
+    showToast(`✅ تم مسح ${ids.length} مرتجع نهائياً`);
+    sretLoad();
+  }catch(e){
+    console.warn('sretDeleteConfirmed error:', e);
+    showToast('❌ خطأ في المسح');
+  }
 }
 
 function sretExportExcel(){
