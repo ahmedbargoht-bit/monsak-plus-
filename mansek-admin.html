@@ -15628,26 +15628,31 @@ function _wrBuildAndDownload(data, from, to, fname){
 
 // جيب كل الصفوف بدون حد أقصى عبر Pagination (Supabase بيحدد 1000 صف كحد أقصى لكل طلب،
 // فلو احتجنا أكتر بنكرر الطلب بـ Range header لحد ما نوصل لكل البيانات)
-async function fetchAllPaginated(baseUrl){
+// جيب كل الصفوف بدون حد أقصى عبر Pagination باستخدام offset/limit في الرابط نفسه
+// (أكثر ثباتاً من Range header مع بعض إعدادات PostgREST)
+async function fetchAllPaginated(baseUrl, onProgress){
   const pageSize = 1000;
   let allRows = [];
-  let from = 0;
+  let offset = 0;
+  let page = 0;
   while(true){
-    const res = await fetch(baseUrl, {
-      headers:{
-        'apikey':SUPABASE_KEY,
-        'Authorization':`Bearer ${SUPABASE_KEY}`,
-        'Range-Unit':'items',
-        'Range': `${from}-${from+pageSize-1}`
-      }
-    });
+    const sep = baseUrl.includes('?') ? '&' : '?';
+    const pageUrl = `${baseUrl}${sep}limit=${pageSize}&offset=${offset}`;
+    let res;
+    try{
+      res = await fetch(pageUrl, {
+        headers:{ 'apikey':SUPABASE_KEY, 'Authorization':`Bearer ${SUPABASE_KEY}` }
+      });
+    }catch(e){ break; } // فشل شبكة — نوقف ونرجع اللي جمعناه لحد دلوقتي
     if(!res.ok) break;
     const chunk = await res.json();
     if(!Array.isArray(chunk) || !chunk.length) break;
     allRows = allRows.concat(chunk);
+    page++;
+    if(typeof onProgress==='function') onProgress(allRows.length, page);
     if(chunk.length < pageSize) break; // آخر صفحة
-    from += pageSize;
-    if(allRows.length > 600000) break; // حد أمان أقصى يمنع loop لا نهائي
+    offset += pageSize;
+    if(allRows.length > 200000) break; // حد أمان أقصى يمنع استهلاك مفرط
   }
   return allRows;
 }
@@ -15669,12 +15674,16 @@ async function hmLoad(){
   const grpFilter  = grp==='all' ? '' : `&grp=eq.${grp}`;
   const dateFilter = `&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`;
 
-  const [visits, products, returns_, missing_] = await Promise.all([
-    fetchAllPaginated(`${SUPABASE_URL}/rest/v1/visits?select=id,grp,branch,created_at${grpFilter}${dateFilter}&order=id.asc`).catch(()=>[]),
-    fetchAllPaginated(`${SUPABASE_URL}/rest/v1/products?select=id,grp,branch,snf,created_at${grpFilter}${dateFilter}&order=id.asc`).catch(()=>[]),
-    fetchAllPaginated(`${SUPABASE_URL}/rest/v1/returns?select=id,grp,branch,qty,created_at${grpFilter}${dateFilter}&order=id.asc`).catch(()=>[]),
-    fetchAllPaginated(`${SUPABASE_URL}/rest/v1/missing?select=id,grp,branch,created_at${grpFilter}${dateFilter}&order=id.asc`).catch(()=>[]),
-  ]);
+  const progressEl = document.getElementById('hm-container');
+  const showProgress = (label, count) => {
+    if(progressEl) progressEl.innerHTML = `<div style="text-align:center;padding:40px"><div class="spinner" style="margin:0 auto 10px"></div>جاري تحميل ${label}... (${count} صف حتى الآن)</div>`;
+  };
+
+  // تباعي مش متزامن — لتخفيف الضغط على السيرفر وتقليل فرص فشل الطلبات الكبيرة
+  const visits   = await fetchAllPaginated(`${SUPABASE_URL}/rest/v1/visits?select=id,grp,branch,created_at${grpFilter}${dateFilter}&order=id.asc`, (c)=>showProgress('الزيارات', c)).catch(()=>[]);
+  const products = await fetchAllPaginated(`${SUPABASE_URL}/rest/v1/products?select=id,grp,branch,snf,created_at${grpFilter}${dateFilter}&order=id.asc`, (c)=>showProgress('الأصناف', c)).catch(()=>[]);
+  const returns_  = await fetchAllPaginated(`${SUPABASE_URL}/rest/v1/returns?select=id,grp,branch,qty,created_at${grpFilter}${dateFilter}&order=id.asc`, (c)=>showProgress('المرتجعات', c)).catch(()=>[]);
+  const missing_  = await fetchAllPaginated(`${SUPABASE_URL}/rest/v1/missing?select=id,grp,branch,created_at${grpFilter}${dateFilter}&order=id.asc`, (c)=>showProgress('النواقص', c)).catch(()=>[]);
 
   const V = Array.isArray(visits)?visits:[];
   const P = Array.isArray(products)?products:[];
