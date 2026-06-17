@@ -3224,13 +3224,14 @@ h2,h3{color:#2C1F0A}
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn btn-ghost btn-sm" onclick="hmLoad()"><i class="ti ti-refresh"></i> تحديث</button>
-              <button class="btn btn-navy btn-sm" onclick="hmExport()"><i class="ti ti-file-download"></i> تصدير Excel</button>
+              <button class="btn btn-navy btn-sm" onclick="hmExportMetric()"><i class="ti ti-file-download"></i> تصدير المقياس</button>
+              <button class="btn btn-navy btn-sm" onclick="hmExportTable()"><i class="ti ti-file-download"></i> تصدير تفاصيل الفروع</button>
             </div>
           </div>
 
           <!-- فلاتر -->
           <div class="card" style="margin-bottom:12px">
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:8px;align-items:end">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr auto;gap:8px;align-items:end">
               <div class="fld" style="margin:0">
                 <label class="lbl">من تاريخ</label>
                 <input type="date" id="hm-from"/>
@@ -3241,7 +3242,7 @@ h2,h3{color:#2C1F0A}
               </div>
               <div class="fld" style="margin:0">
                 <label class="lbl">المجموعة</label>
-                <select id="hm-grp">
+                <select id="hm-grp" onchange="hmOnGrpChange()">
                   <option value="all">كل المجموعات</option>
                   <option value="giza">الجيزة</option>
                   <option value="cairo">القاهرة</option>
@@ -3249,6 +3250,12 @@ h2,h3{color:#2C1F0A}
                   <option value="tajmuat">التجمعات</option>
                   <option value="hyper">الهايبر</option>
                   <option value="alex">الإسكندرية</option>
+                </select>
+              </div>
+              <div class="fld" style="margin:0">
+                <label class="lbl">خط السير</label>
+                <select id="hm-route">
+                  <option value="all">كل الخطوط</option>
                 </select>
               </div>
               <div class="fld" style="margin:0">
@@ -15624,6 +15631,7 @@ function _wrBuildAndDownload(data, from, to, fname){
     if(t && !t.value) t.value = fmt(today);
   }
   document.addEventListener('DOMContentLoaded', initHmDates);
+  document.addEventListener('DOMContentLoaded', ()=>{ if(typeof hmOnGrpChange==='function') hmOnGrpChange(); });
 })();
 
 // جيب كل الصفوف بدون حد أقصى عبر Pagination (Supabase بيحدد 1000 صف كحد أقصى لكل طلب،
@@ -15661,10 +15669,20 @@ const HM_COLORS = ['#EFF6FF','#BFDBFE','#60A5FA','#2563EB','#1D4ED8','#1E3A8A'];
 const HM_GRP_COLORS = {giza:'#D62828',cairo:'#005CBF',south:'#1A7A4A',tajmuat:'#F77F00',hyper:'#6A0DAD',alex:'#003049'};
 let _hmRawData = null;
 
+// عند تغيير المجموعة — حدّث قائمة خطوط السير
+async function hmOnGrpChange(){
+  await loadAdminRoutesData();
+  const grp = document.getElementById('hm-grp').value;
+  const routeSel = document.getElementById('hm-route');
+  routeSel.innerHTML = '<option value="all">كل الخطوط</option>' +
+    adminGetRoutes(grp).map(r=>`<option value="${r}">${r}</option>`).join('');
+}
+
 async function hmLoad(){
   const from   = document.getElementById('hm-from').value;
   const to     = document.getElementById('hm-to').value;
   const grp    = document.getElementById('hm-grp').value;
+  const route  = document.getElementById('hm-route')?.value||'all';
   const metric = document.getElementById('hm-metric').value;
   if(!from||!to){ alert('اختر فترة زمنية'); return; }
 
@@ -15685,10 +15703,19 @@ async function hmLoad(){
   const returns_  = await fetchAllPaginated(`${SUPABASE_URL}/rest/v1/returns?select=id,grp,branch,qty,created_at${grpFilter}${dateFilter}&order=id.asc`, (c)=>showProgress('المرتجعات', c)).catch(()=>[]);
   const missing_  = await fetchAllPaginated(`${SUPABASE_URL}/rest/v1/missing?select=id,grp,branch,created_at${grpFilter}${dateFilter}&order=id.asc`, (c)=>showProgress('النواقص', c)).catch(()=>[]);
 
-  const V = Array.isArray(visits)?visits:[];
-  const P = Array.isArray(products)?products:[];
-  const R = Array.isArray(returns_)?returns_:[];
-  const M = Array.isArray(missing_)?missing_:[];
+  // فلتر بخط السير — لو محدد، نقصر كل المصفوفات على فروع الخط ده بس
+  let V = Array.isArray(visits)?visits:[];
+  let P = Array.isArray(products)?products:[];
+  let R = Array.isArray(returns_)?returns_:[];
+  let M = Array.isArray(missing_)?missing_:[];
+  if(route!=='all'){
+    await loadAdminRoutesData();
+    const routeBranches = new Set(adminGetBranches(grp, route));
+    V = V.filter(x=>routeBranches.has((x.branch||'').trim()));
+    P = P.filter(x=>routeBranches.has((x.branch||'').trim()));
+    R = R.filter(x=>routeBranches.has((x.branch||'').trim()));
+    M = M.filter(x=>routeBranches.has((x.branch||'').trim()));
+  }
 
   // فلتر: استثناء أي "فرع" يكون فعلياً اسم خط سير (يبدأ بـ "خط سير" أو "ثابت")
   const isRouteNotBranch = (b) => /^(خط سير|ثابت)/.test((b||'').trim());
@@ -15848,7 +15875,8 @@ document.addEventListener('DOMContentLoaded', ()=>{
   }, 500);
 });
 
-function hmExport(){
+// تصدير "تفاصيل الفروع" — الجدول التفصيلي بكل المقاييس
+function hmExportTable(){
   if(!_hmRawData||!_hmRawData.length){ alert('اضغط بحث أولاً'); return; }
   const from = document.getElementById('hm-from').value;
   const to   = document.getElementById('hm-to').value;
@@ -15874,8 +15902,47 @@ function hmExport(){
   ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:7}}];
   const hStyle = {fill:{fgColor:{rgb:'003049'}},font:{bold:true,color:{rgb:'FFFFFF'},sz:12,name:'Cairo'},alignment:{horizontal:'center',readingOrder:2}};
   const c = ws['A1']; if(c) c.s = hStyle;
-  XLSX.utils.book_append_sheet(wb, ws, 'خريطة الحرارة');
-  XLSX.writeFile(wb, `خريطة_حرارة_الفروع_${from}.xlsx`);
+  XLSX.utils.book_append_sheet(wb, ws, 'تفاصيل الفروع');
+  XLSX.writeFile(wb, `تفاصيل_الفروع_${from}_${to}.xlsx`);
+}
+
+// تصدير "المقياس" — نفس بيانات الكروت الملونة المعروضة في الخريطة (المقياس المختار فقط)
+function hmExportMetric(){
+  if(!_hmRawData||!_hmRawData.length){ alert('اضغط بحث أولاً'); return; }
+  const from   = document.getElementById('hm-from').value;
+  const to     = document.getElementById('hm-to').value;
+  const metric = document.getElementById('hm-metric').value;
+  const metricLabels = {visits:'الزيارات',products:'الأصناف',returns:'المرتجعات',missing:'النواقص'};
+
+  // تجميع حسب المجموعة، مرتب تنازلياً بنفس منطق hmRender
+  const groups = {};
+  _hmRawData.forEach(b=>{
+    const g = b.grp||'other';
+    if(!groups[g]) groups[g] = [];
+    groups[g].push(b);
+  });
+  Object.values(groups).forEach(arr=>arr.sort((a,b)=>(b[metric]||0)-(a[metric]||0)));
+
+  const aoa = [
+    [`خريطة حرارة الفروع — مقياس: ${metricLabels[metric]||metric}`,'',''],
+    [`الفترة: ${from} إلى ${to}`,'',''],
+    [''],
+    ['المجموعة','الفرع', metricLabels[metric]||metric],
+  ];
+  Object.entries(groups).forEach(([grp, branches])=>{
+    branches.forEach(b=>{
+      aoa.push([WR_GRP_LABELS[grp]||grp, b.branch, b[metric]||0]);
+    });
+  });
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{wch:16},{wch:30},{wch:14}];
+  ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:2}}];
+  const hStyle = {fill:{fgColor:{rgb:'003049'}},font:{bold:true,color:{rgb:'FFFFFF'},sz:12,name:'Cairo'},alignment:{horizontal:'center',readingOrder:2}};
+  const c = ws['A1']; if(c) c.s = hStyle;
+  XLSX.utils.book_append_sheet(wb, ws, 'المقياس');
+  XLSX.writeFile(wb, `مقياس_${metricLabels[metric]||metric}_${from}_${to}.xlsx`);
 }
 
 function _sdOpenModal(message, onConfirm){
