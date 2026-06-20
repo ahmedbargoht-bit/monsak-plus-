@@ -4544,12 +4544,24 @@ h2,h3{color:#2C1F0A}
           <option value="south">جنوب وشرق القاهرة</option>
           <option value="tajmuat">مجموعة التجمعات</option>
           <option value="hyper">الهايبر ماركت</option>
-                  <option value="alex">الإسكندرية</option>
+          <option value="alex">الإسكندرية</option>
         </select>
       </div>
       <div class="form-fld"><label class="form-lbl">النوع</label>
-        <select id="eu-type"><option value="متحرك">متحرك</option><option value="ثابت">ثابت</option></select>
+        <select id="eu-type" onchange="euOnTypeChange()">
+          <option value="متحرك">متحرك</option>
+          <option value="ثابت">ثابت</option>
+          <option value="ثابت كبار عملاء">ثابت كبار عملاء</option>
+        </select>
       </div>
+    </div>
+    <!-- فرع المنسق الثابت — يظهر فقط للثابت وثابت كبار عملاء -->
+    <div class="form-fld" id="eu-branch-wrap" style="display:none">
+      <label class="form-lbl">الفرع المخصص</label>
+      <select id="eu-branch" style="width:100%">
+        <option value="">جاري التحميل...</option>
+      </select>
+      <div style="font-size:10px;color:#8B6F47;margin-top:3px">سيتم تحديث الفرع في النظام وإزالة الاسم من الفرع القديم</div>
     </div>
     <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center">
       <button class="btn" style="background:#FFEBEE;color:#B71C1C;border:none" onclick="deleteRepFromModal()">
@@ -10462,7 +10474,6 @@ function loadUsers(){
 }
 
 function openEditUser(r){
-  // r ممكن يكون object أو string — نتعامل مع الاتنين
   const rep = typeof r === 'string' ? JSON.parse(r) : r;
   document.getElementById('eu-id').value=rep.name;
   document.getElementById('eu-name').value=rep.name;
@@ -10472,8 +10483,49 @@ function openEditUser(r){
   document.getElementById('eu-type').value=rep.type||rep.user_type||'متحرك';
   if(document.getElementById('eu-goal')) document.getElementById('eu-goal').value=rep.goal||1;
   if(document.getElementById('eu-status')) document.getElementById('eu-status').value=rep.status||'active';
+  euOnTypeChange();
   openModal('modal-edit-user');
 }
+
+async function euOnTypeChange(){
+  const type = document.getElementById('eu-type').value;
+  const wrap = document.getElementById('eu-branch-wrap');
+  if(type === 'ثابت' || type === 'ثابت كبار عملاء'){
+    wrap.style.display = 'block';
+    await loadEuBranches(type);
+  } else {
+    wrap.style.display = 'none';
+  }
+}
+
+async function loadEuBranches(type){
+  const sel = document.getElementById('eu-branch');
+  sel.innerHTML = '<option value="">جاري التحميل...</option>';
+  try{
+    // جيب الفروع حسب النوع
+    let url;
+    if(type === 'ثابت كبار عملاء'){
+      url = `${SUPABASE_URL}/rest/v1/branches?coord_type=eq.ثابت كبار عملاء&select=branch_name,route,grp&order=branch_name.asc&limit=500`;
+    } else {
+      url = `${SUPABASE_URL}/rest/v1/branches?coord_type=eq.ثابت&select=branch_name,route,grp&order=branch_name.asc&limit=500`;
+    }
+    const res = await fetch(url, {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const data = res.ok ? await res.json() : [];
+
+    // الفرع الحالي للمنسق
+    const currentRoute = document.getElementById('eu-route').value;
+    const currentName  = document.getElementById('eu-name').value;
+
+    sel.innerHTML = '<option value="">اختر الفرع...</option>' +
+      data.map(b=>{
+        const isCurrent = b.route === currentRoute || b.rep_name === currentName;
+        return `<option value="${b.branch_name}" data-route="${b.route}" data-grp="${b.grp||''}" ${isCurrent?'selected':''}>${b.branch_name}</option>`;
+      }).join('');
+  }catch(e){
+    sel.innerHTML = '<option value="">خطأ في التحميل</option>';
+  }
+}
+
 
 async function addUser(){
   const name=document.getElementById('nu-name').value.trim();
@@ -10539,30 +10591,82 @@ async function editUser(){
   const oldName=document.getElementById('eu-id').value;
   const name=document.getElementById('eu-name').value.trim();
   const pass=document.getElementById('eu-pass').value.trim();
-  const route=document.getElementById('eu-route').value.trim();
-  const group=document.getElementById('eu-group').value;
   const type=document.getElementById('eu-type').value;
+  const group=document.getElementById('eu-group').value;
   const goal=parseInt(document.getElementById('eu-goal')?document.getElementById('eu-goal').value:1)||1;
   const status=document.getElementById('eu-status')?document.getElementById('eu-status').value:'active';
-  if(!name)return;
+  if(!name) return;
 
-  // التحديث يتم مباشرة في Supabase
+  // للمنسق الثابت — خد route من الفرع المختار
+  let route = document.getElementById('eu-route').value.trim();
+  let selectedBranch = null;
 
-  // 2. تحديث في Supabase لو الجدول موجود
+  if((type==='ثابت'||type==='ثابت كبار عملاء') && document.getElementById('eu-branch-wrap').style.display!=='none'){
+    const brSel = document.getElementById('eu-branch');
+    const brOpt = brSel.options[brSel.selectedIndex];
+    if(brOpt && brOpt.value){
+      selectedBranch = brOpt.value;
+      route = brOpt.dataset.route || route;
+      if(brOpt.dataset.grp) document.getElementById('eu-group').value = brOpt.dataset.grp;
+    }
+  }
+
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+
   try{
-    const r=REPS.find(x=>x.name===oldName);
-    if(r&&r.id) await sbUpdate('users',{id:r.id},{name,pass_hash:pass,route,grp:group,user_type:type,goal,status});
-    else         await sbUpdateByName('users',oldName,{name,pass_hash:pass,route,grp:group,user_type:type,goal,status});
-  }catch(e){console.warn('Supabase update failed, saved locally');}
+    // 1. تحديث بيانات المنسق في users
+    await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(oldName)}&role=eq.rep`,{
+      method:'PATCH', headers:H,
+      body: JSON.stringify({name, pass_hash:pass, route, grp:group, user_type:type, goal, status})
+    });
 
-  // 3. تحديث في REPS المحلي
+    // 2. لو ثابت وفيه فرع محدد — حدّث branches
+    if(selectedBranch && (type==='ثابت'||type==='ثابت كبار عملاء')){
+      // امسح اسم المنسق من الفرع القديم
+      await fetch(`${SUPABASE_URL}/rest/v1/branches?rep_name=eq.${encodeURIComponent(oldName)}`,{
+        method:'PATCH', headers:H,
+        body: JSON.stringify({rep_name: null})
+      });
+      await fetch(`${SUPABASE_URL}/rest/v1/branches?rep_name2=eq.${encodeURIComponent(oldName)}`,{
+        method:'PATCH', headers:H,
+        body: JSON.stringify({rep_name2: null})
+      });
+      await fetch(`${SUPABASE_URL}/rest/v1/branches?rep_name3=eq.${encodeURIComponent(oldName)}`,{
+        method:'PATCH', headers:H,
+        body: JSON.stringify({rep_name3: null})
+      });
+
+      // أضف اسم المنسق للفرع الجديد في rep_name (لو مش مأخود) أو rep_name2
+      const brRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/branches?branch_name=eq.${encodeURIComponent(selectedBranch)}&select=rep_name,rep_name2,rep_name3`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+      );
+      const brData = brRes.ok ? await brRes.json() : [];
+      const br = brData[0];
+      if(br){
+        let updateField = {};
+        if(!br.rep_name || br.rep_name === oldName) updateField = {rep_name: name};
+        else if(!br.rep_name2 || br.rep_name2 === oldName) updateField = {rep_name2: name};
+        else updateField = {rep_name3: name};
+        await fetch(`${SUPABASE_URL}/rest/v1/branches?branch_name=eq.${encodeURIComponent(selectedBranch)}`,{
+          method:'PATCH', headers:H, body: JSON.stringify(updateField)
+        });
+      }
+    }
+
+    showToast(`✅ تم تعديل "${name}" بنجاح`);
+  }catch(e){
+    console.warn('editUser error:', e);
+    showToast('❌ خطأ في الحفظ');
+  }
+
+  // تحديث REPS المحلي
   const repIdx=REPS.findIndex(x=>x.name===oldName);
   if(repIdx!==-1) REPS[repIdx]={...REPS[repIdx],name,pass,route,group,type,goal,status};
 
   closeModal('modal-edit-user');
   loadUsers();
-  showOk('nu-ok','✓ تم تعديل '+name+' بنجاح');
-  saveRepsToDB(); // حفظ كل REPS في Supabase
+  saveRepsToDB();
 }
 
 async function saveRepsToDB(){
