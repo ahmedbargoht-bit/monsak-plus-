@@ -831,7 +831,13 @@ input[type=number] { -moz-appearance:textfield; }
         </div>
       </div>
       <div class="card">
-        <div class="card-title" id="dash-title"><i class="ti ti-chart-bar"></i> أدائي</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div class="card-title" id="dash-title" style="margin:0"><i class="ti ti-chart-bar"></i> أدائي</div>
+          <select id="dash-date-sel" onchange="loadDashByDate(this.value)"
+            style="font-size:12px;padding:5px 10px;border:1px solid #E8D5B0;border-radius:8px;background:#FFFBF5;font-family:Cairo,sans-serif;cursor:pointer;max-width:160px">
+            <option value="">اختر يوم...</option>
+          </select>
+        </div>
         <div class="stat-g">
           <div class="stat-c"><div class="stat-n" id="d-visits">0</div><div class="stat-l">فروع تمت زيارتها</div></div>
           <div class="stat-c"><div class="stat-n" id="d-score">0</div><div class="stat-l">النقاط</div></div>
@@ -1357,6 +1363,7 @@ async function doLogin(){
   fetchAssignments();
   fetchOrders();
   loadHolidays();
+  loadDashDates();
   loadPDBFromCloud().then(()=>{ renderProdList(); });
   loadBranchesMapFromCloud().then(()=>{ popBranches(freshRep.route); });
   updateOnlineStatus(true);
@@ -1970,7 +1977,7 @@ function showTab(tab){
   document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
   document.getElementById('tab-'+tab).classList.add('active');
   document.getElementById('nav-'+tab).classList.add('active');
-  if(tab==='dash'){updateDash();loadHolidays();}
+  if(tab==='dash'){updateDash();loadHolidays();loadDashDates();}
   if(tab==='orders')      { renderOrders(); loadRepOrders(); }
   if(tab==='missing')     renderMissing();
   if(tab==='returns')     { renderRetList(); renderRetSaved(); }
@@ -3420,6 +3427,127 @@ function recordAttFromDash(){
         {timeout:8000,enableHighAccuracy:true}
       )
     : done('','');
+}
+
+// ══════════════════════════════════════════════════════════════
+// لوحتي — بيانات من Supabase حسب التاريخ
+// ══════════════════════════════════════════════════════════════
+async function loadDashDates(){
+  if(!cu) return;
+  const sel = document.getElementById('dash-date-sel');
+  if(!sel) return;
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/attendance?select=date&name=eq.${encodeURIComponent(cu.name)}&order=date.desc&limit=60`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    );
+    if(!res.ok) return;
+    const data = await res.json();
+    // أيام فريدة بس
+    const dates = [...new Set(data.map(d=>d.date).filter(Boolean))].sort((a,b)=>b.localeCompare(a));
+    const today = new Date().toISOString().slice(0,10);
+    sel.innerHTML = dates.map(d=>`<option value="${d}" ${d===today?'selected':''}>${d}</option>`).join('');
+    // حمّل بيانات اليوم الأحدث تلقائياً
+    if(dates.length) loadDashByDate(sel.value);
+  }catch(e){ console.warn('loadDashDates error:', e); }
+}
+
+async function loadDashByDate(date){
+  if(!cu || !date) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  // 1. ساعات العمل من attendance
+  let firstIn = null, lastOut = null, hrs = 0;
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(cu.name)}&date=eq.${date}&select=time_in,time_out`,
+      {headers:H}
+    );
+    if(res.ok){
+      const data = await res.json();
+      const ins  = data.map(d=>d.time_in).filter(Boolean).sort();
+      const outs = data.map(d=>d.time_out).filter(Boolean).sort();
+      firstIn = ins[0]   || null;
+      lastOut = outs[outs.length-1] || null;
+      if(firstIn && lastOut){
+        const [ih,im] = firstIn.split(':').map(Number);
+        const [oh,om] = lastOut.split(':').map(Number);
+        hrs = Math.max(0, (oh*60+om - ih*60-im) / 60);
+      }
+    }
+  }catch(e){}
+
+  // 2. الزيارات من visits (distinct branch)
+  let visitBranches = [], prodCount = 0, missCount = 0, spaceT = 0, spaceU = 0, score = 0;
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(cu.name)}&date=eq.${date}&select=branch,time_in,time_out,points,space_total,space_used,sku_on,missing_count&order=time_in.asc`,
+      {headers:H}
+    );
+    if(res.ok){
+      const data = await res.json();
+      // فروع فريدة
+      const seen = new Set();
+      visitBranches = data.filter(v=>{ if(seen.has(v.branch)) return false; seen.add(v.branch); return true; });
+      score = data.reduce((s,v)=>s+(parseFloat(v.points)||0), 0);
+      spaceT = data.reduce((s,v)=>s+(parseFloat(v.space_total)||0), 0);
+      spaceU = data.reduce((s,v)=>s+(parseFloat(v.space_used)||0), 0);
+      missCount = data.reduce((s,v)=>s+(parseFloat(v.missing_count)||0), 0);
+    }
+  }catch(e){}
+
+  // 3. الأصناف من products
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/products?name=eq.${encodeURIComponent(cu.name)}&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59&select=snf`,
+      {headers:H}
+    );
+    if(res.ok){
+      const data = await res.json();
+      prodCount = new Set(data.map(p=>p.snf).filter(Boolean)).size;
+    }
+  }catch(e){}
+
+  // ── تحديث الواجهة ──
+  document.getElementById('dash-title').innerHTML = `<i class="ti ti-chart-bar"></i> أدائي — ${date}`;
+  document.getElementById('d-visits').textContent = visitBranches.length;
+  document.getElementById('d-score').textContent  = Math.round(score);
+  document.getElementById('d-hrs').textContent    = Math.round(hrs*10)/10;
+  document.getElementById('d-prods').textContent  = prodCount;
+  document.getElementById('d-space').textContent  = spaceT>0 ? Math.round(spaceU/spaceT*100)+'%' : '0%';
+  document.getElementById('d-miss').textContent   = missCount;
+
+  // سجل الحضور
+  const al = document.getElementById('att-log');
+  if(al){
+    if(firstIn){
+      al.innerHTML = `<div style="display:flex;gap:16px">
+        <div><div style="font-size:10px;color:#aaa">الحضور</div><div style="font-size:15px;font-weight:700;color:var(--green)">${firstIn}</div></div>
+        ${lastOut?`<div><div style="font-size:10px;color:#aaa">الانصراف</div><div style="font-size:15px;font-weight:700;color:var(--red)">${lastOut}</div></div>`:''}
+        ${hrs>0?`<div><div style="font-size:10px;color:#aaa">الساعات</div><div style="font-size:15px;font-weight:700;color:#003A80">${Math.round(hrs*10)/10}</div></div>`:''}
+      </div>`;
+    } else {
+      al.innerHTML = '<span style="color:#aaa">لا يوجد حضور في هذا اليوم</span>';
+    }
+  }
+
+  // قائمة الفروع
+  const vl = document.getElementById('visit-list');
+  if(vl){
+    if(!visitBranches.length){
+      vl.innerHTML = '<div style="font-size:12px;color:#bbb;text-align:center;padding:1rem">لا توجد زيارات في هذا اليوم</div>';
+    } else {
+      const colors = ['#005CBF','#1A7A4A','#F77F00','#6B7280'];
+      vl.innerHTML = visitBranches.map((v,i)=>`
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #f0f0f0">
+          <div style="width:28px;height:28px;border-radius:50%;background:${colors[i]||'#6B7280'};color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</div>
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:700">${v.branch||'—'}</div>
+            <div style="font-size:10px;color:#aaa">${v.time_in||'--'} → ${v.time_out||'--'}</div>
+          </div>
+        </div>`).join('');
+    }
+  }
 }
 
 function updateDash(){
