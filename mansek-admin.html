@@ -4286,13 +4286,75 @@ h2,h3{color:#2C1F0A}
               <button class="btn btn-blue btn-sm" onclick="hlLoad()"><i class="ti ti-search"></i> بحث</button>
             </div>
           </div>
-          <div class="card">
+          <div class="card" style="margin-bottom:16px">
             <div class="table-wrap">
               <table>
                 <thead><tr><th>#</th><th>التاريخ</th><th>اسم الإجازة</th><th>المجموعة</th><th>الاستثناءات</th><th>حذف</th></tr></thead>
-                <tbody id="hl-tbody"><tr><td colspan="5" style="text-align:center;padding:20px;color:#888">اختر الشهر واضغط بحث</td></tr></tbody>
+                <tbody id="hl-tbody"><tr><td colspan="6" style="text-align:center;padding:20px;color:#888">اختر الشهر واضغط بحث</td></tr></tbody>
               </table>
             </div>
+          </div>
+
+          <!-- ══ العطل الأسبوعية ══ -->
+          <div class="card">
+            <div class="card-title" style="margin-bottom:14px">
+              <i class="ti ti-calendar-week" style="color:#1565C0"></i> العطل الأسبوعية للمنسقين
+              <span style="font-size:11px;color:#888;font-weight:400;margin-right:8px">حدد منسقين واختر يوم عطلتهم الأسبوعية — التطبيق لن يفتح في يوم العطلة</span>
+            </div>
+            <!-- فلتر سريع -->
+            <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+              <input type="text" id="dow-search" placeholder="ابحث بالاسم..." oninput="dowFilter()"
+                style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;flex:1;min-width:150px"/>
+              <select id="dow-filter-grp" onchange="dowFilter()"
+                style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
+                <option value="">كل المجموعات</option>
+                <option value="giza">مجموعة الجيزة</option>
+                <option value="cairo">وسط القاهرة</option>
+                <option value="south">جنوب وشرق القاهرة</option>
+                <option value="tajmuat">مجموعة التجمعات</option>
+                <option value="hyper">الهايبر ماركت</option>
+                <option value="alex">مجموعة الإسكندرية</option>
+              </select>
+              <button class="btn btn-ghost btn-sm" onclick="loadDayOffTable()"><i class="ti ti-refresh"></i></button>
+            </div>
+            <!-- أزرار تحديد جماعي -->
+            <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="dow-select-all" onchange="dowToggleAll(this.checked)" style="width:15px;height:15px"/>
+                تحديد الكل
+              </label>
+              <span style="color:#ddd">|</span>
+              <span style="font-size:12px;color:#555">تعيين العطلة للمحددين:</span>
+              <select id="dow-bulk-day" style="padding:4px 8px;border:1px solid #ddd;border-radius:6px;font-family:Cairo,sans-serif;font-size:12px">
+                <option value="">اختر اليوم</option>
+                <option value="friday">الجمعة</option>
+                <option value="saturday">السبت</option>
+                <option value="sunday">الأحد</option>
+                <option value="thursday">الخميس</option>
+                <option value="none">بلا عطلة</option>
+              </select>
+              <button class="btn btn-sm" style="background:#1565C0;color:#fff" onclick="dowBulkSave()">
+                <i class="ti ti-device-floppy"></i> حفظ للمحددين
+              </button>
+            </div>
+            <!-- الجدول -->
+            <div class="table-wrap" style="max-height:400px;overflow-y:auto">
+              <table>
+                <thead style="position:sticky;top:0">
+                  <tr>
+                    <th style="width:36px"></th>
+                    <th>اسم المنسق</th>
+                    <th>خط السير</th>
+                    <th>المجموعة</th>
+                    <th style="text-align:center">يوم العطلة</th>
+                  </tr>
+                </thead>
+                <tbody id="dow-tbody">
+                  <tr><td colspan="5" style="text-align:center;padding:20px;color:#888">جاري التحميل...</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div style="font-size:11px;color:#888;margin-top:8px" id="dow-count"></div>
           </div>
         </div>
 
@@ -7764,7 +7826,7 @@ function renderCurrentPanel(){
         renderGoals();
       }).catch(()=>renderGoals());
       break;
-    case 'holidays': loadHolidays(); break;
+    case 'holidays': loadHolidays(); loadDayOffTable(); break;
     case 'export-full': break;
     case 'activity': loadActivity(); break;
     case 'rep-summary': initRepSummaryDates(); break;
@@ -12522,6 +12584,114 @@ function cnExportPDF(){
   w.document.write(html); w.document.close();
   setTimeout(()=>{ w.focus(); w.print(); },800);
   showToast('✅ تم فتح نافذة PDF');
+}
+
+// ══════════════════════════════════════════════════════════════
+// العطل الأسبوعية للمنسقين (day_off)
+// ══════════════════════════════════════════════════════════════
+const DAY_LABELS = {friday:'الجمعة', saturday:'السبت', sunday:'الأحد', thursday:'الخميس', none:'بلا عطلة'};
+let _dowAllData = [];
+
+async function loadDayOffTable(){
+  const tbody = document.getElementById('dow-tbody');
+  if(!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:14px;color:#888">جاري التحميل...</td></tr>';
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/users?select=id,name,route,grp,role,day_off&role=eq.rep&order=grp.asc,name.asc&limit=500`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    _dowAllData = res.ok ? await res.json() : [];
+  }catch(e){ _dowAllData = []; }
+  document.getElementById('dow-count').textContent = `إجمالي: ${_dowAllData.length} منسق`;
+  dowFilter();
+}
+
+function dowFilter(){
+  const search = (document.getElementById('dow-search')?.value||'').toLowerCase();
+  const grp    = document.getElementById('dow-filter-grp')?.value||'';
+  const tbody  = document.getElementById('dow-tbody');
+  if(!tbody) return;
+
+  let data = _dowAllData;
+  if(search) data = data.filter(u=>(u.name||'').toLowerCase().includes(search));
+  if(grp)    data = data.filter(u=>(u.grp||'')=== grp);
+
+  if(!data.length){
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:14px;color:#888">لا توجد نتائج</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.map(u=>`<tr>
+    <td style="text-align:center">
+      <input type="checkbox" class="dow-cb" data-id="${u.id}" data-name="${(u.name||'').replace(/"/g,'&quot;')}"
+        style="width:15px;height:15px;cursor:pointer" onchange="dowUpdateSelAll()"/>
+    </td>
+    <td><b>${u.name||'—'}</b></td>
+    <td style="font-size:11px">${u.route||'—'}</td>
+    <td><span class="badge b-blue">${GROUPS[u.grp]?.label||u.grp||'—'}</span></td>
+    <td style="text-align:center">
+      <select onchange="dowSaveSingle('${u.id}',this.value,'${(u.name||'').replace(/'/g,"\\'")}' )"
+        style="font-size:11px;padding:3px 8px;border-radius:6px;border:1px solid #ddd;cursor:pointer">
+        <option value=""      ${!u.day_off?'selected':''}>— غير محدد —</option>
+        <option value="friday"    ${u.day_off==='friday'?'selected':''}>الجمعة</option>
+        <option value="saturday"  ${u.day_off==='saturday'?'selected':''}>السبت</option>
+        <option value="sunday"    ${u.day_off==='sunday'?'selected':''}>الأحد</option>
+        <option value="thursday"  ${u.day_off==='thursday'?'selected':''}>الخميس</option>
+        <option value="none"      ${u.day_off==='none'?'selected':''}>بلا عطلة</option>
+      </select>
+    </td>
+  </tr>`).join('');
+}
+
+function dowUpdateSelAll(){
+  const all = [...document.querySelectorAll('.dow-cb')];
+  const checked = all.filter(c=>c.checked);
+  const selAll = document.getElementById('dow-select-all');
+  if(selAll){
+    selAll.indeterminate = checked.length > 0 && checked.length < all.length;
+    selAll.checked = checked.length === all.length;
+  }
+}
+
+function dowToggleAll(checked){
+  document.querySelectorAll('.dow-cb').forEach(cb=>{ cb.checked = checked; });
+}
+
+async function dowSaveSingle(id, dayOff, name){
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body: JSON.stringify({day_off: dayOff||null})
+    });
+    if(res.ok) showToast(`✅ تم تحديث عطلة "${name}"`);
+    else showToast('❌ فشل التحديث','err');
+    // حدّث الكاش
+    const u = _dowAllData.find(x=>String(x.id)===String(id));
+    if(u) u.day_off = dayOff||null;
+  }catch(e){ showToast('❌ خطأ في الاتصال','err'); }
+}
+
+async function dowBulkSave(){
+  const cbs    = [...document.querySelectorAll('.dow-cb:checked')];
+  const dayOff = document.getElementById('dow-bulk-day').value;
+  if(!cbs.length){ showToast('⚠️ حدد منسقين أولاً','err'); return; }
+  if(!dayOff)    { showToast('⚠️ اختر يوم العطلة','err'); return; }
+
+  showToast(`⏳ جاري تحديث ${cbs.length} منسق...`);
+  let ok=0, fail=0;
+  for(const cb of cbs){
+    try{
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${cb.dataset.id}`,{
+        method:'PATCH',
+        headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+        body: JSON.stringify({day_off: dayOff==='none'?null:dayOff})
+      });
+      if(res.ok){ ok++; const u=_dowAllData.find(x=>String(x.id)===cb.dataset.id); if(u) u.day_off=dayOff==='none'?null:dayOff; }
+      else fail++;
+    }catch(e){ fail++; }
+  }
+  showToast(fail===0 ? `✅ تم تحديث ${ok} منسق` : `⚠️ تم ${ok} — فشل ${fail}`);
+  dowFilter(); // أعد رسم الجدول
 }
 
 async function loadHolidays(){
