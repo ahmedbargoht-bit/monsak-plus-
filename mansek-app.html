@@ -344,6 +344,7 @@ input[type=number] { -moz-appearance:textfield; }
   <!-- ══ Top Nav ══ -->
   <div class="bottom-nav">
     <button class="nav-btn active" id="nav-entry" onclick="showTab('entry')"><i class="ti ti-clipboard-list"></i><span>إدخال</span></button>
+    <button class="nav-btn" id="nav-visit" onclick="showTab('visit')"><i class="ti ti-map-pin"></i><span>الزيارة</span><span class="nav-badge" id="visit-badge" style="display:none">0</span></button>
     <button class="nav-btn" id="nav-products" onclick="showTab('products')"><i class="ti ti-package"></i><span>أصناف</span><span class="nav-badge" id="prod-badge" style="display:none">0</span></button>
     <button class="nav-btn" id="nav-missing" onclick="showTab('missing')"><i class="ti ti-alert-triangle"></i><span>نواقص</span><span class="nav-badge" id="miss-badge" style="display:none">0</span></button>
     <button class="nav-btn" id="nav-returns" onclick="showTab('returns')"><i class="ti ti-arrow-back-up"></i><span>مرتجعات</span><span class="nav-badge" id="ret-badge" style="display:none">0</span></button>
@@ -746,6 +747,38 @@ input[type=number] { -moz-appearance:textfield; }
         <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);font-size:11px;color:var(--text2);text-align:center">
           الباسورد الجديد سيظهر للمشرف والإدارة فوراً
         </div>
+      </div>
+    </div>
+
+    <!-- تاب الزيارة -->
+    <div id="tab-visit" class="tab">
+      <!-- هيدر الفرع الحالي -->
+      <div class="card" id="visit-tab-header" style="border:2px solid #4B3C1A;background:linear-gradient(135deg,#4B3C1A,#7C2D12);color:#EDE5D8;border-radius:12px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <i class="ti ti-building-store" style="font-size:24px;color:#EDE5D8"></i>
+          <div>
+            <div style="font-size:11px;opacity:.7">الفرع الحالي</div>
+            <div style="font-size:16px;font-weight:700" id="visit-tab-branch">—</div>
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:11px;opacity:.7" id="visit-tab-time">—</div>
+      </div>
+
+      <!-- جدول الأصناف -->
+      <div class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <div class="card-title" style="margin:0"><i class="ti ti-package" style="color:#7E22CE"></i> الأصناف المسجّلة</div>
+          <span id="visit-tab-prod-count" style="font-size:11px;color:#888">0 صنف</span>
+        </div>
+        <div id="visit-tab-prods">
+          <div style="text-align:center;padding:20px;color:#aaa;font-size:12px">لا توجد أصناف مسجّلة بعد</div>
+        </div>
+      </div>
+
+      <!-- النواقص -->
+      <div class="card" id="visit-tab-miss-card" style="display:none">
+        <div class="card-title"><i class="ti ti-alert-triangle" style="color:#EA580C"></i> النواقص المسجّلة <span id="visit-tab-miss-count" style="font-size:11px;color:#888"></span></div>
+        <div id="visit-tab-miss"></div>
       </div>
     </div>
 
@@ -1481,6 +1514,25 @@ function updateOnlineStatus(isOnline){
 }
 
 function logout(){
+  // لو في زيارة أو أصناف مسجلة — اظهر رسالة تأكيد
+  const branch = document.getElementById('f-branch')?.value;
+  const prodCount = products.length;
+  const missCount = missing.length;
+
+  const summary = document.getElementById('logout-summary');
+  if(summary){
+    summary.innerHTML = `
+      <div>📍 <b>الفرع:</b> ${branch||'لم يُحدَّد'}</div>
+      <div>📦 <b>الأصناف المسجّلة:</b> ${prodCount}</div>
+      <div>⚠️ <b>النواقص:</b> ${missCount}</div>
+      <div>🕐 <b>وقت الخروج:</b> ${new Date().toLocaleTimeString('ar',{hour:'2-digit',minute:'2-digit'})}</div>
+    `;
+  }
+  document.getElementById('modal-logout-confirm').style.display = 'flex';
+}
+
+function confirmLogout(){
+  document.getElementById('modal-logout-confirm').style.display = 'none';
   if(locInterval) clearInterval(locInterval);
   if(window._notifInterval) clearInterval(window._notifInterval);
   if(shiftTimerInterval) clearInterval(shiftTimerInterval);
@@ -1494,6 +1546,108 @@ function logout(){
   document.getElementById('loc-live-badge').style.display='none';
   showScreen('s-login');
 }
+
+// ══════════════════════════════════════════════════════════════
+// تاب الزيارة — بيانات من Supabase
+// ══════════════════════════════════════════════════════════════
+async function loadVisitTab(){
+  if(!cu) return;
+  const branch = document.getElementById('f-branch')?.value;
+  const today  = new Date().toISOString().slice(0,10);
+
+  // هيدر الفرع
+  document.getElementById('visit-tab-branch').textContent = branch || 'لم يُحدَّد بعد';
+  document.getElementById('visit-tab-time').textContent   = `اليوم: ${today}`;
+
+  if(!branch){
+    document.getElementById('visit-tab-prods').innerHTML = '<div style="text-align:center;padding:20px;color:#aaa;font-size:12px">اختر الفرع من تاب الإدخال أولاً</div>';
+    return;
+  }
+
+  // جيب الأصناف من Supabase
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/products?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id,snf,shelf_qty,stock_qty&order=snf.asc`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    );
+    if(!res.ok) return;
+    const data = await res.json();
+
+    document.getElementById('visit-tab-prod-count').textContent = `${data.length} صنف`;
+
+    if(!data.length){
+      document.getElementById('visit-tab-prods').innerHTML = '<div style="text-align:center;padding:20px;color:#aaa;font-size:12px">لا توجد أصناف مسجّلة لهذا الفرع اليوم</div>';
+      return;
+    }
+
+    document.getElementById('visit-tab-prods').innerHTML = data.map(p=>`
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #f0f0f0">
+        <div style="flex:1;font-size:12px;font-weight:600;color:#2C1F0A">${p.snf||'—'}</div>
+        <div style="text-align:center;min-width:50px">
+          <div style="font-size:9px;color:#888">رف</div>
+          <div style="font-size:13px;font-weight:700;color:#1565C0">${p.shelf_qty??'—'}</div>
+        </div>
+        <div style="text-align:center;min-width:50px">
+          <div style="font-size:9px;color:#888">مخزن</div>
+          <div style="font-size:13px;font-weight:700;color:#1A7A4A">${p.stock_qty??'—'}</div>
+        </div>
+        <button onclick="openEditProd('${p.id}','${(p.snf||'').replace(/'/g,"\\'")}',${p.shelf_qty??0},${p.stock_qty??0})"
+          style="background:#FFF3E0;color:#E65100;border:1px solid #FFD54F;border-radius:8px;padding:4px 8px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif">
+          <i class="ti ti-edit"></i> تعديل
+        </button>
+      </div>`).join('');
+  }catch(e){ console.warn('loadVisitTab error:', e); }
+
+  // النواقص
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/missing?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=snf,reason`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    );
+    if(res.ok){
+      const data = await res.json();
+      const card = document.getElementById('visit-tab-miss-card');
+      if(data.length){
+        card.style.display='block';
+        document.getElementById('visit-tab-miss-count').textContent = `(${data.length})`;
+        document.getElementById('visit-tab-miss').innerHTML = data.map(m=>`
+          <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f0f0f0;font-size:12px">
+            <span style="font-weight:600">${m.snf||'—'}</span>
+            <span style="color:#EA580C">${m.reason||'—'}</span>
+          </div>`).join('');
+      } else {
+        card.style.display='none';
+      }
+    }
+  }catch(e){}
+}
+
+function openEditProd(id, snf, shelf, stock){
+  document.getElementById('edit-prod-id').value   = id;
+  document.getElementById('edit-prod-name').textContent = snf;
+  document.getElementById('edit-shelf-qty').value  = shelf;
+  document.getElementById('edit-stock-qty').value  = stock;
+  document.getElementById('modal-edit-prod').style.display = 'flex';
+}
+
+async function saveEditProd(){
+  const id    = document.getElementById('edit-prod-id').value;
+  const shelf = document.getElementById('edit-shelf-qty').value;
+  const stock = document.getElementById('edit-stock-qty').value;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body: JSON.stringify({shelf_qty: parseFloat(shelf)||0, stock_qty: parseFloat(stock)||0})
+    });
+    if(res.ok){
+      document.getElementById('modal-edit-prod').style.display='none';
+      loadVisitTab(); // أعد تحميل البيانات
+    }
+  }catch(e){ alert('خطأ في الحفظ'); }
+}
+
+
 
 
 // ══════════════════════════════════════════════════════════
@@ -1978,6 +2132,7 @@ function showTab(tab){
   document.getElementById('tab-'+tab).classList.add('active');
   document.getElementById('nav-'+tab).classList.add('active');
   if(tab==='dash'){updateDash();loadHolidays();loadDashDates();}
+  if(tab==='visit'){loadVisitTab();}
   if(tab==='orders')      { renderOrders(); loadRepOrders(); }
   if(tab==='missing')     renderMissing();
   if(tab==='returns')     { renderRetList(); renderRetSaved(); }
@@ -2337,6 +2492,9 @@ async function saveVisit(){
   _savingVisit = false;
   const btn2 = document.getElementById('save-visit-btn');
   if(btn2){ btn2.disabled=false; btn2.innerHTML='<i class="ti ti-device-floppy"></i> حفظ الزيارة'; }
+  // حدّث badge تاب الزيارة
+  const vBadge = document.getElementById('visit-badge');
+  if(vBadge){ vBadge.textContent = visits.length; vBadge.style.display='block'; }
   const ok=document.getElementById('entry-ok');
   ok.textContent='✓ تم حفظ "'+branch+'" وإضافة '+e.points+' نقطة!';
   ok.style.background=''; ok.style.color='';
@@ -4871,5 +5029,54 @@ function closePromoBanner(){
   border:1px solid #F0A50040;backdrop-filter:blur(4px)">
   v1.2
 </div>
+<!-- Modal تأكيد الخروج -->
+<div id="modal-logout-confirm" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#FFFDF8;border-radius:16px;width:100%;max-width:380px;overflow:hidden;border:1px solid #E8D9C0">
+    <div style="background:linear-gradient(135deg,#4B3C1A,#7C2D12);padding:16px;color:#EDE5D8;text-align:center">
+      <i class="ti ti-logout" style="font-size:28px"></i>
+      <div style="font-size:15px;font-weight:700;margin-top:6px">تأكيد الخروج</div>
+    </div>
+    <div style="padding:16px">
+      <div id="logout-summary" style="background:#F8F9FA;border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.8"></div>
+      <div style="font-size:13px;font-weight:700;color:#4B3C1A;text-align:center;margin-bottom:14px">✅ تم إرسال بيانات الزيارة بنجاح — هل تريد الخروج؟</div>
+      <div style="display:flex;gap:10px">
+        <button onclick="confirmLogout()" style="flex:1;background:#7C2D12;color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
+          <i class="ti ti-logout"></i> نعم، خروج
+        </button>
+        <button onclick="document.getElementById('modal-logout-confirm').style.display='none'" style="flex:1;background:#F5F5F5;color:#555;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
+          إلغاء
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal تعديل كمية الصنف -->
+<div id="modal-edit-prod" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#FFFDF8;border-radius:16px;width:100%;max-width:340px;overflow:hidden;border:1px solid #E8D9C0">
+    <div style="background:#4B3C1A;padding:14px 16px;color:#EDE5D8;display:flex;align-items:center;justify-content:space-between">
+      <span style="font-weight:700"><i class="ti ti-edit"></i> تعديل الكمية</span>
+      <button onclick="document.getElementById('modal-edit-prod').style.display='none'" style="background:rgba(255,255,255,.15);border:none;color:#EDE5D8;width:26px;height:26px;border-radius:50%;cursor:pointer">✕</button>
+    </div>
+    <div style="padding:16px">
+      <div id="edit-prod-name" style="font-size:13px;font-weight:700;color:#4B3C1A;margin-bottom:14px;text-align:center"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+        <div>
+          <div style="font-size:11px;color:#888;margin-bottom:4px">كمية الرف</div>
+          <input type="number" id="edit-shelf-qty" min="0" style="width:100%;padding:10px;border:1px solid #E8D9C0;border-radius:8px;font-family:Cairo,sans-serif;font-size:14px;text-align:center"/>
+        </div>
+        <div>
+          <div style="font-size:11px;color:#888;margin-bottom:4px">كمية المخزن</div>
+          <input type="number" id="edit-stock-qty" min="0" style="width:100%;padding:10px;border:1px solid #E8D9C0;border-radius:8px;font-family:Cairo,sans-serif;font-size:14px;text-align:center"/>
+        </div>
+      </div>
+      <input type="hidden" id="edit-prod-id"/>
+      <button onclick="saveEditProd()" style="width:100%;background:#4B3C1A;color:#EDE5D8;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
+        <i class="ti ti-device-floppy"></i> حفظ التعديل
+      </button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
