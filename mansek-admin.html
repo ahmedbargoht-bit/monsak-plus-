@@ -799,9 +799,14 @@ h2,h3{color:#2C1F0A}
           <div class="card">
             <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
               <span><i class="ti ti-map-pin" style="color:var(--green)"></i> لوكيشن المنسقين — مباشر</span>
-              <button class="btn btn-sm" onclick="exportLocationPDF()" style="background:#B71C1C;color:#fff;display:flex;align-items:center;gap:5px">
-                <i class="ti ti-file-type-pdf"></i> تصدير PDF
-              </button>
+              <div style="display:flex;gap:8px">
+                <button class="btn btn-sm" onclick="cleanOrphanedLocations()" style="background:#6B3D15;color:#EDE5D8;display:flex;align-items:center;gap:5px">
+                  <i class="ti ti-trash"></i> تنظيف البيانات اليتيمة
+                </button>
+                <button class="btn btn-sm" onclick="exportLocationPDF()" style="background:#B71C1C;color:#fff;display:flex;align-items:center;gap:5px">
+                  <i class="ti ti-file-type-pdf"></i> تصدير PDF
+                </button>
+              </div>
             </div>
             <!-- فلاتر اللوكيشن -->
             <div class="filter-bar" style="flex-wrap:wrap;gap:8px;margin-bottom:8px">
@@ -907,7 +912,7 @@ h2,h3{color:#2C1F0A}
             <div id="rd-route-stats" style="margin-bottom:12px"></div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>التاريخ</th><th>الفرع</th><th>خط السير</th><th>دخول</th><th>SKU رف</th><th>SKU مخزن</th><th>نواقص</th><th>نوع العرض</th><th>النقاط</th></tr></thead>
+                <thead><tr><th>التاريخ</th><th>الفرع</th><th>خط السير</th><th>دخول</th><th>إجمالي كمية الرف</th><th>إجمالي كمية المخزن</th><th>نواقص</th><th>نوع العرض</th><th>النقاط</th></tr></thead>
                 <tbody id="rd-visits-body"></tbody>
               </table>
             </div>
@@ -2847,7 +2852,7 @@ h2,h3{color:#2C1F0A}
                     <tr>
                       <th>#</th><th>المنسق</th><th>التاريخ</th><th>الفرع</th>
                       <th>وقت الدخول</th><th>وقت الخروج</th><th>نوع العميل</th>
-                      <th>SKU رف</th><th>SKU مخزن</th><th>نواقص</th><th>النقاط</th>
+                      <th>إجمالي كمية الرف</th><th>إجمالي كمية المخزن</th><th>نواقص</th><th>النقاط</th>
                     </tr>
                   </thead>
                   <tbody id="rr-preview-tbody"></tbody>
@@ -6215,8 +6220,8 @@ function exportRepReport(){
       'وقت الخروج':  v.time_out||'',
       'نوع العميل':  v.client_type||'',
       'نوع العرض':   v.display_type||'',
-      'SKU رف':       v.sku_on||0,
-      'SKU مخزن':     v.sku_stock||0,
+      'إجمالي كمية الرف':       v.sku_on||0,
+      'إجمالي كمية المخزن':     v.sku_stock||0,
       'نواقص':        v.missing_count||0,
       'النقاط':       v.points||0,
     }));
@@ -8450,6 +8455,55 @@ function locToggleAll(cb){
   locOnCheckChange();
 }
 
+// تنظيف الصفوف اليتيمة من location (أسماء مش موجودة في users)
+async function cleanOrphanedLocations(){
+  const btn = document.querySelector('[onclick="cleanOrphanedLocations()"]');
+  if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري الفحص...'; }
+
+  try{
+    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+    // جيب كل أسماء المنسقين الحقيقيين من users
+    const usersRes = await fetch(`${SUPABASE_URL}/rest/v1/users?select=name&limit=5000`,{headers:H});
+    const usersList = usersRes.ok ? await usersRes.json() : [];
+    const validNames = new Set(usersList.map(u=>u.name));
+
+    // جيب كل صفوف location
+    const locRes = await fetch(`${SUPABASE_URL}/rest/v1/location?select=name,route,updated_at&limit=5000`,{headers:H});
+    const locList = locRes.ok ? await locRes.json() : [];
+
+    // فلتر الأسماء اليتيمة (موجودة في location بس مش في users)
+    const orphaned = locList.filter(l=>!validNames.has(l.name));
+
+    if(!orphaned.length){
+      showToast('✅ مفيش بيانات يتيمة — كل الأسماء في اللوكيشن موجودة فعلاً في users');
+      return;
+    }
+
+    const list = orphaned.map(o=>`• ${o.name} (${o.route||'—'})`).join('\n');
+    const confirmed = confirm(`وُجد ${orphaned.length} صف يتيم في جدول اللوكيشن (أسماء مش موجودة في المنسقين):\n\n${list}\n\nهل تريد حذفهم؟`);
+    if(!confirmed) return;
+
+    // احذف كل صف يتيم
+    let deleted = 0;
+    for(const o of orphaned){
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/location?name=eq.${encodeURIComponent(o.name)}`,{
+        method:'DELETE', headers:H
+      });
+      if(res.ok) deleted++;
+    }
+
+    showToast(`🗑️ تم حذف ${deleted} صف يتيم من اللوكيشن`);
+    await refreshAll();
+
+  }catch(e){
+    alert('حدث خطأ أثناء التنظيف: '+e.message);
+    console.error(e);
+  }
+
+  if(btn){ btn.disabled=false; btn.innerHTML='<i class="ti ti-trash"></i> تنظيف البيانات اليتيمة'; }
+}
+
 function exportLocationPDF(){
   const rows = document.querySelectorAll('#loc-table tr');
   if(!rows.length){ alert('لا توجد بيانات للتصدير'); return; }
@@ -9100,8 +9154,8 @@ function rdExport(){
       'خط السير':v.route||'',
       'دخول':v.time_in||'',
       'خروج':v.time_out||'',
-      'SKU رف':v.sku_on||0,
-      'SKU مخزن':v.sku_stock||0,
+      'إجمالي كمية الرف':v.sku_on||0,
+      'إجمالي كمية المخزن':v.sku_stock||0,
       'نواقص':v.missing_count||0,
       'نوع العرض':v.display_type||v.client_type||'',
       'النقاط':v.points||0
@@ -9368,7 +9422,7 @@ function loadVisits(){
     const spUtil  = r.spaceTotal>0 ? Math.round(r.spaceUsed/r.spaceTotal*100)+'%' : '—';
     const gc      = GROUPS[r.grp]?.color||'#ccc';
     const skuBadge    = r.skuOn>0
-      ? `<span class="badge b-blue">${r.skuOn} صنف</span>`
+      ? `<span class="badge b-blue">${r.skuOn} قطعة (رف)</span>`
       : `<span style="color:#bbb;font-size:11px">—</span>`;
     const missBadge   = r.missingCount>0
       ? `<span class="badge b-red">${r.missingCount} ناقص</span>`
