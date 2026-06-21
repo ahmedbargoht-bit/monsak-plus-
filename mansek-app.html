@@ -5196,6 +5196,35 @@ window.addEventListener('DOMContentLoaded', () => {
   if(!navigator.onLine) showOfflineBanner(true);
   updateQueueBadge();
   setTimeout(flushOQ, 3000);
+
+  // استعادة حالة الزيارة الحالية (الفرع + الحضور/الانصراف) — مستقلة تماماً
+  // عن باقي خطوات استعادة الجلسة، عشان أي خطأ في سطر تاني ميوقفهاش
+  function restoreVisitStateIndependently(){
+    try{
+      const savedVisit = sessionStorage.getItem('visit_state');
+      if(!savedVisit) return;
+      const vs = JSON.parse(savedVisit);
+      attIn  = vs.attIn  || null;
+      attOut = vs.attOut || null;
+      const fBranch = document.getElementById('f-branch');
+      const fCtype  = document.getElementById('f-ctype');
+      if(fBranch && vs.branch){ fBranch.value = vs.branch; }
+      if(fCtype  && vs.ctype){  fCtype.value  = vs.ctype;  }
+      if(vs.branch && typeof onBranchChange==='function') onBranchChange();
+      if(typeof checkStep1Done==='function') checkStep1Done();
+      if(attIn){
+        const elTime = document.getElementById('att-in-time');
+        if(elTime) elTime.textContent = attIn.time||'';
+        document.getElementById('btn-in')?.classList.add('in');
+        if(typeof lockBranchSelect==='function') lockBranchSelect();
+      }
+      if(attOut){
+        const elTime = document.getElementById('att-out-time');
+        if(elTime) elTime.textContent = attOut.time||'';
+      }
+    }catch(e){ console.warn('restoreVisitStateIndependently error:', e); }
+  }
+
   // استعادة الجلسة لو الصفحة اتفتحت من جديد (refresh)
   try{
     const saved = sessionStorage.getItem('cu_session');
@@ -5205,7 +5234,12 @@ window.addEventListener('DOMContentLoaded', () => {
       document.getElementById('top-user').textContent = s.name;
       showScreen('s-main');
       loadPDBFromCloud().then(()=>{ renderProdList(); });
-      loadBranchesMapFromCloud().then(()=>{ popBranches(s.route); });
+      loadBranchesMapFromCloud().then(()=>{
+        popBranches(s.route).then(()=>{
+          // استرجع حالة الزيارة بعد ما قايمة الفروع تتعبى فعلياً (مش بـ setTimeout ثابت)
+          restoreVisitStateIndependently();
+        }).catch(()=>{ restoreVisitStateIndependently(); });
+      }).catch(()=>{ restoreVisitStateIndependently(); });
       startLocTracking();
       fetchMessages();
       fetchOrders();
@@ -5218,36 +5252,15 @@ window.addEventListener('DOMContentLoaded', () => {
       }
       loadRepsFromCloud();
 
-      // استعادة حالة الزيارة الحالية (الفرع + الحضور/الانصراف) لو موجودة
-      try{
-        const savedVisit = sessionStorage.getItem('visit_state');
-        if(savedVisit){
-          const vs = JSON.parse(savedVisit);
-          attIn  = vs.attIn  || null;
-          attOut = vs.attOut || null;
-          setTimeout(()=>{
-            const fBranch = document.getElementById('f-branch');
-            const fCtype  = document.getElementById('f-ctype');
-            if(fBranch && vs.branch){ fBranch.value = vs.branch; }
-            if(fCtype  && vs.ctype){  fCtype.value  = vs.ctype;  }
-            if(vs.branch) onBranchChange();
-            checkStep1Done();
-            if(attIn){
-              const elTime = document.getElementById('att-in-time');
-              if(elTime) elTime.textContent = attIn.time||'';
-              document.getElementById('btn-in')?.classList.add('in');
-              lockBranchSelect();
-            }
-            if(attOut){
-              const elTime = document.getElementById('att-out-time');
-              if(elTime) elTime.textContent = attOut.time||'';
-            }
-          }, 800); // بعد ما popBranches تخلص تعبئة قايمة الفروع
-        }
-      }catch(e){}
+      // شبكة أمان: لو لأي سبب الـ callbacks فوق ما اتنفذتش (مثلاً fetch مش بيرجع promise)
+      setTimeout(restoreVisitStateIndependently, 2000);
       return;
     }
-  }catch(e){}
+  }catch(e){
+    console.warn('session restore error:', e);
+    // حتى لو فشلت استعادة الجلسة كاملة، حاول استرجع حالة الزيارة لو cu موجودة
+    if(cu) restoreVisitStateIndependently();
+  }
   // مفيش جلسة — حمّل قايمة المنسقين
   loadRepsFromCloud().then(()=>{
     const sel = document.getElementById('l-name');
