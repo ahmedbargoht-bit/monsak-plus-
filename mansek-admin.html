@@ -8611,12 +8611,27 @@ async function rdLoad(){
     return iso>=from && iso<=to;
   });
 
-  const [products,missing,orders,attend]=await Promise.all([
+  // خط سير المنسق — لحساب عدد الأصناف الفريدة اللي خط السير بيتعامل فيها (كل الوقت)
+  const repRoute = (REPS||[]).find(r=>r.name===name)?.route || '';
+
+  const [products,missing,orders,attend,routeSnfData,undeliveredMissingData]=await Promise.all([
     fetch(`${SUPABASE_URL}/rest/v1/products?name=eq.${enc}&select=*&order=created_at.desc${dfCA}&limit=500`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/missing?name=eq.${enc}&select=*&order=created_at.desc${dfCA}&limit=500`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/orders?to_name=eq.${enc}&select=*&order=created_at.desc${dfCA}&limit=200`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/attendance?name=eq.${enc}&select=*&order=created_at.desc${dfCA}&limit=200`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[])
+    fetch(`${SUPABASE_URL}/rest/v1/attendance?name=eq.${enc}&select=*&order=created_at.desc${dfCA}&limit=200`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    repRoute
+      ? fetch(`${SUPABASE_URL}/rest/v1/products?route=eq.${encodeURIComponent(repRoute)}&select=snf&limit=8000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[])
+      : Promise.resolve([]),
+    fetch(`${SUPABASE_URL}/rest/v1/missing?name=eq.${enc}&delivered=eq.false&select=snf${dfCA}&limit=2000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
   ]);
+
+  // عدد الأصناف الفريدة اللي خط سير المنسق بيتعامل فيها (كل الوقت، مش مرتبط بفترة)
+  const routeDistinctSnfCount = new Set((routeSnfData||[]).map(p=>p.snf).filter(Boolean)).size;
+  // عدد الأصناف الناقصة الفريدة غير المسلّمة في الفترة المحددة
+  const undeliveredMissingCount = new Set((undeliveredMissingData||[]).map(m=>m.snf).filter(Boolean)).size;
+  window._rdRouteSnfCount = routeDistinctSnfCount;
+  window._rdUndeliveredMissingCount = undeliveredMissingCount;
+
   // حفظ البيانات الكاملة
   window._rdAllData={visits,products,missing,orders,attend};
   // تحديث قائمة الفروع
@@ -8649,12 +8664,14 @@ function rdRenderData(visits,products,missing,orders,attend){
 
   const totalPts=visits.reduce((s,v)=>s+(+v.points||0),0);
   const branches=[...new Set(visits.map(v=>v.branch).filter(Boolean))];
+  const routeSnfCount = window._rdRouteSnfCount ?? products.length;
+  const undeliveredMissingCount = window._rdUndeliveredMissingCount ?? missing.length;
   document.getElementById('rd-stats').innerHTML=`
     <div class="stat-card blue"><div class="stat-n">${visits.length}</div><div class="stat-l">زيارة</div></div>
     <div class="stat-card green"><div class="stat-n">${totalPts}</div><div class="stat-l">نقاط</div></div>
     <div class="stat-card orange"><div class="stat-n">${branches.length}</div><div class="stat-l">فرع مختلف</div></div>
-    <div class="stat-card purple"><div class="stat-n">${products.length}</div><div class="stat-l">تسجيل صنف</div></div>
-    <div class="stat-card red"><div class="stat-n">${missing.length}</div><div class="stat-l">ناقص</div></div>
+    <div class="stat-card purple"><div class="stat-n">${routeSnfCount}</div><div class="stat-l">عدد الأصناف</div></div>
+    <div class="stat-card red"><div class="stat-n">${undeliveredMissingCount}</div><div class="stat-l">أصناف ناقصة</div></div>
     <div class="stat-card yellow"><div class="stat-n">${attend.length}</div><div class="stat-l">يوم حضور</div></div>
   `;
 
