@@ -2474,6 +2474,18 @@ function calcPts(e){
 
 let _savingVisit = false;
 
+// يجيب موقع GPS لحظي — مستخدم في كل زيارة بدل الاعتماد على موقع الحضور الصباحي
+function getFreshGPSLocation(){
+  return new Promise(resolve=>{
+    if(!navigator.geolocation){ resolve({lat:'', lng:''}); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos=>resolve({lat:pos.coords.latitude.toFixed(5), lng:pos.coords.longitude.toFixed(5)}),
+      ()=>resolve({lat:'', lng:''}),
+      {enableHighAccuracy:true, timeout:8000}
+    );
+  });
+}
+
 async function saveVisit(){
   if(_savingVisit) return; // منع الضغط المتكرر
   const branch=document.getElementById('f-branch').value;
@@ -2501,19 +2513,26 @@ async function saveVisit(){
 
   _savingVisit = true;
   const btn = document.getElementById('save-visit-btn');
-  if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري الحفظ...'; }
+  if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري تحديد الموقع...'; }
 
   // احفظ آخر فرع للمنسق الثابت
   if(cu?.coordType==='ثابت'){
     try{ localStorage.setItem('last_branch_'+cu.name, branch); }catch(e){}
   }
+
+  // موقع GPS لحظي لنفس الزيارة دي بالتحديد — بدل موقع تسجيل الحضور الصباحي
+  const freshLoc = await getFreshGPSLocation();
+  const nowTime = new Date().toTimeString().slice(0,5);
+
+  if(btn){ btn.innerHTML='<i class="ti ti-loader"></i> جاري الحفظ...'; }
+
   const skuOn=products.reduce((s,p)=>s+(parseInt(p.shelf)||0),0);
   const e={
     action:'saveVisit',
     name:cu.name,route:cu.route,group:cu.group||'',branch,
     date:new Date().toISOString().slice(0,10),
-    timeIn:attIn?attIn.time:'--',timeOut:attOut?attOut.time:'--',
-    lat:attIn?attIn.lat:'',lng:attIn?attIn.lng:'',
+    timeIn:nowTime,timeOut:attOut?attOut.time:'--',
+    lat:freshLoc.lat,lng:freshLoc.lng,
     clientType:document.getElementById('f-ctype').value,
     skuOn:skuOn||0,skuStock:products.reduce((s,p)=>s+(parseInt(p.stock)||0),0)||0,
     displayType:getSelectedDTs()||'--',
@@ -2529,8 +2548,16 @@ async function saveVisit(){
   };
   e.points=calcPts(e);cu.score=(cu.score||0)+e.points;
   visits.push({...e,branch});
+  window._lastVisitedBranch = branch;
   showOverlay(true);
   await apiPost(e);
+  // حدّث جدول location بالفرع الفعلي اللي اتزار + الموقع اللحظي — عشان "اللوكيشن المباشر" يعكس آخر فرع حقيقي
+  try{
+    await sbUpsert('location', {
+      name:cu.name, route:cu.route, grp:cu.group||cu.grp||'', branch,
+      lat:freshLoc.lat, lng:freshLoc.lng, active:true, updated_at:new Date().toISOString()
+    }, 'name');
+  }catch(e){ console.warn('location branch sync failed:', e); }
   showOverlay(false);
   _savingVisit = false;
   const btn2 = document.getElementById('save-visit-btn');
@@ -4615,9 +4642,11 @@ function updateSupplyBadge(){
 function sendLocation(){
   if(!cu) return;
   const grp = cu.group || cu.grp || '';
+  // آخر فرع معروف (من آخر زيارة محفوظة) — عشان upsert الدوري ميمسحش الفرع المسجل
+  const lastBranch = window._lastVisitedBranch || '';
   // أولاً: سجّل الأونلاين حتى لو مفيش GPS
   sbUpsert('location', {
-    name:cu.name, route:cu.route, grp,
+    name:cu.name, route:cu.route, grp, branch:lastBranch,
     lat:'', lng:'', active:true, updated_at: new Date().toISOString()
   }, 'name');
   updateOnlineStatus(true);
@@ -4627,7 +4656,7 @@ function sendLocation(){
     const lat = pos.coords.latitude.toFixed(5);
     const lng = pos.coords.longitude.toFixed(5);
     sbUpsert('location', {
-      name:cu.name, route:cu.route, grp,
+      name:cu.name, route:cu.route, grp, branch:lastBranch,
       lat, lng, active:true, updated_at: new Date().toISOString()
     }, 'name');
     // ── حدّث lat/lng في جدول users عشان يظهر في لوحة التحكم ──
