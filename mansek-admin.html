@@ -20957,7 +20957,7 @@ function serExportPDF(){
 // ══════════════════════════════════════════════════════════════
 // صلاحيات السوق — SE (Shelf Expiry)
 // ══════════════════════════════════════════════════════════════
-let _seFilters = {grps:[], routes:[], branches:[], feas:[], cats:[], snfs:[]};
+let _seFilters = {_raw:[], _branches:[]};
 let _seInited = false;
 
 async function seInit(){
@@ -20966,24 +20966,40 @@ async function seInit(){
 }
 
 async function seLoadData(){
+  _seInited = false;
   await seLoadFilters();
-  await seSearch();
 }
 
 async function seLoadFilters(){
   const tbody = document.getElementById('se-tbody');
   tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text2)"><div class="spinner" style="margin:0 auto"></div></td></tr>`;
   try{
-    const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json'};
-    const res = await fetch(SUPABASE_URL+'/rest/v1/rpc/get_market_expiry_filters',{method:'POST',headers:H,body:JSON.stringify({})});
-    const data = res.ok ? await res.json() : [];
-    _seFilters.grps     = [...new Set(data.map(r=>r.grp).filter(Boolean))].sort();
-    _seFilters.routes   = [...new Set(data.map(r=>r.route).filter(Boolean))].sort();
-    _seFilters.branches = [...new Set(data.map(r=>r.branch).filter(Boolean))].sort();
-    _seFilters.feas     = [...new Set(data.map(r=>r.fea).filter(Boolean))].sort();
-    _seFilters.cats     = [...new Set(data.map(r=>r.cat).filter(Boolean))].sort();
-    _seFilters.snfs     = [...new Set(data.map(r=>r.snf).filter(Boolean))].sort();
-    _seFilters._raw     = data; // نحتفظ بالبيانات للفلترة المتسلسلة
+    const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY};
+
+    // جيب المجموعات من groups
+    const grpsRes = await fetch(SUPABASE_URL+'/rest/v1/groups?select=key_name,name,color,emoji&order=name.asc',{headers:H});
+    const grpsData = grpsRes.ok ? await grpsRes.json() : [];
+
+    // جيب الخطوط من routes
+    const routesRes = await fetch(SUPABASE_URL+'/rest/v1/routes?select=name,grp&order=name.asc&limit=500',{headers:H});
+    const routesData = routesRes.ok ? await routesRes.json() : [];
+
+    // جيب الفروع من branches
+    const branchesRes = await fetch(SUPABASE_URL+'/rest/v1/branches?select=branch_name,route,grp&status=eq.active&order=branch_name.asc&limit=500',{headers:H});
+    const branchesData = branchesRes.ok ? await branchesRes.json() : [];
+
+    // جيب الفئات والتصنيفات والأصناف من market_expiry
+    const snfRes = await fetch(SUPABASE_URL+'/rest/v1/market_expiry?select=fea,cat,snf&order=snf.asc&limit=1000',{headers:H});
+    const snfData = snfRes.ok ? await snfRes.json() : [];
+
+    _seFilters._raw      = branchesData; // للفلترة المتسلسلة
+    _seFilters._branches = branchesData;
+    _seFilters._grps     = grpsData;
+    _seFilters._routes   = routesData;
+    _seFilters._feas     = [...new Set(snfData.map(r=>r.fea).filter(Boolean))].sort();
+    _seFilters._cats     = snfData;
+    _seFilters._snfs     = snfData;
+
     sePopulateFilters();
     await seSearch();
   }catch(e){
@@ -20992,49 +21008,61 @@ async function seLoadFilters(){
 }
 
 function sePopulateFilters(){
+  // المجموعات من groups table
   const seGrp = document.getElementById('se-grp');
-  seGrp.innerHTML = '<option value="all">كل المجموعات</option>' + _seFilters.grps.map(g=>`<option value="${g}">${GROUPS[g]?.label||g}</option>`).join('');
+  seGrp.innerHTML = '<option value="all">كل المجموعات</option>' +
+    (_seFilters._grps||[]).map(g=>`<option value="${g.key_name}">${g.emoji||''} ${g.name}</option>`).join('');
+
+  // الفئات من market_expiry
   const seFea = document.getElementById('se-fea');
-  seFea.innerHTML = '<option value="all">كل الفئات</option>' + _seFilters.feas.map(f=>`<option value="${f}">${f}</option>`).join('');
+  seFea.innerHTML = '<option value="all">كل الفئات</option>' +
+    (_seFilters._feas||[]).map(f=>`<option value="${f}">${f}</option>`).join('');
+
   seOnGrpChange();
   seOnFeaChange();
 }
 
 function seOnGrpChange(){
   const grp = document.getElementById('se-grp').value;
-  const f = grp==='all' ? _seFilters._raw : (_seFilters._raw||[]).filter(r=>r.grp===grp);
-  const routes = [...new Set(f.map(r=>r.route).filter(Boolean))].sort();
-  document.getElementById('se-route').innerHTML = '<option value="all">كل الخطوط</option>' + routes.map(r=>`<option value="${r}">${r}</option>`).join('');
+  const routes = grp==='all'
+    ? (_seFilters._routes||[])
+    : (_seFilters._routes||[]).filter(r=>r.grp===grp);
+  const routeNames = [...new Set(routes.map(r=>r.name).filter(Boolean))].sort();
+  document.getElementById('se-route').innerHTML = '<option value="all">كل الخطوط</option>' +
+    routeNames.map(r=>`<option value="${r}">${r}</option>`).join('');
   seOnRouteChange(false);
 }
 
 function seOnRouteChange(doSearch=true){
   const grp   = document.getElementById('se-grp').value;
   const route = document.getElementById('se-route').value;
-  let f = _seFilters._raw||[];
-  if(grp!=='all')   f=f.filter(r=>r.grp===grp);
-  if(route!=='all') f=f.filter(r=>r.route===route);
-  const branches = [...new Set(f.map(r=>r.branch).filter(Boolean))].sort();
-  document.getElementById('se-branch').innerHTML = '<option value="all">كل الفروع</option>' + branches.map(b=>`<option value="${b}">${b}</option>`).join('');
+  let branches = _seFilters._branches||[];
+  if(grp!=='all')   branches=branches.filter(b=>b.grp===grp);
+  if(route!=='all') branches=branches.filter(b=>b.route===route);
+  const branchNames = [...new Set(branches.map(b=>b.branch_name).filter(Boolean))].sort();
+  document.getElementById('se-branch').innerHTML = '<option value="all">كل الفروع</option>' +
+    branchNames.map(b=>`<option value="${b}">${b}</option>`).join('');
   if(doSearch) seSearch();
 }
 
 function seOnFeaChange(){
   const fea = document.getElementById('se-fea').value;
-  const f = fea==='all' ? _seFilters._raw||[] : (_seFilters._raw||[]).filter(r=>r.fea===fea);
+  const f = fea==='all' ? (_seFilters._cats||[]) : (_seFilters._cats||[]).filter(r=>r.fea===fea);
   const cats = [...new Set(f.map(r=>r.cat).filter(Boolean))].sort();
-  document.getElementById('se-cat').innerHTML = '<option value="all">كل التصنيفات</option>' + cats.map(c=>`<option value="${c}">${c}</option>`).join('');
+  document.getElementById('se-cat').innerHTML = '<option value="all">كل التصنيفات</option>' +
+    cats.map(c=>`<option value="${c}">${c}</option>`).join('');
   seOnCatChange(false);
 }
 
 function seOnCatChange(doSearch=true){
   const fea = document.getElementById('se-fea').value;
   const cat = document.getElementById('se-cat').value;
-  let f = _seFilters._raw||[];
+  let f = _seFilters._snfs||[];
   if(fea!=='all') f=f.filter(r=>r.fea===fea);
   if(cat!=='all') f=f.filter(r=>r.cat===cat);
   const snfs = [...new Set(f.map(r=>r.snf).filter(Boolean))].sort();
-  document.getElementById('se-snf').innerHTML = '<option value="all">كل الأصناف</option>' + snfs.map(s=>`<option value="${s}">${s}</option>`).join('');
+  document.getElementById('se-snf').innerHTML = '<option value="all">كل الأصناف</option>' +
+    snfs.map(s=>`<option value="${s}">${s}</option>`).join('');
   if(doSearch) seSearch();
 }
 
