@@ -1625,6 +1625,9 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
           <button onclick="meLoadData()" style="padding:8px 14px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
             <i class="ti ti-refresh"></i> تحديث
           </button>
+          <button onclick="mePrintPDF()" style="padding:8px 14px;background:#731E2E;color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif;font-weight:700">
+            <i class="ti ti-file-type-pdf"></i> PDF
+          </button>
         </div>
 
         <!-- إحصائيات -->
@@ -9096,15 +9099,20 @@ async function meLoadData(){
   tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;padding:2rem;color:var(--text2)"><div class="spinner" style="margin:0 auto"></div></td></tr>';
   try{
     const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json'};
-    const grp = cu?.grp || null;
+    const groups = cu?.groups || [];
 
-    // جيب الخطوط الخاصة بالمجموعة
-    const rtRes = await fetch(`${SUPABASE_URL}/rest/v1/routes?select=name,grp${grp?`&grp=eq.${grp}`:''}&order=name.asc`,{headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}});
+    // جيب الخطوط الخاصة بالمجموعات
+    let rtUrl = `${SUPABASE_URL}/rest/v1/routes?select=name,grp&order=name.asc`;
+    if(groups.length === 1) rtUrl += `&grp=eq.${encodeURIComponent(groups[0])}`;
+    else if(groups.length > 1) rtUrl += `&grp=in.(${groups.map(g=>encodeURIComponent(g)).join(',')})`;
+    const rtRes = await fetch(rtUrl,{headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}});
     const rtData = rtRes.ok ? await rtRes.json() : [];
     document.getElementById('me-route').innerHTML = '<option value="all">كل الخطوط</option>' + rtData.map(r=>`<option value="${r.name}">${r.name}</option>`).join('');
 
-    // جيب الفئات والأصناف من market_expiry للمجموعة
-    const snfUrl = `${SUPABASE_URL}/rest/v1/market_expiry?select=fea,cat,snf${grp?`&grp=eq.${grp}`:''}&order=snf.asc&limit=1000`;
+    // جيب الفئات والأصناف من market_expiry للمجموعات
+    let snfUrl = `${SUPABASE_URL}/rest/v1/market_expiry?select=fea,cat,snf&order=snf.asc&limit=1000`;
+    if(groups.length === 1) snfUrl += `&grp=eq.${encodeURIComponent(groups[0])}`;
+    else if(groups.length > 1) snfUrl += `&grp=in.(${groups.map(g=>encodeURIComponent(g)).join(',')})`;
     const snfRes = await fetch(snfUrl,{headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}});
     const snfData = snfRes.ok ? await snfRes.json() : [];
     _meFilters._snfData = snfData;
@@ -9140,9 +9148,10 @@ function meOnCatChange(doSearch=true){
 
 async function meOnRouteChange(){
   const route = document.getElementById('me-route').value;
-  const grp = cu?.grp || null;
+  const groups = cu?.groups || [];
   let url = `${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,grp&status=eq.active&order=branch_name.asc&limit=500`;
-  if(grp) url += `&grp=eq.${grp}`;
+  if(groups.length === 1) url += `&grp=eq.${encodeURIComponent(groups[0])}`;
+  else if(groups.length > 1) url += `&grp=in.(${groups.map(g=>encodeURIComponent(g)).join(',')})`;
   if(route!=='all') url += `&route=eq.${encodeURIComponent(route)}`;
   const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}});
   const data = res.ok ? await res.json() : [];
@@ -9151,7 +9160,8 @@ async function meOnRouteChange(){
 }
 
 async function meSearch(){
-  const grp    = cu?.grp || null;
+  const groups = cu?.groups || [];
+  const grp    = groups.length === 1 ? groups[0] : (groups.length > 1 ? groups.join(',') : null);
   const route  = document.getElementById('me-route')?.value || 'all';
   const branch = document.getElementById('me-branch')?.value || 'all';
   const fea    = document.getElementById('me-fea')?.value || 'all';
@@ -9261,6 +9271,57 @@ async function meSearch(){
   }catch(e){
     tbody.innerHTML=`<tr><td colspan="3" style="text-align:center;padding:2rem;color:#B71C1C">خطأ: ${e.message}</td></tr>`;
   }
+}
+
+function mePrintPDF(){
+  const table = document.getElementById('me-table');
+  if(!table){ alert('لا توجد بيانات للطباعة'); return; }
+
+  const route  = document.getElementById('me-route')?.value || 'all';
+  const branch = document.getElementById('me-branch')?.value || 'all';
+  const fea    = document.getElementById('me-fea')?.value || 'all';
+  const cat    = document.getElementById('me-cat')?.value || 'all';
+  const snf    = document.getElementById('me-snf')?.value || 'all';
+  const grpLabel = (cu?.groups||[]).map(g=>GROUPS[g]?.label||g).join('، ') || '';
+  const dateStr = new Date().toLocaleDateString('ar-EG');
+
+  const filterText = [
+    grpLabel ? `المجموعة: ${grpLabel}` : '',
+    route!=='all' ? `الخط: ${route}` : '',
+    branch!=='all' ? `الفرع: ${branch}` : '',
+    fea!=='all' ? `الفئة: ${fea}` : '',
+    cat!=='all' ? `التصنيف: ${cat}` : '',
+    snf!=='all' ? `الصنف: ${snf}` : '',
+  ].filter(Boolean).join(' | ');
+
+  const win = window.open('','_blank');
+  win.document.write(`<!DOCTYPE html><html dir="rtl" lang="ar"><head>
+    <meta charset="UTF-8"/>
+    <title>صلاحيات السوق</title>
+    <style>
+      body{font-family:Cairo,Arial,sans-serif;font-size:11px;margin:16px;color:#1a1a1a}
+      h2{color:#6A0F0E;font-size:15px;margin:0 0 4px}
+      .sub{font-size:10px;color:#666;margin-bottom:4px}
+      .filters{font-size:10px;color:#444;margin-bottom:10px;background:#f5f5f5;padding:6px 10px;border-radius:6px}
+      table{width:100%;border-collapse:collapse;font-size:10px}
+      th{background:#6A0F0E;color:#EDE5D8;padding:6px 5px;text-align:center;white-space:nowrap}
+      th:first-child{text-align:right}
+      td{padding:5px 4px;border-bottom:1px solid #eee;text-align:center}
+      td:first-child{text-align:right;font-weight:600;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      tr:nth-child(even){background:#fafafa}
+      .total-row{background:#6A0F0E!important;color:#EDE5D8;font-weight:700}
+      .total-row td{color:#EDE5D8;border:none}
+      @media print{body{margin:8px}}
+    </style>
+  </head><body>
+    <h2>🗓 صلاحيات السوق</h2>
+    <div class="sub">تواريخ إنتاج الأصناف على الرف — آخر زيارة لكل فرع</div>
+    <div class="sub">تاريخ الطباعة: ${dateStr}</div>
+    ${filterText ? `<div class="filters">${filterText}</div>` : ''}
+    ${table.outerHTML}
+  </body></html>`);
+  win.document.close();
+  setTimeout(()=>{ win.print(); }, 600);
 }
 
 </script>
