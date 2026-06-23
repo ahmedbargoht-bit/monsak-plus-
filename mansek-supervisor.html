@@ -660,6 +660,9 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       <i class="ti ti-alert-triangle"></i>النواقص
       <span id="miss-sup-badge" style="display:none;position:absolute;top:4px;right:calc(50% - 14px);background:#F77F00;color:#fff;border-radius:999px;font-size:9px;padding:1px 5px;font-weight:700;min-width:16px;text-align:center"></span>
     </div>
+    <div class="tab" onclick="showTab('market-expiry')" id="tab-market-expiry">
+      <i class="ti ti-calendar-stats"></i>صلاحيات
+    </div>
   </div>
 
   <!-- Content -->
@@ -1571,6 +1574,71 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
         </div>
 
         <div id="sup-miss-list"><div class="empty">جاري التحميل...</div></div>
+      </div>
+    </div>
+
+    <!-- ══ صلاحيات السوق ══════════════════════════════════════ -->
+    <div class="screen" id="screen-market-expiry">
+      <div class="card">
+        <div class="card-title"><i class="ti ti-calendar-stats" style="color:#C55B48"></i> صلاحيات السوق</div>
+        <p style="font-size:11px;color:var(--text2);margin-bottom:12px">تواريخ إنتاج الأصناف على الرف — آخر زيارة لكل فرع</p>
+
+        <!-- فلاتر الصنف -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+          <div>
+            <label style="font-size:10px;color:var(--text2);display:block;margin-bottom:3px">الفئة</label>
+            <select id="me-fea" onchange="meOnFeaChange()" style="width:100%;padding:7px 8px;border:1.5px solid var(--border);border-radius:8px;font-size:11px;font-family:Cairo,sans-serif">
+              <option value="all">كل الفئات</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:10px;color:var(--text2);display:block;margin-bottom:3px">التصنيف</label>
+            <select id="me-cat" onchange="meOnCatChange()" style="width:100%;padding:7px 8px;border:1.5px solid var(--border);border-radius:8px;font-size:11px;font-family:Cairo,sans-serif">
+              <option value="all">كل التصنيفات</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-bottom:10px">
+          <label style="font-size:10px;color:var(--text2);display:block;margin-bottom:3px">الصنف</label>
+          <select id="me-snf" onchange="meSearch()" style="width:100%;padding:7px 8px;border:1.5px solid var(--border);border-radius:8px;font-size:11px;font-family:Cairo,sans-serif">
+            <option value="all">كل الأصناف</option>
+          </select>
+        </div>
+
+        <!-- فلاتر المنطقة (خط السير فقط — المجموعة محددة تلقائياً) -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+          <div>
+            <label style="font-size:10px;color:var(--text2);display:block;margin-bottom:3px">خط السير</label>
+            <select id="me-route" onchange="meOnRouteChange()" style="width:100%;padding:7px 8px;border:1.5px solid var(--border);border-radius:8px;font-size:11px;font-family:Cairo,sans-serif">
+              <option value="all">كل الخطوط</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:10px;color:var(--text2);display:block;margin-bottom:3px">الفرع</label>
+            <select id="me-branch" onchange="meSearch()" style="width:100%;padding:7px 8px;border:1.5px solid var(--border);border-radius:8px;font-size:11px;font-family:Cairo,sans-serif">
+              <option value="all">كل الفروع</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:12px">
+          <button onclick="meLoadData()" style="padding:8px 14px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
+            <i class="ti ti-refresh"></i> تحديث
+          </button>
+        </div>
+
+        <!-- إحصائيات -->
+        <div id="me-stats" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:12px"></div>
+
+        <!-- الجدول -->
+        <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+          <table id="me-table" style="width:100%;border-collapse:collapse;font-size:11px;min-width:500px">
+            <thead id="me-thead"></thead>
+            <tbody id="me-tbody">
+              <tr><td colspan="3" style="text-align:center;padding:2rem;color:var(--text2)">اضغط تحديث لتحميل البيانات</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -2516,6 +2584,7 @@ function showTab(tab){
   if(tab==='expiry') supLoadExpiry();
   if(tab==='returns') supLoadReturns();
   if(tab==='missing') supLoadMissing();
+  if(tab==='market-expiry') meInit();
   if(tab==='prod-report') supRptInit();
   if(tab==='results'){
     document.getElementById('res-date').value = new Date().toISOString().slice(0,10);
@@ -9009,6 +9078,189 @@ async function supRejectPlan(planId){
   });
   showToast('❌ تم رفض الخطة');
   teamPlansLoadSup();
+}
+// ══════════════════════════════════════════════════════════════
+// صلاحيات السوق — ME (Market Expiry) — Supervisor
+// ══════════════════════════════════════════════════════════════
+let _meRaw = [];
+let _meFilters = { _snfData: [], _brData: [] };
+let _meInited = false;
+
+async function meInit(){
+  if(!_meInited){ await meLoadData(); _meInited=true; }
+  else meSearch();
+}
+
+async function meLoadData(){
+  const tbody = document.getElementById('me-tbody');
+  tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;padding:2rem;color:var(--text2)"><div class="spinner" style="margin:0 auto"></div></td></tr>';
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json'};
+    const grp = CU?.grp || null;
+
+    // جيب الخطوط الخاصة بالمجموعة
+    const rtRes = await fetch(`${SUPABASE_URL}/rest/v1/routes?select=name,grp${grp?`&grp=eq.${grp}`:''}&order=name.asc`,{headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}});
+    const rtData = rtRes.ok ? await rtRes.json() : [];
+    document.getElementById('me-route').innerHTML = '<option value="all">كل الخطوط</option>' + rtData.map(r=>`<option value="${r.name}">${r.name}</option>`).join('');
+
+    // جيب الفئات والأصناف من market_expiry للمجموعة
+    const snfUrl = `${SUPABASE_URL}/rest/v1/market_expiry?select=fea,cat,snf${grp?`&grp=eq.${grp}`:''}&order=snf.asc&limit=1000`;
+    const snfRes = await fetch(snfUrl,{headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}});
+    const snfData = snfRes.ok ? await snfRes.json() : [];
+    _meFilters._snfData = snfData;
+
+    const feas = [...new Set(snfData.map(r=>r.fea).filter(Boolean))].sort();
+    document.getElementById('me-fea').innerHTML = '<option value="all">كل الفئات</option>' + feas.map(f=>`<option value="${f}">${f}</option>`).join('');
+    meOnFeaChange();
+    meOnRouteChange();
+    await meSearch();
+  }catch(e){
+    tbody.innerHTML=`<tr><td colspan="3" style="text-align:center;padding:2rem;color:#B71C1C">خطأ: ${e.message}</td></tr>`;
+  }
+}
+
+function meOnFeaChange(){
+  const fea = document.getElementById('me-fea').value;
+  const f = fea==='all' ? _meFilters._snfData : _meFilters._snfData.filter(r=>r.fea===fea);
+  const cats = [...new Set(f.map(r=>r.cat).filter(Boolean))].sort();
+  document.getElementById('me-cat').innerHTML = '<option value="all">كل التصنيفات</option>' + cats.map(c=>`<option value="${c}">${c}</option>`).join('');
+  meOnCatChange(false);
+}
+
+function meOnCatChange(doSearch=true){
+  const fea = document.getElementById('me-fea').value;
+  const cat = document.getElementById('me-cat').value;
+  let f = _meFilters._snfData;
+  if(fea!=='all') f=f.filter(r=>r.fea===fea);
+  if(cat!=='all') f=f.filter(r=>r.cat===cat);
+  const snfs = [...new Set(f.map(r=>r.snf).filter(Boolean))].sort();
+  document.getElementById('me-snf').innerHTML = '<option value="all">كل الأصناف</option>' + snfs.map(s=>`<option value="${s}">${s}</option>`).join('');
+  if(doSearch) meSearch();
+}
+
+async function meOnRouteChange(){
+  const route = document.getElementById('me-route').value;
+  const grp = CU?.grp || null;
+  let url = `${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,grp&status=eq.active&order=branch_name.asc&limit=500`;
+  if(grp) url += `&grp=eq.${grp}`;
+  if(route!=='all') url += `&route=eq.${encodeURIComponent(route)}`;
+  const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}});
+  const data = res.ok ? await res.json() : [];
+  document.getElementById('me-branch').innerHTML = '<option value="all">كل الفروع</option>' + data.map(b=>`<option value="${b.branch_name}">${b.branch_name}</option>`).join('');
+  meSearch();
+}
+
+async function meSearch(){
+  const grp    = CU?.grp || null;
+  const route  = document.getElementById('me-route')?.value || 'all';
+  const branch = document.getElementById('me-branch')?.value || 'all';
+  const fea    = document.getElementById('me-fea')?.value || 'all';
+  const cat    = document.getElementById('me-cat')?.value || 'all';
+  const snf    = document.getElementById('me-snf')?.value || 'all';
+
+  const tbody = document.getElementById('me-tbody');
+  tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;padding:1rem;color:var(--text2)"><div class="spinner" style="margin:0 auto"></div></td></tr>';
+
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Content-Type':'application/json'};
+    const params = {
+      p_grp:    grp,
+      p_route:  route!=='all'  ? route  : null,
+      p_branch: branch!=='all' ? branch : null,
+      p_fea:    fea!=='all'    ? fea    : null,
+      p_cat:    cat!=='all'    ? cat    : null,
+      p_snf:    snf!=='all'    ? snf    : null,
+    };
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_market_expiry_filtered`,{method:'POST',headers:H,body:JSON.stringify(params)});
+    const data = res.ok ? await res.json() : [];
+
+    // جمّع: snf → date_shelf → qty
+    const snfMap = {};
+    data.forEach(r=>{
+      if(!r.date_shelf) return;
+      if(!snfMap[r.snf]) snfMap[r.snf]={cat:r.cat,fea:r.fea,months:{}};
+      snfMap[r.snf].months[r.date_shelf] = (snfMap[r.snf].months[r.date_shelf]||0) + (r.total_qty||0);
+    });
+
+    const allMonths = [...new Set(data.map(r=>r.date_shelf).filter(Boolean))].sort();
+    const entries = Object.entries(snfMap);
+
+    // الإحصائيات
+    let grandTotal = 0;
+    const totalByMonth = {};
+    allMonths.forEach(m=>totalByMonth[m]=0);
+    entries.forEach(([,{months}])=>{
+      allMonths.forEach(m=>{
+        const q=months[m]||0;
+        grandTotal+=q;
+        totalByMonth[m]+=q;
+      });
+    });
+
+    const lastVisit = data.map(r=>r.last_visit).filter(Boolean).sort().pop();
+
+    document.getElementById('me-stats').innerHTML = `
+      <div style="background:var(--card);border-radius:10px;padding:10px;text-align:center;border:1px solid var(--border)">
+        <div style="font-size:20px;font-weight:900;color:var(--navy)">${grandTotal}</div>
+        <div style="font-size:10px;color:var(--text2)">إجمالي القطع</div>
+      </div>
+      <div style="background:var(--card);border-radius:10px;padding:10px;text-align:center;border:1px solid var(--border)">
+        <div style="font-size:20px;font-weight:900;color:#1A7A4A">${entries.length}</div>
+        <div style="font-size:10px;color:var(--text2)">أصناف مختلفة</div>
+      </div>
+      <div style="background:var(--card);border-radius:10px;padding:10px;text-align:center;border:1px solid var(--border)">
+        <div style="font-size:20px;font-weight:900;color:#C55B48">${allMonths.length}</div>
+        <div style="font-size:10px;color:var(--text2)">أشهر إنتاج</div>
+      </div>
+      ${lastVisit?`<div style="background:var(--card);border-radius:10px;padding:10px;text-align:center;border:1px solid var(--border)">
+        <div style="font-size:13px;font-weight:900;color:#5B3A8A">${lastVisit}</div>
+        <div style="font-size:10px;color:var(--text2)">آخر زيارة</div>
+      </div>`:''}
+    `;
+
+    // بناء الجدول
+    const thead = document.getElementById('me-thead');
+    thead.innerHTML = `<tr style="background:var(--navy)">
+      <th style="padding:8px 6px;text-align:right;color:#EDE5D8;font-size:10px;white-space:nowrap">الصنف</th>
+      ${allMonths.map(m=>{
+        const [y,mo]=m.split('-');
+        const lbl=new Date(+y,+mo-1,1).toLocaleString('en-US',{month:'short',year:'2-digit'});
+        return `<th style="padding:8px 4px;text-align:center;color:#EDE5D8;font-size:10px;white-space:nowrap">${lbl}</th>`;
+      }).join('')}
+      <th style="padding:8px 6px;text-align:center;color:#F9C74F;font-size:10px;white-space:nowrap">الإجمالي</th>
+    </tr>`;
+
+    if(!entries.length){
+      tbody.innerHTML=`<tr><td colspan="${allMonths.length+2}" style="text-align:center;padding:2rem;color:var(--text2)">لا توجد بيانات</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = entries.map(([snfName,{cat,months}],i)=>{
+      let rowTotal=0;
+      const cells = allMonths.map(m=>{
+        const q=months[m]||0; rowTotal+=q;
+        return q>0
+          ? `<td style="padding:6px 4px;text-align:center;font-weight:700;color:var(--navy);font-size:11px">${q}</td>`
+          : `<td style="padding:6px 4px;text-align:center;color:#ccc;font-size:10px">—</td>`;
+      }).join('');
+      grandTotal+=rowTotal;
+      return `<tr style="background:${i%2===0?'var(--card)':'var(--bg)'}">
+        <td style="padding:6px 8px;font-size:11px;font-weight:600;color:var(--navy);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${snfName}">${snfName}</td>
+        ${cells}
+        <td style="padding:6px 4px;text-align:center;font-weight:700;color:#1A7A4A;font-size:12px">${rowTotal}</td>
+      </tr>`;
+    }).join('');
+
+    // صف الإجمالي
+    const totalCells = allMonths.map(m=>`<td style="padding:6px 4px;text-align:center;font-weight:700;color:#EDE5D8;font-size:11px">${totalByMonth[m]||0}</td>`).join('');
+    tbody.innerHTML += `<tr style="background:var(--navy)">
+      <td style="padding:8px;font-weight:700;color:#EDE5D8;font-size:11px">الإجمالي الكلي</td>
+      ${totalCells}
+      <td style="padding:6px 4px;text-align:center;font-weight:700;color:#F9C74F;font-size:13px">${grandTotal}</td>
+    </tr>`;
+  }catch(e){
+    tbody.innerHTML=`<tr><td colspan="3" style="text-align:center;padding:2rem;color:#B71C1C">خطأ: ${e.message}</td></tr>`;
+  }
 }
 
 </script>
