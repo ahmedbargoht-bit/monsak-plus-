@@ -2054,6 +2054,7 @@ let cachedVisits = [];
 let cachedAttendance = [];
 let cachedLogs = [];
 let repNames = [];
+let cachedRepUsers = []; // المنسقون من جدول users — المصدر الموثوق
 let _ptsAction = null; // {visitId, action, repName, oldPts}
 
 // ══════════════════════════════════════════════════════════════
@@ -2218,7 +2219,7 @@ function closePromoBanner(){
 
 
 function logout(){
-  cu=null; cachedVisits=[]; cachedAttendance=[]; cachedLogs=[];
+  cu=null; cachedVisits=[]; cachedAttendance=[]; cachedLogs=[]; cachedRepUsers=[];
   _stopBlockWatch();
   document.getElementById('s-app').style.display='none';
   document.getElementById('s-login').style.display='flex';
@@ -2411,8 +2412,27 @@ async function loadAllData(){
   cachedLogs = await sbGet('point_logs',{supervisor_name:cu.name},{order:'created_at.desc',limit:100});
   if(!Array.isArray(cachedLogs)) cachedLogs=[];
 
-  // بناء قايمة المنسقين
-  repNames = [...new Set(cachedVisits.map(v=>v.name).filter(Boolean))].sort();
+  // جيب المنسقين من users (المصدر الموثوق — بدل جمعهم من الزيارات)
+  cachedRepUsers = [];
+  for(const grp of cu.groups){
+    try{
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/users?select=name,route,grp&role=eq.rep&grp=eq.${encodeURIComponent(grp)}&status=eq.active&order=name.asc&limit=300`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+      );
+      const data = res.ok ? await res.json() : [];
+      if(Array.isArray(data)) cachedRepUsers.push(...data);
+    }catch(e){}
+  }
+  // إزالة التكرار بالاسم
+  const _seenNames = new Set();
+  cachedRepUsers = cachedRepUsers.filter(u=>{ if(_seenNames.has(u.name)) return false; _seenNames.add(u.name); return true; });
+
+  // بناء قايمة المنسقين من users أولاً، مع fallback للزيارات لو users فاضي
+  repNames = cachedRepUsers.length
+    ? cachedRepUsers.map(u=>u.name)
+    : [...new Set(cachedVisits.map(v=>v.name).filter(Boolean))].sort();
+
   const sel = document.getElementById('v-rep');
   sel.innerHTML = '<option value="all">كل المنسقين</option>';
   repNames.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});
@@ -2669,11 +2689,13 @@ function renderDashboard(){
     if(v.branch) visitedBranchesMap[v.name].add(v.branch);
   });
 
-  // جيب كل المنسقين من cachedVisits + attendance
-  const allReps = [...new Set([
-    ...cachedVisits.map(v=>v.name),
-    ...cachedAttendance.map(a=>a.name)
-  ].filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+  // جيب كل المنسقين — من users أولاً (موثوق)، مع fallback للزيارات
+  const allReps = cachedRepUsers.length
+    ? cachedRepUsers.map(u=>u.name)
+    : [...new Set([
+        ...cachedVisits.map(v=>v.name),
+        ...cachedAttendance.map(a=>a.name)
+      ].filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
 
   if(!allReps.length){
     document.getElementById('dash-activity').innerHTML = '<div class="empty">لا توجد بيانات</div>';
@@ -2955,11 +2977,13 @@ function renderRepCards(){
   const todayV   = cachedVisits.filter(v=>v.created_at?.startsWith(todayStr));
   const todayA   = cachedAttendance.filter(a=>a.created_at?.startsWith(todayStr)||a.date===new Date().toLocaleDateString('en-GB'));
 
-  // بناء قائمة المنسقين الفريدة من الزيارات + الحضور
-  const repsSet = new Set([
-    ...cachedVisits.map(v=>v.name).filter(Boolean),
-    ...cachedAttendance.map(a=>a.name).filter(Boolean)
-  ]);
+  // بناء قائمة المنسقين — من users أولاً (موثوق)، مع fallback للزيارات
+  const repsSet = cachedRepUsers.length
+    ? new Set(cachedRepUsers.map(u=>u.name))
+    : new Set([
+        ...cachedVisits.map(v=>v.name).filter(Boolean),
+        ...cachedAttendance.map(a=>a.name).filter(Boolean)
+      ]);
   const repsList = [...repsSet].sort((a,b)=>a.localeCompare(b,'ar'));
 
   if(!repsList.length){
