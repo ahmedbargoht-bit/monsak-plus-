@@ -2034,6 +2034,7 @@ h2,h3{color:#2C1F0A}
                   <tr>
                     <th>#</th>
                     <th>الصنف</th>
+                    <th>الصلاحية</th>
                     <th>الفئة</th>
                     <th>التصنيف</th>
                     <th>المجموعة الفرعية</th>
@@ -7048,35 +7049,52 @@ function renderProdDB(){
     Object.entries(cats||{}).forEach(([cat,grps])=>{
       if(catF!=='all' && cat!==catF) return;
       Object.entries(grps||{}).forEach(([grp,prods])=>{
-        (prods||[]).forEach(item=>{
-          const snf = typeof item === 'object' ? (item.name||JSON.stringify(item)) : String(item);
+        (prods||[]).forEach((item,itemIdx)=>{
+          const isObj = typeof item === 'object' && item !== null;
+          const snf   = isObj ? (item.name||JSON.stringify(item)) : String(item);
+          const shelf = isObj ? (item.monthsShelf||null) : null;
+          const stock = isObj ? (item.monthsStock||null) : null;
           if(search && !snf.toLowerCase().includes(search) && !cat.toLowerCase().includes(search)) return;
-          rows.push({idx:idx++,snf,fea,cat,grp});
+          // نمرر itemIdx عشان نلاقي العنصر بدقة في الـ array
+          rows.push({idx:idx++,snf,shelf,stock,fea,cat,grp,itemIdx,isObj});
         });
       });
     });
   });
   if(!rows.length){
-    tbody.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:2rem;color:#aaa">${Object.keys(PDB||{}).length?'لا توجد نتائج':'لم يتم رفع قاعدة الأصناف بعد — استخدم زرار رفع شيت Excel'}</td></tr>`;
+    tbody.innerHTML=`<tr><td colspan="7" style="text-align:center;padding:2rem;color:#aaa">${Object.keys(PDB||{}).length?'لا توجد نتائج':'لم يتم رفع قاعدة الأصناف بعد — استخدم زرار رفع شيت Excel'}</td></tr>`;
     return;
   }
-  tbody.innerHTML=rows.map(r=>`<tr>
+  tbody.innerHTML=rows.map(r=>{
+    // عرض الصلاحية
+    let shelfHtml = '<span style="color:#bbb;font-size:11px">—</span>';
+    if(r.shelf!==null||r.stock!==null){
+      const parts=[];
+      if(r.shelf!==null) parts.push(`<span title="صلاحية رف" style="background:#E8F5E9;color:#2E7D32;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700">رف ${r.shelf}ش</span>`);
+      if(r.stock!==null) parts.push(`<span title="صلاحية مخزن" style="background:#FFF3E0;color:#E65100;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700">مخزن ${r.stock}ش</span>`);
+      shelfHtml=parts.join(' ');
+    }
+    // encode الـ key عشان نمرره للأزرار بأمان
+    const itemKey=encodeURIComponent(JSON.stringify({fea:r.fea,cat:r.cat,grp:r.grp,idx:r.itemIdx}));
+    return `<tr>
     <td style="color:var(--text2)">${r.idx}</td>
     <td style="font-weight:600">${r.snf}</td>
+    <td>${shelfHtml}</td>
     <td><span class="badge b-blue">${r.fea}</span></td>
     <td style="font-size:11px">${r.cat}</td>
     <td style="font-size:11px;color:var(--text2)">${r.grp||'—'}</td>
     <td style="display:flex;gap:4px">
-      <button class="btn btn-xs" style="background:#E3F2FD;color:#1565C0" 
-        onclick="editProdFromPDB('${r.fea}','${r.cat}','${r.grp}','${String(r.snf).replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">
+      <button class="btn btn-xs" style="background:#E3F2FD;color:#1565C0"
+        onclick="editProdFromPDB(decodeURIComponent('${itemKey}'))">
         <i class="ti ti-pencil"></i>
       </button>
-      <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" 
-        onclick="confirmDeleteProd('${r.fea}','${r.cat}','${r.grp}','${String(r.snf).replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">
+      <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C"
+        onclick="confirmDeleteProd(decodeURIComponent('${itemKey}'))">
         <i class="ti ti-trash"></i>
       </button>
     </td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
 }
 
 function renderPDBPanel(){ renderProdDB(); }
@@ -7108,7 +7126,12 @@ function buildPDBPills(){
   }
 }
 
-function confirmDeleteProd(fea,cat,grp,snf){
+function confirmDeleteProd(itemKeyStr){
+  const k=JSON.parse(itemKeyStr);
+  const arr=PDB[k.fea]?.[k.cat]?.[k.grp];
+  if(!arr) return;
+  const item=arr[k.idx];
+  const snf=typeof item==='object'?(item.name||JSON.stringify(item)):String(item);
   const overlay=document.createElement('div');
   overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center';
   overlay.innerHTML=`
@@ -7123,12 +7146,33 @@ function confirmDeleteProd(fea,cat,grp,snf){
       </div>
     </div>`;
   document.body.appendChild(overlay);
-  document.getElementById('dp-yes').onclick=()=>{ overlay.remove(); deleteProdFromPDB(fea,cat,grp,snf); };
+  document.getElementById('dp-yes').onclick=()=>{ overlay.remove(); deleteProdFromPDB(itemKeyStr); };
   document.getElementById('dp-no').onclick =()=>{ overlay.remove(); };
   overlay.onclick=(e)=>{ if(e.target===overlay) overlay.remove(); };
 }
 
-function editProdFromPDB(fea,cat,grp,snf){
+function editProdFromPDB(itemKeyStr){
+  const k=JSON.parse(itemKeyStr);
+  const arr=PDB[k.fea]?.[k.cat]?.[k.grp];
+  if(!arr) return;
+  const item=arr[k.idx];
+  const isObj=typeof item==='object'&&item!==null;
+  const snf=isObj?(item.name||''):String(item);
+  const shelf=isObj?(item.monthsShelf||''):'';
+  const stock=isObj?(item.monthsStock||''):'';
+  const shelfFields=isObj?`
+    <div style="display:flex;gap:10px;margin-bottom:12px">
+      <div style="flex:1">
+        <label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:4px">صلاحية الرف (شهر)</label>
+        <input type="number" id="edit-shelf-input" value="${shelf}" min="0"
+          style="width:100%;border:1.5px solid #D4C4A8;border-radius:8px;padding:8px 12px;font-family:Cairo,sans-serif;font-size:13px;box-sizing:border-box"/>
+      </div>
+      <div style="flex:1">
+        <label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:4px">صلاحية المخزن (شهر)</label>
+        <input type="number" id="edit-stock-input" value="${stock}" min="0"
+          style="width:100%;border:1.5px solid #D4C4A8;border-radius:8px;padding:8px 12px;font-family:Cairo,sans-serif;font-size:13px;box-sizing:border-box"/>
+      </div>
+    </div>`:'';
   const overlay=document.createElement('div');
   overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center';
   overlay.innerHTML=`
@@ -7138,17 +7182,14 @@ function editProdFromPDB(fea,cat,grp,snf){
         <button onclick="this.closest('[style*=fixed]').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#8B6F47">×</button>
       </div>
       <div style="margin-bottom:12px">
-        <label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:4px">اسم الصنف الحالي</label>
-        <div style="padding:8px 12px;background:#F5F0E8;border-radius:8px;font-size:12px;color:#4B3C1A">${snf}</div>
-      </div>
-      <div style="margin-bottom:16px">
-        <label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:4px">الاسم الجديد *</label>
+        <label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:4px">اسم الصنف *</label>
         <input type="text" id="edit-snf-input" value="${snf.replace(/"/g,'&quot;')}"
           style="width:100%;border:1.5px solid #D4C4A8;border-radius:8px;padding:8px 12px;font-family:Cairo,sans-serif;font-size:13px;box-sizing:border-box"/>
       </div>
+      ${shelfFields}
       <div id="edit-snf-msg" style="display:none;padding:8px;border-radius:8px;font-size:12px;margin-bottom:12px"></div>
       <div style="display:flex;gap:10px">
-        <button onclick="saveEditProd('${fea}','${cat}','${grp}','${snf.replace(/'/g,"\\'")}')"
+        <button onclick="saveEditProd(decodeURIComponent('${encodeURIComponent(itemKeyStr)}'))"
           style="flex:1;padding:10px;background:linear-gradient(135deg,#C55B48,#A04035);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
           💾 حفظ التعديل
         </button>
@@ -7163,17 +7204,28 @@ function editProdFromPDB(fea,cat,grp,snf){
   document.getElementById('edit-snf-input').select();
 }
 
-function saveEditProd(fea,cat,grp,oldSnf){
+function saveEditProd(itemKeyStr){
+  const k=JSON.parse(itemKeyStr);
   const newSnf=(document.getElementById('edit-snf-input')?.value||'').trim();
   const msg=document.getElementById('edit-snf-msg');
   if(!newSnf){ msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';msg.textContent='❌ اسم الصنف مطلوب'; return; }
-  if(newSnf===oldSnf){ document.querySelector('[style*=fixed]')?.remove(); return; }
 
-  if(!PDB[fea]?.[cat]?.[grp]) return;
-  const idx=PDB[fea][cat][grp].indexOf(oldSnf);
-  if(idx===-1){ msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';msg.textContent='❌ الصنف غير موجود'; return; }
+  if(!PDB[k.fea]?.[k.cat]?.[k.grp]) return;
+  const arr=PDB[k.fea][k.cat][k.grp];
+  const item=arr[k.idx];
+  const isObj=typeof item==='object'&&item!==null;
 
-  PDB[fea][cat][grp][idx]=newSnf;
+  if(isObj){
+    const newShelf=document.getElementById('edit-shelf-input')?.value;
+    const newStock=document.getElementById('edit-stock-input')?.value;
+    const updated={...item, name:newSnf};
+    if(newShelf!==''&&newShelf!==null&&newShelf!==undefined) updated.monthsShelf=Number(newShelf)||item.monthsShelf;
+    if(newStock!==''&&newStock!==null&&newStock!==undefined) updated.monthsStock=Number(newStock)||item.monthsStock;
+    arr[k.idx]=updated;
+  } else {
+    arr[k.idx]=newSnf;
+  }
+
   try{ localStorage.setItem('pdb_cache',JSON.stringify(PDB)); }catch(e){}
   saveProductsToSupabase(PDB);
   document.querySelector('[style*="position:fixed"]')?.remove();
@@ -7181,9 +7233,13 @@ function saveEditProd(fea,cat,grp,oldSnf){
   showToast('✅ تم تعديل الصنف بنجاح');
 }
 
-function deleteProdFromPDB(fea,cat,grp,snf){
-  if(!PDB[fea]?.[cat]?.[grp]) return;
-  PDB[fea][cat][grp]=PDB[fea][cat][grp].filter(s=>s!==snf);
+function deleteProdFromPDB(itemKeyStr){
+  const k=JSON.parse(itemKeyStr);
+  if(!PDB[k.fea]?.[k.cat]?.[k.grp]) return;
+  const arr=PDB[k.fea][k.cat][k.grp];
+  const item=arr[k.idx];
+  const snf=typeof item==='object'?(item.name||JSON.stringify(item)):String(item);
+  arr.splice(k.idx,1);
   try{ localStorage.setItem('pdb_cache',JSON.stringify(PDB)); }catch(e){}
   saveProductsToSupabase(PDB);
   renderProdDB();
