@@ -1519,7 +1519,7 @@ h2,h3{color:#2C1F0A}
             </div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>#</th><th>الاسم</th><th>الدور</th><th>الباسورد</th><th>المجموعات</th><th>المستوى</th><th>الحالة</th><th>إجراءات</th></tr></thead>
+                <thead><tr><th>#</th><th>الاسم</th><th>الدور</th><th>الباسورد</th><th>المجموعات</th><th>التطبيقات</th><th>الحالة</th><th>إجراءات</th></tr></thead>
                 <tbody id="supervisors-table"></tbody>
               </table>
             </div>
@@ -10859,65 +10859,47 @@ async function loadSupervisors(){
   SUPERVISORS = [];
 
   try{
-    // 1. جيب المديرين من staff
-    const staffRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/staff?select=*&order=id.asc`,
-      {headers:H}
-    );
+    // المصدر الوحيد: جدول staff
+    const [staffRes, usersRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/staff?select=*&active=eq.true&order=id.asc`,{headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/users?select=name,pass_hash,supervisors&role=eq.supervisor`,{headers:H})
+    ]);
     const staffData = staffRes.ok ? await staffRes.json().catch(()=>[]) : [];
-
-    // 2. جيب المشرفين من users
-    const usersRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/users?select=id,name,role,level,groups,grp,pass_hash,status&role=eq.supervisor&order=name.asc`,
-      {headers:H}
-    );
     const usersData = usersRes.ok ? await usersRes.json().catch(()=>[]) : [];
 
-    // دمجهم: staff أولاً ثم users
-    const staffMapped = (Array.isArray(staffData)?staffData:[]).map(u=>({
-      id:     u.id,
-      name:   u.name,
-      pass:   u.app_access ? JSON.stringify(u.app_access) : '—',
-      role:   u.role,
-      level:  u.role === 'gm' ? 'gm' : u.role.includes('manager') ? 'dm' : 'sup',
-      groups: u.grp ? (Array.isArray(u.grp) ? u.grp : u.grp.replace(/[{}]/g,'').split(',').filter(Boolean)) : [],
-      status: u.active ? 'active' : 'inactive',
-      source: 'staff',
-      notes:  u.notes || ''
-    }));
-
-    const usersMapped = (Array.isArray(usersData)?usersData:[]).map(u=>({
-      id:     u.id,
-      name:   u.name,
-      pass:   u.pass_hash || '—',
-      role:   'supervisor',
-      user_type: u.user_type||'مشرف التنسيق',
-      level:  u.level || 'sup',
-      groups: (u.groups||'').split(',').map(g=>g.trim()).filter(Boolean),
-      status: u.status||'active',
-      source: 'users',
-      notes:  ''
-    }));
-
-    // دمجهم مع إزالة التكرار بالاسم — users بياخد الأولوية على staff
-    const allSups = [...staffMapped, ...usersMapped];
-    const seenNames = new Set();
-    SUPERVISORS = allSups.filter(s=>{
-      if(seenNames.has(s.name)) return false;
-      seenNames.add(s.name);
-      return true;
+    // map الباسورد والصلاحيات من users بالاسم
+    const usersMap = {};
+    (Array.isArray(usersData)?usersData:[]).forEach(u=>{
+      usersMap[u.name] = {pass: u.pass_hash||'—', supervisors: u.supervisors||null};
     });
-    // لو موجود في users — استخدمه بدل staff
-    SUPERVISORS = SUPERVISORS.map(s=>{
-      if(s.source==='staff'){
-        const fromUsers = usersMapped.find(u=>u.name===s.name);
-        if(fromUsers) return fromUsers;
-      }
-      return s;
+
+    // بناء SUPERVISORS من staff فقط
+    SUPERVISORS = (Array.isArray(staffData)?staffData:[]).map(u=>{
+      const userData = usersMap[u.name]||{};
+      const grp = Array.isArray(u.grp) ? u.grp : (u.grp||'').replace(/[{}"]/g,'').split(',').filter(Boolean);
+      const appAccess = Array.isArray(u.app_access) ? u.app_access : [];
+      const level = u.role==='gm'?'gm': u.role.includes('manager')?'dm':'sup';
+      // المسمى الوظيفي
+      const userType = ROLE_LABELS_MAP[u.role] || u.role;
+      // نوع التطبيق
+      const appType = appAccess.some(a=>a.includes('sales')) ? 'sales' : 'coord';
+      return {
+        id:         u.id,
+        name:       u.name,
+        pass:       userData.pass || '—',
+        role:       u.role,
+        user_type:  userType,
+        level,
+        groups:     grp,
+        status:     u.active ? 'active' : 'inactive',
+        source:     'staff',
+        notes:      u.notes||'',
+        app_access: appAccess,
+        app_type:   appType,
+        supervisors: userData.supervisors||null,
+      };
     });
-    // إزالة تكرار تاني بعد الدمج
-    const seen2 = new Set();
-    SUPERVISORS = SUPERVISORS.filter(s=>{ if(seen2.has(s.name)) return false; seen2.add(s.name); return true; });
+
   }catch(e){
     console.warn('loadSupervisors error:', e);
   }
@@ -10944,6 +10926,62 @@ function renderSupervisors(){
     return;
   }
 
+  // تقسيم: تنسيق vs بيع
+  const coordRoles = ['merch_sup','merch_manager','hyper_sup','special_sup'];
+  const salesRoles  = ['group_sup','sales_manager','hyper_sales_sup'];
+  const coordTeam  = SUPERVISORS.filter(s=>coordRoles.includes(s.role)||s.app_type==='coord');
+  const salesTeam  = SUPERVISORS.filter(s=>salesRoles.includes(s.role)||s.app_type==='sales');
+  const otherTeam  = SUPERVISORS.filter(s=>!coordTeam.includes(s)&&!salesTeam.includes(s));
+
+  let html = '';
+  const renderRow = (sup, i) => {
+    const roleClr  = ROLE_COLORS_MAP[sup.role] || '#666';
+    const levelClr = LEVEL_COLORS[sup.level] || roleClr;
+    const roleLabel= sup.user_type || ROLE_LABELS_MAP[sup.role] || sup.role;
+    const groups   = Array.isArray(sup.groups)?sup.groups:(sup.groups||'').split(',').filter(Boolean);
+    const grpBadges= groups.map(g=>`<span class="badge" style="background:${GROUPS[g]?.color||'#ccc'}22;color:${GROUPS[g]?.color||'#555'};font-size:10px">◆ ${GROUPS[g]?.label||g}</span>`).join(' ');
+    const statusBadge = sup.status==='active'?'<span class="badge b-green">نشط</span>':'<span class="badge b-gray">موقوف</span>';
+    const appBadge = sup.app_access?.length
+      ? sup.app_access.map(a=>`<span style="background:#E3F2FD;color:#0D47A1;padding:1px 5px;border-radius:4px;font-size:9px">${a}</span>`).join(' ')
+      : '—';
+    const idx = SUPERVISORS.indexOf(sup);
+    return `<tr style="${sup.status!=='active'?'opacity:.5':''}">
+      <td>${i+1}</td>
+      <td><b>${sup.name}</b>${sup.notes?`<div style="font-size:10px;color:#aaa">${sup.notes}</div>`:''}</td>
+      <td><span style="font-size:11px;font-weight:700;color:${levelClr}">${roleLabel}</span></td>
+      <td><code style="background:#f5f5f5;padding:2px 6px;border-radius:4px;font-size:11px">${sup.pass}</code></td>
+      <td style="font-size:11px">${grpBadges||'—'}</td>
+      <td style="font-size:10px">${appBadge}</td>
+      <td>${statusBadge}</td>
+      <td>
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-ghost btn-xs" onclick="supEditDispatch(${idx})" title="تعديل"><i class="ti ti-edit"></i></button>
+          <button class="btn btn-xs" style="background:${sup.status==='active'?'#FFF3E0':'#E8F5E9'};color:${sup.status==='active'?'#E65100':'#1B5E20'}" onclick="supToggleDispatch(${idx})">${sup.status==='active'?'إيقاف':'تفعيل'}</button>
+          <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="supDeleteDispatch(${idx})" title="حذف"><i class="ti ti-trash"></i></button>
+          <button class="btn btn-xs" style="background:#E3F2FD;color:#0D47A1" onclick="openStaffPermissions(${idx})" title="الصلاحيات"><i class="ti ti-key"></i></button>
+        </div>
+      </td>
+    </tr>`;
+  };
+
+  if(coordTeam.length){
+    html += `<tr><td colspan="8" style="background:linear-gradient(135deg,#2D4A1A,#1A3A0A);color:#C8D8A0;font-size:11px;font-weight:700;padding:6px 12px">🧑‍💼 فريق التنسيق الميداني</td></tr>`;
+    coordTeam.forEach((s,i)=>{ html += renderRow(s,i+1); });
+  }
+  if(salesTeam.length){
+    html += `<tr><td colspan="8" style="background:linear-gradient(135deg,#1A2A4A,#0A1A3A);color:#C0C8D8;font-size:11px;font-weight:700;padding:6px 12px">💼 فريق المبيعات</td></tr>`;
+    salesTeam.forEach((s,i)=>{ html += renderRow(s,i+1); });
+  }
+  if(otherTeam.length){
+    html += `<tr><td colspan="8" style="background:#3D2E0F;color:#EDE5D8;font-size:11px;font-weight:700;padding:6px 12px">🏢 المديرون والمشرفون الإداريون</td></tr>`;
+    otherTeam.forEach((s,i)=>{ html += renderRow(s,i+1); });
+  }
+
+  tbody.innerHTML = html;
+}
+    return;
+  }
+
   // فاصل بين staff و users
   let html = '';
   let hadStaff = false, hadUsers = false;
@@ -10960,27 +10998,30 @@ function renderSupervisors(){
     }
 
     const roleClr  = ROLE_COLORS_MAP[sup.role] || '#666';
-    const roleLabel = sup.user_type || ROLE_LABELS_MAP[sup.role] || sup.role;
+    const roleLabel = sup.user_type || LEVEL_LABELS[sup.level] || ROLE_LABELS_MAP[sup.role] || sup.role;
+    const levelClr  = LEVEL_COLORS[sup.level] || roleClr;
     const groups   = Array.isArray(sup.groups) ? sup.groups : (sup.groups||'').split(',').filter(Boolean);
     const grpBadges= groups.map(g=>`<span class="badge" style="background:${GROUPS[g]?.color||'#ccc'}22;color:${GROUPS[g]?.color||'#555'};font-size:10px">◆ ${GROUPS[g]?.label||g}</span>`).join(' ');
     const statusBadge = sup.status==='active'
       ? '<span class="badge b-green">نشط</span>'
       : '<span class="badge b-gray">موقوف</span>';
+    // عرض الباسورد لكل المشرفين
+    const passVal = sup.source==='staff' ? (sup.pass||'—') : (sup.pass||'—');
 
     html += `<tr style="${sup.status!=='active'?'opacity:.5':''}">
       <td>${i+1}</td>
       <td><b>${sup.name}</b>${sup.notes?`<div style="font-size:10px;color:#aaa;margin-top:2px">${sup.notes}</div>`:''}</td>
-      <td><span style="font-size:11px;font-weight:700;color:${roleClr}">${roleLabel}</span></td>
-      <td><code style="background:#f5f5f5;padding:2px 6px;border-radius:4px;font-size:11px">${sup.source==='staff'?sup.role:sup.pass||'—'}</code></td>
+      <td><span style="font-size:11px;font-weight:700;color:${levelClr}">${roleLabel}</span></td>
+      <td><code style="background:#f5f5f5;padding:2px 6px;border-radius:4px;font-size:11px">${passVal}</code></td>
       <td style="font-size:11px">${grpBadges||'—'}</td>
-      <td><span class="badge" style="background:${roleClr}22;color:${roleClr}">${sup.source==='staff'?'إداري':'ميداني'}</span></td>
+      <td><span class="badge" style="background:${levelClr}22;color:${levelClr}">${LEVEL_LABELS[sup.level]||'مشرف'}</span></td>
       <td>${statusBadge}</td>
       <td>
         <div style="display:flex;gap:4px">
           <button class="btn btn-ghost btn-xs" onclick="supEditDispatch(${i})" title="تعديل"><i class="ti ti-edit"></i></button>
           <button class="btn btn-xs" style="background:${sup.status==='active'?'#FFF3E0':'#E8F5E9'};color:${sup.status==='active'?'#E65100':'#1B5E20'}" onclick="supToggleDispatch(${i})">${sup.status==='active'?'إيقاف':'تفعيل'}</button>
           <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="supDeleteDispatch(${i})" title="حذف"><i class="ti ti-trash"></i></button>
-          ${sup.source==='staff'?`<button class="btn btn-xs" style="background:#E3F2FD;color:#0D47A1" onclick="openStaffPermissions(${i})" title="الصلاحيات"><i class="ti ti-key"></i></button>`:''}
+          <button class="btn btn-xs" style="background:#E3F2FD;color:#0D47A1" onclick="openStaffPermissions(${i})" title="الصلاحيات"><i class="ti ti-key"></i></button>
         </div>
       </td>
     </tr>`;
@@ -21255,11 +21296,15 @@ function openStaffPermissions(idx){
   }
 
   modal._idx = idx;
-  document.getElementById('sperms-name').textContent = st.name + ' — ' + (ROLE_LABELS_MAP[st.role]||st.role);
+  document.getElementById('sperms-name').textContent = st.name + ' — ' + (st.user_type||LEVEL_LABELS[st.level]||st.role||'مشرف');
 
-  // parse app_access من JSON string
+  // قرأ الصلاحيات — من users.supervisors أولاً، ثم staff.app_access
   let curApps = [];
-  try { curApps = JSON.parse(st.pass) || []; } catch(e){ curApps = []; }
+  try{
+    if(st.supervisors) curApps = JSON.parse(st.supervisors);
+    else if(st.app_access) curApps = Array.isArray(st.app_access)?st.app_access:JSON.parse(st.app_access);
+    else if(st.pass && st.source==='staff') curApps = JSON.parse(st.pass)||[];
+  }catch(e){ curApps=[]; }
 
   document.getElementById('sperms-apps').innerHTML = Object.entries(APP_LABELS).map(([key,label])=>`
     <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1.5px solid ${curApps.includes(key)?'#005CBF':'#ddd'};
@@ -21285,10 +21330,41 @@ async function saveStaffPermissions(){
   const apps = [...document.querySelectorAll('#sperms-apps input:checked')].map(i=>i.value);
   const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
 
-  await fetch(`${SUPABASE_URL}/rest/v1/staff?id=eq.${st.id}`,{
-    method:'PATCH', headers:H,
-    body:JSON.stringify({ app_access: apps })
-  });
+  // حفظ في staff لو موجود
+  if(st.source==='staff' && st.id){
+    await fetch(`${SUPABASE_URL}/rest/v1/staff?id=eq.${st.id}`,{
+      method:'PATCH', headers:H,
+      body:JSON.stringify({ app_access: apps })
+    });
+  }
+
+  // حفظ في users — في عمود supervisors (JSON string)
+  try{
+    const existing = await fetch(
+      `${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(st.name)}&role=eq.supervisor`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    ).then(r=>r.ok?r.json():[]);
+
+    if(existing && existing.length>0){
+      await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(st.name)}`,{
+        method:'PATCH', headers:H,
+        body:JSON.stringify({ supervisors: JSON.stringify(apps) })
+      });
+    } else {
+      // مش موجود في users — أضفه
+      await fetch(`${SUPABASE_URL}/rest/v1/users`,{
+        method:'POST', headers:{...H,'Prefer':'return=minimal'},
+        body:JSON.stringify({
+          name:st.name, pass_hash:st.pass||'1234',
+          role:'supervisor', level:st.level||'sup',
+          user_type:st.user_type||'مشرف التنسيق',
+          groups:Array.isArray(st.groups)?st.groups.join(','):(st.groups||''),
+          status:'active', goal:0,
+          supervisors: JSON.stringify(apps)
+        })
+      });
+    }
+  }catch(e){ console.warn('users permissions save failed',e); }
 
   showToast('✅ تم حفظ الصلاحيات');
   modal.classList.remove('open');
