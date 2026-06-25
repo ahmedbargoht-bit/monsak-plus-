@@ -639,9 +639,7 @@ h2,h3{color:#2C1F0A}
           <div class="nav-item" onclick="showPanel('activity')">
             <i class="ti ti-activity"></i> سجل النشاط
           </div>
-          <div class="nav-item" onclick="showPanel('rep-summary')">
-            <i class="ti ti-chart-bar"></i> ملخص أداء المنسقين
-          </div>
+          
           <div class="nav-item" onclick="showPanel('coord-plans')">
             <i class="ti ti-eye"></i> متابعة المشرفين
           </div>
@@ -8010,7 +8008,6 @@ function renderCurrentPanel(){
     case 'holidays': loadHolidays(); break;
     case 'export-full': break;
     case 'activity': loadActivity(); break;
-    case 'rep-summary': initRepSummaryDates(); break;
     case 'rep-report': rrInit(); break;
     case 'products-report': admRptInit(); break;
     case 'checkout-exceptions': adminLoadExceptions(); break;
@@ -14770,242 +14767,11 @@ async function loadFieldMonitor(){
   }).join('');
 }
 
-// ══════════════════════════════════════════════════════════════
-// ملخص أداء المنسقين
-// ══════════════════════════════════════════════════════════════
-let _rsSummaryData = [];
 
-function initRepSummaryDates(){
-  const today = new Date().toISOString().slice(0,10);
-  const firstDay = today.slice(0,8)+'01';
-  const fromEl = document.getElementById('rs-from');
-  const toEl   = document.getElementById('rs-to');
-  if(fromEl && !fromEl.value) fromEl.value = firstDay;
-  if(toEl   && !toEl.value)   toEl.value   = today;
-}
 
-async function loadRepSummary(){
-  const from  = document.getElementById('rs-from')?.value;
-  const to    = document.getElementById('rs-to')?.value;
-  const grp   = document.getElementById('rs-grp')?.value || 'all';
-  const tbody = document.getElementById('rs-tbody');
-  if(!from||!to){ alert('اختر التاريخ من وإلى'); return; }
-  if(!tbody) return;
+function loadActivity(){
 
-  tbody.innerHTML=`<tr><td colspan="8" style="text-align:center;padding:2rem">
-    <i class="ti ti-loader spin"></i> جارٍ التحميل...
-  </td></tr>`;
-
-  try{
-    // جيب البيانات من الجداول الأربعة بالتوازي
-    const grpFilter = grp==='all' ? '' : `&grp=eq.${grp}`;
-
-    const [attData, locData, prodData] = await Promise.all([
-      // الحضور والانصراف
-      fetch(`${SUPABASE_URL}/rest/v1/attendance?date=gte.${from}&date=lte.${to}${grpFilter}&select=name,grp,date,time_in,time_out&limit=5000`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]),
-      // اللوكيشن
-      fetch(`${SUPABASE_URL}/rest/v1/location?updated_at=gte.${from}T00:00:00&updated_at=lte.${to}T23:59:59${grpFilter}&select=name,grp,updated_at&limit=5000`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]),
-      // تقارير الأصناف
-      fetch(`${SUPABASE_URL}/rest/v1/products?created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59&select=name,grp,created_at&limit=10000`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]),
-    ]);
-
-    // بناء ملخص لكل منسق
-    const repsMap = {};
-
-    const getOrCreate = (name, grpVal) => {
-      if(!repsMap[name]) repsMap[name] = {name, grp:grpVal||'—', att:0, out:0, loc:0, prod:0};
-      return repsMap[name];
-    };
-
-    attData.forEach(a=>{
-      const r = getOrCreate(a.name, a.grp);
-      if(a.time_in)  r.att++;
-      if(a.time_out) r.out++;
-    });
-
-    // اللوكيشن — نحسب أيام مختلفة لكل منسق
-    const locByRep = {};
-    locData.forEach(l=>{
-      if(!locByRep[l.name]) locByRep[l.name] = {grp:l.grp, days:new Set()};
-      locByRep[l.name].days.add(l.updated_at?.slice(0,10));
-    });
-    Object.entries(locByRep).forEach(([name,v])=>{
-      const r = getOrCreate(name, v.grp);
-      r.loc = v.days.size;
-    });
-
-    prodData.forEach(p=>{
-      const r = getOrCreate(p.name, p.grp);
-      r.prod++;
-    });
-
-    // فلترة بالمجموعة
-    let rows = Object.values(repsMap);
-    if(grp!=='all') rows = rows.filter(r=>r.grp===grp);
-    rows.sort((a,b)=>a.name.localeCompare(b.name,'ar'));
-
-    _rsSummaryData = rows;
-
-    // إحصائيات
-    const statEl = document.getElementById('rs-stats');
-    if(statEl){
-      statEl.style.display='block';
-      document.getElementById('rs-stat-att').textContent  = rows.reduce((s,r)=>s+r.att,0);
-      document.getElementById('rs-stat-out').textContent  = rows.reduce((s,r)=>s+r.out,0);
-      document.getElementById('rs-stat-loc').textContent  = rows.reduce((s,r)=>s+r.loc,0);
-      document.getElementById('rs-stat-prod').textContent = rows.reduce((s,r)=>s+r.prod,0);
-      document.getElementById('rs-stat-reps').textContent = rows.length;
-    }
-
-    if(!rows.length){
-      tbody.innerHTML=`<tr><td colspan="8" style="text-align:center;padding:2rem;color:#aaa">لا توجد بيانات في هذه الفترة</td></tr>`;
-      return;
-    }
-
-    const grpLabel = (g)=> GROUPS[g]?.label || g || '—';
-
-    tbody.innerHTML = rows.map((r,i)=>`<tr style="${i%2===0?'background:#FFFDF8':''}">
-      <td style="color:var(--text2)">${i+1}</td>
-      <td style="font-weight:700">${r.name}</td>
-      <td><span class="badge b-blue" style="font-size:10px">${grpLabel(r.grp)}</span></td>
-      <td style="text-align:center">
-        <span style="background:${r.att>0?'#E8F5E9':'#FFEBEE'};color:${r.att>0?'#1A7A4A':'#B71C1C'};
-          padding:3px 10px;border-radius:20px;font-size:12px;font-weight:700">${r.att}</span>
-      </td>
-      <td style="text-align:center">
-        <span style="background:${r.out>0?'#E3F2FD':'#FFEBEE'};color:${r.out>0?'#1565C0':'#B71C1C'};
-          padding:3px 10px;border-radius:20px;font-size:12px;font-weight:700">${r.out}</span>
-      </td>
-      <td style="text-align:center">
-        <span style="background:${r.loc>0?'#FFF3E0':'#F5F5F5'};color:${r.loc>0?'#E65100':'#aaa'};
-          padding:3px 10px;border-radius:20px;font-size:12px;font-weight:700">${r.loc}</span>
-      </td>
-      <td style="text-align:center">
-        <span style="background:${r.prod>0?'#F3E5F5':'#F5F5F5'};color:${r.prod>0?'#6A0DAD':'#aaa'};
-          padding:3px 10px;border-radius:20px;font-size:12px;font-weight:700">${r.prod}</span>
-      </td>
-      <td>
-        <button class="btn btn-xs btn-ghost" onclick="showRepDetails('${r.name}','${from}','${to}')">
-          <i class="ti ti-eye"></i> تفاصيل
-        </button>
-      </td>
-    </tr>`).join('');
-
-  }catch(e){
-    tbody.innerHTML=`<tr><td colspan="8" style="text-align:center;padding:2rem;color:#B71C1C">❌ خطأ: ${e.message}</td></tr>`;
-  }
-}
-
-async function showRepDetails(name, from, to){
-  const overlay=document.createElement('div');
-  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
-  overlay.innerHTML=`
-    <div style="background:#FFFDF8;border-radius:16px;width:100%;max-width:600px;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.3)">
-      <div style="padding:16px 20px;border-bottom:1px solid #E8D9C0;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;background:#FFFDF8;z-index:1">
-        <div style="font-size:15px;font-weight:700;color:#2C1F0A">📊 تفاصيل: ${name}</div>
-        <button onclick="this.closest('[style*=fixed]').remove()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#8B6F47">×</button>
-      </div>
-      <div id="rep-details-content" style="padding:16px">
-        <div style="text-align:center;padding:2rem;color:#aaa"><i class="ti ti-loader spin"></i> جارٍ التحميل...</div>
-      </div>
-    </div>`;
-  document.body.appendChild(overlay);
-  overlay.onclick=(e)=>{ if(e.target===overlay) overlay.remove(); };
-
-  try{
-    const [attData, prodData] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(name)}&date=gte.${from}&date=lte.${to}&select=date,time_in,time_out&order=date.desc&limit=200`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]),
-      fetch(`${SUPABASE_URL}/rest/v1/products?name=eq.${encodeURIComponent(name)}&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59&select=branch,created_at&order=created_at.desc&limit=500`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]),
-    ]);
-
-    const content = document.getElementById('rep-details-content');
-    content.innerHTML = `
-      <div style="font-size:11px;color:#8B6F47;margin-bottom:12px">الفترة: ${from} → ${to}</div>
-
-      <div style="font-size:13px;font-weight:700;color:#2C1F0A;margin-bottom:8px">🕐 سجل الحضور والانصراف (${attData.length} سجل)</div>
-      ${attData.length ? `<div class="tbl-wrap" style="margin-bottom:16px">
-        <table><thead><tr><th>التاريخ</th><th>حضور</th><th>انصراف</th></tr></thead>
-        <tbody>${[...new Map(attData.map(a=>[a.date,a])).values()].map(a=>`<tr>
-          <td style="font-size:11px">${a.date}</td>
-          <td><span style="color:${a.time_in?'#1A7A4A':'#aaa'}">${a.time_in||'—'}</span></td>
-          <td><span style="color:${a.time_out?'#1565C0':'#aaa'}">${a.time_out||'—'}</span></td>
-        </tr>`).join('')}</tbody></table>
-      </div>` : '<div style="color:#aaa;font-size:12px;margin-bottom:16px">لا يوجد حضور</div>'}
-
-      <div style="font-size:13px;font-weight:700;color:#2C1F0A;margin-bottom:8px">📦 تقارير الأصناف (${prodData.length} تقرير)</div>
-      ${prodData.length ? `<div class="tbl-wrap">
-        <table><thead><tr><th>الفرع</th><th>التاريخ</th></tr></thead>
-        <tbody>${prodData.slice(0,50).map(p=>`<tr>
-          <td style="font-size:11px">${p.branch||'—'}</td>
-          <td style="font-size:11px;color:#8B6F47">${p.created_at?.slice(0,10)||'—'}</td>
-        </tr>`).join('')}</tbody></table>
-      </div>` : '<div style="color:#aaa;font-size:12px">لا توجد تقارير أصناف</div>'}
-    `;
-  }catch(e){
-    document.getElementById('rep-details-content').innerHTML=`<div style="color:#B71C1C">❌ خطأ: ${e.message}</div>`;
-  }
-}
-
-function exportRepSummaryExcel(){
-  if(!_rsSummaryData.length){ alert('ابحث أولاً'); return; }
-  const from = document.getElementById('rs-from')?.value||'';
-  const to   = document.getElementById('rs-to')?.value||'';
-  const aoa  = [
-    ['ملخص أداء المنسقين','','','','','',''],
-    [`الفترة: ${from} — ${to}`,'','','','','',''],
-    [''],
-    ['#','اسم المنسق','المجموعة','حضور','انصراف','لوكيشن','أصناف'],
-    ..._rsSummaryData.map((r,i)=>[i+1, r.name, GROUPS[r.grp]?.label||r.grp, r.att, r.out, r.loc, r.prod]),
-    [''],
-    ['الإجمالي','','',
-      _rsSummaryData.reduce((s,r)=>s+r.att,0),
-      _rsSummaryData.reduce((s,r)=>s+r.out,0),
-      _rsSummaryData.reduce((s,r)=>s+r.loc,0),
-      _rsSummaryData.reduce((s,r)=>s+r.prod,0)
-    ]
-  ];
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:4},{wch:25},{wch:18},{wch:8},{wch:8},{wch:8},{wch:8}];
-  XLSX.utils.book_append_sheet(wb, ws, 'ملخص الأداء');
-  XLSX.writeFile(wb, `rep_summary_${from}_${to}.xlsx`);
-}
-
-function exportRepSummaryPDF(){
-  if(!_rsSummaryData.length){ alert('ابحث أولاً'); return; }
-  const from = document.getElementById('rs-from')?.value||'';
-  const to   = document.getElementById('rs-to')?.value||'';
-  const rows = _rsSummaryData.map((r,i)=>`
-    <tr style="background:${i%2===0?'#FFFDF8':'#fff'}">
-      <td>${i+1}</td><td>${r.name}</td><td>${GROUPS[r.grp]?.label||r.grp}</td>
-      <td style="color:${r.att>0?'#1A7A4A':'#B71C1C'};font-weight:700">${r.att}</td>
-      <td style="color:${r.out>0?'#1565C0':'#B71C1C'};font-weight:700">${r.out}</td>
-      <td style="color:${r.loc>0?'#E65100':'#aaa'};font-weight:700">${r.loc}</td>
-      <td style="color:${r.prod>0?'#6A0DAD':'#aaa'};font-weight:700">${r.prod}</td>
-    </tr>`).join('');
-  const html=`<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8">
-    <style>body{font-family:Cairo,Arial,sans-serif;padding:20px;color:#2C1F0A}
-    h2{color:#4B3C1A;margin-bottom:4px}p{color:#8B6F47;font-size:12px;margin-bottom:16px}
-    table{width:100%;border-collapse:collapse;font-size:12px}
-    th{background:#4B3C1A;color:#EDE5D8;padding:8px 10px;text-align:right}
-    td{padding:7px 10px;border-bottom:1px solid #E8D9C0}
-    .footer{margin-top:20px;font-size:10px;color:#aaa;text-align:center}</style></head>
-    <body>
-    <h2>📊 ملخص أداء المنسقين</h2>
-    <p>الفترة: ${from} — ${to} | إجمالي المنسقين: ${_rsSummaryData.length}</p>
-    <table><thead><tr><th>#</th><th>اسم المنسق</th><th>المجموعة</th><th>✅ حضور</th><th>🚪 انصراف</th><th>📍 لوكيشن</th><th>📦 أصناف</th></tr></thead>
-    <tbody>${rows}</tbody></table>
-    <div class="footer">الطحان جولدن داتس © ${new Date().getFullYear()}</div>
-    </body></html>`;
-  const w=window.open('','_blank','width=900,height=700');
-  w.document.write(html); w.document.close();
-  setTimeout(()=>{ w.focus(); w.print(); }, 600);
-}
+function loadActivity(){
 
 function loadActivity(){
   const rows=[...cachedData.visits.slice(0,20),...cachedData.missing.slice(0,10),...cachedData.attendance.slice(0,10)]
