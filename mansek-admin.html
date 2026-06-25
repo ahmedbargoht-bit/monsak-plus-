@@ -3798,9 +3798,23 @@ h2,h3{color:#2C1F0A}
             <div id="ser-summary" style="padding:12px 16px;background:#F5EDD8;border-bottom:1px solid #D4C4A8;font-size:12px;color:#7B5C2A;font-weight:700;display:none"></div>
             <div style="overflow-x:auto">
               <table style="width:100%;border-collapse:collapse;font-size:12px" id="ser-table">
-                <thead id="ser-thead"></thead>
+                <thead>
+                  <tr style="background:#4B3C1A;color:#EDE5D8;font-size:11px">
+                    <th style="padding:10px 8px;text-align:right">#</th>
+                    <th style="padding:10px 8px;text-align:right">الصنف</th>
+                    <th style="padding:10px 8px;text-align:right">الفرع</th>
+                    <th style="padding:10px 8px;text-align:right">خط السير</th>
+                    <th style="padding:10px 8px;text-align:center">كمية الرف</th>
+                    <th style="padding:10px 8px;text-align:center">كمية المخزن</th>
+                    <th style="padding:10px 8px;text-align:center">تاريخ الإنتاج</th>
+                    <th style="padding:10px 8px;text-align:center">صلاحية المنتج</th>
+                    <th style="padding:10px 8px;text-align:center">تاريخ الانتهاء</th>
+                    <th style="padding:10px 8px;text-align:center">المتبقي</th>
+                    <th style="padding:10px 8px;text-align:center">الحالة</th>
+                  </tr>
+                </thead>
                 <tbody id="ser-tbody">
-                  <tr><td colspan="6" style="text-align:center;padding:40px;color:#aaa">اختر الفلاتر واضغط عرض</td></tr>
+                  <tr><td colspan="9" style="text-align:center;padding:40px;color:#aaa">اختر الفلاتر واضغط عرض</td></tr>
                 </tbody>
               </table>
             </div>
@@ -21241,10 +21255,9 @@ async function serLoadSnf(){
 
 async function serLoad(){
   const tbody  = document.getElementById('ser-tbody');
-  const thead  = document.getElementById('ser-thead');
   const sumEl  = document.getElementById('ser-summary');
   if(!tbody) return;
-  tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:40px;color:#aaa"><i class="ti ti-loader-2" style="font-size:24px;display:block;margin:0 auto 8px;animation:spin 1s linear infinite"></i>جاري التحميل...</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:40px;color:#aaa"><i class="ti ti-loader-2" style="font-size:24px;display:block;margin:0 auto 8px;animation:spin 1s linear infinite"></i>جاري التحميل...</td></tr>`;
 
   const month  = document.getElementById('ser-month')?.value||'';
   const grp    = document.getElementById('ser-grp')?.value||'';
@@ -21254,11 +21267,7 @@ async function serLoad(){
   const cat    = document.getElementById('ser-cat')?.value||'';
   const snf    = document.getElementById('ser-snf')?.value||'';
 
-  if(!month && !grp && !route && !branch){
-    tbody.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:30px;color:#E65100">⚠️ اختر شهراً أو مجموعة أو خط سير على الأقل</td></tr>`;
-    return;
-  }
-
+  // حوّل الشهر لـ from/to
   let from='', to='';
   if(month){
     const [y,m]=month.split('-').map(Number);
@@ -21268,8 +21277,13 @@ async function serLoad(){
   }
 
   try{
-    // جيب كل البيانات مرتبة بالتاريخ تنازلياً
-    let url = `${SUPABASE_URL}/rest/v1/products?select=name,snf,branch,route,grp,shelf_qty,date_shelf,created_at&order=created_at.desc&limit=5000`;
+    // لازم يكون فيه فلتر على الأقل
+    if(!month && !grp && !route && !branch){
+      tbody.innerHTML=`<tr><td colspan="11" style="text-align:center;padding:30px;color:#E65100">⚠️ اختر شهراً أو مجموعة أو خط سير على الأقل</td></tr>`;
+      return;
+    }
+
+    let url = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,route,grp,shelf_qty,stock_qty,date_shelf,date_stock,created_at&order=snf.asc,branch.asc,created_at.desc&limit=5000`;
     if(grp)    url += `&grp=eq.${encodeURIComponent(grp)}`;
     if(route)  url += `&route=eq.${encodeURIComponent(route)}`;
     if(branch) url += `&branch=eq.${encodeURIComponent(branch)}`;
@@ -21280,141 +21294,51 @@ async function serLoad(){
     if(to)     url += `&created_at=lte.${to}T23:59:59`;
 
     const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    if(!res.ok){ tbody.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:30px;color:#E65100">خطأ في جلب البيانات</td></tr>`; return; }
+    if(!res.ok){ tbody.innerHTML=`<tr><td colspan="11" style="text-align:center;padding:30px;color:#E65100">خطأ في جلب البيانات</td></tr>`; return; }
     const rawData = await res.json();
 
-    if(!rawData.length){
-      if(thead) thead.innerHTML='';
-      tbody.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:40px;color:#aaa">لا توجد بيانات</td></tr>`;
+    // جيب آخر سجل لكل snf+branch (بما إن الترتيب created_at.desc، أول عنصر هو الأحدث)
+    const seen = new Map();
+    rawData.forEach(r=>{
+      const key = `${r.snf}||${r.branch}`;
+      if(!seen.has(key)) seen.set(key, r);
+    });
+    const data = [...seen.values()].sort((a,b)=>(a.branch||'').localeCompare(b.branch||'','ar')||(a.snf||'').localeCompare(b.snf||'','ar'));
+    _serData = data;
+
+    if(!data.length){
+      tbody.innerHTML=`<tr><td colspan="11" style="text-align:center;padding:40px;color:#aaa">لا توجد بيانات</td></tr>`;
       if(sumEl) sumEl.style.display='none';
       return;
     }
 
-    // ── الخطوة 1: جيب آخر تاريخ زيارة لكل فرع
-    const lastVisitPerBranch = {};
-    rawData.forEach(r=>{
-      const b = r.branch||'';
-      if(!lastVisitPerBranch[b] || r.created_at > lastVisitPerBranch[b])
-        lastVisitPerBranch[b] = r.created_at;
-    });
-
-    // ── الخطوة 2: فلتر — بس السجلات اللي created_at تساوي آخر زيارة للفرع
-    // (نأخذ نفس اليوم بس)
-    const lastVisitData = rawData.filter(r=>{
-      const b = r.branch||'';
-      const lastVisit = lastVisitPerBranch[b];
-      return r.created_at && lastVisit &&
-        r.created_at.slice(0,10) === lastVisit.slice(0,10);
-    });
-
-    // ── الخطوة 3: Pivot — لكل فرع+صنف: جمع الكميات حسب تاريخ الإنتاج
-    // الهيكل: pivotData[branch][snf][date_shelf] = total_qty
-    const pivotData = {};
-    const allDates = new Set();
-
-    lastVisitData.forEach(r=>{
-      const b   = r.branch||'—';
-      const s   = r.snf||'—';
-      const dt  = r.date_shelf||'بدون تاريخ';
-      const qty = parseFloat(r.shelf_qty)||0;
-      allDates.add(dt);
-      if(!pivotData[b])       pivotData[b]={};
-      if(!pivotData[b][s])    pivotData[b][s]={};
-      if(!pivotData[b][s][dt]) pivotData[b][s][dt]=0;
-      pivotData[b][s][dt] += qty;
-    });
-
-    // ترتيب التواريخ
-    const sortedDates = [...allDates].filter(d=>d!=='بدون تاريخ').sort();
-    if(allDates.has('بدون تاريخ')) sortedDates.push('بدون تاريخ');
-
-    // ── الخطوة 4: بناء الجدول
-    const branches = Object.keys(pivotData).sort((a,b)=>a.localeCompare(b,'ar'));
-    const colCount = sortedDates.length + 3; // صنف + تواريخ + إجمالي + حالة الصلاحية
-
-    // هيدر الجدول
-    if(thead){
-      thead.innerHTML = `<tr style="background:linear-gradient(135deg,#731E2E,#5A1520);color:#EDE5D8;font-size:11px">
-        <th style="padding:8px;text-align:right">الصنف</th>
-        ${sortedDates.map(d=>`<th style="padding:8px;text-align:center;white-space:nowrap">${d}</th>`).join('')}
-        <th style="padding:8px;text-align:center;background:rgba(0,0,0,.2)">الإجمالي</th>
-        <th style="padding:8px;text-align:center">انتهاء الصلاحية</th>
-        <th style="padding:8px;text-align:center">المتبقي</th>
-        <th style="padding:8px;text-align:center">الحالة</th>
-      </tr>`;
-    }
-
-    // صفوف الجدول
-    let allRows = [];
-    let totalQty = 0;
-    let rowIdx = 0;
-
-    branches.forEach(b=>{
-      const snfs = Object.keys(pivotData[b]).sort((a,c)=>a.localeCompare(c,'ar'));
-
-      // هيدر الفرع
-      allRows.push(`<tr style="background:#4B3C1A;color:#EDE5D8">
-        <td colspan="${colCount+2}" style="padding:6px 10px;font-size:11px;font-weight:700">
-          🏪 ${b}
-        </td>
-      </tr>`);
-
-      snfs.forEach(s=>{
-        const dates = pivotData[b][s];
-        const snfTotal = Object.values(dates).reduce((sum,v)=>sum+v,0);
-        totalQty += snfTotal;
-
-        // آخر تاريخ إنتاج للصنف (الأحدث)
-        const latestDate = sortedDates.filter(d=>dates[d]>0).sort().pop()||'';
-        const status = latestDate ? serExpiryStatus(latestDate!=='بدون تاريخ'?latestDate:null, s) : {bg:'#f5f5f5',color:'#aaa',label:'—',remaining:'—',expiry:'—'};
-        const monthsFromPDB = serGetMonthsShelf(s);
-
-        const rowBg = rowIdx%2===0?'#FFFDF8':'#F5EDD8';
-        rowIdx++;
-
-        allRows.push(`<tr style="background:${rowBg};border-bottom:1px solid #E8D9C0">
-          <td style="padding:7px 8px;font-weight:600;color:#2C1F0A;font-size:11px">${s}</td>
-          ${sortedDates.map(d=>{
-            const qty = dates[d]||0;
-            return `<td style="padding:7px 8px;text-align:center;font-size:12px;font-weight:${qty>0?'700':'400'};color:${qty>0?'#1565C0':'#ccc'}">${qty>0?qty:'—'}</td>`;
-          }).join('')}
-          <td style="padding:7px 8px;text-align:center;font-weight:900;color:#731E2E;background:rgba(115,30,46,.06)">${snfTotal}</td>
-          <td style="padding:7px 8px;text-align:center">
-            ${status.expiry&&status.expiry!=='—'?`<span style="background:${status.bg};color:${status.color};padding:2px 7px;border-radius:5px;font-size:10px;font-weight:700">${status.expiry}</span>`:'—'}
-          </td>
-          <td style="padding:7px 8px;text-align:center">
-            <span style="background:${status.bg};color:${status.color};padding:2px 7px;border-radius:5px;font-size:10px;font-weight:700">${status.remaining||'—'}</span>
-          </td>
-          <td style="padding:7px 8px;text-align:center">
-            ${status.label&&status.label!=='—'?`<span style="background:${status.bg};color:${status.color};padding:2px 6px;border-radius:4px;font-size:10px">${status.label}</span>`:'—'}
-          </td>
-        </tr>`);
-      });
-    });
-
-    // صف الإجمالي الكلي
-    allRows.push(`<tr style="background:#731E2E;color:#EDE5D8;font-weight:700">
-      <td style="padding:8px">إجمالي الكل</td>
-      ${sortedDates.map(d=>{
-        const dtTotal = branches.reduce((s,b)=>s+Object.values(pivotData[b]).reduce((ss,snfs)=>ss+(snfs[d]||0),0),0);
-        return `<td style="padding:8px;text-align:center">${dtTotal||'—'}</td>`;
-      }).join('')}
-      <td style="padding:8px;text-align:center;font-size:14px">${totalQty}</td>
-      <td colspan="3"></td>
-    </tr>`);
-
-    tbody.innerHTML = allRows.join('');
-    _serData = lastVisitData;
-
+    // حساب الإجماليات
+    const totalShelf = data.reduce((s,r)=>s+(parseFloat(r.shelf_qty)||0),0);
+    const totalStock = data.reduce((s,r)=>s+(parseFloat(r.stock_qty)||0),0);
     if(sumEl){
       sumEl.style.display='block';
-      sumEl.innerHTML = `📊 فروع: <b>${branches.length}</b> &nbsp;|&nbsp; أصناف مختلفة: <b>${new Set(lastVisitData.map(r=>r.snf)).size}</b> &nbsp;|&nbsp; إجمالي الرف: <b>${totalQty.toLocaleString()}</b>`;
+      sumEl.innerHTML = `📊 إجمالي السجلات: <b>${data.length}</b> &nbsp;|&nbsp; إجمالي الرف: <b>${Math.round(totalShelf).toLocaleString('en-US')}</b> &nbsp;|&nbsp; إجمالي المخزن: <b>${Math.round(totalStock).toLocaleString('en-US')}</b>`;
     }
 
-  }catch(e){
-    tbody.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:30px;color:#E65100">خطأ: ${e.message}</td></tr>`;
-  }
-}
+    const now = new Date();
+    tbody.innerHTML = data.map((r,idx)=>{
+      const shelfStatus = serExpiryStatus(r.date_shelf, r.snf);
+      const monthsFromPDB = r.snf ? serGetMonthsShelf(r.snf) : null;
+      const rowBg = idx%2===0?'#fff':'#FAF6EE';
+      return `<tr style="background:${rowBg};border-bottom:1px solid #F0E8DE">
+        <td style="padding:8px;color:#aaa;text-align:right">${idx+1}</td>
+        <td style="padding:8px;font-weight:600;color:#3A0800">${r.snf||'—'}</td>
+        <td style="padding:8px;color:#4B3C1A">${r.branch||'—'}</td>
+        <td style="padding:8px;color:#7B5C2A">${r.route||'—'}</td>
+        <td style="padding:8px;text-align:center;font-weight:700;color:#1A5276">${r.shelf_qty||0}</td>
+        <td style="padding:8px;text-align:center;font-weight:700;color:#145A32">${r.stock_qty||0}</td>
+        <td style="padding:8px;text-align:center">${r.date_shelf?`<span style="background:#E3F2FD;color:#1565C0;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${r.date_shelf}</span>`:'—'}</td>
+        <td style="padding:8px;text-align:center">${monthsFromPDB!==null?`<span style="background:#F3E5F5;color:#6A1B9A;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${monthsFromPDB} ش</span>`:'<span style="color:#aaa;font-size:11px">غير محدد</span>'}</td>
+        <td style="padding:8px;text-align:center">${shelfStatus.expiry!=='—'?`<span style="background:${shelfStatus.bg};color:${shelfStatus.color};padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${shelfStatus.expiry}</span>`:'—'}</td>
+        <td style="padding:8px;text-align:center"><span style="background:${shelfStatus.bg};color:${shelfStatus.color};padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${shelfStatus.remaining}</span></td>
+        <td style="padding:8px;text-align:center">${shelfStatus.label?`<span style="background:${shelfStatus.bg};color:${shelfStatus.color};padding:2px 6px;border-radius:5px;font-size:10px">${shelfStatus.label}</span>`:'—'}</td>
+      </tr>`;
+    }).join('');
   }catch(e){
     tbody.innerHTML=`<tr><td colspan="9" style="text-align:center;padding:30px;color:#E65100">خطأ: ${e.message}</td></tr>`;
   }
