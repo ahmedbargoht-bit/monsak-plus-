@@ -4,6 +4,13 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="theme-color" content="#4B3C1A"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="لوحة التحكم"/>
+<link rel="manifest" href="manifest.json"/>
+<link rel="apple-touch-icon" href="icon-192.png"/>
 <title>MT Admin</title>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;900&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css"/>
@@ -2004,8 +2011,14 @@ h2,h3{color:#2C1F0A}
                 <i class="ti ti-upload"></i> رفع Excel
                 <input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="uploadPDBFile(this)"/>
               </label>
+              <button class="btn" onclick="verifyPDBFromSupabase()" style="background:#2E5F8A;color:#EDE5D8">
+                <i class="ti ti-cloud-search"></i> تحقق من Supabase
+              </button>
               <button class="btn" onclick="pullPDBToApp()" style="background:#6B3D15;color:#EDE5D8">
                 <i class="ti ti-refresh"></i> تحديث تطبيق المنسقين
+              </button>
+              <button class="btn btn-ghost" onclick="verifyPDBFromSupabase()" style="border-color:#6B7A3B;color:#6B7A3B">
+                <i class="ti ti-cloud-download"></i> تحقق من Supabase
               </button>
             </div>
           </div>
@@ -5407,6 +5420,14 @@ let refreshTimer = null;
 
 // ✅ متغيرات ناقصة
 let rtChannelsAdmin = [];
+
+// مسح الكاش القديم لو الـ version اتغير
+const _PDB_CACHE_VER = 'v4.4';
+if(localStorage.getItem('pdb_cache_ver') !== _PDB_CACHE_VER){
+  localStorage.removeItem('pdb_cache');
+  localStorage.setItem('pdb_cache_ver', _PDB_CACHE_VER);
+}
+
 let PDB        = (()=>{ try{ const c=localStorage.getItem('pdb_cache'); return c?JSON.parse(c):{}; }catch(e){ return {}; } })();
 
 // ✅ تحميل PDB من Supabase وتحديث الـ cache
@@ -5419,6 +5440,77 @@ async function loadPDBFromSupabase(){
       try{ localStorage.setItem('pdb_cache', res[0].value); }catch(e){}
     }
   }catch(e){ console.warn('PDB load from Supabase failed, using cache'); }
+}
+
+// ✅ تحقق من Supabase مباشرة وعرض الصلاحيات
+async function verifyPDBFromSupabase(){
+  const btn=document.querySelector('[onclick="verifyPDBFromSupabase()"]');
+  const origHtml=btn?.innerHTML;
+  if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader spin"></i> جاري الجلب...'; }
+  try{
+    const res = await sb('products_db',{key:'pdb'});
+    if(!res||!res[0]?.value){ showToast('❌ مفيش بيانات في Supabase'); return; }
+    const fresh=JSON.parse(res[0].value);
+    // حدّث PDB المحلي والكاش من Supabase مباشرة
+    PDB=fresh;
+    try{ localStorage.setItem('pdb_cache',res[0].value); }catch(e){}
+    // حساب إحصائيات الصلاحيات
+    let total=0,withShelf=0,withStock=0,withBoth=0;
+    Object.values(fresh).forEach(cats=>
+      Object.values(cats||{}).forEach(grps=>
+        Object.values(grps||{}).forEach(arr=>
+          (arr||[]).forEach(item=>{
+            total++;
+            const isObj=typeof item==='object'&&item!==null;
+            const hasShelf=isObj&&item.monthsShelf!=null;
+            const hasStock=isObj&&item.monthsStock!=null;
+            if(hasShelf) withShelf++;
+            if(hasStock) withStock++;
+            if(hasShelf&&hasStock) withBoth++;
+          }))));
+    // عرض النتيجة
+    const overlay=document.createElement('div');
+    overlay.id='pdb-verify-overlay';
+    overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center';
+    overlay.innerHTML=`
+      <div style="background:#FFFDF8;border-radius:16px;padding:28px;width:380px;box-shadow:0 8px 32px rgba(75,60,26,.3);border:1px solid #E8D9C0">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+          <h3 style="font-size:15px;font-weight:700;color:#2C1F0A">☁️ بيانات Supabase</h3>
+          <button onclick="document.getElementById('pdb-verify-overlay').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#8B6F47">×</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
+          <div style="background:#F5F0E8;border-radius:10px;padding:14px;text-align:center">
+            <div style="font-size:26px;font-weight:900;color:#4B3C1A">${total.toLocaleString()}</div>
+            <div style="font-size:11px;color:#8B6F47;margin-top:2px">إجمالي الأصناف</div>
+          </div>
+          <div style="background:#E8F5E9;border-radius:10px;padding:14px;text-align:center">
+            <div style="font-size:26px;font-weight:900;color:#2E7D32">${withBoth.toLocaleString()}</div>
+            <div style="font-size:11px;color:#4CAF50;margin-top:2px">بهم رف + مخزن ✅</div>
+          </div>
+          <div style="background:#E3F2FD;border-radius:10px;padding:14px;text-align:center">
+            <div style="font-size:26px;font-weight:900;color:#1565C0">${withShelf.toLocaleString()}</div>
+            <div style="font-size:11px;color:#1976D2;margin-top:2px">بهم صلاحية رف</div>
+          </div>
+          <div style="background:#FFF3E0;border-radius:10px;padding:14px;text-align:center">
+            <div style="font-size:26px;font-weight:900;color:#E65100">${withStock.toLocaleString()}</div>
+            <div style="font-size:11px;color:#F57C00;margin-top:2px">بهم صلاحية مخزن</div>
+          </div>
+        </div>
+        <div style="background:${total-withBoth>0?'#FFF3E0':'#E8F5E9'};border-radius:8px;padding:10px 14px;font-size:12px;color:${total-withBoth>0?'#E65100':'#2E7D32'};text-align:center;margin-bottom:16px">
+          ${total-withBoth>0?`⚠️ ${(total-withBoth).toLocaleString()} صنف بدون صلاحية كاملة`:'✅ كل الأصناف عندها صلاحية كاملة'}
+        </div>
+        <button onclick="document.getElementById('pdb-verify-overlay').remove();renderProdDB();"
+          style="width:100%;padding:10px;background:linear-gradient(135deg,#6B7A3B,#4E5C28);color:#EDE5D8;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          تم — تحديث العرض
+        </button>
+      </div>`;
+    document.body.appendChild(overlay);
+    renderProdDB();
+  }catch(e){
+    showToast('❌ خطأ: '+e.message);
+  }finally{
+    if(btn){ btn.disabled=false; btn.innerHTML=origHtml; }
+  }
 }
 let ROUTES_LIST      = JSON.parse(localStorage.getItem('routes_list')||'[]');
 let USERS_LIST       = [];
@@ -7308,42 +7400,46 @@ function editProdFromPDB(itemKeyStr){
   const item=arr[k.idx];
   const isObj=typeof item==='object'&&item!==null;
   const snf=isObj?(item.name||''):String(item);
-  const shelf=isObj?(item.monthsShelf||''):'';
-  const stock=isObj?(item.monthsStock||''):'';
-  const shelfFields=isObj?`
-    <div style="display:flex;gap:10px;margin-bottom:12px">
-      <div style="flex:1">
-        <label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:4px">صلاحية الرف (شهر)</label>
-        <input type="number" id="edit-shelf-input" value="${shelf}" min="0"
-          style="width:100%;border:1.5px solid #D4C4A8;border-radius:8px;padding:8px 12px;font-family:Cairo,sans-serif;font-size:13px;box-sizing:border-box"/>
-      </div>
-      <div style="flex:1">
-        <label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:4px">صلاحية المخزن (شهر)</label>
-        <input type="number" id="edit-stock-input" value="${stock}" min="0"
-          style="width:100%;border:1.5px solid #D4C4A8;border-radius:8px;padding:8px 12px;font-family:Cairo,sans-serif;font-size:13px;box-sizing:border-box"/>
-      </div>
-    </div>`:'';
+  const shelf=isObj?(item.monthsShelf??''):'';
+  const stock=isObj?(item.monthsStock??''):'';
   const overlay=document.createElement('div');
+  overlay.id='pdb-edit-overlay';
   overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center';
   overlay.innerHTML=`
     <div style="background:#FFFDF8;border-radius:16px;padding:28px;width:420px;box-shadow:0 8px 32px rgba(75,60,26,.3);border:1px solid #E8D9C0">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <h3 style="font-size:15px;font-weight:700;color:#2C1F0A">✏️ تعديل الصنف</h3>
-        <button onclick="this.closest('[style*=fixed]').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#8B6F47">×</button>
+        <button onclick="document.getElementById('pdb-edit-overlay').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#8B6F47">×</button>
       </div>
       <div style="margin-bottom:12px">
         <label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:4px">اسم الصنف *</label>
         <input type="text" id="edit-snf-input" value="${snf.replace(/"/g,'&quot;')}"
           style="width:100%;border:1.5px solid #D4C4A8;border-radius:8px;padding:8px 12px;font-family:Cairo,sans-serif;font-size:13px;box-sizing:border-box"/>
       </div>
-      ${shelfFields}
+      <div style="display:flex;gap:10px;margin-bottom:12px">
+        <div style="flex:1">
+          <label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:4px">
+            <span style="background:#E8F5E9;color:#2E7D32;padding:1px 5px;border-radius:3px;font-size:10px">رف</span> صلاحية الرف (شهر)
+          </label>
+          <input type="number" id="edit-shelf-input" value="${shelf}" min="0" placeholder="—"
+            style="width:100%;border:1.5px solid #D4C4A8;border-radius:8px;padding:8px 12px;font-family:Cairo,sans-serif;font-size:13px;box-sizing:border-box;text-align:center"/>
+        </div>
+        <div style="flex:1">
+          <label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:4px">
+            <span style="background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:3px;font-size:10px">مخزن</span> صلاحية المخزن (شهر)
+          </label>
+          <input type="number" id="edit-stock-input" value="${stock}" min="0" placeholder="—"
+            style="width:100%;border:1.5px solid #D4C4A8;border-radius:8px;padding:8px 12px;font-family:Cairo,sans-serif;font-size:13px;box-sizing:border-box;text-align:center"/>
+        </div>
+      </div>
+      <p style="font-size:10px;color:#B8A080;margin-bottom:12px;text-align:center">اتركها فاضية لو مش محتاج صلاحية</p>
       <div id="edit-snf-msg" style="display:none;padding:8px;border-radius:8px;font-size:12px;margin-bottom:12px"></div>
       <div style="display:flex;gap:10px">
         <button onclick="saveEditProd(decodeURIComponent('${encodeURIComponent(itemKeyStr)}'))"
           style="flex:1;padding:10px;background:linear-gradient(135deg,#C55B48,#A04035);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
           💾 حفظ التعديل
         </button>
-        <button onclick="this.closest('[style*=fixed]').remove()"
+        <button onclick="document.getElementById('pdb-edit-overlay').remove()"
           style="padding:10px 20px;background:#F5F0E8;color:#4B3C1A;border:1.5px solid #D4C4A8;border-radius:8px;font-size:13px;cursor:pointer;font-family:Cairo,sans-serif">
           إلغاء
         </button>
@@ -7365,20 +7461,28 @@ function saveEditProd(itemKeyStr){
   const item=arr[k.idx];
   const isObj=typeof item==='object'&&item!==null;
 
-  if(isObj){
-    const newShelf=document.getElementById('edit-shelf-input')?.value;
-    const newStock=document.getElementById('edit-stock-input')?.value;
-    const updated={...item, name:newSnf};
-    if(newShelf!==''&&newShelf!==null&&newShelf!==undefined) updated.monthsShelf=Number(newShelf)||item.monthsShelf;
-    if(newStock!==''&&newStock!==null&&newStock!==undefined) updated.monthsStock=Number(newStock)||item.monthsStock;
+  const newShelf=document.getElementById('edit-shelf-input')?.value.trim();
+  const newStock=document.getElementById('edit-stock-input')?.value.trim();
+  const hasShelf=newShelf!==''&&newShelf!==null&&newShelf!==undefined;
+  const hasStock=newStock!==''&&newStock!==null&&newStock!==undefined;
+
+  if(isObj||hasShelf||hasStock){
+    // نحفظ كـ object
+    const updated=isObj?{...item}:{};
+    updated.name=newSnf;
+    if(hasShelf) updated.monthsShelf=Number(newShelf);
+    else if(isObj&&item.monthsShelf!==undefined) updated.monthsShelf=item.monthsShelf;
+    if(hasStock) updated.monthsStock=Number(newStock);
+    else if(isObj&&item.monthsStock!==undefined) updated.monthsStock=item.monthsStock;
     arr[k.idx]=updated;
   } else {
+    // لا صلاحية — نحفظ كـ string عادي
     arr[k.idx]=newSnf;
   }
 
   try{ localStorage.setItem('pdb_cache',JSON.stringify(PDB)); }catch(e){}
   saveProductsToSupabase(PDB);
-  document.querySelector('[style*="position:fixed"]')?.remove();
+  document.getElementById('pdb-edit-overlay')?.remove();
   renderProdDB();
   showToast('✅ تم تعديل الصنف بنجاح');
 }
@@ -21760,6 +21864,17 @@ async function confirmRestart(){
     </div>
   </div>
 </div>
+
+<!-- ══ PWA Service Worker ══ -->
+<script>
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>{
+    navigator.serviceWorker.register('/monsak-plus-/sw.js')
+      .then(r=>console.log('SW:',r.scope))
+      .catch(e=>console.warn('SW fail:',e));
+  });
+}
+</script>
 
 </body>
 </html>
