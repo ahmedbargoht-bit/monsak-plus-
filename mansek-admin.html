@@ -4654,7 +4654,16 @@ h2,h3{color:#2C1F0A}
         </select>
       </div>
       <div class="form-fld"><label class="form-lbl">الدور / المسمى الوظيفي</label>
-        <input type="text" id="ns-role" placeholder="مثال: مشرف مجموعة الجيزة"/>
+        <select id="ns-role">
+          <option value="مدير عام">مدير عام</option>
+          <option value="مدير التنسيق">مدير التنسيق</option>
+          <option value="مدير البيع">مدير البيع</option>
+          <option value="مشرف الهايبر">مشرف الهايبر</option>
+          <option value="مشرف المجموعة">مشرف المجموعة</option>
+          <option value="مشرف التنسيق" selected>مشرف التنسيق</option>
+          <option value="مشرف الأسواق الخاصة">مشرف الأسواق الخاصة</option>
+          <option value="مشرف بيع هايبر">مشرف بيع هايبر</option>
+        </select>
       </div>
     </div>
     <div class="form-fld"><label class="form-lbl">المجموعات المسؤول عنها</label>
@@ -4696,7 +4705,16 @@ h2,h3{color:#2C1F0A}
         </select>
       </div>
       <div class="form-fld"><label class="form-lbl">الدور / المسمى</label>
-        <input type="text" id="es-role"/>
+        <select id="es-role">
+          <option value="مدير عام">مدير عام</option>
+          <option value="مدير التنسيق">مدير التنسيق</option>
+          <option value="مدير البيع">مدير البيع</option>
+          <option value="مشرف الهايبر">مشرف الهايبر</option>
+          <option value="مشرف المجموعة">مشرف المجموعة</option>
+          <option value="مشرف التنسيق">مشرف التنسيق</option>
+          <option value="مشرف الأسواق الخاصة">مشرف الأسواق الخاصة</option>
+          <option value="مشرف بيع هايبر">مشرف بيع هايبر</option>
+        </select>
       </div>
     </div>
     <div class="form-fld"><label class="form-lbl">المجموعات</label>
@@ -10873,6 +10891,7 @@ async function loadSupervisors(){
       name:   u.name,
       pass:   u.pass_hash || '—',
       role:   'supervisor',
+      user_type: u.user_type||'مشرف التنسيق',
       level:  u.level || 'sup',
       groups: (u.groups||'').split(',').map(g=>g.trim()).filter(Boolean),
       status: u.status||'active',
@@ -10880,7 +10899,25 @@ async function loadSupervisors(){
       notes:  ''
     }));
 
-    SUPERVISORS = [...staffMapped, ...usersMapped];
+    // دمجهم مع إزالة التكرار بالاسم — users بياخد الأولوية على staff
+    const allSups = [...staffMapped, ...usersMapped];
+    const seenNames = new Set();
+    SUPERVISORS = allSups.filter(s=>{
+      if(seenNames.has(s.name)) return false;
+      seenNames.add(s.name);
+      return true;
+    });
+    // لو موجود في users — استخدمه بدل staff
+    SUPERVISORS = SUPERVISORS.map(s=>{
+      if(s.source==='staff'){
+        const fromUsers = usersMapped.find(u=>u.name===s.name);
+        if(fromUsers) return fromUsers;
+      }
+      return s;
+    });
+    // إزالة تكرار تاني بعد الدمج
+    const seen2 = new Set();
+    SUPERVISORS = SUPERVISORS.filter(s=>{ if(seen2.has(s.name)) return false; seen2.add(s.name); return true; });
   }catch(e){
     console.warn('loadSupervisors error:', e);
   }
@@ -10923,7 +10960,7 @@ function renderSupervisors(){
     }
 
     const roleClr  = ROLE_COLORS_MAP[sup.role] || '#666';
-    const roleLabel= ROLE_LABELS_MAP[sup.role]  || sup.role;
+    const roleLabel = sup.user_type || ROLE_LABELS_MAP[sup.role] || sup.role;
     const groups   = Array.isArray(sup.groups) ? sup.groups : (sup.groups||'').split(',').filter(Boolean);
     const grpBadges= groups.map(g=>`<span class="badge" style="background:${GROUPS[g]?.color||'#ccc'}22;color:${GROUPS[g]?.color||'#555'};font-size:10px">◆ ${GROUPS[g]?.label||g}</span>`).join(' ');
     const statusBadge = sup.status==='active'
@@ -10959,7 +10996,15 @@ function openEditSup(idx){
   document.getElementById('es-name').value = s.name;
   document.getElementById('es-pass').value = s.pass||'';
   document.getElementById('es-level').value = s.level||'sup';
-  document.getElementById('es-role').value = s.role||'';
+  // ضبط المسمى الوظيفي من user_type
+  const esRole = document.getElementById('es-role');
+  const roleVal = s.user_type||s.role||'مشرف التنسيق';
+  esRole.value = roleVal;
+  if(!esRole.value){
+    const opts = [...esRole.options].map(o=>o.value);
+    const closest = opts.find(o=>o.includes(roleVal)||roleVal.includes(o));
+    esRole.value = closest || 'مشرف التنسيق';
+  }
   document.getElementById('es-status').value = s.status||'active';
   const groups = Array.isArray(s.groups) ? s.groups : (s.groups||'').split(',').filter(Boolean);
   // تحميل المجموعات ديناميكياً ثم تحديد المختارة
@@ -11025,14 +11070,15 @@ async function addSupervisor(){
   const name = document.getElementById('ns-name').value.trim();
   const pass = document.getElementById('ns-pass').value.trim();
   const level = document.getElementById('ns-level').value;
-  const role = document.getElementById('ns-role').value.trim();
+  const jobTitle = document.getElementById('ns-role').value.trim();
   const groups = [...document.querySelectorAll('.ns-grp-cb:checked')].map(c=>c.value).join(',');
   if(!name||!pass){alert('أدخل الاسم والباسورد');return;}
 
   const data = {
     name, pass_hash:pass, role:'supervisor',
     level, groups, status:'active',
-    user_type:'مكتبي', grp: groups.split(',')[0]||null, route:null, goal:0
+    user_type: jobTitle||'مشرف التنسيق',
+    grp: groups.split(',')[0]||null, route:null, goal:0
   };
 
   try{
@@ -11044,7 +11090,7 @@ async function addSupervisor(){
       const res = await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(name)}`,{
         method:'PATCH',
         headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-        body: JSON.stringify({pass_hash:pass, level, groups, status:'active', role:'supervisor'})
+        body: JSON.stringify({pass_hash:pass, level, groups, status:'active', role:'supervisor', user_type:jobTitle||'مشرف التنسيق'})
       });
       if(!res.ok) throw new Error('PATCH failed');
     } else {
@@ -11074,11 +11120,11 @@ async function editSupervisor(){
   const name = document.getElementById('es-name').value.trim();
   const pass = document.getElementById('es-pass').value.trim();
   const level = document.getElementById('es-level').value;
-  const role = document.getElementById('es-role').value.trim();
+  const jobTitle = document.getElementById('es-role').value.trim();
   const status = document.getElementById('es-status').value;
   const groups = [...document.querySelectorAll('.es-grp-cb:checked')].map(c=>c.value).join(',');
   if(!name)return;
-  const data = {name,pass_hash:pass,level,groups,status};
+  const data = {name,pass_hash:pass,level,groups,status,user_type:jobTitle||'مشرف التنسيق'};
   if(id) await sbUpdate('users',{id},data);
   else    await sbUpdateByName('users',oldName,data);
   closeModal('modal-edit-sup');
