@@ -1784,8 +1784,15 @@ h2,h3{color:#2C1F0A}
               </div>
               <div>
                 <label class="lbl" style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">خط السير</label>
-                <input type="text" id="qb-route" readonly style="width:100%;background:#f5f5f5;color:#888"/>
+                <input type="text" id="qb-route" readonly style="width:100%;background:#f5f5f5;color:#555;font-weight:600"/>
               </div>
+            </div>
+            <!-- فروع المنسق الحالية -->
+            <div id="qb-branches-wrap" style="display:none;margin-bottom:10px">
+              <label class="lbl" style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">
+                فروع المنسق الحالية <span id="qb-branches-count" style="color:#005CBF"></span>
+              </label>
+              <div id="qb-branches-list" style="display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:#F5F0E8;border-radius:8px;min-height:36px"></div>
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end">
               <div>
@@ -13208,12 +13215,65 @@ async function qbInitReps(){
   }
 }
 
-function qbOnRepChange(){
+async function qbOnRepChange(){
   const sel=document.getElementById('qb-rep');
   const opt=sel.options[sel.selectedIndex];
-  document.getElementById('qb-route').value=opt?.dataset?.route||'';
+  const route=opt?.dataset?.route||'';
+  const repName=sel.value;
+
+  // ملأ خط السير
+  document.getElementById('qb-route').value=route;
   document.getElementById('qb-ok').style.display='none';
   document.getElementById('qb-err').style.display='none';
+  document.getElementById('qb-branch').value='';
+
+  const wrap=document.getElementById('qb-branches-wrap');
+  const list=document.getElementById('qb-branches-list');
+  const count=document.getElementById('qb-branches-count');
+
+  if(!repName){ wrap.style.display='none'; return; }
+
+  // جيب فروع المنسق من branches
+  list.innerHTML='<span style="color:#aaa;font-size:11px">جاري التحميل...</span>';
+  wrap.style.display='block';
+
+  try{
+    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    // جيب الفروع بالخط (للمتحركين) + بالاسم (للثابتين)
+    const [byRoute, byName] = await Promise.all([
+      route ? fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,client_type,status&route=eq.${encodeURIComponent(route)}&order=branch_name.asc`,{headers:H}).then(r=>r.ok?r.json():[]) : [],
+      fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,client_type,status&or=(rep_name.eq.${encodeURIComponent(repName)},rep_name2.eq.${encodeURIComponent(repName)},rep_name3.eq.${encodeURIComponent(repName)})&order=branch_name.asc`,{headers:H}).then(r=>r.ok?r.json():[]),
+    ]);
+
+    // دمج بدون تكرار
+    const seen=new Set();
+    const all=[...byRoute,...byName].filter(b=>{
+      if(!b.branch_name||seen.has(b.branch_name)) return false;
+      seen.add(b.branch_name); return true;
+    });
+
+    count.textContent=`(${all.length} فرع)`;
+
+    if(!all.length){
+      list.innerHTML='<span style="color:#aaa;font-size:11px">لا توجد فروع مسجلة بعد</span>';
+      return;
+    }
+
+    list.innerHTML=all.map(b=>{
+      const typeColor=b.client_type==='A'?'#1A7A4A':b.client_type==='C'?'#B71C1C':'#005CBF';
+      const typeText=b.client_type||'—';
+      const isInactive=b.status==='inactive';
+      return `<span style="display:inline-flex;align-items:center;gap:4px;background:${isInactive?'#f5f5f5':'#EEF6FF'};
+        color:${isInactive?'#aaa':'#003A80'};padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600;
+        border:1px solid ${isInactive?'#eee':'#C8DDF8'};${isInactive?'text-decoration:line-through':''}">
+        ${b.branch_name}
+        <span style="background:${typeColor}22;color:${typeColor};padding:0 4px;border-radius:3px;font-size:10px">${typeText}</span>
+      </span>`;
+    }).join('');
+
+  }catch(e){
+    list.innerHTML='<span style="color:#B71C1C;font-size:11px">تعذر تحميل الفروع</span>';
+  }
 }
 
 async function quickAddBranch(){
@@ -13247,6 +13307,8 @@ async function quickAddBranch(){
     ok.style.display='block';
     document.getElementById('qb-branch').value='';
     await refreshAll(); loadBranches();
+    // حدّث قائمة الفروع أوتوماتيك
+    await qbOnRepChange();
   }catch(e){err.textContent='خطأ: '+e.message;err.style.display='block';}
 }
 
