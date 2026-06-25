@@ -3681,23 +3681,34 @@ h2,h3{color:#2C1F0A}
 
             <!-- قسم ربط الفروع بالعملاء -->
             <div class="card" style="margin-bottom:12px">
-              <div class="card-title"><i class="ti ti-link"></i> ربط فرع بعميل</div>
-              <div style="display:grid;grid-template-columns:2fr 2fr auto;gap:10px;align-items:end">
-                <div class="fld" style="margin:0">
-                  <label class="lbl">الفرع *</label>
-                  <select id="spl-map-branch" style="width:100%">
-                    <option value="">اختر الفرع...</option>
-                  </select>
+              <div class="card-title"><i class="ti ti-link"></i> ربط فروع بعميل</div>
+
+              <!-- اختيار العميل -->
+              <div class="fld" style="margin:0 0 12px 0">
+                <label class="lbl">العميل *</label>
+                <select id="spl-map-client" onchange="splOnMapClientChange()" style="width:100%">
+                  <option value="">اختر العميل أولاً...</option>
+                </select>
+              </div>
+
+              <!-- فلتر بحث في الفروع -->
+              <div id="spl-map-branch-wrap" style="display:none">
+                <div style="margin-bottom:8px">
+                  <input type="text" id="spl-map-branch-search" oninput="splFilterBranchCbs()"
+                    placeholder="🔍 بحث في الفروع..." style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"/>
                 </div>
-                <div class="fld" style="margin:0">
-                  <label class="lbl">العميل *</label>
-                  <select id="spl-map-client" style="width:100%">
-                    <option value="">اختر العميل...</option>
-                  </select>
+                <!-- checkboxes الفروع -->
+                <div id="spl-map-branch-cbs"
+                  style="max-height:220px;overflow-y:auto;display:flex;flex-wrap:wrap;gap:6px;padding:10px;background:#F9F6F1;border:1.5px solid var(--border);border-radius:8px;margin-bottom:10px">
                 </div>
-                <button class="btn btn-blue" onclick="splSaveBranchMap()" style="white-space:nowrap">
-                  <i class="ti ti-link"></i> ربط
-                </button>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <button onclick="splSelectAllBranches()" class="btn btn-ghost btn-sm">تحديد الكل</button>
+                  <button onclick="splDeselectAllBranches()" class="btn btn-ghost btn-sm">إلغاء الكل</button>
+                  <span id="spl-map-selected-count" style="font-size:12px;color:var(--text2);margin-right:auto"></span>
+                  <button onclick="splSaveBranchMap()" class="btn btn-blue btn-sm">
+                    <i class="ti ti-link"></i> ربط المحددة
+                  </button>
+                </div>
               </div>
               <div id="spl-map-msg" style="margin-top:8px;font-size:12px"></div>
             </div>
@@ -15763,19 +15774,13 @@ async function spLoadAll(){
   _splBranchMap = mapRes.ok     ? await mapRes.json()     : [];
   _splBranches  = bRes.ok       ? await bRes.json()       : [];
 
-  // ملء قوائم الربط
-  const mapBranch = document.getElementById('spl-map-branch');
+  // ملء قائمة العملاء في الربط
   const mapClient = document.getElementById('spl-map-client');
-  if(mapBranch){
-    const mapped = new Set(_splBranchMap.map(m=>m.branch_name));
-    mapBranch.innerHTML = '<option value="">اختر الفرع...</option>' +
-      _splBranches.filter(b=>!mapped.has(b.branch_name))
-        .map(b=>`<option value="${b.branch_name}">${b.branch_name}</option>`).join('');
-  }
   if(mapClient){
-    mapClient.innerHTML = '<option value="">اختر العميل...</option>' +
+    mapClient.innerHTML = '<option value="">اختر العميل أولاً...</option>' +
       _splClients.map(c=>`<option value="${c.name}">${c.name} (${c.discount_pct}%)</option>`).join('');
   }
+  document.getElementById('spl-map-branch-wrap').style.display='none';
 
   splRenderProducts();
   splRenderClients();
@@ -15875,20 +15880,85 @@ async function splDeleteClient(id, name){
   showToast('✅ تم الحذف'); await spLoadAll();
 }
 
-async function splSaveBranchMap(){
-  const branch = document.getElementById('spl-map-branch').value;
+function splOnMapClientChange(){
   const client = document.getElementById('spl-map-client').value;
-  const msg    = document.getElementById('spl-map-msg');
-  if(!branch||!client){ msg.style.color='#B71C1C'; msg.textContent='يرجى اختيار الفرع والعميل'; return; }
+  const wrap   = document.getElementById('spl-map-branch-wrap');
+  const cbs    = document.getElementById('spl-map-branch-cbs');
+  if(!client){ wrap.style.display='none'; return; }
+
+  const mapped = new Set(_splBranchMap.filter(m=>m.client_name===client).map(m=>m.branch_name));
+  const allMapped = new Set(_splBranchMap.map(m=>m.branch_name));
+
+  // الفروع الغير مربوطة بأي عميل
+  const available = _splBranches.filter(b=>!allMapped.has(b.branch_name));
+
+  cbs.innerHTML = available.map(b=>`
+    <label style="display:flex;align-items:center;gap:5px;background:#fff;border:1px solid #ddd;border-radius:16px;padding:3px 10px;cursor:pointer;font-size:11px;white-space:nowrap">
+      <input type="checkbox" class="spl-branch-cb" value="${b.branch_name}"/>
+      ${b.branch_name}
+    </label>`).join('');
+
+  cbs.querySelectorAll('input').forEach(cb=>{
+    cb.addEventListener('change', splUpdateSelectedCount);
+  });
+
+  wrap.style.display = available.length ? '' : 'none';
+  if(!available.length){
+    document.getElementById('spl-map-msg').style.color='#888';
+    document.getElementById('spl-map-msg').textContent = 'كل الفروع مربوطة بعملاء';
+  }
+  splUpdateSelectedCount();
+}
+
+function splFilterBranchCbs(){
+  const search = document.getElementById('spl-map-branch-search').value.toLowerCase();
+  document.querySelectorAll('#spl-map-branch-cbs label').forEach(lbl=>{
+    lbl.style.display = lbl.textContent.toLowerCase().includes(search) ? '' : 'none';
+  });
+}
+
+function splSelectAllBranches(){
+  document.querySelectorAll('#spl-map-branch-cbs input:not([style*="none"])').forEach(cb=>{
+    const lbl = cb.closest('label');
+    if(!lbl || lbl.style.display==='none') return;
+    cb.checked=true;
+  });
+  // اختار الكل المرئيين
+  document.querySelectorAll('#spl-map-branch-cbs label').forEach(lbl=>{
+    if(lbl.style.display!=='none') lbl.querySelector('input').checked=true;
+  });
+  splUpdateSelectedCount();
+}
+
+function splDeselectAllBranches(){
+  document.querySelectorAll('.spl-branch-cb').forEach(cb=>cb.checked=false);
+  splUpdateSelectedCount();
+}
+
+function splUpdateSelectedCount(){
+  const n = document.querySelectorAll('.spl-branch-cb:checked').length;
+  const el = document.getElementById('spl-map-selected-count');
+  if(el) el.textContent = n > 0 ? `${n} فرع محدد` : '';
+}
+
+async function splSaveBranchMap(){
+  const client  = document.getElementById('spl-map-client').value;
+  const checked = [...document.querySelectorAll('.spl-branch-cb:checked')].map(c=>c.value);
+  const msg     = document.getElementById('spl-map-msg');
+  if(!client){ msg.style.color='#B71C1C'; msg.textContent='يرجى اختيار العميل'; return; }
+  if(!checked.length){ msg.style.color='#B71C1C'; msg.textContent='يرجى تحديد فرع واحد على الأقل'; return; }
+
   const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  const payload = checked.map(branch_name=>({branch_name, client_name:client}));
   const r = await fetch(`${SUPABASE_URL}/rest/v1/branch_client_map`,{
-    method:'POST', headers:H, body:JSON.stringify({branch_name:branch, client_name:client})
+    method:'POST', headers:H, body:JSON.stringify(payload)
   });
   if(r.ok||r.status===201||r.status===204){
-    msg.style.color='#065F46'; msg.textContent='✅ تم الربط';
+    msg.style.color='#065F46'; msg.textContent=`✅ تم ربط ${checked.length} فرع`;
     await spLoadAll();
+    splOnMapClientChange(); // تحديث الـ checkboxes
   } else { msg.style.color='#B71C1C'; msg.textContent='❌ خطأ: '+await r.text(); }
-  setTimeout(()=>msg.textContent='',3000);
+  setTimeout(()=>msg.textContent='',4000);
 }
 
 async function splDeleteBranchMap(id, branch){
