@@ -13600,8 +13600,8 @@ async function openRouteDetail(routeEncoded){
     _rdCurrentRoute.supervisor = supervisor;
     document.getElementById('rd-supervisor').textContent = supervisor;
 
-    // الفروع (من branches)
-    const brRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,client_type,status&route=eq.${encodeURIComponent(routeName)}&order=branch_name.asc`,{
+    // الفروع (من branches) مع المنسقين
+    const brRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,client_type,status,rep_name,rep_name2,rep_name3&route=eq.${encodeURIComponent(routeName)}&order=branch_name.asc`,{
       headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
     });
     const branches = brRes.ok ? await brRes.json() : [];
@@ -13609,7 +13609,7 @@ async function openRouteDetail(routeEncoded){
     document.getElementById('rd-branch-count').textContent = `(${branches.length} فرع)`;
 
     if(!branches.length){
-      document.getElementById('rd-branches-tbody').innerHTML = '<tr><td colspan="5" style="text-align:center;padding:1rem;color:#aaa">لا توجد فروع مسجلة</td></tr>';
+      document.getElementById('rd-branches-tbody').innerHTML = '<tr><td colspan="6" style="text-align:center;padding:1rem;color:#aaa">لا توجد فروع مسجلة</td></tr>';
       return;
     }
 
@@ -13620,19 +13620,33 @@ async function openRouteDetail(routeEncoded){
       const typeBadge = b.client_type
         ? `<span class="badge" style="background:${b.client_type==='A'?'#E8F5E9':'#FFF3E0'};color:${b.client_type==='A'?'#1A7A4A':'#E65100'}">${b.client_type}</span>`
         : '—';
+      // عرض المنسقين المسجلين على الفرع
+      const reps=[b.rep_name,b.rep_name2,b.rep_name3].filter(Boolean);
+      const repsHtml=reps.length
+        ? reps.map(r=>`<span style="display:inline-block;background:#EEF6FF;color:#003A80;
+            padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;margin:1px;
+            cursor:pointer" onclick="rdEditRepOnBranch(${b.id},'${(b.branch_name||'').replace(/'/g,"\\'")}',
+            '${r.replace(/'/g,"\\'")}','${routeName.replace(/'/g,"\\'")}')">
+            ${r} <span style="color:#C55B48">✎</span></span>`).join('')
+        : `<span style="color:#aaa;font-size:10px">— <button class="btn btn-xs" style="background:#F5F0E8;color:#8B6F47;padding:1px 5px"
+            onclick="rdAssignRep(${b.id},'${(b.branch_name||'').replace(/'/g,"\\'")}','${routeName.replace(/'/g,"\\'")}')">
+            تعيين منسق</button></span>`;
+      const brName=(b.branch_name||'').replace(/'/g,"\\'");
+      const rt=routeName.replace(/'/g,"\\'");
       return `<tr>
         <td>${i+1}</td>
         <td><b>${b.branch_name||'—'}</b></td>
         <td>${typeBadge}</td>
+        <td style="max-width:200px">${repsHtml}</td>
         <td>${statusBadge}</td>
         <td style="white-space:nowrap">
-          <button class="btn btn-xs btn-blue" onclick="openEditBranch(${b.id},'${(b.branch_name||'').replace(/'/g,"\\'")}','${b.status||'active'}','${b.client_type||''}','${routeName.replace(/'/g,"\\'")}')">
-            <i class="ti ti-edit"></i> تعديل
+          <button class="btn btn-xs btn-blue" onclick="openEditBranch(${b.id},'${brName}','${b.status||'active'}','${b.client_type||''}','${rt}')">
+            <i class="ti ti-edit"></i>
           </button>
-          <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="toggleBranchStatus(${b.id},'${b.status==='active'?'inactive':'active'}','${routeName.replace(/'/g,"\\'")}')">
-            <i class="ti ti-power"></i> ${b.status==='active'?'إيقاف':'تفعيل'}
+          <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="toggleBranchStatus(${b.id},'${b.status==='active'?'inactive':'active'}','${rt}')">
+            <i class="ti ti-power"></i>
           </button>
-          <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="deleteBranchFromRoute(${b.id},'${(b.branch_name||'').replace(/'/g,"\\'")}','${routeName.replace(/'/g,"\\'")}')">
+          <button class="btn btn-xs" style="background:#FFEBEE;color:#B71C1C" onclick="deleteBranchFromRoute(${b.id},'${brName}','${rt}')">
             <i class="ti ti-trash"></i>
           </button>
         </td>
@@ -13645,7 +13659,138 @@ async function openRouteDetail(routeEncoded){
   }
 }
 
-async function openEditBranch(id, name, status, clientType, currentRoute){
+async function rdEditRepOnBranch(brId, brName, currentRep, routeName){
+  // اجيب كل المنسقين المتاحين
+  const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const reps=await fetch(`${SUPABASE_URL}/rest/v1/users?select=name&role=eq.rep&status=eq.active&order=name.asc`,{headers:H})
+    .then(r=>r.ok?r.json():[]).catch(()=>[]);
+
+  const overlay=document.createElement('div');
+  overlay.id='rd-rep-edit-overlay';
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML=`
+    <div style="background:#FFFDF8;border-radius:16px;padding:24px;width:380px;box-shadow:0 8px 32px rgba(75,60,26,.3);border:1px solid #E8D9C0">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h3 style="font-size:14px;font-weight:700;color:var(--navy)">تعديل منسق الفرع</h3>
+        <button onclick="document.getElementById('rd-rep-edit-overlay').remove()" style="background:none;border:none;font-size:20px;cursor:pointer">×</button>
+      </div>
+      <p style="font-size:12px;color:var(--text2);margin-bottom:12px;padding:6px 10px;background:#F5F0E8;border-radius:6px">
+        🏪 <b>${brName}</b> — المنسق الحالي: <b style="color:var(--caramel)">${currentRep}</b>
+      </p>
+      <div style="margin-bottom:12px">
+        <label style="font-size:11px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">المنسق الجديد</label>
+        <select id="rd-rep-new" style="width:100%;padding:8px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:Cairo,sans-serif">
+          <option value="">— اختر منسق —</option>
+          ${reps.map(r=>`<option value="${r.name}" ${r.name===currentRep?'selected':''}>${r.name}</option>`).join('')}
+        </select>
+      </div>
+      <div id="rd-rep-msg" style="display:none;font-size:12px;margin-bottom:10px;padding:6px 10px;border-radius:6px"></div>
+      <div style="display:flex;gap:8px">
+        <button onclick="rdSaveRepOnBranch(${brId},'${currentRep.replace(/'/g,"\\'")}','${routeName.replace(/'/g,"\\'")}')"
+          style="flex:1;padding:9px;background:linear-gradient(135deg,#C55B48,#A04035);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          💾 حفظ
+        </button>
+        <button onclick="rdRemoveRepFromBranch(${brId},'${currentRep.replace(/'/g,"\\'")}','${routeName.replace(/'/g,"\\'")}')"
+          style="padding:9px 14px;background:#FFEBEE;color:#B71C1C;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
+          🗑️ إزالة
+        </button>
+        <button onclick="document.getElementById('rd-rep-edit-overlay').remove()"
+          style="padding:9px 14px;background:#F5F0E8;color:#4B3C1A;border:1.5px solid #D4C4A8;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
+          إلغاء
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+async function rdAssignRep(brId, brName, routeName){
+  const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const reps=await fetch(`${SUPABASE_URL}/rest/v1/users?select=name&role=eq.rep&status=eq.active&order=name.asc`,{headers:H})
+    .then(r=>r.ok?r.json():[]).catch(()=>[]);
+  const overlay=document.createElement('div');
+  overlay.id='rd-rep-edit-overlay';
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML=`
+    <div style="background:#FFFDF8;border-radius:16px;padding:24px;width:360px;box-shadow:0 8px 32px rgba(75,60,26,.3);border:1px solid #E8D9C0">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h3 style="font-size:14px;font-weight:700;color:var(--navy)">تعيين منسق للفرع</h3>
+        <button onclick="document.getElementById('rd-rep-edit-overlay').remove()" style="background:none;border:none;font-size:20px;cursor:pointer">×</button>
+      </div>
+      <p style="font-size:12px;color:var(--text2);margin-bottom:12px;padding:6px 10px;background:#F5F0E8;border-radius:6px">
+        🏪 <b>${brName}</b>
+      </p>
+      <div style="margin-bottom:12px">
+        <label style="font-size:11px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">اختر المنسق</label>
+        <select id="rd-rep-new" style="width:100%;padding:8px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:Cairo,sans-serif">
+          <option value="">— اختر منسق —</option>
+          ${reps.map(r=>`<option value="${r.name}">${r.name}</option>`).join('')}
+        </select>
+      </div>
+      <div id="rd-rep-msg" style="display:none;font-size:12px;margin-bottom:10px;padding:6px 10px;border-radius:6px"></div>
+      <div style="display:flex;gap:8px">
+        <button onclick="rdSaveRepOnBranch(${brId},null,'${routeName.replace(/'/g,"\\'")}')"
+          style="flex:1;padding:9px;background:linear-gradient(135deg,#6B7A3B,#4E5C28);color:#EDE5D8;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          ✅ تعيين
+        </button>
+        <button onclick="document.getElementById('rd-rep-edit-overlay').remove()"
+          style="padding:9px 14px;background:#F5F0E8;color:#4B3C1A;border:1.5px solid #D4C4A8;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
+          إلغاء
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+async function rdSaveRepOnBranch(brId, oldRep, routeName){
+  const newRep=document.getElementById('rd-rep-new')?.value;
+  const msg=document.getElementById('rd-rep-msg');
+  if(!newRep){msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';msg.textContent='اختر منسق';return;}
+
+  const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+  // جيب بيانات الفرع الحالية
+  const [br]=await fetch(`${SUPABASE_URL}/rest/v1/branches?select=rep_name,rep_name2,rep_name3&id=eq.${brId}`,
+    {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+  if(!br) return;
+
+  const patch={};
+  if(oldRep){
+    if(br.rep_name===oldRep)  patch.rep_name=newRep;
+    else if(br.rep_name2===oldRep) patch.rep_name2=newRep;
+    else if(br.rep_name3===oldRep) patch.rep_name3=newRep;
+  } else {
+    // إضافة جديدة — أول حقل فاضي
+    if(!br.rep_name)  patch.rep_name=newRep;
+    else if(!br.rep_name2) patch.rep_name2=newRep;
+    else if(!br.rep_name3) patch.rep_name3=newRep;
+    else{msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';msg.textContent='الفرع ممتلئ (3 منسقين)';return;}
+  }
+
+  const ok=await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${brId}`,{method:'PATCH',headers:H,body:JSON.stringify(patch)}).then(r=>r.ok).catch(()=>false);
+  if(ok){
+    document.getElementById('rd-rep-edit-overlay')?.remove();
+    showToast('✅ تم تحديث المنسق');
+    openRouteDetail(encodeURIComponent(routeName));
+  } else {
+    msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';msg.textContent='خطأ في الحفظ';
+  }
+}
+
+async function rdRemoveRepFromBranch(brId, repName, routeName){
+  const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+  const [br]=await fetch(`${SUPABASE_URL}/rest/v1/branches?select=rep_name,rep_name2,rep_name3&id=eq.${brId}`,
+    {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+  if(!br) return;
+  const patch={};
+  if(br.rep_name===repName)  patch.rep_name=null;
+  if(br.rep_name2===repName) patch.rep_name2=null;
+  if(br.rep_name3===repName) patch.rep_name3=null;
+  const ok=await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${brId}`,{method:'PATCH',headers:H,body:JSON.stringify(patch)}).then(r=>r.ok).catch(()=>false);
+  if(ok){
+    document.getElementById('rd-rep-edit-overlay')?.remove();
+    showToast('🗑️ تم إزالة المنسق من الفرع');
+    openRouteDetail(encodeURIComponent(routeName));
+  }
+}
   document.getElementById('eb-id').value = id;
   document.getElementById('eb-name').value = name;
   document.getElementById('eb-old-name').value = name; // إصلاح بق undefined
@@ -22049,7 +22194,7 @@ async function confirmRestart(){
     </div>
     <div class="table-wrap" style="margin-bottom:1rem">
       <table>
-        <thead><tr><th>#</th><th>اسم الفرع</th><th>النوع</th><th>الحالة</th><th>إجراءات</th></tr></thead>
+        <thead><tr><th>#</th><th>اسم الفرع</th><th>النوع</th><th>المنسق</th><th>الحالة</th><th>إجراءات</th></tr></thead>
         <tbody id="rd-branches-tbody"></tbody>
       </table>
     </div>
