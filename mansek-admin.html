@@ -615,9 +615,6 @@ h2,h3{color:#2C1F0A}
           <div class="nav-item" onclick="showPanel('branches')">
             <i class="ti ti-building-store"></i> الفروع والعملاء
           </div>
-          <div class="nav-item" onclick="showPanel('upload')">
-            <i class="ti ti-upload"></i> رفع البيانات
-          </div>
           <div class="nav-item" onclick="showPanel('routes')">
             <i class="ti ti-route"></i> خطوط سير المنسقين
           </div>
@@ -7986,7 +7983,6 @@ function renderCurrentPanel(){
     case 'orders': loadOrders(); break;
     case 'settings': loadHolidays(); loadNavReorder(); break;
     case 'sales-plans-plus': loadSppPanel(); break;
-    case 'upload': loadUploadPanel(); break;
     case 'routes':
       // migration: لو في بيانات في localStorage انقلهم لـ Supabase
       const localRoutes = localStorage.getItem('routes_list');
@@ -11558,7 +11554,6 @@ const NAV_DEFAULT = [
   {id:'users',          icon:'ti-users',              label:'المنسقون',               visible:true},
   {id:'supervisors',    icon:'ti-user-star',          label:'المشرفون والمديرون',     visible:true},
   {id:'branches',       icon:'ti-building-store',     label:'الفروع والعملاء',        visible:true},
-  {id:'upload',         icon:'ti-upload',             label:'رفع البيانات',           visible:true},
   {id:'routes',         icon:'ti-route',              label:'خطوط سير المنسقين',     visible:true},
   {id:'products-db',    icon:'ti-package',            label:'قاعدة الأصناف',          visible:true},
   {id:'holidays',       icon:'ti-calendar',           label:'الإجازات',               visible:true},
@@ -11575,10 +11570,24 @@ const NAV_DEFAULT = [
 
 let navOrder = [];
 
+// التابات المحذوفة — لا تظهر حتى لو محفوظة في localStorage
+const REMOVED_PANELS = ['rep-summary','upload'];
+
 function getNavOrder(){
   try{
     const saved = localStorage.getItem('nav_order');
-    if(saved) return JSON.parse(saved);
+    if(saved){
+      const arr = JSON.parse(saved);
+      // امسح أي تاب محذوف
+      const cleaned = arr.filter(item=>{
+        const id = typeof item==='string'?item:(item?.id||'');
+        return !REMOVED_PANELS.includes(id);
+      });
+      // لو اتغير حجمه — احفظه نظيف
+      if(cleaned.length !== arr.length)
+        localStorage.setItem('nav_order', JSON.stringify(cleaned));
+      return cleaned;
+    }
   }catch(e){}
   return JSON.parse(JSON.stringify(NAV_DEFAULT));
 }
@@ -12806,332 +12815,6 @@ document.querySelectorAll('.modal-overlay').forEach(m=>{
 renderGoals();
 
 // ══ رفع البيانات من Excel ══════════════════════════════════════
-let uploadedData = [];
-
-function loadUploadPanel(){
-  renderCurrentRepsTable();
-}
-
-function handleFileDrop(e){
-  e.preventDefault();
-  const file = e.dataTransfer.files[0];
-  if(file) processExcelFile(file);
-}
-
-function handleFileSelect(input){
-  const file = input.files[0];
-  if(file) processExcelFile(file);
-}
-
-function processExcelFile(file){
-  if(!file.name.match(/\.(xlsx|xls)$/i)){
-    showUploadErr('الملف لازم يكون .xlsx أو .xls');
-    return;
-  }
-  const reader = new FileReader();
-  reader.onload = function(e){
-    try{
-      const wb = XLSX.read(e.target.result, {type:'array'});
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
-      parseUploadedRows(rows);
-    }catch(err){
-      showUploadErr('خطأ في قراءة الملف: ' + err.message);
-    }
-  };
-  reader.readAsArrayBuffer(file);
-}
-
-function parseUploadedRows(rows){
-  if(!rows.length){ showUploadErr('الملف فاضي'); return; }
-
-  // تحديد الأعمدة — السطر الأول headers
-  const headers = rows[0].map(h=>String(h).trim().toLowerCase());
-  console.log('Headers:', headers);
-
-  // البحث عن الأعمدة بالاسم المرن
-  // تحديد الأعمدة بالاسم الدقيق أولاً ثم fallback
-  const findCol = (keys) => {
-    for(let k of keys){
-      // بحث دقيق أولاً
-      let idx = headers.findIndex(h => h === k);
-      if(idx !== -1) return idx;
-      // بحث جزئي
-      idx = headers.findIndex(h => h.includes(k));
-      if(idx !== -1) return idx;
-    }
-    return -1;
-  };
-
-  // أسماء الأعمدة بالظبط زي النموذج الجديد
-  const colSup    = findCol(['اسم المشرف']);
-  const colRep    = findCol(['اسم المنسق']);
-  const colRoute  = findCol(['خط السير', 'خط سير']);
-  const colBranch = findCol(['اسم العميل', 'اسم الفرع', 'فرع', 'عميل']);
-  const colStatus = findCol(['حالة العميل', 'حالة', 'status']);
-  const colType   = findCol(['نوع المنسق', 'نوع']);
-  const colPass   = findCol(['باسورد المنسق', 'الباسورد', 'باسورد']);
-  const colGroup  = findCol(['المجموعة', 'مجموعة']);
-
-  console.log('Columns detected:', {colSup, colRep, colRoute, colBranch, colType, colPass, colGroup});
-
-  if(colRep === -1){ showUploadErr('مش لاقي عمود اسم المنسق — تأكد من وجود عمود "اسم المنسق"'); return; }
-
-  uploadedData = [];
-  const dataRows = rows.slice(1).filter(r => r.some(c=>c?.toString().trim()));
-
-  // متغيرات للصف السابق — عشان الخلايا المدمجة (merge)
-  let lastSup='', lastRep='', lastRoute='', lastPass='', lastGroup='', lastType='';
-
-  dataRows.forEach(r => {
-    const rawRep    = colRep>=0    ? String(r[colRep]||'').trim()    : '';
-    const rawSup    = colSup>=0    ? String(r[colSup]||'').trim()    : '';
-    const rawRoute  = colRoute>=0  ? String(r[colRoute]||'').trim()  : '';
-    const rawGroup  = colGroup>=0  ? String(r[colGroup]||'').trim()  : '';
-    const branch    = colBranch>=0 ? String(r[colBranch]||'').trim() : '';
-    const brStatus  = colStatus>=0 ? String(r[colStatus]||'نشط').trim() : 'نشط';
-
-    // تحديد الباسورد والنوع — لو القيمة نص (ثابت/متحرك) هي النوع، لو رقم هي الباسورد
-    const rawPassRaw = colPass>=0 ? String(r[colPass]||'').trim() : '';
-    const rawTypeRaw = colType>=0 ? String(r[colType]||'').trim() : '';
-    const isTypeVal  = (v) => v==='ثابت' || v==='متحرك';
-    let rawPass, rawType;
-    if(isTypeVal(rawPassRaw)){ rawType=rawPassRaw; rawPass=rawTypeRaw; }
-    else if(isTypeVal(rawTypeRaw)){ rawType=rawTypeRaw; rawPass=rawPassRaw; }
-    else { rawPass=rawPassRaw; rawType=rawTypeRaw; }
-
-    // ورث القيم الفاضية من الصف السابق (خلايا مدمجة)
-    const name  = rawRep   || lastRep;
-    const sup   = rawSup   || lastSup;
-    const route = rawRoute || lastRoute;
-    const pass  = rawPass  || lastPass;
-    const group = rawGroup || lastGroup;
-    const type  = rawType  || lastType;
-
-    if(!name) return;
-
-    // حدّث الأخير
-    if(rawRep)   lastRep   = rawRep;
-    if(rawSup)   lastSup   = rawSup;
-    if(rawRoute) lastRoute = rawRoute;
-    if(rawPass)  lastPass  = rawPass;
-    if(rawGroup) lastGroup = rawGroup;
-    if(rawType)  lastType  = rawType;
-
-    // لو نفس المنسق موجود — أضف الفرع للموجود
-    const existing = uploadedData.find(u=>u.name===name && u.route===route);
-    if(existing){
-      if(branch && !existing.branches.find(b=>b.name===branch)){
-        existing.branches.push({name:branch, status:brStatus});
-      }
-    } else {
-      uploadedData.push({name, sup, route, pass, group, type, branches: branch?[{name:branch, status:brStatus}]:[]});
-    }
-  });
-
-  if(!uploadedData.length){ showUploadErr('مفيش بيانات صالحة في الملف'); return; }
-
-  // إحصائيات
-  const sups   = [...new Set(uploadedData.map(r=>r.sup).filter(Boolean))];
-  const routes = [...new Set(uploadedData.map(r=>r.route).filter(Boolean))];
-
-  document.getElementById('upload-stats').innerHTML = `
-    <span style="background:#E3F2FD;color:#1565C0;padding:4px 12px;border-radius:999px;font-size:12px">👤 ${uploadedData.length} منسق</span>
-    <span style="background:#F3E5F5;color:#6A1B9A;padding:4px 12px;border-radius:999px;font-size:12px">👔 ${sups.length} مشرف</span>
-    <span style="background:#E8F5E9;color:#1B5E20;padding:4px 12px;border-radius:999px;font-size:12px">🗺️ ${routes.length} خط سير</span>
-  `;
-
-  // جدول المعاينة
-  document.getElementById('upload-table-wrap').innerHTML = `
-    <table style="width:100%;border-collapse:collapse;font-size:12px">
-      <thead><tr style="background:#f5f7fa">
-        <th style="padding:8px;border:1px solid #ddd;text-align:right">الاسم</th>
-        <th style="padding:8px;border:1px solid #ddd;text-align:right">المشرف</th>
-        <th style="padding:8px;border:1px solid #ddd;text-align:right">خط السير</th>
-        <th style="padding:8px;border:1px solid #ddd;text-align:right">النوع</th>
-        <th style="padding:8px;border:1px solid #ddd;text-align:right">الباسورد</th>
-      </tr></thead>
-      <tbody>
-        ${uploadedData.map(r=>`<tr>
-          <td style="padding:6px 8px;border:1px solid #ddd">${r.name}</td>
-          <td style="padding:6px 8px;border:1px solid #ddd;color:#666">${r.sup||'—'}</td>
-          <td style="padding:6px 8px;border:1px solid #ddd">${r.route||'—'}</td>
-          <td style="padding:6px 8px;border:1px solid #ddd"><span style="background:${r.type==='ثابت'?'#E8EAF6':'#E3F2FD'};padding:2px 8px;border-radius:999px">${r.type}</span></td>
-          <td style="padding:6px 8px;border:1px solid #ddd;font-family:monospace">${r.pass||'—'}</td>
-        </tr>`).join('')}
-      </tbody>
-    </table>
-  `;
-
-  document.getElementById('upload-preview').style.display='block';
-  document.getElementById('upload-err').style.display='none';
-  document.getElementById('upload-ok').style.display='none';
-}
-
-async function uploadToSupabase(){
-  if(!uploadedData.length) return;
-  const btn = document.getElementById('upload-confirm-btn');
-  btn.disabled=true; btn.textContent='جاري الرفع...';
-
-  try{
-    // حذف القديم وإضافة الجديد
-    await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.rep`,{
-      method:'DELETE',
-      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
-    });
-
-    // تحديد المجموعة من اسم المشرف
-    const supGroups = {
-      'حمدى محمد ربيع':'giza','احمد علاء هنداوى':'cairo',
-      'مصطفى مهدى يوسف':'south','عمر احمد عبد العظيم':'tajmuat',
-      'عبد العظيم محمد عبد العظيم':'hyper'
-    };
-    // أضف أي مشرف إسكندرية من SUPERVISORS تلقائياً
-    (SUPERVISORS||[]).filter(s=>s.level==='sup'&&(s.groups||[]).includes('alex'))
-      .forEach(s=>{ supGroups[s.name]='alex'; });
-
-    // دالة لتوحيد اسم المجموعة
-    const normalizeGrp = (grp) => {
-      if(!grp) return null;
-      const g = grp.toString().toLowerCase().trim();
-      // الإسكندرية أولاً — لو فيها alex أو alx بأي شكل
-      if(g.includes('alex')||g==='alx'||g.includes('اسكندر')||g.includes('إسكندر')) return 'alex';
-      if(g==='giza'||g.includes('جيزة')||g.includes('جيزه')) return 'giza';
-      if(g==='cairo'||g.includes('قاهرة')||g.includes('قاهره')) return 'cairo';
-      if(g==='south'||g.includes('جنوب')) return 'south';
-      if(g==='tajmuat'||g.includes('تجمع')) return 'tajmuat';
-      // hyper بعد alex عشان hyper alx تتحول لـ alex مش hyper
-      if(g==='hyper'||g.includes('هايبر')||g.includes('hyper')) return 'hyper';
-      return g;
-    };
-
-    const batch = uploadedData.map(r=>({
-      name: r.name,
-      pass_hash: r.pass || '1234',
-      role: 'rep',
-      route: r.route,
-      grp: supGroups[r.sup] || normalizeGrp(r.group) || 'giza',
-      groups: supGroups[r.sup] || normalizeGrp(r.group) || 'giza',
-      user_type: r.type || 'متحرك',
-      level: 'rep',
-      status: 'active',
-      goal: 1
-    }));
-
-    // حذف المنسقين القديمين أولاً ثم إضافة الجدد
-    try{
-      await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.rep`,{
-        method:'DELETE',
-        headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'}
-      });
-    }catch(e){ console.warn('delete reps failed',e); }
-
-    // رفع الجدد على دفعات 20
-    for(let i=0; i<batch.length; i+=20){
-      const slice = batch.slice(i,i+20);
-      await fetch(`${SUPABASE_URL}/rest/v1/users`,{
-        method:'POST',
-        headers:{
-          'Content-Type':'application/json',
-          'apikey':SUPABASE_KEY,
-          'Authorization':`Bearer ${SUPABASE_KEY}`,
-          'Prefer':'return=minimal'
-        },
-        body: JSON.stringify(slice)
-      });
-    }
-
-    // حفظ في products_db عشان التطبيق يجيبها
-    const repsForApp = uploadedData.map(r=>({
-      name:r.name, route:r.route,
-      group: supGroups[r.sup]||normalizeGrp(r.group)||'giza',
-      type:r.type||'متحرك', pass:r.pass||'1234', goal:1,
-      branches: (r.branches||[]).filter(b=>b.status==='نشط').map(b=>b.name)
-    }));
-
-    // branches_map للتطبيق — الفروع النشطة فقط
-    const newBranchesMap = {};
-    uploadedData.forEach(r=>{
-      if(r.route && r.branches && r.branches.length){
-        const activeBranches = r.branches.filter(b=>b.status==='نشط').map(b=>b.name);
-        if(activeBranches.length) newBranchesMap[r.route] = activeBranches;
-      }
-    });
-
-    // حفظ كل الفروع بحالاتها في جدول branches في Supabase
-    const allBranches = [];
-    uploadedData.forEach(r=>{
-      const grp = supGroups[r.sup]||normalizeGrp(r.group)||'giza';
-      (r.branches||[]).forEach(b=>{
-        allBranches.push({
-          branch_name: b.name,
-          route: r.route,
-          grp,
-          rep_name: r.name,
-          client_type: 'A — كبير',
-          status: b.status==='نشط' ? 'active' : b.status==='متوقف' ? 'suspended' : 'closed'
-        });
-      });
-    });
-
-    // حذف الفروع القديمة وإضافة الجديدة
-    if(allBranches.length){
-      const grps = [...new Set(allBranches.map(b=>b.grp))];
-      for(const grp of grps){
-        await fetch(`${SUPABASE_URL}/rest/v1/branches?grp=eq.${encodeURIComponent(grp)}`,{
-          method:'DELETE',
-          headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'}
-        });
-      }
-      for(let i=0;i<allBranches.length;i+=50){
-        await fetch(`${SUPABASE_URL}/rest/v1/branches`,{
-          method:'POST',
-          headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-          body:JSON.stringify(allBranches.slice(i,i+50))
-        });
-      }
-    }
-
-    // upsert branches_map و reps في products_db
-    await sbUpsert('products_db', {key:'branches_map', value:JSON.stringify(newBranchesMap), updated_at:new Date().toISOString()}, 'key');
-    await sbUpsert('products_db', {key:'reps', value:JSON.stringify(repsForApp), updated_at:new Date().toISOString()}, 'key');
-
-    const totalBranches = allBranches.length;
-    const activeBranches = allBranches.filter(b=>b.status==='active').length;
-    const suspendedBranches = allBranches.filter(b=>b.status==='suspended').length;
-    const closedBranches = allBranches.filter(b=>b.status==='closed').length;
-
-    document.getElementById('upload-ok').innerHTML = `
-      ✓ تم رفع ${uploadedData.length} منسق و ${totalBranches} فرع للنظام بنجاح<br>
-      <span style="font-size:11px;opacity:.8">
-        🟢 نشط: ${activeBranches} &nbsp;|&nbsp; 🟡 متوقف: ${suspendedBranches} &nbsp;|&nbsp; 🔴 مغلق: ${closedBranches}
-      </span>`;
-    document.getElementById('upload-ok').style.display='block';
-    document.getElementById('upload-preview').style.display='none';
-    uploadedData=[];
-    // reload من Supabase عشان المنسقين الجدد يظهروا فوراً
-    await loadAdminUsers();
-    await refreshAll();
-    renderCurrentRepsTable();
-
-  }catch(err){
-    showUploadErr('خطأ في الرفع: ' + err.message);
-  }
-  btn.disabled=false; btn.innerHTML='<i class="ti ti-cloud-upload"></i> رفع للنظام';
-}
-
-function cancelUpload(){
-  uploadedData=[];
-  document.getElementById('upload-preview').style.display='none';
-  document.getElementById('excel-file-input').value='';
-}
-
-function showUploadErr(msg){
-  const el=document.getElementById('upload-err');
-  el.textContent=msg; el.style.display='block';
-  document.getElementById('upload-ok').style.display='none';
-}
-
 function renderCurrentRepsTable(){
   const el=document.getElementById('current-reps-table');
   if(!el) return;
