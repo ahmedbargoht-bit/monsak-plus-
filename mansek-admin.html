@@ -3606,22 +3606,62 @@ h2,h3{color:#2C1F0A}
               </div>
             </div>
 
-            <!-- بحث -->
-            <div style="margin-bottom:10px">
-              <input type="text" id="spl-psearch" oninput="splRenderProducts()" placeholder="🔍 بحث في الأصناف..." style="width:100%"/>
+            <!-- فلاتر -->
+            <div class="card" style="margin-bottom:12px">
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;align-items:end">
+                <div class="fld" style="margin:0">
+                  <label class="lbl">النوع</label>
+                  <select id="spl-pfea" onchange="splOnFeaChange()" style="width:100%">
+                    <option value="all">كل الأنواع</option>
+                  </select>
+                </div>
+                <div class="fld" style="margin:0">
+                  <label class="lbl">التصنيف</label>
+                  <select id="spl-pcat" onchange="splRenderProducts()" style="width:100%">
+                    <option value="all">كل التصنيفات</option>
+                  </select>
+                </div>
+                <div class="fld" style="margin:0">
+                  <label class="lbl">بحث</label>
+                  <input type="text" id="spl-psearch" oninput="splRenderProducts()" placeholder="🔍 بحث في الأصناف..." style="width:100%"/>
+                </div>
+              </div>
+            </div>
+
+            <!-- تسعير جماعي -->
+            <div class="card" style="margin-bottom:12px;display:none" id="spl-bulk-bar">
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <span id="spl-bulk-count" style="font-size:12px;font-weight:700;color:var(--navy)"></span>
+                <input type="number" id="spl-bulk-price" placeholder="السعر" min="0" step="0.01"
+                  style="width:110px;padding:6px 8px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"/>
+                <input type="number" id="spl-bulk-tax" placeholder="ضريبة %" min="0" max="100" step="0.1" value="0"
+                  style="width:100px;padding:6px 8px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"/>
+                <button onclick="splBulkSavePrice()" class="btn btn-blue btn-sm">
+                  <i class="ti ti-device-floppy"></i> حفظ السعر للمحددين
+                </button>
+                <button onclick="splDeselectAllProducts()" class="btn btn-ghost btn-sm">إلغاء التحديد</button>
+              </div>
             </div>
 
             <div class="card">
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-                <span id="spl-prod-count" style="font-size:12px;color:var(--text2)"></span>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer">
+                    <input type="checkbox" id="spl-select-all" onchange="splToggleSelectAll(this)"/> تحديد الكل
+                  </label>
+                  <span id="spl-prod-count" style="font-size:12px;color:var(--text2)"></span>
+                </div>
                 <button onclick="splExportProducts()" class="btn btn-ghost btn-sm"><i class="ti ti-file-spreadsheet"></i> Excel</button>
               </div>
               <div class="tbl-wrap">
                 <table>
                   <thead>
                     <tr>
+                      <th style="width:36px"></th>
                       <th>#</th>
                       <th>اسم الصنف</th>
+                      <th style="text-align:center">النوع</th>
+                      <th style="text-align:center">التصنيف</th>
                       <th style="text-align:center">السعر</th>
                       <th style="text-align:center">ضريبة %</th>
                       <th style="text-align:center">شامل الضريبة</th>
@@ -15746,8 +15786,9 @@ function repRouteCbChange(el){
 // ══════════════════════════════════════════════════════════════
 // SALES PRICELIST — أسعار الأصناف وخصومات العملاء
 // ══════════════════════════════════════════════════════════════
-let _splClients   = []; // من sales_clients
-let _splBranchMap = []; // من branch_client_map
+let _splClients   = [];
+let _splBranchMap = [];
+let _splPdbRaw    = {};
 
 async function spLoadAll(){
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
@@ -15764,26 +15805,27 @@ async function spLoadAll(){
     }),
   ]);
 
-  // استخرج أسماء الأصناف من products_db JSON
+  // استخرج الأصناف مع fea وcat
   _splProducts = [];
+  _splPdbRaw = {};
   if(pdbRes.ok){
     const pdbData = await pdbRes.json();
     if(pdbData && pdbData[0] && pdbData[0].value){
       try{
         const pdb = JSON.parse(pdbData[0].value);
+        _splPdbRaw = pdb;
         const seen = new Set();
-        function extractNames(obj){
-          if(Array.isArray(obj)){
-            obj.forEach(item=>{
-              const name = typeof item==='object' ? (item.name||'') : String(item||'');
-              if(name && !seen.has(name)){ seen.add(name); _splProducts.push(name); }
+        Object.entries(pdb).forEach(([fea, cats])=>{
+          Object.entries(cats||{}).forEach(([cat, grps])=>{
+            Object.values(grps||{}).forEach(arr=>{
+              (arr||[]).forEach(item=>{
+                const name = typeof item==='object' ? (item.name||'') : String(item||'');
+                if(name && !seen.has(name)){ seen.add(name); _splProducts.push({name, fea, cat}); }
+              });
             });
-          } else if(obj && typeof obj==='object'){
-            Object.values(obj).forEach(v=>extractNames(v));
-          }
-        }
-        extractNames(pdb);
-        _splProducts.sort();
+          });
+        });
+        _splProducts.sort((a,b)=>a.name.localeCompare(b.name,'ar'));
       }catch(e){ console.error('PDB parse error',e); }
     }
   }
@@ -15791,9 +15833,17 @@ async function spLoadAll(){
   _splPrices    = pricesRes.ok  ? await pricesRes.json()  : [];
   _splClients   = clientsRes.ok ? await clientsRes.json() : [];
   _splBranchMap = mapRes.ok     ? await mapRes.json()     : [];
-  _splBranches  = Array.isArray(bRes) ? bRes : (bRes.ok ? await bRes.json() : []);
-  // deduplicate
-  _splBranches = [...new Map(_splBranches.map(b=>[b.branch_name, b])).values()];
+  _splBranches  = Array.isArray(bRes) ? bRes : [];
+  _splBranches  = [...new Map(_splBranches.map(b=>[b.branch_name, b])).values()];
+
+  // ملء فلاتر النوع والتصنيف
+  const feaSel = document.getElementById('spl-pfea');
+  if(feaSel){
+    const feas = [...new Set(_splProducts.map(p=>p.fea).filter(Boolean))].sort();
+    feaSel.innerHTML = '<option value="all">كل الأنواع</option>' +
+      feas.map(f=>`<option value="${f}">${f}</option>`).join('');
+  }
+  splOnFeaChange();
 
   // ملء قائمة العملاء في الربط
   const mapClient = document.getElementById('spl-map-client');
@@ -15803,9 +15853,19 @@ async function spLoadAll(){
   }
   document.getElementById('spl-map-branch-wrap').style.display='none';
 
-  splRenderProducts();
   splRenderClients();
   splRenderBranchMap();
+}
+
+function splOnFeaChange(){
+  const fea = document.getElementById('spl-pfea')?.value||'all';
+  const catSel = document.getElementById('spl-pcat');
+  if(catSel){
+    const cats = [...new Set(_splProducts.filter(p=>fea==='all'||p.fea===fea).map(p=>p.cat).filter(Boolean))].sort();
+    catSel.innerHTML = '<option value="all">كل التصنيفات</option>' +
+      cats.map(c=>`<option value="${c}">${c}</option>`).join('');
+  }
+  splRenderProducts();
 }
 function splRenderClients(){
   const tbody  = document.getElementById('spl-client-tbody');
@@ -15980,38 +16040,84 @@ function splShowTab(tab){
 
 function splRenderProducts(){
   const search = (document.getElementById('spl-psearch')?.value||'').toLowerCase();
+  const fea    = document.getElementById('spl-pfea')?.value||'all';
+  const cat    = document.getElementById('spl-pcat')?.value||'all';
   const tbody  = document.getElementById('spl-prod-tbody');
   const count  = document.getElementById('spl-prod-count');
 
-  // merge الأصناف من products_db مع الأسعار من sales_prices
-  let data = _splProducts.map(name=>{
-    const pr = _splPrices.find(p=>p.snf_name===name);
-    return { name, price: pr?.price||0, tax_pct: pr?.tax_pct||0, id: pr?.id||null };
+  let data = _splProducts.map(p=>{
+    const pr = _splPrices.find(x=>x.snf_name===p.name);
+    return {...p, price:pr?.price||0, tax_pct:pr?.tax_pct||0, prId:pr?.id||null};
   });
+  if(fea!=='all') data = data.filter(p=>p.fea===fea);
+  if(cat!=='all') data = data.filter(p=>p.cat===cat);
   if(search) data = data.filter(p=>p.name.toLowerCase().includes(search));
   if(count) count.textContent = `${data.length} صنف`;
 
   tbody.innerHTML = data.map((p,i)=>{
-    const priceWithTax = p.tax_pct > 0 ? (p.price * (1 + p.tax_pct/100)).toFixed(2) : p.price.toFixed(2);
-    const taxBadge = p.tax_pct > 0
-      ? `<span style="background:#FFF3E0;color:#E65100;padding:2px 8px;border-radius:10px;font-size:10px">${p.tax_pct}%</span>`
-      : `<span style="background:#F1F5F9;color:#888;padding:2px 8px;border-radius:10px;font-size:10px">—</span>`;
-    const hasPriceBadge = p.price > 0
-      ? `<span style="background:#D1FAE5;color:#065F46;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">محدد</span>`
-      : `<span style="background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">لم يحدد</span>`;
+    const priceWithTax = p.tax_pct>0 ? (p.price*(1+p.tax_pct/100)).toFixed(2) : p.price.toFixed(2);
+    const taxBadge = p.tax_pct>0
+      ? `<span style="background:#FFF3E0;color:#E65100;padding:2px 6px;border-radius:8px;font-size:10px">${p.tax_pct}%</span>`
+      : `<span style="color:#ccc;font-size:11px">—</span>`;
+    const priceBadge = p.price>0
+      ? `<span style="background:#D1FAE5;color:#065F46;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:700">محدد</span>`
+      : `<span style="background:#FEE2E2;color:#B91C1C;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:700">لم يحدد</span>`;
+    const safeName = p.name.replace(/'/g,"\'");
     return `<tr style="${p.price===0?'background:#FFFBF0':''}">
+      <td style="text-align:center"><input type="checkbox" class="spl-prod-cb" value="${safeName}" onchange="splOnProductCheck()"/></td>
       <td>${i+1}</td>
-      <td style="font-weight:600">${p.name}</td>
+      <td style="font-weight:600;font-size:12px">${p.name}</td>
+      <td style="text-align:center;font-size:11px;color:var(--text2)">${p.fea||'—'}</td>
+      <td style="text-align:center;font-size:11px;color:var(--text2)">${p.cat||'—'}</td>
       <td style="text-align:center;font-weight:700;color:var(--navy)">${p.price>0?p.price.toFixed(2)+' ج':'—'}</td>
       <td style="text-align:center">${taxBadge}</td>
       <td style="text-align:center;font-weight:700;color:#1A7A4A">${p.price>0?priceWithTax+' ج':'—'}</td>
-      <td style="text-align:center">${hasPriceBadge}</td>
+      <td style="text-align:center">${priceBadge}</td>
       <td style="text-align:center">
-        <button onclick="splEditPrice('${p.name.replace(/'/g,"\\'")}',${p.price},${p.tax_pct})"
-          style="background:#EEF6FF;color:#1D4ED8;border:1px solid #BFDBFE;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px">✏️ سعر</button>
+        <button onclick="splEditPrice('${safeName}',${p.price},${p.tax_pct})"
+          style="background:#EEF6FF;color:#1D4ED8;border:1px solid #BFDBFE;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">✏️</button>
       </td>
     </tr>`;
-  }).join('') || `<tr><td colspan="7" style="text-align:center;padding:20px;color:#888">لا توجد أصناف</td></tr>`;
+  }).join('') || `<tr><td colspan="10" style="text-align:center;padding:20px;color:#888">لا توجد أصناف</td></tr>`;
+}
+
+function splOnProductCheck(){
+  const checked = document.querySelectorAll('.spl-prod-cb:checked');
+  const bar = document.getElementById('spl-bulk-bar');
+  const cnt = document.getElementById('spl-bulk-count');
+  if(checked.length>0){ bar.style.display=''; cnt.textContent=`${checked.length} صنف محدد`; }
+  else { bar.style.display='none'; }
+}
+
+function splToggleSelectAll(el){
+  document.querySelectorAll('.spl-prod-cb').forEach(cb=>cb.checked=el.checked);
+  splOnProductCheck();
+}
+
+function splDeselectAllProducts(){
+  document.querySelectorAll('.spl-prod-cb').forEach(cb=>cb.checked=false);
+  const sa=document.getElementById('spl-select-all'); if(sa) sa.checked=false;
+  splOnProductCheck();
+}
+
+async function splBulkSavePrice(){
+  const checked = [...document.querySelectorAll('.spl-prod-cb:checked')].map(c=>c.value);
+  const price   = parseFloat(document.getElementById('spl-bulk-price').value)||0;
+  const tax     = parseFloat(document.getElementById('spl-bulk-tax').value)||0;
+  if(!checked.length){ showToast('اختر أصناف أولاً'); return; }
+  if(price<=0){ showToast('ادخل سعر صحيح'); return; }
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  for(const name of checked){
+    const existing = _splPrices.find(p=>p.snf_name===name);
+    if(existing){
+      await fetch(`${SUPABASE_URL}/rest/v1/sales_prices?id=eq.${existing.id}`,{method:'PATCH',headers:H,body:JSON.stringify({price,tax_pct:tax,updated_at:new Date().toISOString()})});
+    } else {
+      await fetch(`${SUPABASE_URL}/rest/v1/sales_prices`,{method:'POST',headers:{...H,'Prefer':'return=minimal'},body:JSON.stringify({snf_name:name,price,tax_pct:tax})});
+    }
+  }
+  showToast(`✅ تم حفظ السعر لـ ${checked.length} صنف`);
+  splDeselectAllProducts();
+  await spLoadAll();
 }
 
 async function splEditPrice(snfName, currentPrice, currentTax){
