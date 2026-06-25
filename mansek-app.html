@@ -2393,55 +2393,43 @@ async function popBranches(route){
   const coordType = cu?.coordType || 'متحرك';
 
   // ══ المصدر الموحد: جدول branches في Supabase ══
-  // متحرك → جيب بالخط | أي نوع ثابت → جيب باسم المنسق
   try{
-    let url;
+    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    let urls=[];
+
     if(coordType === 'متحرك'){
-      url = `${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${encodeURIComponent(route)}&status=neq.inactive&order=branch_name.asc`;
+      // متحرك — فقط بالخط
+      urls=[`${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${encodeURIComponent(route)}&status=neq.inactive&order=branch_name.asc`];
     } else {
-      // ثابت / ثابت كبار عملاء / أي نوع ثابت مستقبلي
-      // جيب الفروع اللي المنسق مسجل فيها كـ rep_name أو rep_name2 أو rep_name3
-      url = `${SUPABASE_URL}/rest/v1/branches?select=branch_name&or=(rep_name.eq.${encodeURIComponent(cu.name)},rep_name2.eq.${encodeURIComponent(cu.name)},rep_name3.eq.${encodeURIComponent(cu.name)})&status=neq.inactive&order=branch_name.asc`;
+      // ثابت — 3 مصادر بالتوازي: بالاسم + بالخط + coord_route_assignments
+      urls=[
+        `${SUPABASE_URL}/rest/v1/branches?select=branch_name&or=(rep_name.eq.${encodeURIComponent(cu.name)},rep_name2.eq.${encodeURIComponent(cu.name)},rep_name3.eq.${encodeURIComponent(cu.name)})&status=neq.inactive&order=branch_name.asc`,
+        route ? `${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${encodeURIComponent(route)}&status=neq.inactive&order=branch_name.asc` : null,
+        `${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${encodeURIComponent(cu.name)}&order=branch_name.asc`,
+      ].filter(Boolean);
     }
 
-    const res = await fetch(url, {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    if(res.ok){
-      const data = await res.json();
-      if(Array.isArray(data) && data.length){
-        // إزالة أي تكرار محتمل
-        const unique = [...new Map(data.filter(b=>b.branch_name).map(b=>[b.branch_name,b])).values()];
-        unique.forEach(b=>{
-          addedBranches.add(b.branch_name);
-          const o=document.createElement('option');
-          o.value=b.branch_name; o.textContent=b.branch_name; sel.appendChild(o);
-        });
-        if(unique.length===1){
-          sel.value=unique[0].branch_name; checkStep1Done();
-        } else {
-          const lastBranch=localStorage.getItem('last_branch_'+cu?.name);
-          if(lastBranch && unique.find(b=>b.branch_name===lastBranch)){
-            sel.value=lastBranch; checkStep1Done();
-          }
-        }
+    // جيب من كل المصادر بالتوازي
+    const results = await Promise.all(
+      urls.map(url=>fetch(url,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]))
+    );
+    const allData = results.flat().filter(b=>b.branch_name);
+    const unique = [...new Map(allData.map(b=>[b.branch_name,b])).values()];
+
+    if(unique.length){
+      unique.forEach(b=>{
+        if(addedBranches.has(b.branch_name)) return;
+        addedBranches.add(b.branch_name);
+        const o=document.createElement('option');
+        o.value=b.branch_name; o.textContent=b.branch_name; sel.appendChild(o);
+      });
+      if(unique.length===1){
+        sel.value=unique[0].branch_name; checkStep1Done();
       } else {
-        // fallback: جيب من coord_route_assignments لو مفيش في branches
-        try{
-          const craUrl=`${SUPABASE_URL}/rest/v1/coord_route_assignments?rep_name=eq.${encodeURIComponent(cu.name)}&select=branch_name&order=branch_name.asc`;
-          const craRes=await fetch(craUrl,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-          if(craRes.ok){
-            const craData=await craRes.json();
-            if(Array.isArray(craData)&&craData.length){
-              const unique=[...new Map(craData.filter(b=>b.branch_name).map(b=>[b.branch_name,b])).values()];
-              unique.forEach(b=>{
-                if(addedBranches.has(b.branch_name)) return;
-                addedBranches.add(b.branch_name);
-                const o=document.createElement('option');
-                o.value=b.branch_name; o.textContent=b.branch_name; sel.appendChild(o);
-              });
-              if(unique.length===1){ sel.value=unique[0].branch_name; checkStep1Done(); }
-            }
-          }
-        }catch(e2){ console.warn('coord_route_assignments fallback error:',e2); }
+        const lastBranch=localStorage.getItem('last_branch_'+cu?.name);
+        if(lastBranch && unique.find(b=>b.branch_name===lastBranch)){
+          sel.value=lastBranch; checkStep1Done();
+        }
       }
     }
   }catch(e){
