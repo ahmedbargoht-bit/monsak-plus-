@@ -2395,26 +2395,29 @@ async function popBranches(route){
   // ══ المصدر الموحد: جدول branches في Supabase ══
   try{
     const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    let urls=[];
+    let allData=[];
 
-    if(coordType === 'متحرك'){
-      // متحرك — فقط بالخط
-      urls=[`${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${encodeURIComponent(route)}&status=neq.inactive&order=branch_name.asc`];
+    if(isFixedRep(coordType)){
+      // ثابت — جيب من 3 مصادر بالتوازي
+      const enc=encodeURIComponent(cu.name);
+      const [byRepName, byRepName2, byRepName3, byCoord] = await Promise.all([
+        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name2=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name3=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      ]);
+      allData=[...byRepName,...byRepName2,...byRepName3,...byCoord];
     } else {
-      // ثابت — 3 مصادر بالتوازي: بالاسم + بالخط + coord_route_assignments
-      urls=[
-        `${SUPABASE_URL}/rest/v1/branches?select=branch_name&or=(rep_name.eq.${encodeURIComponent(cu.name)},rep_name2.eq.${encodeURIComponent(cu.name)},rep_name3.eq.${encodeURIComponent(cu.name)})&status=neq.inactive&order=branch_name.asc`,
-        route ? `${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${encodeURIComponent(route)}&status=neq.inactive&order=branch_name.asc` : null,
-        `${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${encodeURIComponent(cu.name)}&order=branch_name.asc`,
-      ].filter(Boolean);
+      // متحرك — جيب بالخط
+      const data=await fetch(
+        `${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${encodeURIComponent(route)}&status=neq.inactive&order=branch_name.asc`,
+        {headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+      allData=data;
     }
 
-    // جيب من كل المصادر بالتوازي
-    const results = await Promise.all(
-      urls.map(url=>fetch(url,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]))
-    );
-    const allData = results.flat().filter(b=>b.branch_name);
-    const unique = [...new Map(allData.map(b=>[b.branch_name,b])).values()];
+    // إزالة التكرار وترتيب
+    const unique=[...new Map(allData.filter(b=>b.branch_name).map(b=>[b.branch_name,b])).values()]
+      .sort((a,b)=>a.branch_name.localeCompare(b.branch_name,'ar'));
 
     if(unique.length){
       unique.forEach(b=>{
@@ -2434,7 +2437,6 @@ async function popBranches(route){
     }
   }catch(e){
     console.warn('popBranches error:', e);
-    // fallback عند خطأ الاتصال
     const fallback=BRANCHES[route]||[];
     fallback.forEach(b=>{
       addedBranches.add(b);
