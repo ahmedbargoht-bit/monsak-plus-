@@ -21283,7 +21283,7 @@ async function serLoad(){
       return;
     }
 
-    let url = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,route,grp,shelf_qty,stock_qty,date_shelf,date_stock,created_at&order=snf.asc,branch.asc&limit=3000`;
+    let url = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,route,grp,shelf_qty,stock_qty,date_shelf,date_stock,created_at&order=snf.asc,branch.asc,created_at.desc&limit=5000`;
     if(grp)    url += `&grp=eq.${encodeURIComponent(grp)}`;
     if(route)  url += `&route=eq.${encodeURIComponent(route)}`;
     if(branch) url += `&branch=eq.${encodeURIComponent(branch)}`;
@@ -21294,8 +21294,16 @@ async function serLoad(){
     if(to)     url += `&created_at=lte.${to}T23:59:59`;
 
     const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    if(!res.ok){ tbody.innerHTML=`<tr><td colspan="9" style="text-align:center;padding:30px;color:#E65100">خطأ في جلب البيانات</td></tr>`; return; }
-    const data = await res.json();
+    if(!res.ok){ tbody.innerHTML=`<tr><td colspan="11" style="text-align:center;padding:30px;color:#E65100">خطأ في جلب البيانات</td></tr>`; return; }
+    const rawData = await res.json();
+
+    // جيب آخر سجل لكل snf+branch (بما إن الترتيب created_at.desc، أول عنصر هو الأحدث)
+    const seen = new Map();
+    rawData.forEach(r=>{
+      const key = `${r.snf}||${r.branch}`;
+      if(!seen.has(key)) seen.set(key, r);
+    });
+    const data = [...seen.values()].sort((a,b)=>(a.branch||'').localeCompare(b.branch||'','ar')||(a.snf||'').localeCompare(b.snf||'','ar'));
     _serData = data;
 
     if(!data.length){
@@ -21401,26 +21409,203 @@ function serExportExcel(){
 
 function serExportPDF(){
   if(!_serData.length){ alert('لا توجد بيانات للتصدير'); return; }
-  const rows = _serData.map((r,i)=>`
-    <tr style="background:${i%2===0?'#fff':'#FAF6EE'}">
-      <td>${i+1}</td><td>${r.snf||'—'}</td><td>${r.branch||'—'}</td>
-      <td>${r.route||'—'}</td><td>${r.shelf_qty||0}</td><td>${r.stock_qty||0}</td>
-      <td>${r.date_shelf||'—'}</td><td>${r.date_stock||'—'}</td>
-    </tr>`).join('');
-  const w = window.open('','_blank');
-  w.document.write(`<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8">
-    <style>body{font-family:Cairo,sans-serif;font-size:11px;direction:rtl}
-    table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:6px 8px;text-align:right}
-    th{background:#4B3C1A;color:#EDE5D8}h2{color:#4B3C1A}
-    @media print{button{display:none}}</style></head><body>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <h2>📋 تقرير تواريخ الأصناف</h2>
-      <button onclick="window.print()" style="background:#4B3C1A;color:#fff;border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-family:Cairo,sans-serif">طباعة / PDF</button>
+
+  const rows = _serData.map((r,i)=>{
+    const s = serExpiryStatus(r.date_shelf, r.snf);
+    const m = r.snf ? serGetMonthsShelf(r.snf) : null;
+    const rowBg = i%2===0?'#FFFDF8':'#EDE5D8';
+    return `<tr style="background:${rowBg}">
+      <td style="text-align:center;color:#8B6F47">${i+1}</td>
+      <td style="font-weight:700;color:#2C1F0A">${r.snf||'—'}</td>
+      <td style="color:#4B3C1A">${r.branch||'—'}</td>
+      <td style="color:#8B6F47;font-size:10px">${r.route||'—'}</td>
+      <td style="text-align:center;font-weight:700;color:#1565C0">${r.shelf_qty||0}</td>
+      <td style="text-align:center;font-weight:700;color:#2E7D32">${r.stock_qty||0}</td>
+      <td style="text-align:center;color:#1565C0;font-weight:700">${r.date_shelf||'—'}</td>
+      <td style="text-align:center;color:#6A1B9A;font-weight:700">${m!==null?m+' ش':'—'}</td>
+      <td style="text-align:center;background:${s.bg};color:${s.color};font-weight:700">${s.expiry||'—'}</td>
+      <td style="text-align:center;background:${s.bg};color:${s.color};font-weight:700">${s.remaining||'—'}</td>
+      <td style="text-align:center"><span style="background:${s.bg};color:${s.color};padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700">${s.label||'—'}</span></td>
+    </tr>`;
+  }).join('');
+
+  const today = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
+  const html=`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet"/>
+    <title>تقرير تواريخ الأصناف</title>
+    <style>
+      *{margin:0;padding:0;box-sizing:border-box}
+      body{font-family:'Cairo',sans-serif;background:#FFFDF8;color:#2C1F0A;font-size:11px;padding:24px;direction:rtl}
+      .print-btn{position:fixed;top:16px;left:16px;background:#731E2E;color:#fff;border:none;
+        border-radius:8px;padding:8px 18px;font-family:'Cairo',sans-serif;font-size:13px;
+        font-weight:700;cursor:pointer;z-index:999;box-shadow:0 2px 8px rgba(115,30,46,.3)}
+      /* هيدر الشركة */
+      .company-header{display:flex;justify-content:space-between;align-items:center;
+        padding:16px 20px;background:linear-gradient(135deg,#731E2E,#5A1520);
+        border-radius:12px;margin-bottom:20px;color:#EDE5D8}
+      .company-name{font-size:20px;font-weight:900;color:#EDE5D8}
+      .company-sub{font-size:11px;color:#C8A870;margin-top:2px}
+      .report-date{font-size:11px;color:#EDE5D8;text-align:left}
+      /* عنوان التقرير */
+      .report-title{font-size:16px;font-weight:900;color:#731E2E;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+      .report-sub{font-size:11px;color:#8B6F47;margin-bottom:12px}
+      /* stats */
+      .stats{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+      .stat-box{background:#F5F0E8;border:1px solid #E8D9C0;border-radius:8px;padding:8px 14px;text-align:center;flex:1;min-width:100px}
+      .stat-num{font-size:18px;font-weight:900;color:#731E2E}
+      .stat-lbl{font-size:10px;color:#8B6F47;margin-top:2px}
+      /* table */
+      table{width:100%;border-collapse:collapse;font-size:10px}
+      thead tr{background:linear-gradient(135deg,#731E2E,#5A1520)}
+      th{padding:8px 6px;color:#EDE5D8;font-weight:700;text-align:right;font-size:10px;white-space:nowrap}
+      td{padding:6px;border-bottom:1px solid #E8D9C0;vertical-align:middle}
+      tr:hover td{background:#F5EDD8}
+      /* legend */
+      .legend{display:flex;gap:12px;margin-top:16px;flex-wrap:wrap}
+      .leg-item{display:flex;align-items:center;gap:4px;font-size:10px;color:#4B3C1A}
+      .leg-dot{width:10px;height:10px;border-radius:50%}
+      /* footer */
+      .footer{margin-top:20px;text-align:center;font-size:10px;color:#B8A080;
+        border-top:1px solid #E8D9C0;padding-top:10px}
+      @media print{
+        .print-btn{display:none}
+        body{padding:10px}
+        table{font-size:9px}
+        thead tr{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+        .company-header{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+        td[style*="background"]{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      }
+    </style></head><body>
+    <button class="print-btn" onclick="window.print()">🖨️ طباعة / PDF</button>
+
+    <!-- هيدر الشركة -->
+    <div class="company-header">
+      <div>
+        <div class="company-name">🏆 الطحان جولدن داتس</div>
+        <div class="company-sub">Al Tahhan Golden Dates — نظام منسق بلس v2.0</div>
+      </div>
+      <div class="report-date">
+        <div style="font-size:13px;font-weight:700">${today}</div>
+        <div style="font-size:10px;color:#C8A870;margin-top:2px">تاريخ إصدار التقرير</div>
+      </div>
     </div>
-    <p style="color:#7B5C2A;margin-bottom:12px">تاريخ التقرير: ${new Date().toLocaleDateString('ar-EG')} — إجمالي السجلات: ${_serData.length}</p>
-    <table><thead><tr>
-      <th>#</th><th>الصنف</th><th>الفرع</th><th>خط السير</th>
-      <th>كمية الرف</th><th>كمية المخزن</th><th>صلاحية الرف</th><th>صلاحية المخزن</th>
+
+    <!-- عنوان التقرير -->
+    <div class="report-title">📋 تقرير تواريخ صلاحية الأصناف</div>
+    <div class="report-sub">آخر رصيد لكل صنف في كل فرع مع حساب الصلاحية المتبقية</div>
+
+    <!-- إحصائيات -->
+    <div class="stats">
+      <div class="stat-box">
+        <div class="stat-num">${_serData.length}</div>
+        <div class="stat-lbl">إجمالي الأصناف</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" style="color:#B71C1C">${_serData.filter(r=>serExpiryStatus(r.date_shelf,r.snf).label==='منتهية').length}</div>
+        <div class="stat-lbl">منتهية الصلاحية</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" style="color:#F57F17">${_serData.filter(r=>['قريبة','هذا الشهر'].includes(serExpiryStatus(r.date_shelf,r.snf).label)).length}</div>
+        <div class="stat-lbl">قريبة الانتهاء</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" style="color:#1A7A4A">${_serData.filter(r=>serExpiryStatus(r.date_shelf,r.snf).label==='جيدة').length}</div>
+        <div class="stat-lbl">صلاحية جيدة</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" style="color:#1565C0">${Math.round(_serData.reduce((s,r)=>s+(parseFloat(r.shelf_qty)||0),0)).toLocaleString()}</div>
+        <div class="stat-lbl">إجمالي الرف</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" style="color:#2E7D32">${Math.round(_serData.reduce((s,r)=>s+(parseFloat(r.stock_qty)||0),0)).toLocaleString()}</div>
+        <div class="stat-lbl">إجمالي المخزن</div>
+      </div>
+    </div>
+
+    <!-- الجدول -->
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>الصنف</th>
+          <th>الفرع</th>
+          <th>خط السير</th>
+          <th style="text-align:center">كمية الرف</th>
+          <th style="text-align:center">كمية المخزن</th>
+          <th style="text-align:center">تاريخ الإنتاج</th>
+          <th style="text-align:center">صلاحية المنتج</th>
+          <th style="text-align:center">تاريخ الانتهاء</th>
+          <th style="text-align:center">المتبقي</th>
+          <th style="text-align:center">الحالة</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+
+    <!-- legend -->
+    <div class="legend">
+      <div class="leg-item"><div class="leg-dot" style="background:#B71C1C"></div> منتهية الصلاحية</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#E65100"></div> هذا الشهر</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#F57F17"></div> قريبة (أقل من شهرين)</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#1A7A4A"></div> صلاحية جيدة</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#999"></div> صلاحية غير محددة</div>
+    </div>
+
+    <!-- footer -->
+    <div class="footer">الطحان جولدن داتس © ${new Date().getFullYear()} — تقرير آلي من نظام منسق بلس</div>
+
+    <script>window.addEventListener('load',()=>{setTimeout(()=>window.print(),900);})<\/script>
+    </body></html>`;
+
+  const blob = new Blob([html],{type:'text/html;charset=utf-8'});
+  const url  = URL.createObjectURL(blob);
+  const win  = window.open(url,'_blank');
+  if(!win){ const a=document.createElement('a');a.href=url;a.download='تقرير_تواريخ_الأصناف.html';a.click(); }
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
+}
+
+  const html=`<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet"/>
+    <style>
+      *{margin:0;padding:0;box-sizing:border-box}
+      body{font-family:Cairo,sans-serif;font-size:11px;direction:rtl;padding:20px;color:#2C1F0A;position:relative}
+      body::after{content:'';position:fixed;inset:0;
+        background:url('${document.querySelector("link[rel=apple-touch-icon]")?.href||""}') center/380px no-repeat;
+        opacity:0.06;pointer-events:none;z-index:0;print-color-adjust:exact}
+      body>*{position:relative;z-index:1}
+      h2{color:#4B3C1A;margin-bottom:4px;font-size:16px}
+      p{color:#8B6F47;font-size:12px;margin-bottom:16px}
+      table{width:100%;border-collapse:collapse;font-size:10px}
+      th{background:#4B3C1A;color:#EDE5D8;padding:7px 6px;text-align:right;font-size:10px}
+      td{padding:6px;border-bottom:1px solid #E8D9C0;text-align:right}
+      .print-btn{position:fixed;top:16px;left:16px;background:#731E2E;color:#fff;border:none;
+        border-radius:8px;padding:8px 16px;font-family:Cairo,sans-serif;font-size:13px;
+        font-weight:700;cursor:pointer;z-index:999}
+      @media print{.print-btn{display:none}body{padding:10px}
+        body::after{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+    </style></head>
+    <body>
+    <button class="print-btn" onclick="window.print()">🖨️ طباعة</button>
+    <h2>📋 تقرير تواريخ الأصناف — الطحان جولدن داتس</h2>
+    <p>تاريخ التقرير: ${new Date().toLocaleDateString('ar-EG')} &nbsp;|&nbsp; إجمالي السجلات: ${_serData.length}</p>
+    <table>
+      <thead><tr>
+        <th>#</th><th>الصنف</th><th>الفرع</th><th>خط السير</th>
+        <th>كمية الرف</th><th>كمية المخزن</th>
+        <th>تاريخ الإنتاج</th><th>صلاحية المنتج</th>
+        <th>تاريخ الانتهاء</th><th>المتبقي</th><th>الحالة</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <script>window.addEventListener('load',()=>{setTimeout(()=>window.print(),800);})<\/script>
+    </body></html>`;
+
+  const blob = new Blob([html],{type:'text/html;charset=utf-8'});
+  const url  = URL.createObjectURL(blob);
+  const win  = window.open(url,'_blank');
+  if(!win){ const a=document.createElement('a');a.href=url;a.download='تقرير_تواريخ_الأصناف.html';a.click(); }
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
+}
     </tr></thead><tbody>${rows}</tbody></table>
     </body></html>`);
   w.document.close();
