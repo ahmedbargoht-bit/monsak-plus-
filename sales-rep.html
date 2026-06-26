@@ -263,7 +263,10 @@
     </div>
     <!-- PRODUCTS -->
     <div id="products-section" style="display:none">
-      <div class="section-label">الأصناف</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div class="section-label" style="margin-bottom:0">الأصناف</div>
+        <span id="disc-badge" style="font-size:11px;font-weight:700;color:var(--text-light)"></span>
+      </div>
       <div id="products-list"></div>
     </div>
   </div>
@@ -491,58 +494,78 @@ async function loadClientsTab(){
   const sel = document.getElementById('route-select');
   if(sel.options.length > 1) return; // already loaded
   try{
-    // 1. get all routes for rep's grp from sales_route_assignments
-    const params = '?grp=eq.'+encodeURIComponent(currentRep.grp)+'&active=eq.true&select=route&order=route';
-    const rows = await sbFetch('sales_route_assignments', params);
-    const routes = [...new Set(rows.map(r=>r.route).filter(Boolean))];
-    // 2. make sure branches_map is loaded
-    await loadBranchesMap();
-    // 3. populate dropdown with rep's routes only
-    const finalRoutes = routes.length ? routes : Object.keys(branchesMap);
+    const map = await loadBranchesMap();
+    // rep's route is stored in currentRep.route (from users table)
+    // show only the route(s) matching rep's route, or all if not set
+    const allRoutes = Object.keys(map);
+    const repRoute = currentRep.route || '';
+    // filter: if rep has a route, show matching ones; else show all
+    const filtered = repRoute
+      ? allRoutes.filter(r => r === repRoute || r.includes(repRoute))
+      : allRoutes;
+    const finalRoutes = filtered.length ? filtered : allRoutes;
     finalRoutes.forEach(route=>{
       const o = document.createElement('option');
       o.value = route; o.textContent = route;
       sel.appendChild(o);
     });
-  }catch(e){
-    // fallback: show all routes from branches_map
-    try{
-      const map = await loadBranchesMap();
-      Object.keys(map).forEach(route=>{
-        const o = document.createElement('option');
-        o.value = route; o.textContent = route;
-        sel.appendChild(o);
-      });
-    }catch(e2){ showToast('تعذّر تحميل خطوط السير'); }
-  }
+  }catch(e){ showToast('تعذّر تحميل خطوط السير'); }
 }
 
-function onRouteChange(){
+async function onRouteChange(){
   const sel = document.getElementById('route-select');
   const container = document.getElementById('branches-list');
   const route = sel.value;
   if(!route){ container.innerHTML=''; return; }
-  // branches come directly from branches_map
   const branches = (branchesMap && branchesMap[route]) || [];
   if(!branches.length){
     container.innerHTML = '<div class="empty-state">لا توجد فروع في هذا الخط</div>';
     return;
   }
-  const icons=['🏪','🏬','🏢','🛒','🏭'];
-  let html = '<div class="route-block"><div class="route-tag">📍 '+route+'</div>';
-  branches.forEach((b,i)=>{
-    const icon = icons[i % icons.length];
-    html += '<div class="branch-card" onclick="startVisit(\''+b.replace(/'/g,"\\'")+'\',\''+route.replace(/'/g,"\\'")+'\')"><div class="branch-icon">'+icon+'</div><div class="branch-info"><div class="branch-name">'+b+'</div><div class="branch-client">اضغط لبدء الزيارة</div></div><div class="branch-arrow">◄</div></div>';
-  });
-  html += '</div>';
-  container.innerHTML = html;
+  container.innerHTML='<div class="loading-state"><div class="spinner"></div><span>جاري تحميل العملاء...</span></div>';
+  try{
+    // fetch client names for all branches in this route
+    const encoded = branches.map(b=>`"${b}"`).join(',');
+    const rows = await sbFetch('branch_client_map',
+      '?branch_name=in.('+encodeURIComponent(branches.join(','))+')'+'&select=branch_name,client_name');
+    const clientMap = {};
+    rows.forEach(r=>{ clientMap[r.branch_name] = r.client_name; });
+    const icons=['🏪','🏬','🏢','🛒','🏭'];
+    let html = '<div class="route-block"><div class="route-tag">📍 '+route+'</div>';
+    branches.forEach((b,i)=>{
+      const icon = icons[i % icons.length];
+      const client = clientMap[b] || '';
+      const clientShort = client.length > 25 ? client.substring(0,25)+'...' : client;
+      html += '<div class="branch-card" onclick="startVisit(\''+b.replace(/'/g,"\\'")+'\',\''+route.replace(/'/g,"\\'")+'\',\''+client.replace(/'/g,"\\'")+'\')"><div class="branch-icon">'+icon+'</div><div class="branch-info"><div class="branch-name">'+b+'</div><div class="branch-client">'+(clientShort||'—')+'</div></div><div class="branch-arrow">◄</div></div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  }catch(e){
+    // show without client names
+    const icons=['🏪','🏬','🏢','🛒','🏭'];
+    let html = '<div class="route-block"><div class="route-tag">📍 '+route+'</div>';
+    branches.forEach((b,i)=>{
+      const icon = icons[i % icons.length];
+      html += '<div class="branch-card" onclick="startVisit(\''+b.replace(/'/g,"\\'")+'\',\''+route.replace(/'/g,"\\'")+'\',\'\')"><div class="branch-icon">'+icon+'</div><div class="branch-info"><div class="branch-name">'+b+'</div><div class="branch-client">—</div></div><div class="branch-arrow">◄</div></div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  }
 }
 
 // ==================== VISIT SCREEN ====================
-async function startVisit(branchName, route){
-  visitState = { branch: branchName, route: route, client: '', fea: null, cat: null, quantities: {} };
+async function startVisit(branchName, route, clientName){
+  visitState = { branch: branchName, route: route, client: clientName||'', fea: null, cat: null, quantities: {}, discounts: {} };
   document.getElementById('visit-branch-name').textContent = branchName;
-  document.getElementById('visit-client-name').textContent = route;
+  document.getElementById('visit-client-name').textContent = clientName || route;
+  // pre-load discounts for this client
+  if(clientName){
+    try{
+      const disc = await sbFetch('client_category_discounts',
+        '?client_name=eq.'+encodeURIComponent(clientName)+'&select=cat,discount_pct');
+      disc.forEach(d=>{ visitState.discounts[d.cat] = d.discount_pct||0; });
+    }catch(e){ /* no discounts */ }
+  }
   document.getElementById('cat-section').style.display='none';
   document.getElementById('products-section').style.display='none';
   document.getElementById('submit-bar').style.display='none';
@@ -594,6 +617,13 @@ function selectCat(cat, grpData){
   document.querySelectorAll('.cat-chip').forEach(c=>{
     c.classList.toggle('active', c.textContent===cat);
   });
+  // show discount for this cat
+  const disc = visitState.discounts[cat] || 0;
+  const discBadge = document.getElementById('disc-badge');
+  if(discBadge){
+    discBadge.textContent = disc > 0 ? 'خصم '+disc+'%' : 'بدون خصم';
+    discBadge.style.color = disc > 0 ? 'var(--green)' : 'var(--text-light)';
+  }
   // build products
   const container = document.getElementById('products-list');
   container.innerHTML='';
@@ -637,8 +667,9 @@ function updateSubmitBar(){
   const bar = document.getElementById('submit-bar');
   if(totalItems>0){
     bar.style.display='flex';
+    const disc = visitState.discounts[visitState.cat] || 0;
     document.getElementById('submit-items-txt').textContent = entries.length+' صنف / '+totalItems+' قطعة';
-    document.getElementById('submit-total-txt').textContent = 'الإجمالي يُحسب بعد التأكيد';
+    document.getElementById('submit-total-txt').textContent = disc > 0 ? 'خصم '+disc+'% مطبّق' : 'بدون خصم';
     document.getElementById('btn-submit').disabled=false;
   } else {
     bar.style.display='none';
@@ -653,10 +684,12 @@ async function submitVisit(){
   try{
     const payload = {
       rep_name: currentRep.name,
+      supervisor: currentRep.grp,
       branch_name: visitState.branch,
+      client_name: visitState.client,
       grp: currentRep.grp,
       route: visitState.route,
-      items: entries.map(([name,qty])=>({name,qty})),
+      items: entries.map(([name,qty])=>({name, qty, discount_pct: visitState.discounts[visitState.cat]||0})),
       status: 'draft'
     };
     const res = await fetch(SUPABASE_URL+'/rest/v1/sales_deliveries', {
