@@ -227,7 +227,7 @@
   </div>
   <div class="clients-body">
     <div class="section-label">اختر خط السير</div>
-    <div class="route-select-wrap">
+    <div class="route-select-wrap" id="route-select-wrap">
       <select id="route-select" class="route-select" onchange="onRouteChange()">
         <option value="">— اختر خط السير —</option>
       </select>
@@ -369,7 +369,7 @@ async function doLogin(){
     if(!data.length) throw new Error('not found');
     const user=data[0];
     if(user.pass_hash !== passVal) throw new Error('wrong pass');
-    currentRep={id:user.id, name:user.name, grp:user.grp, route:user.route};
+    currentRep={id:user.id, name:user.name, grp:user.grp, route:user.route, repType:user.rep_type||''};
     await loadHomeScreen();
     showScreen('screen-home');
   }catch(e){
@@ -491,43 +491,47 @@ async function loadBranchesMap(){
 
 // ==================== CLIENTS TAB ====================
 async function loadClientsTab(){
-  const sel = document.getElementById('route-select');
-  if(sel.options.length > 1) return; // already loaded
   try{
     const map = await loadBranchesMap();
-    // rep's route is stored in currentRep.route (from users table)
-    // show only the route(s) matching rep's route, or all if not set
-    const allRoutes = Object.keys(map);
     const repRoute = currentRep.route || '';
-    // filter: if rep has a route, show matching ones; else show all
-    const filtered = repRoute
-      ? allRoutes.filter(r => r === repRoute || r.includes(repRoute))
-      : allRoutes;
-    const finalRoutes = filtered.length ? filtered : allRoutes;
-    finalRoutes.forEach(route=>{
-      const o = document.createElement('option');
-      o.value = route; o.textContent = route;
-      sel.appendChild(o);
-    });
+    // show branches directly — no dropdown needed if rep has one route
+    if(repRoute && map[repRoute]){
+      // hide route selector, show branches directly
+      document.getElementById('route-select-wrap').style.display = 'none';
+      document.querySelector('#screen-clients .section-label').style.display = 'none';
+      showBranchesForRoute(repRoute, map[repRoute]);
+    } else {
+      // rep has multiple routes or route not in map — show dropdown
+      document.getElementById('route-select-wrap').style.display = 'block';
+      const sel = document.getElementById('route-select');
+      if(sel.options.length > 1) return;
+      Object.keys(map).forEach(route=>{
+        const o = document.createElement('option');
+        o.value = route; o.textContent = route;
+        sel.appendChild(o);
+      });
+    }
   }catch(e){ showToast('تعذّر تحميل خطوط السير'); }
 }
 
 async function onRouteChange(){
   const sel = document.getElementById('route-select');
-  const container = document.getElementById('branches-list');
   const route = sel.value;
-  if(!route){ container.innerHTML=''; return; }
+  if(!route){ document.getElementById('branches-list').innerHTML=''; return; }
   const branches = (branchesMap && branchesMap[route]) || [];
+  await showBranchesForRoute(route, branches);
+}
+
+async function showBranchesForRoute(route, branches){
+  const container = document.getElementById('branches-list');
   if(!branches.length){
     container.innerHTML = '<div class="empty-state">لا توجد فروع في هذا الخط</div>';
     return;
   }
   container.innerHTML='<div class="loading-state"><div class="spinner"></div><span>جاري تحميل العملاء...</span></div>';
   try{
-    // fetch client names for all branches in this route
-    const encoded = branches.map(b=>`"${b}"`).join(',');
     const rows = await sbFetch('branch_client_map',
-      '?branch_name=in.('+encodeURIComponent(branches.join(','))+')'+'&select=branch_name,client_name');
+      '?branch_name=in.('+branches.map(b=>encodeURIComponent(b)).join(',')+')'+'&select=branch_name,client_name');
     const clientMap = {};
     rows.forEach(r=>{ clientMap[r.branch_name] = r.client_name; });
     const icons=['🏪','🏬','🏢','🛒','🏭'];
@@ -535,13 +539,12 @@ async function onRouteChange(){
     branches.forEach((b,i)=>{
       const icon = icons[i % icons.length];
       const client = clientMap[b] || '';
-      const clientShort = client.length > 25 ? client.substring(0,25)+'...' : client;
+      const clientShort = client.length > 30 ? client.substring(0,30)+'...' : client;
       html += '<div class="branch-card" onclick="startVisit(\''+b.replace(/'/g,"\\'")+'\',\''+route.replace(/'/g,"\\'")+'\',\''+client.replace(/'/g,"\\'")+'\')"><div class="branch-icon">'+icon+'</div><div class="branch-info"><div class="branch-name">'+b+'</div><div class="branch-client">'+(clientShort||'—')+'</div></div><div class="branch-arrow">◄</div></div>';
     });
     html += '</div>';
     container.innerHTML = html;
   }catch(e){
-    // show without client names
     const icons=['🏪','🏬','🏢','🛒','🏭'];
     let html = '<div class="route-block"><div class="route-tag">📍 '+route+'</div>';
     branches.forEach((b,i)=>{
