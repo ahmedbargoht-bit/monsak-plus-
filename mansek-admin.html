@@ -4868,6 +4868,9 @@ h2,h3{color:#2C1F0A}
           <div class="card">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
               <span id="pb-count" style="font-size:12px;color:var(--text2)"></span>
+              <button onclick="pbExportPDF()" class="btn btn-ghost btn-sm">
+                <i class="ti ti-file-type-pdf"></i> طباعة PDF
+              </button>
             </div>
             <div class="tbl-wrap">
               <table>
@@ -17362,6 +17365,109 @@ async function pbSaveEdit(){
   showToast('✅ تم الحفظ');
   closeModal('modal-pb-edit');
   loadPrivateBranches();
+}
+
+async function pbExportPDF(){
+  const grp    = document.getElementById('pb-grp-filter')?.value||'all';
+  const route  = document.getElementById('pb-route-filter')?.value||'all';
+  const search = (document.getElementById('pb-search')?.value||'').toLowerCase();
+
+  if(!_pbData.length){ alert('لا توجد بيانات'); return; }
+
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  // جيب العملاء والمناديب
+  const [mapRes, repsRes] = await Promise.all([
+    fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?select=branch_name,client_name&limit=5000`, {headers:H}),
+    fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&grp=in.(private_cairo,private_alex)&select=name,route,grp&limit=500`, {headers:H}),
+  ]);
+  const clientMap = mapRes.ok  ? await mapRes.json()  : [];
+  const reps      = repsRes.ok ? await repsRes.json() : [];
+
+  // فلتر البيانات
+  let data = _pbData;
+  if(route!=='all')  data = data.filter(b=>b.route===route);
+  if(search)         data = data.filter(b=>(b.branch_name||'').toLowerCase().includes(search));
+
+  const grpNames  = {'private_cairo':'أسواق خاصة القاهرة','private_alex':'أسواق خاصة الإسكندرية'};
+  const grpColors = {'private_cairo':'#8B4513','private_alex':'#6B3410'};
+
+  // تجميع حسب المجموعة → خط السير
+  const grouped = {};
+  data.forEach(b=>{
+    const g = b.grp||'other';
+    const r = b.route||'غير محدد';
+    if(!grouped[g]) grouped[g]={};
+    if(!grouped[g][r]) grouped[g][r]=[];
+    grouped[g][r].push(b);
+  });
+
+  let body = '';
+  Object.entries(grouped).forEach(([grpKey, routes])=>{
+    const color   = grpColors[grpKey]||'#8B4513';
+    const grpName = grpNames[grpKey]||grpKey;
+    Object.entries(routes).forEach(([routeName, branches])=>{
+      const routeReps = reps.filter(r=>r.route===routeName && r.grp===grpKey).map(r=>r.name);
+      body += `
+        <div style="margin-bottom:20px;break-inside:avoid">
+          <div style="background:${color};color:#fff;padding:8px 14px;border-radius:6px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">
+            <div style="font-size:13px;font-weight:700">${grpName} — ${routeName}</div>
+            <div style="font-size:11px;background:rgba(255,255,255,0.2);padding:2px 10px;border-radius:10px">${branches.length} فرع</div>
+          </div>
+          ${routeReps.length ? `<div style="font-size:11px;color:${color};margin-bottom:6px;padding-right:8px">👤 المندوب: <strong>${routeReps.join(' / ')}</strong></div>` : ''}
+          <table style="width:100%;border-collapse:collapse;font-size:11px">
+            <thead>
+              <tr style="background:${color}22">
+                <th style="padding:6px 8px;text-align:right;border:1px solid ${color}44;width:35px">#</th>
+                <th style="padding:6px 8px;text-align:right;border:1px solid ${color}44">اسم الفرع</th>
+                <th style="padding:6px 8px;text-align:right;border:1px solid ${color}44">العميل</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${branches.map((b,i)=>{
+                const client = clientMap.find(m=>m.branch_name===b.branch_name)?.client_name||'—';
+                return `<tr style="background:${i%2===0?'#fff':'#f9f6f1'}">
+                  <td style="padding:5px 8px;border:1px solid #eee;text-align:center;color:#999">${i+1}</td>
+                  <td style="padding:5px 8px;border:1px solid #eee;font-weight:600">${b.branch_name}</td>
+                  <td style="padding:5px 8px;border:1px solid #eee;color:#1D4ED8">${client}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    });
+  });
+
+  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet"/>
+    <style>
+      *{margin:0;padding:0;box-sizing:border-box}
+      body{font-family:Cairo,sans-serif;font-size:12px;direction:rtl;padding:20px;background:#FAF6F0;color:#2C1F0A}
+      .print-btn{position:fixed;top:16px;left:16px;background:#8B4513;color:#fff;border:none;
+        border-radius:8px;padding:8px 16px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;z-index:999}
+      @media print{.print-btn{display:none}body{background:#fff;padding:12px}}
+    </style></head><body>
+    <button class="print-btn" onclick="window.print()">🖨️ طباعة</button>
+    <div style="border-bottom:3px solid #8B4513;padding-bottom:12px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-size:20px;font-weight:700;color:#8B4513">تقرير فروع الأسواق الخاصة</div>
+        <div style="font-size:11px;color:#888;margin-top:4px">
+          ${grp!=='all'?grpNames[grp]||grp:'كل الأسواق الخاصة'} | 
+          ${route!=='all'?route:'كل خطوط السير'} | 
+          تاريخ: ${new Date().toLocaleDateString('ar-EG')} | 
+          إجمالي: ${data.length} فرع
+        </div>
+      </div>
+    </div>
+    ${body}
+    <script>window.addEventListener('load',()=>setTimeout(()=>window.print(),800))<\/script>
+    </body></html>`;
+
+  const blob = new Blob([html],{type:'text/html;charset=utf-8'});
+  const url  = URL.createObjectURL(blob);
+  const win  = window.open(url,'_blank');
+  if(!win){ const a=document.createElement('a');a.href=url;a.download='فروع_الأسواق_الخاصة.html';a.click(); }
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
 }
 
 async function pbAddBranch(){
