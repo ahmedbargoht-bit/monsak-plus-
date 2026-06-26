@@ -472,14 +472,17 @@ function switchTab(tab){
 async function loadPdb(){
   if(pdbData) return pdbData;
   const rows = await sbFetch('products_db','?key=eq.pdb&select=value&limit=1');
-  pdbData = rows[0]?.value || {};
+  let rawPdb = rows[0]?.value || {};
+  pdbData = typeof rawPdb === 'string' ? JSON.parse(rawPdb) : rawPdb;
   return pdbData;
 }
 
 async function loadBranchesMap(){
   if(branchesMap) return branchesMap;
   const rows = await sbFetch('products_db','?key=eq.branches_map&select=value&limit=1');
-  branchesMap = rows[0]?.value || {};
+  let raw = rows[0]?.value || {};
+  // if value came as string, parse it
+  branchesMap = typeof raw === 'string' ? JSON.parse(raw) : raw;
   return branchesMap;
 }
 
@@ -488,8 +491,22 @@ async function loadClientsTab(){
   const sel = document.getElementById('route-select');
   if(sel.options.length > 1) return; // already loaded
   try{
-    const map = await loadBranchesMap();
-    Object.keys(map).forEach(route=>{
+    // get routes for this rep's grp from sales_route_assignments
+    const params = '?grp=eq.'+encodeURIComponent(currentRep.grp)+'&active=eq.true&select=route&order=route';
+    const rows = await sbFetch('sales_route_assignments', params);
+    // unique routes
+    const routes = [...new Set(rows.map(r=>r.route).filter(Boolean))];
+    if(!routes.length){
+      // fallback: show all routes in branches_map
+      const map = await loadBranchesMap();
+      Object.keys(map).forEach(route=>{
+        const o = document.createElement('option');
+        o.value = route; o.textContent = route;
+        sel.appendChild(o);
+      });
+      return;
+    }
+    routes.forEach(route=>{
       const o = document.createElement('option');
       o.value = route; o.textContent = route;
       sel.appendChild(o);
@@ -497,24 +514,31 @@ async function loadClientsTab(){
   }catch(e){ showToast('تعذّر تحميل خطوط السير'); }
 }
 
-function onRouteChange(){
+async function onRouteChange(){
   const sel = document.getElementById('route-select');
   const container = document.getElementById('branches-list');
   const route = sel.value;
-  if(!route || !branchesMap){ container.innerHTML=''; return; }
-  const branches = branchesMap[route] || [];
-  if(!branches.length){
-    container.innerHTML = '<div class="empty-state">لا توجد فروع في هذا الخط</div>';
-    return;
+  if(!route){ container.innerHTML=''; return; }
+  container.innerHTML='<div class="loading-state"><div class="spinner"></div><span>جاري تحميل الفروع...</span></div>';
+  try{
+    const params = '?grp=eq.'+encodeURIComponent(currentRep.grp)+'&route=eq.'+encodeURIComponent(route)+'&active=eq.true&select=branch_name&order=branch_name';
+    const rows = await sbFetch('sales_route_assignments', params);
+    const branches = rows.map(r=>r.branch_name).filter(Boolean);
+    if(!branches.length){
+      container.innerHTML = '<div class="empty-state">لا توجد فروع في هذا الخط</div>';
+      return;
+    }
+    const icons=['🏪','🏬','🏢','🛒','🏭'];
+    let html = '<div class="route-block"><div class="route-tag">📍 '+route+'</div>';
+    branches.forEach((b,i)=>{
+      const icon = icons[i % icons.length];
+      html += '<div class="branch-card" onclick="startVisit(\''+b.replace(/'/g,"\\'")+'\',\''+route.replace(/'/g,"\\'")+'\')"><div class="branch-icon">'+icon+'</div><div class="branch-info"><div class="branch-name">'+b+'</div><div class="branch-client">اضغط لبدء الزيارة</div></div><div class="branch-arrow">◄</div></div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  }catch(e){
+    container.innerHTML='<div class="empty-state">تعذّر تحميل الفروع</div>';
   }
-  const icons=['🏪','🏬','🏢','🛒','🏭'];
-  let html = '<div class="route-block"><div class="route-tag">📍 '+route+'</div>';
-  branches.forEach((b,i)=>{
-    const icon = icons[i % icons.length];
-    html += '<div class="branch-card" onclick="startVisit(\''+b.replace(/'/g,"\\'")+'\',\''+route.replace(/'/g,"\\'")+'\')"><div class="branch-icon">'+icon+'</div><div class="branch-info"><div class="branch-name">'+b+'</div><div class="branch-client">اضغط لبدء الزيارة</div></div><div class="branch-arrow">◄</div></div>';
-  });
-  html += '</div>';
-  container.innerHTML = html;
 }
 
 // ==================== VISIT SCREEN ====================
