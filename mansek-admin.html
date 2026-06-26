@@ -3769,10 +3769,16 @@ h2,h3{color:#2C1F0A}
 
             <!-- جدول الفروع المربوطة -->
             <div class="card">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
                 <span style="font-size:12px;font-weight:700;color:var(--navy)">🏪 الفروع المربوطة بعملاء</span>
-                <div style="display:flex;gap:8px;align-items:center">
-                  <input type="text" id="spl-map-search" oninput="splRenderBranchMap()" placeholder="🔍 بحث..." style="width:160px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-family:Cairo,sans-serif;font-size:12px"/>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                  <select id="spl-map-client-filter" onchange="splRenderBranchMap()" style="font-family:Cairo,sans-serif;font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;min-width:200px">
+                    <option value="all">كل العملاء</option>
+                  </select>
+                  <input type="text" id="spl-map-search" oninput="splRenderBranchMap()" placeholder="🔍 بحث..." style="width:140px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-family:Cairo,sans-serif;font-size:12px"/>
+                  <button onclick="splExportBranchMapPDF()" class="btn btn-ghost btn-sm" style="white-space:nowrap">
+                    <i class="ti ti-file-type-pdf"></i> طباعة PDF
+                  </button>
                   <span id="spl-map-count" style="font-size:12px;color:var(--text2)"></span>
                 </div>
               </div>
@@ -3782,6 +3788,8 @@ h2,h3{color:#2C1F0A}
                     <tr>
                       <th>#</th>
                       <th>الفرع</th>
+                      <th>المجموعة</th>
+                      <th>خط السير</th>
                       <th>العميل</th>
                       <th>خصومات التصنيفات</th>
                       <th>عروض نشطة</th>
@@ -16032,7 +16040,12 @@ async function spLoadAll(){
 
   _splPrices    = pricesRes.ok  ? await pricesRes.json()  : [];
   _splClients   = clientsRes.ok ? await clientsRes.json() : [];
-  _splBranchMap = mapRes.ok     ? await mapRes.json()     : [];
+  _splBranchMap = mapRes.ok ? await mapRes.json() : [];
+  // أضيف grp و route من _splBranches
+  _splBranchMap = _splBranchMap.map(m=>{
+    const br = _splBranches.find(b=>b.branch_name===m.branch_name)||{};
+    return {...m, grp:br.grp||'', route:br.route||''};
+  });
   _splBranches  = Array.isArray(bRes) ? bRes : [];
   _splBranches  = [...new Map(_splBranches.map(b=>[b.branch_name, b])).values()];
   _splCatDiscounts = cdRes.ok     ? await cdRes.json()      : [];
@@ -16054,6 +16067,15 @@ async function spLoadAll(){
       _splClients.map(c=>`<option value="${c.name}">${c.name} (${c.discount_pct}%)</option>`).join('');
   }
   document.getElementById('spl-map-branch-wrap').style.display='none';
+
+  // ملء فلتر العميل في جدول الفروع
+  const mapClientFilter = document.getElementById('spl-map-client-filter');
+  if(mapClientFilter){
+    const current = mapClientFilter.value;
+    mapClientFilter.innerHTML = '<option value="all">كل العملاء</option>' +
+      _splClients.map(c=>`<option value="${c.name}">${c.name}</option>`).join('');
+    if(current) mapClientFilter.value = current;
+  }
 
   splRenderClients();
   splRenderBranchMap();
@@ -16481,24 +16503,41 @@ async function mepSave(){
 function splRenderDiscounts(){ splRenderClients(); splRenderBranchMap(); }
 
 function splRenderBranchMap(){
-  const search = (document.getElementById('spl-map-search')?.value||'').toLowerCase();
-  const tbody  = document.getElementById('spl-map-tbody');
-  const count  = document.getElementById('spl-map-count');
+  const search  = (document.getElementById('spl-map-search')?.value||'').toLowerCase();
+  const fClient = document.getElementById('spl-map-client-filter')?.value||'all';
+  const tbody   = document.getElementById('spl-map-tbody');
+  const count   = document.getElementById('spl-map-count');
   if(!tbody) return;
+
   let data = _splBranchMap;
+  if(fClient!=='all') data = data.filter(m=>m.client_name===fClient);
   if(search) data = data.filter(m=>(m.branch_name||'').toLowerCase().includes(search)||(m.client_name||'').toLowerCase().includes(search));
   if(count) count.textContent = `${data.length} فرع مربوط`;
 
   const today = new Date(); today.setHours(0,0,0,0);
 
+  // جيب ألوان المجموعات
+  const grpColors = {};
+  if(typeof GROUPS !== 'undefined'){
+    Object.entries(GROUPS).forEach(([k,v])=>{ grpColors[k]=v.color||'#888'; });
+  }
+
   tbody.innerHTML = data.map((m,i)=>{
-    // خصومات التصنيفات للعميل
+    // جيب بيانات الفرع من _splBranches
+    const branchData = _splBranches.find(b=>b.branch_name===m.branch_name)||{};
+    const grp   = m.grp   || branchData.grp   || '—';
+    const route = m.route || branchData.route || '—';
+    const grpColor = grpColors[grp]||'#888';
+
+    const grpBadge = grp!=='—'
+      ? `<span style="background:${grpColor}22;color:${grpColor};padding:2px 8px;border-radius:8px;font-size:10px;font-weight:700">${grp}</span>`
+      : `<span style="color:#ccc;font-size:11px">—</span>`;
+
     const clientDiscs = _splCatDiscounts.filter(d=>d.client_name===m.client_name);
     const discSummary = clientDiscs.length
       ? clientDiscs.map(d=>`<span style="background:#D1FAE5;color:#065F46;padding:1px 6px;border-radius:8px;font-size:10px;margin-left:3px">${d.cat}: ${d.discount_pct}%</span>`).join('')
       : `<span style="color:#ccc;font-size:11px">—</span>`;
 
-    // العروض الثابتة النشطة للعميل
     const activePromos = (_splPromos||[]).filter(p=>{
       const from=new Date(p.date_from); const to=new Date(p.date_to);
       return p.client_name===m.client_name && p.active!==false && from<=today && to>=today;
@@ -16509,7 +16548,9 @@ function splRenderBranchMap(){
 
     return `<tr style="border-bottom:0.5px solid var(--border);${i%2===1?'background:var(--surface-1)':''}">
       <td style="padding:8px;font-size:12px;color:var(--text2)">${i+1}</td>
-      <td style="padding:8px;font-size:12px">${m.branch_name}</td>
+      <td style="padding:8px;font-size:12px;font-weight:500">${m.branch_name}</td>
+      <td style="padding:8px">${grpBadge}</td>
+      <td style="padding:8px;font-size:11px;color:var(--text2)">${route}</td>
       <td style="padding:8px;font-weight:600;color:var(--navy);font-size:12px">${m.client_name}</td>
       <td style="padding:8px">${discSummary}</td>
       <td style="padding:8px">${promosSummary}</td>
@@ -16518,7 +16559,90 @@ function splRenderBranchMap(){
           style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">🗑 إلغاء الربط</button>
       </td>
     </tr>`;
-  }).join('') || `<tr><td colspan="6" style="text-align:center;padding:20px;color:#888">لا توجد فروع مربوطة</td></tr>`;
+  }).join('') || `<tr><td colspan="8" style="text-align:center;padding:20px;color:#888">لا توجد فروع مربوطة</td></tr>`;
+}
+
+function splExportBranchMapPDF(){
+  const fClient = document.getElementById('spl-map-client-filter')?.value||'all';
+  let data = _splBranchMap;
+  if(fClient!=='all') data = data.filter(m=>m.client_name===fClient);
+  if(!data.length){ alert('لا توجد بيانات للطباعة'); return; }
+
+  const today = new Date(); today.setHours(0,0,0,0);
+  const clientTitle = fClient!=='all' ? fClient : 'كل العملاء';
+
+  // تجميع الفروع حسب المجموعة وخط السير
+  const grouped = {};
+  data.forEach(m=>{
+    const grp   = m.grp   || _splBranches.find(b=>b.branch_name===m.branch_name)?.grp   || 'غير محدد';
+    const route = m.route || _splBranches.find(b=>b.branch_name===m.branch_name)?.route || 'غير محدد';
+    if(!grouped[grp]) grouped[grp]={};
+    if(!grouped[grp][route]) grouped[grp][route]=[];
+    grouped[grp][route].push(m);
+  });
+
+  const grpColors = {};
+  if(typeof GROUPS !== 'undefined'){
+    Object.entries(GROUPS).forEach(([k,v])=>{ grpColors[k]=v.color||'#4B3C1A'; });
+  }
+
+  const activePromos = (_splPromos||[]).filter(p=>{
+    const from=new Date(p.date_from); const to=new Date(p.date_to);
+    return p.active!==false && from<=today && to>=today;
+  });
+
+  let body = '';
+  Object.entries(grouped).forEach(([grp, routes])=>{
+    const color = grpColors[grp]||'#4B3C1A';
+    body += `<div class="grp-header" style="background:${color};color:#fff;padding:8px 14px;border-radius:6px;margin:16px 0 8px;font-size:14px;font-weight:700">${grp}</div>`;
+    Object.entries(routes).forEach(([route, branches])=>{
+      body += `<div style="font-size:12px;font-weight:700;color:${color};margin:8px 0 4px;padding-right:10px;border-right:3px solid ${color}">🚗 ${route}</div>`;
+      body += `<table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:8px">
+        <thead><tr style="background:${color}22">
+          <th style="padding:5px 8px;text-align:right;border:1px solid ${color}44">#</th>
+          <th style="padding:5px 8px;text-align:right;border:1px solid ${color}44">الفرع</th>
+          <th style="padding:5px 8px;text-align:right;border:1px solid ${color}44">العميل</th>
+          <th style="padding:5px 8px;text-align:right;border:1px solid ${color}44">خصومات التصنيفات</th>
+          <th style="padding:5px 8px;text-align:right;border:1px solid ${color}44">عروض نشطة</th>
+        </tr></thead><tbody>`;
+      branches.forEach((m,i)=>{
+        const clientDiscs = _splCatDiscounts.filter(d=>d.client_name===m.client_name);
+        const discStr = clientDiscs.length ? clientDiscs.map(d=>`${d.cat}: ${d.discount_pct}%`).join(' | ') : '—';
+        const clientPromos = activePromos.filter(p=>p.client_name===m.client_name);
+        const promoStr = clientPromos.length ? clientPromos.map(p=>`${p.snf_name}: ${p.promo_price}ج`).join(' | ') : '—';
+        body += `<tr style="background:${i%2===0?'#fff':'#f9f9f9'}">
+          <td style="padding:5px 8px;border:1px solid #eee">${i+1}</td>
+          <td style="padding:5px 8px;border:1px solid #eee;font-weight:600">${m.branch_name}</td>
+          <td style="padding:5px 8px;border:1px solid #eee">${m.client_name}</td>
+          <td style="padding:5px 8px;border:1px solid #eee;color:#065F46">${discStr}</td>
+          <td style="padding:5px 8px;border:1px solid #eee;color:#E65100">${promoStr}</td>
+        </tr>`;
+      });
+      body += `</tbody></table>`;
+    });
+  });
+
+  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet"/>
+    <style>
+      *{margin:0;padding:0;box-sizing:border-box}
+      body{font-family:Cairo,sans-serif;font-size:12px;direction:rtl;padding:20px;color:#2C1F0A}
+      h2{color:#4B3C1A;margin-bottom:4px;font-size:18px}
+      p{color:#888;font-size:11px;margin-bottom:12px}
+      @media print{.no-print{display:none}body{padding:10px}}
+    </style></head><body>
+    <button class="no-print" onclick="window.print()" style="position:fixed;top:12px;left:12px;background:#731E2E;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-family:Cairo,sans-serif;font-size:13px;cursor:pointer">🖨️ طباعة</button>
+    <h2>🏪 فروع العملاء — ${clientTitle}</h2>
+    <p>تاريخ التقرير: ${new Date().toLocaleDateString('ar-EG')} | إجمالي الفروع: ${data.length}</p>
+    ${body}
+    <script>window.addEventListener('load',()=>setTimeout(()=>window.print(),800))<\/script>
+    </body></html>`;
+
+  const blob = new Blob([html],{type:'text/html;charset=utf-8'});
+  const url  = URL.createObjectURL(blob);
+  const win  = window.open(url,'_blank');
+  if(!win){ const a=document.createElement('a');a.href=url;a.download='فروع_العملاء.html';a.click(); }
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
 }
 
 function splRenderCatDiscounts(){
