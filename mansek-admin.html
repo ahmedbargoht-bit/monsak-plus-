@@ -4889,6 +4889,44 @@ h2,h3{color:#2C1F0A}
         </div>
         <!-- ══ END PANEL: الأسواق الخاصة ══════════════════════════ -->
 
+        <!-- ══ MODAL: تعديل فرع أسواق خاصة ══════════════════════ -->
+        <div class="modal-overlay" id="modal-pb-edit">
+          <div class="modal" style="max-width:480px">
+            <div class="modal-title">تعديل بيانات الفرع
+              <button class="modal-close" onclick="closeModal('modal-pb-edit')">✕</button>
+            </div>
+            <input type="hidden" id="pb-edit-id"/>
+            <input type="hidden" id="pb-edit-map-id"/>
+            <div class="form-fld">
+              <label class="form-lbl">اسم الفرع *</label>
+              <input type="text" id="pb-edit-name"/>
+            </div>
+            <div class="form-fld">
+              <label class="form-lbl">العميل</label>
+              <select id="pb-edit-client" style="width:100%">
+                <option value="">بدون عميل</option>
+              </select>
+            </div>
+            <div class="form-fld">
+              <label class="form-lbl">المجموعة *</label>
+              <select id="pb-edit-grp" onchange="pbEditUpdateRoutes()" style="width:100%">
+                <option value="private_cairo">أسواق خاصة القاهرة</option>
+                <option value="private_alex">أسواق خاصة الإسكندرية</option>
+              </select>
+            </div>
+            <div class="form-fld">
+              <label class="form-lbl">خط السير *</label>
+              <select id="pb-edit-route" style="width:100%"></select>
+            </div>
+            <div id="pb-edit-msg" style="font-size:12px;margin-top:6px"></div>
+            <div class="modal-footer">
+              <button class="btn btn-ghost" onclick="closeModal('modal-pb-edit')">إلغاء</button>
+              <button class="btn btn-blue" onclick="pbSaveEdit()"><i class="ti ti-device-floppy"></i> حفظ</button>
+            </div>
+          </div>
+        </div>
+        <!-- ══ END MODAL: تعديل فرع أسواق خاصة ══════════════════ -->
+
         <!-- ══ PANEL: activity ══════════════════════════════════ -->
         <div id="panel-activity" class="panel">
           <div class="page-header">
@@ -17226,6 +17264,8 @@ async function loadPrivateBranches(){
       <td style="font-size:11px;color:var(--text2)">${b.route||'—'}</td>
       <td style="text-align:center">${statusBadge}</td>
       <td style="text-align:center;display:flex;gap:4px;justify-content:center">
+        <button onclick="pbOpenEdit(${b.id},'${safeName}','${b.grp}','${b.route||''}','${(clientMap.find(m=>m.branch_name===b.branch_name)?.client_name||'').replace(/'/g,"\\'")}')"
+          style="background:#EEF6FF;color:#1D4ED8;border:1px solid #BFDBFE;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">✏️</button>
         <button onclick="pbToggleStatus(${b.id},'${b.status}')"
           style="background:${b.status==='active'?'#FFF3E0':'#E8F5E9'};color:${b.status==='active'?'#E65100':'#2E7D32'};border:1px solid currentColor;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">
           ${b.status==='active'?'⏸ إيقاف':'▶ تفعيل'}</button>
@@ -17236,6 +17276,92 @@ async function loadPrivateBranches(){
   }).join('') || `<tr><td colspan="7" style="text-align:center;padding:20px;color:#888">لا توجد فروع</td></tr>`;
 
   pbUpdateRoutes();
+}
+
+function pbEditUpdateRoutes(){
+  const grp = document.getElementById('pb-edit-grp')?.value||'private_cairo';
+  const sel = document.getElementById('pb-edit-route');
+  if(!sel) return;
+  const current = sel.value;
+  sel.innerHTML = (PB_ROUTES[grp]||[]).map(r=>`<option value="${r}">${r}</option>`).join('');
+  if(current) sel.value = current;
+}
+
+let _pbClients = [];
+
+async function pbOpenEdit(id, name, grp, route, clientName){
+  document.getElementById('pb-edit-id').value = id;
+  document.getElementById('pb-edit-name').value = name;
+  document.getElementById('pb-edit-msg').textContent = '';
+
+  // جيب العملاء لو مش محملين
+  if(!_pbClients.length){
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/sales_clients?select=id,name&order=name.asc`, {headers:H});
+    _pbClients = r.ok ? await r.json() : [];
+  }
+
+  // ملء قائمة العملاء
+  const clientSel = document.getElementById('pb-edit-client');
+  clientSel.innerHTML = '<option value="">بدون عميل</option>' +
+    _pbClients.map(c=>`<option value="${c.name}">${c.name}</option>`).join('');
+  clientSel.value = clientName||'';
+
+  // ملء المجموعة وخط السير
+  document.getElementById('pb-edit-grp').value = grp||'private_cairo';
+  pbEditUpdateRoutes();
+  document.getElementById('pb-edit-route').value = route||'';
+
+  // جيب map id للعميل
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const mapRes = await fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?branch_name=eq.${encodeURIComponent(name)}&select=id`, {headers:H});
+  const mapData = mapRes.ok ? await mapRes.json() : [];
+  document.getElementById('pb-edit-map-id').value = mapData[0]?.id||'';
+
+  openModal('modal-pb-edit');
+}
+
+async function pbSaveEdit(){
+  const id       = document.getElementById('pb-edit-id').value;
+  const mapId    = document.getElementById('pb-edit-map-id').value;
+  const newName  = document.getElementById('pb-edit-name').value.trim();
+  const client   = document.getElementById('pb-edit-client').value;
+  const grp      = document.getElementById('pb-edit-grp').value;
+  const route    = document.getElementById('pb-edit-route').value;
+  const msg      = document.getElementById('pb-edit-msg');
+  if(!newName){ msg.style.color='#B71C1C'; msg.textContent='يرجى إدخال اسم الفرع'; return; }
+
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+
+  // 1) تحديث branches
+  await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${id}`,{
+    method:'PATCH', headers:H,
+    body:JSON.stringify({branch_name:newName, grp, route})
+  });
+
+  // 2) تحديث أو إضافة العميل في branch_client_map
+  if(client){
+    if(mapId){
+      await fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?id=eq.${mapId}`,{
+        method:'PATCH', headers:H,
+        body:JSON.stringify({client_name:client, branch_name:newName})
+      });
+    } else {
+      await fetch(`${SUPABASE_URL}/rest/v1/branch_client_map`,{
+        method:'POST', headers:{...H,'Prefer':'return=minimal'},
+        body:JSON.stringify({branch_name:newName, client_name:client})
+      });
+    }
+  } else if(mapId){
+    // لو شيل العميل → احذف الربط
+    await fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?id=eq.${mapId}`,{
+      method:'DELETE', headers:H
+    });
+  }
+
+  showToast('✅ تم الحفظ');
+  closeModal('modal-pb-edit');
+  loadPrivateBranches();
 }
 
 async function pbAddBranch(){
