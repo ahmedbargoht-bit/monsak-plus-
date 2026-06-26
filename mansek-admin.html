@@ -4875,6 +4875,7 @@ h2,h3{color:#2C1F0A}
                   <tr>
                     <th>#</th>
                     <th>اسم الفرع</th>
+                    <th>العميل</th>
                     <th>المجموعة</th>
                     <th>خط السير</th>
                     <th style="text-align:center">الحالة</th>
@@ -17172,22 +17173,31 @@ async function loadPrivateBranches(){
 
   // تحديث خطوط السير في الفلتر
   const routeSel = document.getElementById('pb-route-filter');
-  if(routeSel && routeSel.options.length<=1){
+  if(routeSel){
     const routes = grp==='all'
       ? [...PB_ROUTES.private_cairo, ...PB_ROUTES.private_alex]
       : (PB_ROUTES[grp]||[]);
+    const current = routeSel.value;
     routeSel.innerHTML = '<option value="all">كل خطوط السير</option>' +
       routes.map(r=>`<option value="${r}">${r}</option>`).join('');
+    if(current) routeSel.value = current;
   }
 
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  // جيب الفروع والعملاء بالتوازي
   let url = `${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,route,grp,status&order=branch_name.asc&limit=2000`;
   if(grp==='all') url += `&grp=in.(private_cairo,private_alex)`;
   else url += `&grp=eq.${grp}`;
   if(status!=='all') url += `&status=eq.${status}`;
 
-  const r = await fetch(url, {headers:H});
-  _pbData = r.ok ? await r.json() : [];
+  const [brRes, mapRes] = await Promise.all([
+    fetch(url, {headers:H}),
+    fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?select=branch_name,client_name&limit=5000`, {headers:H}),
+  ]);
+
+  _pbData = brRes.ok ? await brRes.json() : [];
+  const clientMap = mapRes.ok ? await mapRes.json() : [];
 
   let data = _pbData;
   if(route!=='all') data = data.filter(b=>b.route===route);
@@ -17203,9 +17213,15 @@ async function loadPrivateBranches(){
     const statusBadge = b.status==='active'
       ? `<span style="background:#D1FAE5;color:#065F46;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">نشط</span>`
       : `<span style="background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">موقوف</span>`;
+    const clientName = clientMap.find(m=>m.branch_name===b.branch_name)?.client_name||'';
+    const clientBadge = clientName
+      ? `<span style="background:#EEF6FF;color:#1D4ED8;padding:2px 8px;border-radius:8px;font-size:10px;font-weight:600">${clientName}</span>`
+      : `<span style="color:#ccc;font-size:11px">—</span>`;
+    const safeName = (b.branch_name||'').replace(/'/g,"\\'");
     return `<tr style="${i%2===1?'background:var(--surface-1)':''}">
       <td style="font-size:12px;color:var(--text2)">${i+1}</td>
       <td style="font-weight:600;font-size:12px">${b.branch_name}</td>
+      <td>${clientBadge}</td>
       <td>${grpBadge}</td>
       <td style="font-size:11px;color:var(--text2)">${b.route||'—'}</td>
       <td style="text-align:center">${statusBadge}</td>
@@ -17213,13 +17229,12 @@ async function loadPrivateBranches(){
         <button onclick="pbToggleStatus(${b.id},'${b.status}')"
           style="background:${b.status==='active'?'#FFF3E0':'#E8F5E9'};color:${b.status==='active'?'#E65100':'#2E7D32'};border:1px solid currentColor;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">
           ${b.status==='active'?'⏸ إيقاف':'▶ تفعيل'}</button>
-        <button onclick="pbDelete(${b.id},'${(b.branch_name||'').replace(/'/g,"\\'")}')"
+        <button onclick="pbDelete(${b.id},'${safeName}')"
           style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">🗑</button>
       </td>
     </tr>`;
-  }).join('') || `<tr><td colspan="6" style="text-align:center;padding:20px;color:#888">لا توجد فروع</td></tr>`;
+  }).join('') || `<tr><td colspan="7" style="text-align:center;padding:20px;color:#888">لا توجد فروع</td></tr>`;
 
-  // تهيئة قائمة الخطوط عند التحميل الأول
   pbUpdateRoutes();
 }
 
