@@ -3595,6 +3595,10 @@ h2,h3{color:#2C1F0A}
               style="padding:8px 20px;border:none;border-bottom:3px solid transparent;background:none;font-family:Cairo,sans-serif;font-size:13px;font-weight:600;color:var(--text2);cursor:pointer">
               🏷️ خصومات العملاء
             </button>
+            <button id="spl-tab-catdisc" onclick="splShowTab('catdisc')"
+              style="padding:8px 20px;border:none;border-bottom:3px solid transparent;background:none;font-family:Cairo,sans-serif;font-size:13px;font-weight:600;color:var(--text2);cursor:pointer">
+              🎯 خصومات التصنيفات
+            </button>
           </div>
 
           <!-- ── تاب الأصناف ── -->
@@ -3793,6 +3797,71 @@ h2,h3{color:#2C1F0A}
               </div>
             </div>
           </div>
+
+          <!-- ── تاب خصومات التصنيفات ── -->
+          <div id="spl-pane-catdisc" style="display:none">
+
+            <!-- إضافة خصم تصنيف -->
+            <div class="card" style="margin-bottom:12px;background:#FFFBF0;border:1px solid #FEF3C7">
+              <div style="font-size:12px;color:#92400E;margin-bottom:10px">
+                <i class="ti ti-info-circle"></i>
+                الخصم هنا بيطغى على الخصم العام للعميل — لو مفيش خصم تصنيف، بيطبق الخصم العام
+              </div>
+              <div style="display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:10px;align-items:end">
+                <div class="fld" style="margin:0">
+                  <label class="lbl">العميل *</label>
+                  <select id="spl-cd-client" style="width:100%">
+                    <option value="">اختر العميل...</option>
+                  </select>
+                </div>
+                <div class="fld" style="margin:0">
+                  <label class="lbl">التصنيف *</label>
+                  <select id="spl-cd-cat" style="width:100%">
+                    <option value="">اختر التصنيف...</option>
+                  </select>
+                </div>
+                <div class="fld" style="margin:0">
+                  <label class="lbl">نسبة الخصم % *</label>
+                  <input type="number" id="spl-cd-pct" placeholder="0" min="0" max="100" step="0.1"/>
+                </div>
+                <button class="btn btn-blue" onclick="splSaveCatDiscount()" style="white-space:nowrap">
+                  <i class="ti ti-device-floppy"></i> حفظ
+                </button>
+              </div>
+              <div id="spl-cd-msg" style="margin-top:8px;font-size:12px"></div>
+            </div>
+
+            <!-- فلتر بحث -->
+            <div style="display:flex;gap:10px;margin-bottom:10px">
+              <select id="spl-cd-filter-client" onchange="splRenderCatDiscounts()" style="font-family:Cairo,sans-serif;font-size:12px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;flex:1">
+                <option value="all">كل العملاء</option>
+              </select>
+              <input type="text" id="spl-cd-search" oninput="splRenderCatDiscounts()" placeholder="🔍 بحث..." style="flex:1"/>
+            </div>
+
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                <span id="spl-cd-count" style="font-size:12px;color:var(--text2)"></span>
+              </div>
+              <div class="tbl-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>العميل</th>
+                      <th>التصنيف</th>
+                      <th style="text-align:center">الخصم الخاص %</th>
+                      <th style="text-align:center">الخصم العام %</th>
+                      <th style="text-align:center">آخر تحديث</th>
+                      <th style="text-align:center">إجراءات</th>
+                    </tr>
+                  </thead>
+                  <tbody id="spl-cd-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
         </div>
         <!-- ══ END PANEL: sales-pricelist ══════════════════════════ -->
 
@@ -15790,10 +15859,12 @@ let _splClients   = [];
 let _splBranchMap = [];
 let _splPdbRaw    = {};
 
+let _splCatDiscounts = [];
+
 async function spLoadAll(){
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
 
-  const [pdbRes, pricesRes, clientsRes, mapRes, bRes] = await Promise.all([
+  const [pdbRes, pricesRes, clientsRes, mapRes, bRes, cdRes] = await Promise.all([
     fetch(`${SUPABASE_URL}/rest/v1/products_db?select=value&key=eq.pdb`, {headers:H}),
     fetch(`${SUPABASE_URL}/rest/v1/sales_prices?select=*&order=snf_name.asc&limit=2000`, {headers:H}),
     fetch(`${SUPABASE_URL}/rest/v1/sales_clients?select=*&order=name.asc`, {headers:H}),
@@ -15803,6 +15874,7 @@ async function spLoadAll(){
       const data = await r.json();
       return [...new Map(data.map(b=>[b.branch_name, b])).values()];
     }),
+    fetch(`${SUPABASE_URL}/rest/v1/client_category_discounts?select=*&order=client_name.asc&limit=2000`, {headers:H}),
   ]);
 
   // استخرج الأصناف مع fea وcat
@@ -15835,6 +15907,7 @@ async function spLoadAll(){
   _splBranchMap = mapRes.ok     ? await mapRes.json()     : [];
   _splBranches  = Array.isArray(bRes) ? bRes : [];
   _splBranches  = [...new Map(_splBranches.map(b=>[b.branch_name, b])).values()];
+  _splCatDiscounts = cdRes.ok   ? await cdRes.json()      : [];
 
   // ملء فلاتر النوع والتصنيف
   const feaSel = document.getElementById('spl-pfea');
@@ -15855,6 +15928,25 @@ async function spLoadAll(){
 
   splRenderClients();
   splRenderBranchMap();
+  splRenderCatDiscounts();
+
+  // ملء قوائم تاب خصومات التصنيفات
+  const cdClient = document.getElementById('spl-cd-client');
+  const cdFilterClient = document.getElementById('spl-cd-filter-client');
+  const cdCat = document.getElementById('spl-cd-cat');
+  if(cdClient){
+    cdClient.innerHTML = '<option value="">اختر العميل...</option>' +
+      _splClients.map(c=>`<option value="${c.name}">${c.name}</option>`).join('');
+  }
+  if(cdFilterClient){
+    cdFilterClient.innerHTML = '<option value="all">كل العملاء</option>' +
+      _splClients.map(c=>`<option value="${c.name}">${c.name}</option>`).join('');
+  }
+  if(cdCat){
+    const cats = [...new Set(_splProducts.map(p=>p.cat).filter(Boolean))].sort();
+    cdCat.innerHTML = '<option value="">اختر التصنيف...</option>' +
+      cats.map(c=>`<option value="${c}">${c}</option>`).join('');
+  }
 }
 
 function splOnFeaChange(){
@@ -16028,14 +16120,15 @@ async function splDeleteBranchMap(id, branch){
 }
 
 function splShowTab(tab){
-  document.getElementById('spl-pane-products').style.display  = tab==='products'  ? '' : 'none';
-  document.getElementById('spl-pane-discounts').style.display = tab==='discounts' ? '' : 'none';
-  document.getElementById('spl-tab-products').style.borderBottomColor  = tab==='products'  ? 'var(--caramel)' : 'transparent';
-  document.getElementById('spl-tab-products').style.color               = tab==='products'  ? 'var(--caramel)' : 'var(--text2)';
-  document.getElementById('spl-tab-products').style.fontWeight          = tab==='products'  ? '700' : '600';
-  document.getElementById('spl-tab-discounts').style.borderBottomColor = tab==='discounts' ? 'var(--caramel)' : 'transparent';
-  document.getElementById('spl-tab-discounts').style.color              = tab==='discounts' ? 'var(--caramel)' : 'var(--text2)';
-  document.getElementById('spl-tab-discounts').style.fontWeight         = tab==='discounts' ? '700' : '600';
+  ['products','discounts','catdisc'].forEach(t=>{
+    document.getElementById(`spl-pane-${t}`).style.display  = tab===t ? '' : 'none';
+    const btn = document.getElementById(`spl-tab-${t}`);
+    if(btn){
+      btn.style.borderBottomColor = tab===t ? 'var(--caramel)' : 'transparent';
+      btn.style.color             = tab===t ? 'var(--caramel)' : 'var(--text2)';
+      btn.style.fontWeight        = tab===t ? '700' : '600';
+    }
+  });
 }
 
 function splRenderProducts(){
@@ -16149,6 +16242,83 @@ async function splEditPrice(snfName, currentPrice, currentTax){
 }
 
 function splRenderDiscounts(){ splRenderClients(); splRenderBranchMap(); }
+
+function splRenderCatDiscounts(){
+  const tbody  = document.getElementById('spl-cd-tbody');
+  const count  = document.getElementById('spl-cd-count');
+  const search = (document.getElementById('spl-cd-search')?.value||'').toLowerCase();
+  const filter = document.getElementById('spl-cd-filter-client')?.value||'all';
+  if(!tbody) return;
+
+  let data = _splCatDiscounts;
+  if(filter!=='all') data = data.filter(d=>d.client_name===filter);
+  if(search) data = data.filter(d=>(d.client_name||'').toLowerCase().includes(search)||(d.cat||'').toLowerCase().includes(search));
+  if(count) count.textContent = `${data.length} سجل`;
+
+  tbody.innerHTML = data.map((d,i)=>{
+    const generalDisc = _splClients.find(c=>c.name===d.client_name)?.discount_pct||0;
+    const upd = d.updated_at ? new Date(d.updated_at).toLocaleDateString('ar-EG') : '—';
+    return `<tr>
+      <td>${i+1}</td>
+      <td style="font-weight:600;font-size:12px">${d.client_name}</td>
+      <td><span style="background:#EEF6FF;color:#1D4ED8;padding:2px 8px;border-radius:8px;font-size:11px">${d.cat}</span></td>
+      <td style="text-align:center"><span style="background:#D1FAE5;color:#065F46;padding:3px 12px;border-radius:10px;font-weight:700;font-size:13px">${d.discount_pct}%</span></td>
+      <td style="text-align:center;color:var(--text2);font-size:12px">${generalDisc}%</td>
+      <td style="text-align:center;font-size:11px;color:var(--text2)">${upd}</td>
+      <td style="text-align:center;display:flex;gap:4px;justify-content:center">
+        <button onclick="splEditCatDiscount(${d.id},'${(d.client_name).replace(/'/g,"\\'")}','${(d.cat).replace(/'/g,"\\'")}',${d.discount_pct})"
+          style="background:#EEF6FF;color:#1D4ED8;border:1px solid #BFDBFE;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">✏️</button>
+        <button onclick="splDeleteCatDiscount(${d.id},'${(d.client_name).replace(/'/g,"\\'")}','${(d.cat).replace(/'/g,"\\'")}')"
+          style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">🗑</button>
+      </td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="7" style="text-align:center;padding:20px;color:#888">لا توجد خصومات تصنيفات</td></tr>`;
+}
+
+async function splSaveCatDiscount(){
+  const client = document.getElementById('spl-cd-client').value;
+  const cat    = document.getElementById('spl-cd-cat').value;
+  const pct    = parseFloat(document.getElementById('spl-cd-pct').value)||0;
+  const msg    = document.getElementById('spl-cd-msg');
+  if(!client||!cat){ msg.style.color='#B71C1C'; msg.textContent='يرجى اختيار العميل والتصنيف'; return; }
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'resolution=merge-duplicates,return=minimal'};
+  const existing = _splCatDiscounts.find(d=>d.client_name===client && d.cat===cat);
+  let r;
+  if(existing){
+    r = await fetch(`${SUPABASE_URL}/rest/v1/client_category_discounts?id=eq.${existing.id}`,{
+      method:'PATCH', headers:{...H,'Prefer':'return=minimal'},
+      body:JSON.stringify({discount_pct:pct, updated_at:new Date().toISOString()})
+    });
+  } else {
+    r = await fetch(`${SUPABASE_URL}/rest/v1/client_category_discounts`,{
+      method:'POST', headers:{...H,'Prefer':'return=minimal'},
+      body:JSON.stringify({client_name:client, cat, discount_pct:pct})
+    });
+  }
+  if(r.ok||r.status===201||r.status===204){
+    msg.style.color='#065F46'; msg.textContent='✅ تم الحفظ';
+    document.getElementById('spl-cd-pct').value='';
+    await spLoadAll();
+  } else { msg.style.color='#B71C1C'; msg.textContent='❌ خطأ: '+await r.text(); }
+  setTimeout(()=>msg.textContent='',3000);
+}
+
+async function splEditCatDiscount(id, client, cat, pct){
+  const newPct = prompt(`خصم "${client}" على "${cat}":`, pct); if(newPct===null) return;
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  await fetch(`${SUPABASE_URL}/rest/v1/client_category_discounts?id=eq.${id}`,{
+    method:'PATCH', headers:H,
+    body:JSON.stringify({discount_pct:parseFloat(newPct)||0, updated_at:new Date().toISOString()})
+  });
+  showToast('✅ تم التحديث'); await spLoadAll();
+}
+
+async function splDeleteCatDiscount(id, client, cat){
+  if(!confirm(`حذف خصم "${client}" على "${cat}"؟`)) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  await fetch(`${SUPABASE_URL}/rest/v1/client_category_discounts?id=eq.${id}`,{method:'DELETE',headers:H});
+  showToast('✅ تم الحذف'); await spLoadAll();
+}
 
 function splExportProducts(){
   if(!_splProducts.length){alert('لا توجد بيانات');return;}
