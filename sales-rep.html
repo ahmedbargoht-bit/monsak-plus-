@@ -507,21 +507,33 @@ async function loadBranchesMap(){
 // ==================== CLIENTS TAB ====================
 async function loadClientsTab(){
   try{
-    const map = await loadBranchesMap();
-    const repRoutes = currentRep.routes || [];
+    const isPrivate = currentRep.grp && currentRep.grp.startsWith('private');
+    const repRoutes = currentRep.routes && currentRep.routes.length
+      ? currentRep.routes
+      : currentRep.route ? [currentRep.route] : [];
 
-    if(repRoutes.length === 1 && map[repRoutes[0]]){
-      // one route only — show branches directly, hide dropdown
+    if(!repRoutes.length){
+      document.getElementById('route-select-wrap').style.display = 'none';
+      document.getElementById('branches-list').innerHTML =
+        '<div class="empty-state">⚠️ لم يتم تحديد خط سير — تواصل مع المشرف</div>';
+      return;
+    }
+
+    if(repRoutes.length === 1){
+      // one route — show branches directly
       document.getElementById('route-select-wrap').style.display = 'none';
       document.querySelector('#screen-clients .section-label').style.display = 'none';
-      await showBranchesForRoute(repRoutes[0], map[repRoutes[0]]);
-
-    } else if(repRoutes.length > 1){
-      // multiple routes — show dropdown with rep's routes only
+      if(isPrivate){
+        await showPrivateBranches(repRoutes[0]);
+      } else {
+        const map = await loadBranchesMap();
+        await showBranchesForRoute(repRoutes[0], map[repRoutes[0]] || []);
+      }
+    } else {
+      // multiple routes — show dropdown
       document.getElementById('route-select-wrap').style.display = 'block';
       document.querySelector('#screen-clients .section-label').style.display = 'block';
       const sel = document.getElementById('route-select');
-      // clear and rebuild
       sel.innerHTML = '<option value="">— اختر خط السير —</option>';
       repRoutes.forEach(route=>{
         const o = document.createElement('option');
@@ -529,12 +541,9 @@ async function loadClientsTab(){
         sel.appendChild(o);
       });
       document.getElementById('branches-list').innerHTML = '';
-
-    } else {
-      // no routes set — show empty state
-      document.getElementById('route-select-wrap').style.display = 'none';
-      document.getElementById('branches-list').innerHTML =
-        '<div class="empty-state">⚠️ لم يتم تحديد خط سير — تواصل مع المشرف</div>';
+      // store isPrivate for onRouteChange
+      window._isPrivateRep = isPrivate;
+      if(!isPrivate) await loadBranchesMap();
     }
   }catch(e){ showToast('تعذّر تحميل خطوط السير'); }
 }
@@ -543,8 +552,31 @@ async function onRouteChange(){
   const sel = document.getElementById('route-select');
   const route = sel.value;
   if(!route){ document.getElementById('branches-list').innerHTML=''; return; }
-  const branches = (branchesMap && branchesMap[route]) || [];
-  await showBranchesForRoute(route, branches);
+  const isPrivate = window._isPrivateRep || (currentRep.grp && currentRep.grp.startsWith('private'));
+  if(isPrivate){
+    await showPrivateBranches(route);
+  } else {
+    const branches = (branchesMap && branchesMap[route]) || [];
+    await showBranchesForRoute(route, branches);
+  }
+}
+
+async function showPrivateBranches(route){
+  const container = document.getElementById('branches-list');
+  container.innerHTML='<div class="loading-state"><div class="spinner"></div><span>جاري تحميل الفروع...</span></div>';
+  try{
+    // fetch branches from branches table by route + grp
+    const rows = await sbFetch('branches',
+      '?route=eq.'+encodeURIComponent(route)+'&grp=eq.'+encodeURIComponent(currentRep.grp)+'&status=eq.active&select=branch_name,route&order=branch_name');
+    const branches = rows.map(r=>r.branch_name).filter(Boolean);
+    if(!branches.length){
+      container.innerHTML='<div class="empty-state">لا توجد فروع في هذا الخط</div>';
+      return;
+    }
+    await showBranchesForRoute(route, branches);
+  }catch(e){
+    container.innerHTML='<div class="empty-state">⚠️ تعذّر تحميل الفروع</div>';
+  }
 }
 
 async function showBranchesForRoute(route, allBranches){
