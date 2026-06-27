@@ -128,6 +128,9 @@
   .qty-btn{width:28px;height:28px;background:var(--sand);border:none;border-radius:8px;font-size:16px;color:var(--caramel);cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:'Cairo',sans-serif;transition:background .1s}
   .qty-btn:active{background:var(--sand-dark)}
   .qty-num{font-size:14px;font-weight:800;min-width:22px;text-align:center;color:var(--text-dark)}
+  .qty-input{width:44px;height:28px;text-align:center;font-family:'Cairo',sans-serif;font-size:14px;font-weight:800;color:var(--text-dark);border:1.5px solid var(--sand-dark);border-radius:8px;background:white;outline:none;padding:0 4px}
+  .qty-input:focus{border-color:var(--caramel)}
+  .qty-input.has-val{color:var(--caramel);border-color:rgba(197,91,72,.4)}
   .qty-num.has-val{color:var(--caramel)}
 
   /* Submit bar */
@@ -235,6 +238,10 @@
       <select id="route-select" class="route-select" onchange="onRouteChange()">
         <option value="">— اختر خط السير —</option>
       </select>
+    </div>
+    <div class="branch-search-wrap">
+      <span class="branch-search-icon">🔍</span>
+      <input type="text" class="branch-search" id="branch-search" placeholder="ابحث عن فرع..." oninput="filterBranches(this.value)"/>
     </div>
     <div id="branches-list"></div>
   </div>
@@ -552,7 +559,17 @@ async function loadClientsTab(){
   }catch(e){ showToast('تعذّر تحميل خطوط السير'); }
 }
 
-async function onRouteChange(){
+async function filterBranches(query){
+  const q = query.trim().toLowerCase();
+  const cards = document.querySelectorAll('#branches-list .branch-card');
+  cards.forEach(card=>{
+    const name = card.querySelector('.branch-name')?.textContent?.toLowerCase()||'';
+    const client = card.querySelector('.branch-client')?.textContent?.toLowerCase()||'';
+    card.style.display = (!q || name.includes(q) || client.includes(q)) ? '' : 'none';
+  });
+}
+
+function onRouteChange(){
   const sel = document.getElementById('route-select');
   const route = sel.value;
   if(!route){ document.getElementById('branches-list').innerHTML=''; return; }
@@ -584,6 +601,9 @@ async function showPrivateBranches(route){
 }
 
 async function showBranchesForRoute(route, allBranches){
+  // clear search
+  const searchEl = document.getElementById('branch-search');
+  if(searchEl) searchEl.value = '';
   const container = document.getElementById('branches-list');
 
   // لو خط ثابت → اعرض بس الفروع المختارة من currentRep.branches
@@ -599,8 +619,9 @@ async function showBranchesForRoute(route, allBranches){
   container.innerHTML='<div class="loading-state"><div class="spinner"></div><span>جاري تحميل العملاء...</span></div>';
   try{
     // 1. جيب العملاء
+    const branchesParam = '('+branches.map(b=>'"'+b+'"').join(',')+')';
     const clientRows = await sbFetch('branch_client_map',
-      '?branch_name=in.('+branches.map(b=>encodeURIComponent(b)).join(',')+')'+'&select=branch_name,client_name');
+      '?branch_name=in.'+encodeURIComponent(branchesParam)+'&select=branch_name,client_name');
     const clientMap = {};
     clientRows.forEach(r=>{ clientMap[r.branch_name] = r.client_name; });
 
@@ -610,11 +631,13 @@ async function showBranchesForRoute(route, allBranches){
     let promoMap = {};  // client_name → true/false
 
     if(uniqueClients.length){
+      // wrap each client name in quotes for Supabase IN filter
+      const clientsParam = '('+uniqueClients.map(c=>'"'+c+'"').join(',')+')';
       const [discRows, promoRows] = await Promise.all([
         sbFetch('client_category_discounts',
-          '?client_name=in.('+uniqueClients.map(c=>encodeURIComponent(c)).join(',')+')'+'&select=client_name,cat,discount_pct'),
+          '?client_name=in.'+encodeURIComponent(clientsParam)+'&select=client_name,cat,discount_pct'),
         sbFetch('sales_promotions',
-          '?client_name=in.('+uniqueClients.map(c=>encodeURIComponent(c)).join(',')+')'+'&active=eq.true&select=client_name&limit=100')
+          '?client_name=in.'+encodeURIComponent(clientsParam)+'&active=eq.true&select=client_name&limit=100')
       ]);
       discRows.forEach(d=>{
         if(!discMap[d.client_name]) discMap[d.client_name]={};
@@ -757,7 +780,7 @@ function selectCat(cat, grpData){
     let html = '<div class="grp-header">'+grp+'</div>';
     items.forEach(item=>{
       const qty = visitState.quantities[item.name]||0;
-      html += '<div class="product-row"><div class="prod-name">'+item.name+'</div><div class="qty-ctrl"><button class="qty-btn" onclick="changeQty(\''+item.name.replace(/'/g,"\\'")+'\', -1)">−</button><span class="qty-num '+(qty>0?'has-val':'')+'" id="qty-'+item.name.replace(/[^a-zA-Z0-9]/g,'_')+'">'+qty+'</span><button class="qty-btn" onclick="changeQty(\''+item.name.replace(/'/g,"\\'")+'\', 1)">+</button></div></div>';
+      html += '<div class="product-row"><div class="prod-name">'+item.name+'</div><div class="qty-ctrl"><button class="qty-btn" onclick="changeQty(\''+item.name.replace(/'/g,"\\'")+'\', -1)">−</button><input type="number" class="qty-input '+(qty>0?'has-val':'')+'" id="qty-'+item.name.replace(/[^a-zA-Z0-9]/g,'_')+'" value="'+qty+'" min="0" oninput="onQtyInput(this,\''+item.name.replace(/'/g,"\\'")+'\')" onblur="onQtyBlur(this,\''+item.name.replace(/'/g,"\\'")+'\')" /><button class="qty-btn" onclick="changeQty(\''+item.name.replace(/'/g,"\\'")+'\', 1)">+</button></div></div>';
     });
     card.innerHTML = html;
     container.appendChild(card);
@@ -771,13 +794,29 @@ function changeQty(name, delta){
   const newVal = Math.max(0, current+delta);
   if(newVal===0) delete visitState.quantities[name];
   else visitState.quantities[name] = newVal;
-  // update display
   const key = name.replace(/[^a-zA-Z0-9]/g,'_');
   const el = document.getElementById('qty-'+key);
   if(el){
-    el.textContent = newVal;
+    el.value = newVal;
     el.classList.toggle('has-val', newVal>0);
   }
+  updateSubmitBar();
+}
+
+function onQtyInput(el, name){
+  const newVal = Math.max(0, parseInt(el.value)||0);
+  if(newVal===0) delete visitState.quantities[name];
+  else visitState.quantities[name] = newVal;
+  el.classList.toggle('has-val', newVal>0);
+  updateSubmitBar();
+}
+
+function onQtyBlur(el, name){
+  const newVal = Math.max(0, parseInt(el.value)||0);
+  el.value = newVal;
+  if(newVal===0) delete visitState.quantities[name];
+  else visitState.quantities[name] = newVal;
+  el.classList.toggle('has-val', newVal>0);
   updateSubmitBar();
 }
 
