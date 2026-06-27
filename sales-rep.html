@@ -140,6 +140,10 @@
 
   .section-label{font-size:11px;font-weight:800;color:var(--text-light);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
   .empty-state{text-align:center;padding:40px 20px;color:var(--text-light);font-size:13px}
+  .client-badges{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+  .badge-disc{background:rgba(56,161,105,.12);color:#276749;border:1px solid rgba(56,161,105,.3);border-radius:20px;padding:2px 8px;font-size:10px;font-weight:700}
+  .badge-promo{background:rgba(197,91,72,.10);color:var(--caramel);border:1px solid rgba(197,91,72,.25);border-radius:20px;padding:2px 8px;font-size:10px;font-weight:700}
+  .badge-no-disc{background:#F3F4F6;color:#9CA3AF;border:1px solid #E5E7EB;border-radius:20px;padding:2px 8px;font-size:10px;font-weight:600}
 
   .toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--text-dark);color:white;padding:10px 20px;border-radius:24px;font-size:12px;font-weight:600;opacity:0;transition:all .3s;pointer-events:none;white-space:nowrap;z-index:9999}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
@@ -594,17 +598,66 @@ async function showBranchesForRoute(route, allBranches){
   }
   container.innerHTML='<div class="loading-state"><div class="spinner"></div><span>جاري تحميل العملاء...</span></div>';
   try{
-    const rows = await sbFetch('branch_client_map',
+    // 1. جيب العملاء
+    const clientRows = await sbFetch('branch_client_map',
       '?branch_name=in.('+branches.map(b=>encodeURIComponent(b)).join(',')+')'+'&select=branch_name,client_name');
     const clientMap = {};
-    rows.forEach(r=>{ clientMap[r.branch_name] = r.client_name; });
+    clientRows.forEach(r=>{ clientMap[r.branch_name] = r.client_name; });
+
+    // 2. جيب الخصومات لكل العملاء
+    const uniqueClients = [...new Set(Object.values(clientMap))].filter(Boolean);
+    let discMap  = {};  // client_name → {cat: pct}
+    let promoMap = {};  // client_name → true/false
+
+    if(uniqueClients.length){
+      const [discRows, promoRows] = await Promise.all([
+        sbFetch('client_category_discounts',
+          '?client_name=in.('+uniqueClients.map(c=>encodeURIComponent(c)).join(',')+')'+'&select=client_name,cat,discount_pct'),
+        sbFetch('sales_promotions',
+          '?client_name=in.('+uniqueClients.map(c=>encodeURIComponent(c)).join(',')+')'+'&active=eq.true&select=client_name&limit=100')
+      ]);
+      discRows.forEach(d=>{
+        if(!discMap[d.client_name]) discMap[d.client_name]={};
+        discMap[d.client_name][d.cat] = d.discount_pct||0;
+      });
+      promoRows.forEach(p=>{ promoMap[p.client_name]=true; });
+    }
+
     const icons=['🏪','🏬','🏢','🛒','🏭'];
+    const today = new Date().toISOString().split('T')[0];
     let html = '<div class="route-block"><div class="route-tag">📍 '+route+'</div>';
+
     branches.forEach((b,i)=>{
-      const icon = icons[i % icons.length];
+      const icon   = icons[i % icons.length];
       const client = clientMap[b] || '';
-      const clientShort = client.length > 30 ? client.substring(0,30)+'...' : client;
-      html += '<div class="branch-card" onclick="startVisit(\''+b.replace(/'/g,"\\'")+'\',\''+route.replace(/'/g,"\\'")+'\',\''+client.replace(/'/g,"\\'")+'\')"><div class="branch-icon">'+icon+'</div><div class="branch-info"><div class="branch-name">'+b+'</div><div class="branch-client">'+(clientShort||'—')+'</div></div><div class="branch-arrow">◄</div></div>';
+      const clientShort = client.length > 28 ? client.substring(0,28)+'...' : client;
+
+      // build badges
+      let badges = '';
+      if(client){
+        const discs = discMap[client] || {};
+        const discEntries = Object.entries(discs).filter(([cat,pct])=>pct>0);
+        if(discEntries.length){
+          discEntries.forEach(([cat,pct])=>{
+            badges += '<span class="badge-disc">🎯 '+cat+' '+pct+'%</span>';
+          });
+        } else {
+          badges += '<span class="badge-no-disc">بدون خصم</span>';
+        }
+        if(promoMap[client]){
+          badges += '<span class="badge-promo">🔖 عرض نشط</span>';
+        }
+      }
+
+      html += '<div class="branch-card" onclick="startVisit(\''+b.replace(/'/g,"\\'")+'\',\''+route.replace(/'/g,"\\'")+'\',\''+client.replace(/'/g,"\\'")+'\')">'
+        +'<div class="branch-icon">'+icon+'</div>'
+        +'<div class="branch-info">'
+          +'<div class="branch-name">'+b+'</div>'
+          +'<div class="branch-client">'+(clientShort||'—')+'</div>'
+          +(badges?'<div class="client-badges">'+badges+'</div>':'')
+        +'</div>'
+        +'<div class="branch-arrow">◄</div>'
+        +'</div>';
     });
     html += '</div>';
     container.innerHTML = html;
