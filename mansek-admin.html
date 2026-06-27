@@ -16077,7 +16077,8 @@ function openEditRepModal(el){
   const grp    = el.dataset.repGrp;
   const routesRaw = el.dataset.repRoutes||'';
   const routesArr  = routesRaw ? routesRaw.split('||').filter(Boolean) : [];
-  window._repEditCurrentRoutes = routesArr;
+  window._repEditCurrentRoutes   = routesArr;
+  window._repEditCurrentBranches = (el.dataset.repBranches||'').split('||').filter(Boolean);
   window._repEditId = id;
 
   // Remove existing if any
@@ -16159,30 +16160,70 @@ function repDynGrpChange(){
   const wrap   = document.getElementById('red-routes-wrap');
   const checks = document.getElementById('red-routes-checks');
   if(!wrap || !checks) return;
-  checks.innerHTML = '';
-  wrap.style.display = 'none';
-  if(!grp) return;
+  checks.innerHTML = '<div style="color:#999;font-size:12px;padding:8px">جاري التحميل...</div>';
+  wrap.style.display = '';
+  if(!grp){ wrap.style.display='none'; return; }
 
-  const currentRoutes = window._repEditCurrentRoutes || [];
+  const currentRoutes  = window._repEditCurrentRoutes  || [];
+  const currentBranches = window._repEditCurrentBranches || [];
 
-  // Get routes from _repRoutesData or load them
-  const buildRouteChecks = (routesData) => {
+  const buildChecks = (routesData, branchesMap) => {
     const routes = routesData.filter(r=>r.grp===grp).map(r=>r.name).sort();
-    if(!routes.length){ checks.innerHTML='<div style="color:#999;font-size:12px">لا توجد خطوط لهذه المجموعة</div>'; wrap.style.display=''; return; }
-    checks.innerHTML = routes.map(r=>`
-      <label style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600">
-        <input type="checkbox" class="red-route-cb" value="${r}" ${currentRoutes.includes(r)?'checked':''}
-          style="width:15px;height:15px;accent-color:#731E2E"/>
-        ${r}
-      </label>`).join('');
-    wrap.style.display = '';
+    if(!routes.length){
+      checks.innerHTML='<div style="color:#999;font-size:12px">لا توجد خطوط لهذه المجموعة</div>';
+      return;
+    }
+
+    let html = '';
+    routes.forEach(route => {
+      const isThabet = route.startsWith('ثابت');
+      const branchesInRoute = (branchesMap && branchesMap[route]) || [];
+
+      if(isThabet && branchesInRoute.length){
+        // ثابت → show individual branches as checkboxes under route header
+        html += `<div style="margin-bottom:10px">
+          <div style="font-size:11px;font-weight:800;color:#731E2E;background:rgba(115,30,46,.08);border-right:3px solid #731E2E;padding:5px 10px;border-radius:0 8px 8px 0;margin-bottom:6px">${route}</div>
+          <div style="display:flex;flex-direction:column;gap:5px;padding-right:10px">
+            ${branchesInRoute.map(b=>`
+              <label style="display:flex;align-items:center;gap:8px;padding:5px 10px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;cursor:pointer;font-size:12px">
+                <input type="checkbox" class="red-branch-cb" value="${b}" data-route="${route}"
+                  ${currentBranches.includes(b)?'checked':''}
+                  style="width:14px;height:14px;accent-color:#731E2E"/>
+                🏪 ${b}
+              </label>`).join('')}
+          </div>
+        </div>`;
+      } else {
+        // خط عادي → single checkbox for whole route
+        html += `<label style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600;margin-bottom:5px">
+          <input type="checkbox" class="red-route-cb" value="${route}"
+            ${currentRoutes.includes(route)?'checked':''}
+            style="width:15px;height:15px;accent-color:#731E2E"/>
+          ${route}
+        </label>`;
+      }
+    });
+    checks.innerHTML = html;
   };
 
-  if(_repRoutesData && _repRoutesData.length){
-    buildRouteChecks(_repRoutesData);
-  } else {
-    repInitModal().then(()=> buildRouteChecks(_repRoutesData));
-  }
+  const doLoad = async () => {
+    if(!_repRoutesData || !_repRoutesData.length) await repInitModal();
+    // Load branches_map if not loaded
+    let branchesMap = window._adminBranchesMap || null;
+    if(!branchesMap){
+      try{
+        const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.branches_map&select=value&limit=1`,{headers:H});
+        const d = r.ok ? await r.json() : [];
+        let raw = d[0]?.value || {};
+        branchesMap = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        window._adminBranchesMap = branchesMap;
+      }catch(e){ branchesMap = {}; }
+    }
+    buildChecks(_repRoutesData, branchesMap);
+  };
+
+  doLoad();
 }
 
 async function saveRepUserDynamic(){
@@ -16192,17 +16233,28 @@ async function saveRepUserDynamic(){
   const grp    = document.getElementById('red-grp')?.value;
   const msgEl  = document.getElementById('red-msg');
 
-  const checkedRoutes = [...document.querySelectorAll('.red-route-cb:checked')].map(c=>c.value);
+  const checkedRoutes   = [...document.querySelectorAll('.red-route-cb:checked')].map(c=>c.value);
+  const checkedBranches = [...document.querySelectorAll('.red-branch-cb:checked')].map(c=>({branch:c.value, route:c.dataset.route}));
 
-  if(!name||!grp||!checkedRoutes.length){
+  // For ثابت routes — collect unique route names from selected branches
+  const thabetRoutes = [...new Set(checkedBranches.map(b=>b.route))];
+  const allRoutes = [...checkedRoutes, ...thabetRoutes];
+
+  if(!name||!grp||!allRoutes.length){
     msgEl.style.display='block';
     msgEl.style.background='#FEE2E2'; msgEl.style.color='#B91C1C';
-    msgEl.textContent='يرجى تعبئة الاسم واختيار المنطقة وخط سير واحد على الأقل';
+    msgEl.textContent='يرجى تعبئة الاسم واختيار المنطقة وخط سير أو فرع واحد على الأقل';
     return;
   }
 
   const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
-  const body = { name, grp, route: checkedRoutes[0], routes: checkedRoutes };
+  const body = {
+    name, grp,
+    route: allRoutes[0],
+    routes: allRoutes,
+    // store selected ثابت branches separately
+    branches: checkedBranches.map(b=>b.branch)
+  };
   if(pass) body.pass_hash = pass;
 
   try{
@@ -16315,6 +16367,7 @@ async function loadRepUsersPanel(){
           data-rep-name="${(u.name||'').replace(/"/g,'&quot;')}"
           data-rep-grp="${u.grp||''}"
           data-rep-routes="${(Array.isArray(u.routes)&&u.routes.length?u.routes:(u.route?[u.route]:[])).join('||')}"
+          data-rep-branches="${(Array.isArray(u.branches)&&u.branches.length?u.branches:[]).join('||')}"
           onclick="openEditRepModal(this)"
           style="background:#EEF2FF;color:#3730A3;border:1px solid #C7D2FE;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">✏️ تعديل</button>
         <button onclick="repToggleStatus(${u.id},'${u.status}')"
