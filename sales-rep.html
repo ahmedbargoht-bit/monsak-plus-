@@ -518,6 +518,8 @@ async function loadBranchesMap(){
 // ==================== CLIENTS TAB ====================
 async function loadClientsTab(){
   try{
+    // preload all client data in background
+    loadAllClientData();
     const isPrivate = currentRep.grp && currentRep.grp.startsWith('private');
     const repRoutes = currentRep.routes && currentRep.routes.length
       ? currentRep.routes
@@ -600,13 +602,60 @@ async function showPrivateBranches(route){
   }
 }
 
+// ── مساعد: IN query بـ batches ──
+async function sbFetchIN(table, column, values, extraParams=''){
+  if(!values.length) return [];
+  const batchSize = 15;
+  const results = [];
+  for(let i=0; i<values.length; i+=batchSize){
+    const batch = values.slice(i, i+batchSize);
+    // encode each value correctly for Supabase
+    const param = '('+batch.map(v=>'"'+v.replace(/"/g,'\"')+'"').join(',')+')';
+    try{
+      const rows = await sbFetch(table, '?'+column+'=in.'+encodeURIComponent(param)+extraParams);
+      if(Array.isArray(rows)) results.push(...rows);
+    }catch(e){ console.warn('sbFetchIN error:', e); }
+  }
+  return results;
+}
+
+// ── تحميل بيانات العملاء والخصومات مرة واحدة ──
+let _clientDiscCache = null; // {clientName: {cat: pct}}
+let _clientPromoCache = null; // {clientName: bool}
+let _branchClientCache = null; // {branchName: clientName}
+
+async function loadAllClientData(){
+  if(_clientDiscCache) return; // already loaded
+  try{
+    const [discRows, branchRows] = await Promise.all([
+      sbFetch('client_category_discounts', '?select=client_name,cat,discount_pct&limit=5000'),
+      sbFetch('branch_client_map', '?select=branch_name,client_name&limit=5000')
+    ]);
+    // build discount map
+    _clientDiscCache = {};
+    discRows.forEach(d=>{
+      if(!_clientDiscCache[d.client_name]) _clientDiscCache[d.client_name]={};
+      _clientDiscCache[d.client_name][d.cat] = d.discount_pct||0;
+    });
+    // build branch→client map
+    _branchClientCache = {};
+    branchRows.forEach(r=>{ _branchClientCache[r.branch_name] = r.client_name; });
+    // load promos
+    try{
+      const today = new Date().toISOString().split('T')[0];
+      const promoRows = await sbFetch('sales_promotions',
+        '?active=eq.true&date_from=lte.'+today+'&date_to=gte.'+today+'&select=client_name&limit=1000');
+      _clientPromoCache = {};
+      promoRows.forEach(p=>{ _clientPromoCache[p.client_name]=true; });
+    }catch(e){ _clientPromoCache={}; }
+  }catch(e){ console.error('loadAllClientData error:', e); _clientDiscCache={}; _branchClientCache={}; _clientPromoCache={}; }
+}
+
 async function showBranchesForRoute(route, allBranches){
-  // clear search
   const searchEl = document.getElementById('branch-search');
   if(searchEl) searchEl.value = '';
   const container = document.getElementById('branches-list');
 
-  // لو خط ثابت → اعرض بس الفروع المختارة من currentRep.branches
   let branches = allBranches;
   if(route.startsWith('ثابت') && currentRep.branches && currentRep.branches.length){
     branches = allBranches.filter(b => currentRep.branches.includes(b));
@@ -616,34 +665,25 @@ async function showBranchesForRoute(route, allBranches){
     container.innerHTML = '<div class="empty-state">لا توجد فروع مسندة في هذا الخط</div>';
     return;
   }
-  container.innerHTML='<div class="loading-state"><div class="spinner"></div><span>جاري تحميل العملاء...</span></div>';
+  container.innerHTML='<div class="loading-state"><div class="spinner"></div><span>جاري تحميل البيانات...</span></div>';
   try{
-    // 1. جيب العملاء
-    const branchesParam = '('+branches.map(b=>'"'+b+'"').join(',')+')';
-    const clientRows = await sbFetch('branch_client_map',
-      '?branch_name=in.'+encodeURIComponent(branchesParam)+'&select=branch_name,client_name');
+    // تحميل كل بيانات العملاء والخصومات مرة واحدة
+    await loadAllClientData();
+
+    // جيب العميل لكل فرع من الـ cache
     const clientMap = {};
-    clientRows.forEach(r=>{ clientMap[r.branch_name] = r.client_name; });
+    branches.forEach(b=>{ 
+      if(_branchClientCache[b]) clientMap[b] = _branchClientCache[b];
+    });
 
-    // 2. جيب الخصومات لكل العملاء
-    const uniqueClients = [...new Set(Object.values(clientMap))].filter(Boolean);
-    let discMap  = {};  // client_name → {cat: pct}
-    let promoMap = {};  // client_name → true/false
+    const discMap  = _clientDiscCache  || {};
+    const promoMap = _clientPromoCache || {};
 
-    if(uniqueClients.length){
-      // wrap each client name in quotes for Supabase IN filter
-      const clientsParam = '('+uniqueClients.map(c=>'"'+c+'"').join(',')+')';
-      const [discRows, promoRows] = await Promise.all([
-        sbFetch('client_category_discounts',
-          '?client_name=in.'+encodeURIComponent(clientsParam)+'&select=client_name,cat,discount_pct'),
-        sbFetch('sales_promotions',
-          '?client_name=in.'+encodeURIComponent(clientsParam)+'&active=eq.true&select=client_name&limit=100')
-      ]);
-      discRows.forEach(d=>{
-        if(!discMap[d.client_name]) discMap[d.client_name]={};
-        discMap[d.client_name][d.cat] = d.discount_pct||0;
-      });
-      promoRows.forEach(p=>{ promoMap[p.client_name]=true; });
+    if(true){
+      const discRows = [];
+      const promoRows = [];
+      // data already in cache — discMap and promoMap ready
+      void discRows; void promoRows;
     }
 
     const icons=['🏪','🏬','🏢','🛒','🏭'];
