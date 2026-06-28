@@ -819,7 +819,7 @@ async function loadAppData() {
 
     // Fetch all needed data in parallel
     const [priceRows, cliRows, catRows, mapRows] = await Promise.all([
-      sb('sales_prices','select=snf_name,price,tax_pct,cat&order=id.asc&limit=500'),
+      sb('sales_prices','select=snf_name,price,tax_pct,cat&limit=500'),
       sb('sales_clients','select=name,discount_pct&limit=500'),
       sb('client_category_discounts','select=client_name,cat,discount_pct&limit=1000'),
       sb('branch_client_map','select=branch_name,client_name&limit=5000')
@@ -841,11 +841,26 @@ async function loadAppData() {
     allPrices = Array.isArray(priceRows) ? priceRows : [];
     allBranches = [];
 
-    // Fetch branches by routes
+    // Fetch branches by routes - use POST-style filter to handle Arabic
     if(routes.length) {
-      const routeFilter = routes.map(r => encodeURIComponent(r)).join(',');
-      const brRows = await sb('branches', `route=in.(${routes.map(r=>`"${r}"`).join(',')})&status=eq.active&select=branch_name,route,grp&limit=2000`);
-      brRows.forEach(b => {
+      const brRows = await fetch(
+        `${SB_URL}/rest/v1/branches?status=eq.active&select=branch_name,route,grp&limit=2000`,
+        {headers:{...H, 'route': `in.(${routes.join(',')})`}}
+      ).then(r=>r.json()).catch(()=>[]);
+
+      // Fallback: fetch per route if bulk fails
+      let finalRows = Array.isArray(brRows) ? brRows : [];
+      if(!finalRows.length) {
+        for(const route of routes) {
+          const r = await fetch(
+            `${SB_URL}/rest/v1/branches?route=eq.${encodeURIComponent(route)}&status=eq.active&select=branch_name,route,grp&limit=500`,
+            {headers:H}
+          ).then(r=>r.json()).catch(()=>[]);
+          if(Array.isArray(r)) finalRows = finalRows.concat(r);
+        }
+      }
+
+      finalRows.forEach(b => {
         allBranches.push({
           branch_name: b.branch_name,
           route: b.route,
@@ -856,13 +871,17 @@ async function loadAppData() {
       });
     }
 
-    // Add extra branches (not already in list)
+    // Add extra branches
     if(extraBranches.length) {
       const existing = new Set(allBranches.map(b => b.branch_name));
       const newNames = extraBranches.filter(n => !existing.has(n));
-      if(newNames.length) {
-        const brRows = await sb('branches', `branch_name=in.(${newNames.map(n=>`"${n}"`).join(',')})&select=branch_name,route,grp&limit=500`);
-        brRows.forEach(b => {
+      for(const name of newNames) {
+        const r = await fetch(
+          `${SB_URL}/rest/v1/branches?branch_name=eq.${encodeURIComponent(name)}&select=branch_name,route,grp&limit=1`,
+          {headers:H}
+        ).then(r=>r.json()).catch(()=>[]);
+        if(Array.isArray(r) && r[0]) {
+          const b = r[0];
           allBranches.push({
             branch_name: b.branch_name,
             route: b.route || 'فروع إضافية',
@@ -870,7 +889,7 @@ async function loadAppData() {
             client_name: bcMap[b.branch_name] || '',
             discount_pct: clientDiscounts[bcMap[b.branch_name]] || 0
           });
-        });
+        }
       }
     }
 
