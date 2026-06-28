@@ -561,43 +561,68 @@ function doLogout() {
 // ══════════════ APP DATA ══════════════
 async function loadAppData() {
   try {
-    // Branches for this rep
-    const routes = currentRep.routes || [];
-    let brQuery = 'status=eq.active&select=branch_name,route,grp&limit=2000';
-    if(routes.length) brQuery += '&route=in.(' + routes.map(r=>`"${r}"`).join(',') + ')';
-    const [brs, priceRows, cliRows, catRows, mapRows] = await Promise.all([
-      sb('branches', brQuery),
-      sb('sales_prices','select=snf_name,price,tax_pct&order=snf_name.asc'),
+    const routes = Array.isArray(currentRep.routes) ? currentRep.routes : [];
+    const extraBranches = Array.isArray(currentRep.branches) ? currentRep.branches : [];
+
+    // Fetch all needed data in parallel
+    const [priceRows, cliRows, catRows, mapRows] = await Promise.all([
+      sb('sales_prices','select=snf_name,price,tax_pct,cat&order=snf_name.asc'),
       sb('sales_clients','select=name,discount_pct'),
       sb('client_category_discounts','select=client_name,cat,discount_pct'),
-      sb('branch_client_map','select=branch_name,client_name&limit=3000')
+      sb('branch_client_map','select=branch_name,client_name&limit=5000')
     ]);
 
-    // Map branch -> client
+    // Build branch->client map
     const bcMap = {};
-    mapRows.forEach(m=>bcMap[m.branch_name]=m.client_name);
+    mapRows.forEach(m => bcMap[m.branch_name] = m.client_name);
 
     // Client discounts
-    clientDiscounts={};
-    cliRows.forEach(c=>clientDiscounts[c.name]=c.discount_pct||0);
+    clientDiscounts = {};
+    cliRows.forEach(c => clientDiscounts[c.name] = c.discount_pct || 0);
 
     // Cat discounts
-    catDiscounts={};
-    catRows.forEach(r=>{
-      if(!catDiscounts[r.client_name]) catDiscounts[r.client_name]={};
-      catDiscounts[r.client_name][r.cat]=r.discount_pct;
+    catDiscounts = {};
+    catRows.forEach(r => {
+      if(!catDiscounts[r.client_name]) catDiscounts[r.client_name] = {};
+      catDiscounts[r.client_name][r.cat] = r.discount_pct;
     });
 
-    // Build branches list
-    allBranches = brs.map(b=>({
-      branch_name: b.branch_name,
-      route: b.route,
-      grp: b.grp,
-      client_name: bcMap[b.branch_name]||'',
-      discount_pct: clientDiscounts[bcMap[b.branch_name]]||0
-    }));
-
     allPrices = priceRows;
+    allBranches = [];
+
+    // Fetch branches by routes
+    if(routes.length) {
+      const routeFilter = routes.map(r => encodeURIComponent(r)).join(',');
+      const brRows = await sb('branches', `route=in.(${routes.map(r=>`"${r}"`).join(',')})&status=eq.active&select=branch_name,route,grp&limit=2000`);
+      brRows.forEach(b => {
+        allBranches.push({
+          branch_name: b.branch_name,
+          route: b.route,
+          grp: b.grp,
+          client_name: bcMap[b.branch_name] || '',
+          discount_pct: clientDiscounts[bcMap[b.branch_name]] || 0
+        });
+      });
+    }
+
+    // Add extra branches (not already in list)
+    if(extraBranches.length) {
+      const existing = new Set(allBranches.map(b => b.branch_name));
+      const newNames = extraBranches.filter(n => !existing.has(n));
+      if(newNames.length) {
+        const brRows = await sb('branches', `branch_name=in.(${newNames.map(n=>`"${n}"`).join(',')})&select=branch_name,route,grp&limit=500`);
+        brRows.forEach(b => {
+          allBranches.push({
+            branch_name: b.branch_name,
+            route: b.route || 'فروع إضافية',
+            grp: b.grp,
+            client_name: bcMap[b.branch_name] || '',
+            discount_pct: clientDiscounts[bcMap[b.branch_name]] || 0
+          });
+        });
+      }
+    }
+
   } catch(e) { console.error('loadAppData:', e); }
 }
 
