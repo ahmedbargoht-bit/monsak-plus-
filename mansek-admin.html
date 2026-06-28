@@ -703,6 +703,9 @@ h2,h3{color:#2C1F0A}
           <div class="nav-item" onclick="showPanel('sales-expiry-report')">
             <i class="ti ti-calendar-stats" style="color:#7B3F00"></i> تقرير تواريخ الأصناف
           </div>
+          <div class="nav-item" onclick="showPanel('sales-goals')">
+            <i class="ti ti-target" style="color:#C55B48"></i> الأهداف
+          </div>
           <div class="nav-item" onclick="showPanel('sales-invoices')">
             <i class="ti ti-file-invoice" style="color:#731E2E"></i> فواتير المناديب
             <span class="nav-badge" id="nav-sinv-badge" style="display:none;background:#731E2E"></span>
@@ -4272,6 +4275,62 @@ h2,h3{color:#2C1F0A}
         </div>
 
         <!-- ══ PANEL: فواتير المناديب ══════════════════════════════ -->
+        <!-- ══ PANEL: الأهداف ══ -->
+        <div id="panel-sales-goals" class="panel">
+          <div class="page-header">
+            <div>
+              <h2><i class="ti ti-target" style="color:#C55B48"></i> الأهداف الشهرية</h2>
+              <p>تحديد ومتابعة أهداف المناديب — مقسّمة على أيام العمل الفعلية</p>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span id="sg-workdays-badge" style="background:#F2E4DC;color:#3B1F12;border-radius:6px;padding:5px 12px;font-size:12px;font-weight:700">📅 أيام العمل: <b id="sg-wd-val">26</b></span>
+              <button onclick="sgExportPDF()" style="background:#F2E4DC;color:#3B1F12;border:none;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer;display:flex;align-items:center;gap:5px"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
+              <button onclick="sgSaveAll()" style="background:#C55B48;color:#fff;border:none;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer"><i class="ti ti-device-floppy"></i> حفظ الأهداف</button>
+            </div>
+          </div>
+
+          <!-- فلاتر -->
+          <div class="card" style="margin-bottom:12px">
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+              <div>
+                <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">المنطقة</label>
+                <select id="sg-region" onchange="sgRender()" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;min-width:160px">
+                  <option value="all">— كل المناطق —</option>
+                  <option value="giza">مجموعة الجيزة</option>
+                  <option value="cairo">وسط القاهرة</option>
+                  <option value="south">جنوب وشرق القاهرة</option>
+                  <option value="tajmuat">مجموعة التجمعات</option>
+                  <option value="alex">مجموعة الإسكندرية</option>
+                  <option value="hyper">الهايبر ماركت</option>
+                  <option value="private_cairo">الأسواق الخاصة</option>
+                </select>
+              </div>
+              <div>
+                <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">الشهر</label>
+                <input type="month" id="sg-month" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px" onchange="sgLoad()"/>
+              </div>
+              <div>
+                <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">أيام الجمع في الشهر</label>
+                <input type="number" id="sg-fridays" value="4" min="0" max="5" onchange="sgCalcWorkDays()" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;width:80px;text-align:center"/>
+              </div>
+            </div>
+          </div>
+
+          <!-- إجمالي -->
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px" id="sg-summary"></div>
+
+          <!-- كروت المشرفين -->
+          <div class="card" style="margin-bottom:12px">
+            <div style="font-size:11px;font-weight:700;color:#5C3D2E;margin-bottom:10px">📊 ملخص أداء المشرفين</div>
+            <div id="sg-sup-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px"></div>
+          </div>
+
+          <!-- التفاصيل -->
+          <div id="sg-details">
+            <div style="text-align:center;padding:40px;color:#aaa">جاري التحميل...</div>
+          </div>
+        </div>
+
         <div id="panel-sales-invoices" class="panel">
           <div class="page-header">
             <div>
@@ -5880,6 +5939,376 @@ async function deleteEntity(table, filter, name, title, reloadFn){
 // ══════════════════════════════════════════════════════════════
 // CONFIG
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// SALES GOALS — تاب الأهداف
+// ══════════════════════════════════════════════════════════════
+let _sgData = { supervisors:[], reps:[], targets:{}, sales:{} };
+const SG_GROUPS = {
+  giza:'مجموعة الجيزة', cairo:'وسط القاهرة', south:'جنوب وشرق القاهرة',
+  tajmuat:'مجموعة التجمعات', alex:'مجموعة الإسكندرية',
+  hyper:'الهايبر ماركت', private_cairo:'الأسواق الخاصة'
+};
+
+function sgCalcWorkDays(){
+  const now = new Date();
+  const monthSel = document.getElementById('sg-month');
+  const [yr,mo] = monthSel?.value ? monthSel.value.split('-').map(Number) : [now.getFullYear(), now.getMonth()+1];
+  const daysInMonth = new Date(yr, mo, 0).getDate();
+  const fridays = parseInt(document.getElementById('sg-fridays')?.value)||4;
+  const workDays = daysInMonth - fridays;
+  const el = document.getElementById('sg-wd-val');
+  if(el) el.textContent = workDays;
+  return workDays;
+}
+
+async function sgLoad(){
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const now = new Date();
+  const monthSel = document.getElementById('sg-month');
+  if(!monthSel.value){
+    const m = String(now.getMonth()+1).padStart(2,'0');
+    monthSel.value = `${now.getFullYear()}-${m}`;
+  }
+  const [yr,mo] = monthSel.value.split('-').map(Number);
+  sgCalcWorkDays();
+
+  const details = document.getElementById('sg-details');
+  details.innerHTML = '<div style="text-align:center;padding:40px;color:#aaa"><div class="spin" style="margin:0 auto 10px"></div>جاري التحميل...</div>';
+
+  try{
+    // 1. جيب المشرفين
+    const supRes = await fetch(`${SUPABASE_URL}/rest/v1/sales_staff?select=*&active=eq.true&order=name.asc`,{headers:H});
+    const supData = supRes.ok ? await supRes.json() : [];
+
+    // 2. جيب المناديب
+    const repRes = await fetch(`${SUPABASE_URL}/rest/v1/users?select=id,name,route,grp,groups,supervisors,status&role=in.(rep,sales)&status=eq.active&order=name.asc&limit=500`,{headers:H});
+    const repData = repRes.ok ? await repRes.json() : [];
+
+    // 3. جيب الأهداف الموجودة للشهر ده
+    const tgtRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_targets?select=*&month=eq.${mo}&year=eq.${yr}&limit=500`,{headers:H});
+    const tgtData = tgtRes.ok ? await tgtRes.json() : [];
+
+    // 4. جيب المبيعات للشهر ده
+    const dateFrom = `${yr}-${String(mo).padStart(2,'0')}-01`;
+    const dateTo   = `${yr}-${String(mo).padStart(2,'0')}-${new Date(yr,mo,0).getDate()}`;
+    const salesRes = await fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,total_net&delivery_date=gte.${dateFrom}&delivery_date=lte.${dateTo}&limit=5000`,{headers:H});
+    const salesData = salesRes.ok ? await salesRes.json() : [];
+
+    // بناء maps
+    const tgtMap = {};
+    tgtData.forEach(t=>{ tgtMap[t.rep_name] = t; });
+    const salesMap = {};
+    salesData.forEach(s=>{ salesMap[s.rep_name] = (salesMap[s.rep_name]||0) + (s.total_net||0); });
+
+    _sgData = { supervisors: supData, reps: repData, targets: tgtMap, sales: salesMap };
+    sgRender();
+  }catch(e){
+    details.innerHTML = `<div style="text-align:center;padding:40px;color:#C55B48">تعذر التحميل: ${e.message}</div>`;
+  }
+}
+
+function sgRender(){
+  const region = document.getElementById('sg-region')?.value||'all';
+  const workDays = sgCalcWorkDays();
+  const { supervisors, reps, targets, sales } = _sgData;
+
+  // فلتر المشرفين حسب المنطقة
+  const filteredSups = supervisors.filter(s=>{
+    if(region==='all') return true;
+    const sec = (s.sector||'').split(',').map(x=>x.trim());
+    return sec.includes(region);
+  });
+
+  // حساب إجمالي
+  let totalGoal=0, totalSales=0;
+  reps.forEach(r=>{
+    const t = targets[r.name];
+    if(t) totalGoal += (t.goal||0);
+    totalSales += (sales[r.name]||0);
+  });
+  const totalPct = totalGoal>0 ? Math.round(totalSales/totalGoal*100) : 0;
+  const totalDaily = workDays>0 ? Math.round(totalGoal/workDays) : 0;
+
+  // إجمالي
+  const sumEl = document.getElementById('sg-summary');
+  if(sumEl) sumEl.innerHTML = `
+    <div style="background:var(--surface-2);border:0.5px solid var(--border);border-radius:8px;padding:10px 14px">
+      <div style="font-size:10px;color:var(--text-secondary)">إجمالي الأهداف</div>
+      <div style="font-size:17px;font-weight:700;color:#7A3B1E;margin-top:3px">${totalGoal.toLocaleString('ar-EG')} ج</div>
+    </div>
+    <div style="background:var(--surface-2);border:0.5px solid var(--border);border-radius:8px;padding:10px 14px">
+      <div style="font-size:10px;color:var(--text-secondary)">المبيعات الفعلية</div>
+      <div style="font-size:17px;font-weight:700;color:#3B6D11;margin-top:3px">${Math.round(totalSales).toLocaleString('ar-EG')} ج</div>
+    </div>
+    <div style="background:var(--surface-2);border:0.5px solid var(--border);border-radius:8px;padding:10px 14px">
+      <div style="font-size:10px;color:var(--text-secondary)">الهدف اليومي الكلي</div>
+      <div style="font-size:17px;font-weight:700;color:#185FA5;margin-top:3px">${totalDaily.toLocaleString('ar-EG')} ج</div>
+    </div>
+    <div style="background:var(--surface-2);border:0.5px solid var(--border);border-radius:8px;padding:10px 14px">
+      <div style="font-size:10px;color:var(--text-secondary)">نسبة التحقيق الكلية</div>
+      <div style="font-size:17px;font-weight:700;color:${totalPct>=80?'#3B6D11':totalPct>=60?'#854F0B':'#A32D2D'};margin-top:3px">${totalPct}%</div>
+    </div>`;
+
+  // كروت المشرفين
+  const cardsEl = document.getElementById('sg-sup-cards');
+  if(cardsEl){
+    let cardsHtml = '';
+    filteredSups.forEach(sup=>{
+      const supReps = reps.filter(r=>r.supervisors===sup.name);
+      const supGoal = supReps.reduce((s,r)=>s+(targets[r.name]?.goal||0),0);
+      const supSales = supReps.reduce((s,r)=>s+(sales[r.name]||0),0);
+      const pct = supGoal>0 ? Math.round(supSales/supGoal*100) : 0;
+      const daily = workDays>0 ? Math.round(supGoal/workDays) : 0;
+      const clr = pct>=80?'#3B6D11':pct>=60?'#854F0B':'#A32D2D';
+      const sts = pct>=80?'<span style="padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;background:#EAF3DE;color:#3B6D11">ممتاز</span>':
+                  pct>=60?'<span style="padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;background:#FAEEDA;color:#854F0B">متوسط</span>':
+                  '<span style="padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;background:#FCEBEB;color:#A32D2D">ضعيف</span>';
+      const sectors = (sup.sector||'').split(',').filter(Boolean).map(g=>SG_GROUPS[g]||g).join(' + ');
+      cardsHtml += `<div style="background:var(--surface-2);border:0.5px solid var(--border);border-radius:10px;overflow:hidden">
+        <div style="background:#3B1F12;padding:8px 12px;display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div style="color:#F2E4DC;font-size:12px;font-weight:700">${sup.name}</div>
+            <div style="color:rgba(242,228,220,.6);font-size:10px">${sectors}</div>
+          </div>${sts}
+        </div>
+        <div style="padding:10px 12px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="font-size:10px;color:var(--text-secondary)">الهدف الشهري</span><span style="font-size:12px;font-weight:700;color:#7A3B1E">${supGoal.toLocaleString('ar-EG')} ج</span></div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:10px;color:var(--text-secondary)">المحقق</span><span style="font-size:12px;font-weight:700;color:${clr}">${Math.round(supSales).toLocaleString('ar-EG')} ج</span></div>
+          <div style="width:100%;height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-bottom:6px">
+            <div style="height:100%;width:${Math.min(pct,100)}%;background:${clr};border-radius:3px"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;border-top:0.5px solid var(--border);padding-top:6px">
+            <span style="font-size:10px;color:var(--text-secondary)">يومي: ${daily.toLocaleString('ar-EG')} ج</span>
+            <span style="font-size:14px;font-weight:700;color:${clr}">${pct}%</span>
+          </div>
+        </div>
+      </div>`;
+    });
+    cardsEl.innerHTML = cardsHtml || '<div style="color:#aaa;font-size:12px">لا يوجد مشرفون في هذه المنطقة</div>';
+  }
+
+  // تفاصيل المناديب
+  const details = document.getElementById('sg-details');
+  if(!details) return;
+  let html = '';
+
+  // مجموعة المشرفين مع مدير
+  const dirRes = supervisors.filter(s=>s.role==='sales_manager'||s.role==='sales_gm');
+  const supsWithDir = new Set();
+
+  dirRes.forEach(dir=>{
+    if(region!=='all'){
+      const sec=(dir.sector||'').split(',').map(x=>x.trim());
+      if(!sec.includes(region)) return;
+    }
+    const dirSups = filteredSups.filter(s=>s.role==='sales_sup'&&(s.sector||'').split(',').some(g=>(dir.sector||'').split(',').includes(g.trim())));
+    if(!dirSups.length) return;
+    html += `<div style="background:var(--surface-2);border:0.5px solid var(--border);border-right:4px solid #3B1F12;border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px">
+      <div style="width:38px;height:38px;border-radius:50%;background:#3B1F12;color:#F2E4DC;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">${dir.name.split(' ').map(w=>w[0]).join('').slice(0,2)}</div>
+      <div style="flex:1"><div style="font-size:13px;font-weight:700;color:var(--text-primary)">${dir.name}</div><div style="font-size:11px;color:var(--text-secondary);margin-top:2px">مدير البيع — ${(dir.sector||'').split(',').filter(Boolean).map(g=>SG_GROUPS[g]||g).join('، ')}</div></div>
+      <span style="padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;background:#3B1F12;color:#F2E4DC">مدير بيع</span>
+    </div>`;
+    dirSups.forEach(sup=>{ supsWithDir.add(sup.id); html += sgRenderSupBlock(sup, reps, targets, sales, workDays); });
+  });
+
+  // مشرفين بدون مدير
+  const supsNoDirList = filteredSups.filter(s=>s.role==='sales_sup'&&!supsWithDir.has(s.id));
+  if(supsNoDirList.length){
+    html += `<div style="background:#1A3A5C;color:#C0D4E8;font-size:11px;font-weight:700;padding:6px 12px;border-radius:6px;margin-bottom:10px">🌊 مشرفون بدون مدير بيع مباشر</div>`;
+    supsNoDirList.forEach(sup=>{ html += sgRenderSupBlock(sup, reps, targets, sales, workDays); });
+  }
+
+  // مناديب بدون مشرف
+  const repsNoSup = reps.filter(r=>{
+    if(!r.supervisors) return true;
+    return !supervisors.some(s=>s.name===r.supervisors);
+  }).filter(r=> region==='all'||(r.grp||r.groups||'').includes(region));
+  if(repsNoSup.length){
+    html += `<div style="background:#3D2E0F;color:#EDE5D8;font-size:11px;font-weight:700;padding:6px 12px;border-radius:6px;margin-bottom:10px">مناديب بدون مشرف مبيعات</div>`;
+    html += sgRenderTable(repsNoSup, targets, sales, workDays);
+  }
+
+  details.innerHTML = html || '<div style="text-align:center;padding:40px;color:#aaa">لا توجد بيانات</div>';
+}
+
+function sgRenderSupBlock(sup, reps, targets, sales, workDays){
+  const supReps = reps.filter(r=>r.supervisors===sup.name);
+  const sectors = (sup.sector||'').split(',').filter(Boolean).map(g=>SG_GROUPS[g]||g).join(' + ');
+  const initials = sup.name.split(' ').map(w=>w[0]).join('').slice(0,2);
+  let html = `<div style="margin-bottom:14px;padding-right:14px;border-right:2px solid #F2E4DC">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <div style="width:30px;height:30px;border-radius:50%;background:#F2E4DC;color:#7A3B1E;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0">${initials}</div>
+      <div><div style="font-size:12px;font-weight:700;color:var(--text-primary)">${sup.name}</div><div style="font-size:10px;color:var(--text-secondary)">مشرف المجموعة — ${sectors}</div></div>
+      <span style="padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;background:#F2E4DC;color:#7A3B1E;margin-right:auto">مشرف بيع</span>
+    </div>`;
+  if(supReps.length) html += sgRenderTable(supReps, targets, sales, workDays);
+  else html += '<div style="font-size:11px;color:#aaa;padding:8px 12px">لا يوجد مناديب مرتبطون</div>';
+  html += '</div>';
+  return html;
+}
+
+function sgRenderTable(repsList, targets, sales, workDays){
+  let rows = '';
+  repsList.forEach((r,i)=>{
+    const tgt = targets[r.name];
+    const goal = tgt?.goal||0;
+    const actual = Math.round(sales[r.name]||0);
+    const pct = goal>0 ? Math.round(actual/goal*100) : 0;
+    const daily = goal>0&&workDays>0 ? Math.round(goal/workDays) : 0;
+    const clr = pct>=80?'#3B6D11':pct>=60?'#854F0B':'#A32D2D';
+    const sts = pct>=80?'<span style="padding:2px 7px;border-radius:20px;font-size:10px;font-weight:700;background:#EAF3DE;color:#3B6D11">ممتاز</span>':
+                pct>=60?'<span style="padding:2px 7px;border-radius:20px;font-size:10px;font-weight:700;background:#FAEEDA;color:#854F0B">متوسط</span>':
+                '<span style="padding:2px 7px;border-radius:20px;font-size:10px;font-weight:700;background:#FCEBEB;color:#A32D2D">ضعيف</span>';
+    rows += `<tr style="border-bottom:0.5px solid var(--border)">
+      <td style="padding:9px 12px;color:var(--text-secondary);font-size:11px">${i+1}</td>
+      <td style="padding:9px 12px;font-weight:600;font-size:12px">${r.name}</td>
+      <td style="padding:9px 12px;font-size:10px;color:var(--text-secondary)">${r.route||r.grp||'—'}</td>
+      <td style="padding:9px 8px"><input type="number" class="sg-goal-inp" data-name="${r.name}" data-id="${r.id}" value="${goal}" min="0" step="1000" onchange="sgUpdateDaily(this,${workDays})" style="width:90px;padding:4px 7px;border:0.5px solid var(--border-strong);border-radius:6px;font-size:12px;font-family:Cairo,sans-serif;text-align:center;background:var(--surface-1);color:var(--text-primary)"/></td>
+      <td style="padding:9px 8px;font-size:11px;font-weight:700;color:#185FA5" id="sg-daily-${r.id}">${daily>0?daily.toLocaleString('ar-EG')+' ج':'—'}</td>
+      <td style="padding:9px 8px;font-weight:700;color:${actual>0?clr:'var(--text-secondary)'}; font-size:12px">${actual>0?actual.toLocaleString('ar-EG')+' ج':'—'}</td>
+      <td style="padding:9px 8px;min-width:100px">
+        <div style="display:flex;align-items:center;gap:5px">
+          <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;min-width:35px"><div style="height:100%;width:${Math.min(pct,100)}%;background:${clr};border-radius:3px"></div></div>
+          <span style="font-size:11px;font-weight:700;color:${clr};min-width:28px">${pct}%</span>
+        </div>
+      </td>
+      <td style="padding:9px 8px">${goal>0?sts:'<span style="color:#aaa;font-size:11px">لم يُحدد</span>'}</td>
+    </tr>`;
+  });
+  return `<div style="background:var(--surface-2);border:0.5px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:4px">
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#3B1F12">
+        <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#F2E4DC">#</th>
+        <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#F2E4DC">المندوب</th>
+        <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#F2E4DC">الخط</th>
+        <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#F2E4DC">الهدف الشهري (ج)</th>
+        <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#F2E4DC">الهدف اليومي</th>
+        <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#F2E4DC">المبيعات</th>
+        <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#F2E4DC">التحقيق</th>
+        <th style="padding:8px 12px;text-align:right;font-size:11px;font-weight:700;color:#F2E4DC">الحالة</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+function sgUpdateDaily(inp, workDays){
+  const val = parseInt(inp.value)||0;
+  const id = inp.dataset.id;
+  const daily = workDays>0&&val>0 ? Math.round(val/workDays) : 0;
+  const el = document.getElementById('sg-daily-'+id);
+  if(el) el.textContent = daily>0 ? daily.toLocaleString('ar-EG')+' ج' : '—';
+  // حدّث الـ targets map
+  const name = inp.dataset.name;
+  if(!_sgData.targets[name]) _sgData.targets[name]={rep_name:name,goal:0};
+  _sgData.targets[name].goal = val;
+}
+
+async function sgSaveAll(){
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=minimal'};
+  const monthSel = document.getElementById('sg-month');
+  const [yr,mo] = monthSel.value.split('-').map(Number);
+  const inputs = document.querySelectorAll('.sg-goal-inp');
+  if(!inputs.length){ showToast('لا توجد بيانات للحفظ'); return; }
+
+  const rows = [];
+  inputs.forEach(inp=>{
+    const name = inp.dataset.name;
+    const repId = parseInt(inp.dataset.id)||null;
+    const goal = parseInt(inp.value)||0;
+    const t = _sgData.targets[name]||{};
+    rows.push({ rep_id:repId, rep_name:name, month:mo, year:yr, goal,
+      supervisor: _sgData.reps.find(r=>r.name===name)?.supervisors||null,
+      director: null });
+  });
+
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_targets`,{method:'POST',headers:H,body:JSON.stringify(rows)});
+    if(res.ok||res.status===201||res.status===204){ showToast('✅ تم حفظ الأهداف'); sgLoad(); }
+    else{ const e=await res.text(); showToast('❌ خطأ: '+e.substring(0,60)); }
+  }catch(e){ showToast('❌ '+e.message); }
+}
+
+function sgExportPDF(){
+  const monthSel = document.getElementById('sg-month');
+  const workDays = parseInt(document.getElementById('sg-wd-val')?.textContent)||26;
+  const { supervisors, reps, targets, sales } = _sgData;
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('ar-EG');
+
+  let totalGoal=0,totalSales=0;
+  reps.forEach(r=>{ totalGoal+=(targets[r.name]?.goal||0); totalSales+=(sales[r.name]||0); });
+  const totalPct = totalGoal>0?Math.round(totalSales/totalGoal*100):0;
+
+  let supSections = '';
+  supervisors.filter(s=>s.role==='sales_sup').forEach(sup=>{
+    const supReps = reps.filter(r=>r.supervisors===sup.name);
+    if(!supReps.length) return;
+    const supGoal = supReps.reduce((s,r)=>s+(targets[r.name]?.goal||0),0);
+    const supSales = supReps.reduce((s,r)=>s+(sales[r.name]||0),0);
+    const supPct = supGoal>0?Math.round(supSales/supGoal*100):0;
+    const sectors = (sup.sector||'').split(',').filter(Boolean).map(g=>SG_GROUPS[g]||g).join(' + ');
+    const rows = supReps.map((r,i)=>{
+      const goal=targets[r.name]?.goal||0;
+      const actual=Math.round(sales[r.name]||0);
+      const pct=goal>0?Math.round(actual/goal*100):0;
+      const daily=goal>0&&workDays>0?Math.round(goal/workDays):0;
+      const clr=pct>=80?'#276749':pct>=60?'#854F0B':'#B91C1C';
+      return `<tr style="${i%2?'background:#FFF8F4':''}">
+        <td style="padding:6px 10px;text-align:center">${i+1}</td>
+        <td style="padding:6px 10px;text-align:right;font-weight:600">${r.name}</td>
+        <td style="padding:6px 10px;text-align:right;font-size:11px;color:#9C7B6A">${r.route||'—'}</td>
+        <td style="padding:6px 10px;text-align:center;font-weight:700">${goal>0?goal.toLocaleString('ar-EG'):'-'}</td>
+        <td style="padding:6px 10px;text-align:center;color:#185FA5">${daily>0?daily.toLocaleString('ar-EG'):'-'}</td>
+        <td style="padding:6px 10px;text-align:center;font-weight:700;color:${clr}">${actual>0?actual.toLocaleString('ar-EG'):'-'}</td>
+        <td style="padding:6px 10px;text-align:center;font-weight:800;color:${clr}">${pct}%</td>
+      </tr>`;
+    }).join('');
+    supSections += `<div style="margin-bottom:20px;page-break-inside:avoid">
+      <div style="background:#3B1F12;color:#F2E4DC;padding:8px 14px;border-radius:8px 8px 0 0;display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:13px;font-weight:700">${sup.name} — ${sectors}</span>
+        <span style="font-size:11px">التحقيق: <b>${supPct}%</b> | هدف: ${supGoal.toLocaleString('ar-EG')} ج</span>
+      </div>
+      <table style="width:100%;border-collapse:collapse;border:1px solid #EDE5D8;font-family:Cairo,Arial,sans-serif;font-size:12px">
+        <thead><tr style="background:#F9F2EC">
+          <th style="padding:7px 10px;border-bottom:1px solid #EDE5D8">#</th>
+          <th style="padding:7px 10px;text-align:right;border-bottom:1px solid #EDE5D8">المندوب</th>
+          <th style="padding:7px 10px;text-align:right;border-bottom:1px solid #EDE5D8">الخط</th>
+          <th style="padding:7px 10px;border-bottom:1px solid #EDE5D8">الهدف الشهري</th>
+          <th style="padding:7px 10px;border-bottom:1px solid #EDE5D8">اليومي</th>
+          <th style="padding:7px 10px;border-bottom:1px solid #EDE5D8">المحقق</th>
+          <th style="padding:7px 10px;border-bottom:1px solid #EDE5D8">%</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  });
+
+  const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8">
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Cairo,Arial,sans-serif;direction:rtl;padding:20px;color:#2C1A10;font-size:12px}@media print{.no-print{display:none}}</style></head>
+  <body>
+  <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #C55B48;padding-bottom:14px;margin-bottom:16px">
+    <div style="font-size:24px;font-weight:900;color:#C55B48;letter-spacing:3px">SRP</div>
+    <div style="text-align:center"><div style="font-size:16px;font-weight:800;color:#3B1F12">تقرير الأهداف الشهرية</div><div style="font-size:11px;color:#9C7B6A;margin-top:2px">${monthSel?.value||''} — أيام العمل: ${workDays} يوم</div></div>
+    <div style="text-align:left;font-size:11px;color:#9C7B6A"><div>التاريخ: ${dateStr}</div></div>
+  </div>
+  <div style="display:flex;gap:16px;background:#FFF8F4;border:1px solid #EDE5D8;border-radius:8px;padding:10px 14px;margin-bottom:16px">
+    <div><div style="font-size:10px;color:#9C7B6A">إجمالي الأهداف</div><div style="font-size:15px;font-weight:800;color:#C55B48">${totalGoal.toLocaleString('ar-EG')} ج</div></div>
+    <div><div style="font-size:10px;color:#9C7B6A">المبيعات الفعلية</div><div style="font-size:15px;font-weight:800;color:#276749">${Math.round(totalSales).toLocaleString('ar-EG')} ج</div></div>
+    <div><div style="font-size:10px;color:#9C7B6A">نسبة التحقيق</div><div style="font-size:15px;font-weight:800;color:${totalPct>=80?'#276749':totalPct>=60?'#854F0B':'#B91C1C'}">${totalPct}%</div></div>
+    <div><div style="font-size:10px;color:#9C7B6A">الهدف اليومي</div><div style="font-size:15px;font-weight:800;color:#185FA5">${workDays>0?Math.round(totalGoal/workDays).toLocaleString('ar-EG'):0} ج</div></div>
+  </div>
+  ${supSections}
+  <button class="no-print" onclick="window.print()" style="margin-top:16px;background:#C55B48;color:white;border:none;border-radius:8px;padding:10px 24px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">🖨️ طباعة</button>
+  </body></html>`;
+
+  const w = window.open('','_blank');
+  w.document.write(html);
+  w.document.close();
+  setTimeout(()=>w.print(),600);
+}
+
 let SUPABASE_URL = localStorage.getItem('sb_url') || 'https://lhyfyaenwsvnzythjowk.supabase.co';
 let SUPABASE_KEY = localStorage.getItem('sb_key') || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxoeWZ5YWVud3N2bnp5dGhqb3drIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIyODIyMzIsImV4cCI6MjA5Nzg1ODIzMn0._wRJBBY12j6NHeFzJ_R_ZDQ4vH0Rxe_1HPT8XtjP-UA';
 
@@ -8548,6 +8977,7 @@ function renderCurrentPanel(){
     case 'export-full': break;
     case 'sales-pricelist': spLoadAll(); break;
     case 'sales-invoices': sinvRefreshAll(); break;
+    case 'sales-goals': sgLoad(); break;
     case 'private-branches': loadPrivateBranches(); break;
     case 'rep-report': rrInit(); break;
     case 'products-report': admRptInit(); break;
@@ -8569,7 +8999,7 @@ function updateBadges(){
 // ══════════════════════════════════════════════════════════════
 // NAV
 // ══════════════════════════════════════════════════════════════
-const PANEL_TITLES={'sup-monitor':'خطط مشرفي التنسيق',dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر','rep-detail':'تفاصيل المنسق',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',returns:'المرتجعات',attendance:'الحضور والانصراف','attendance-export':'كشف الحضور والمرتبات','expiry-alert':'تنبيهات الصلاحية','shelf-expiry':'صلاحيات السوق',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',supervisors:'المشرفون والمديرون','sales-users':'مشرفو المبيعات','rep-users':'مناديب البيع',branches:'الفروع والعملاء',settings:'الإعدادات','products-report':'تقرير الأصناف Excel','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام','sales-dashboard':'Sales Dashboard','sales-invoices':'فواتير المناديب','sales-invoices':'فواتير المناديب',heatmap:'خريطة حرارة الفروع','sales-products':'أصناف المبيعات','sales-returns':'مرتجعات المبيعات','sales-missing':'نواقص المبيعات','products-db':'قاعدة الأصناف'};
+const PANEL_TITLES={'sup-monitor':'خطط مشرفي التنسيق',dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'اللوكيشن المباشر','rep-detail':'تفاصيل المنسق',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',returns:'المرتجعات',attendance:'الحضور والانصراف','attendance-export':'كشف الحضور والمرتبات','expiry-alert':'تنبيهات الصلاحية','shelf-expiry':'صلاحيات السوق',goals:'الأهداف',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',supervisors:'المشرفون والمديرون','sales-users':'مشرفو المبيعات','rep-users':'مناديب البيع',branches:'الفروع والعملاء',settings:'الإعدادات','products-report':'تقرير الأصناف Excel','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام','sales-dashboard':'Sales Dashboard','sales-invoices':'فواتير المناديب','sales-goals':'الأهداف الشهرية',heatmap:'خريطة حرارة الفروع','sales-products':'أصناف المبيعات','sales-returns':'مرتجعات المبيعات','sales-missing':'نواقص المبيعات','products-db':'قاعدة الأصناف'};
 
 // ── Toast notification ────────────────────────────────────────
 function showToast(msg, duration=3000){
