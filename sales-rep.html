@@ -838,7 +838,7 @@ function filterDelBranches(q){
 
 // ══════════════ VISIT ══════════════
 async function openDelVisit(branch){
-  visitState={branch:branch.branch_name,route:branch.route,client:branch.client_name||'',fea:null,cat:null,quantities:{},discounts:{},prices:{}};
+  visitState={branch:branch.branch_name,route:branch.route,client:branch.client_name||'',fea:null,cat:null,quantities:{},discounts:{},prices:{},taxPct:0};
   $('v-branch').textContent=branch.branch_name;
   $('v-client').textContent=branch.client_name||branch.route;
 
@@ -849,30 +849,44 @@ async function openDelVisit(branch){
     }catch(e){}
   }
 
+  // reset UI
+  document.querySelectorAll('#tax-selector .tax-btn').forEach((b,i)=>b.classList.toggle('act',i===0));
   $('cat-section').style.display='none';
   $('prods-section').style.display='none';
   $('sub-bar').classList.remove('on');
+  $('fea-row').innerHTML='';
 
+  // preload pdb + prices
   try{
-    const pdb=await loadPdb();
-    const feas=Object.keys(pdb);
-    const feaRow=$('fea-row');
-    feaRow.innerHTML='';
-    feas.forEach(fea=>{
-      const btn=document.createElement('button');
-      btn.className='fea-btn';btn.textContent=fea;
-      btn.onclick=()=>selectFea(fea,pdb);
-      feaRow.appendChild(btn);
-    });
+    const [pdb, prices] = await Promise.all([loadPdb(), loadSalesPrices()]);
+    visitState._pdb = pdb;
+    visitState._prices = prices;
+    buildFeaButtons(pdb);
   }catch(e){ showToast('تعذّر تحميل الأصناف'); }
 
   showScr('s-visit');
+}
+
+function buildFeaButtons(pdb){
+  const feaRow=$('fea-row');
+  feaRow.innerHTML='';
+  Object.keys(pdb).forEach(fea=>{
+    const btn=document.createElement('button');
+    btn.className='fea-btn';btn.textContent=fea;
+    btn.onclick=()=>selectFea(fea,pdb);
+    feaRow.appendChild(btn);
+  });
 }
 
 function setTax(pct, el){
   visitState.taxPct = pct;
   document.querySelectorAll('#tax-selector .tax-btn').forEach(b=>b.classList.remove('act'));
   el.classList.add('act');
+  // إعادة بناء الأصناف لو في تصنيف مختار
+  if(visitState.cat && visitState.fea && visitState._pdb){
+    const grpData=visitState._pdb[visitState.fea]?.[visitState.cat];
+    if(grpData) selectCat(visitState.cat, grpData);
+  }
 }
 
 function setRetTax(pct, el){
@@ -899,17 +913,34 @@ function selectCat(cat,grpData){
   visitState.cat=cat;
   document.querySelectorAll('#cat-row .chip').forEach(c=>c.classList.toggle('act',c.textContent===cat));
   const disc=visitState.discounts[cat]||0;
+  const taxPct=visitState.taxPct||0;
+  const prices=visitState._prices||{};
   $('disc-info').textContent=disc>0?'خصم '+disc+'% على هذا التصنيف':'';
   const container=$('prods-list');container.innerHTML='';
+
   Object.entries(grpData).forEach(([grp,items])=>{
     if(!items||!items.length) return;
+    // فلتر الأصناف حسب نوع الفاتورة المختارة
+    const filtered=items.filter(item=>{
+      const p=prices[item.name];
+      if(!p) return true; // لو مش موجود في الأسعار خليه يظهر
+      return p.tax_pct === taxPct;
+    });
+    if(!filtered.length) return;
+
     const card=document.createElement('div');card.className='prod-card';card.style.marginBottom='8px';
     let html='<div class="prod-grp-hd">'+grp+'</div>';
-    items.forEach(item=>{
+    filtered.forEach(item=>{
       const qty=visitState.quantities[item.name]||0;
       const key=item.name.replace(/[^a-zA-Z0-9]/g,'_');
+      const p=prices[item.name];
+      const price=p?p.price:0;
+      const priceAfterDisc=disc>0?(price*(1-disc/100)).toFixed(2):price;
+      const priceDisplay=disc>0
+        ?`${priceAfterDisc} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span>`
+        :`${price} ج`;
       html+=`<div class="prod-row">
-        <div class="prod-name">${item.name}</div>
+        <div class="prod-name">${item.name}<br><small style="color:var(--c);font-weight:700">${priceDisplay}</small></div>
         <div class="qty-ctrl">
           <button class="qty-btn" onclick="changeQty('${item.name.replace(/'/g,"\\'")}',-1)">−</button>
           <input type="number" class="qty-inp${qty>0?' has':''}" id="qty-${key}" value="${qty}" min="0"
