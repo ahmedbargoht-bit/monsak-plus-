@@ -378,13 +378,15 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Cairo',sans-serif;
 
 <!-- ════════ RETURN VISIT ════════ -->
 <div id="s-ret-visit" class="scr">
-  <div class="visit-header">
+  <div class="visit-header" style="background:#8B2635">
     <button class="back-btn" onclick="goBack('returns')">◄</button>
     <div class="visit-head-info">
       <div class="visit-head-name" id="rv-branch">—</div>
       <div class="visit-head-sub" id="rv-client">—</div>
+      <div id="rv-discounts" style="font-size:10px;color:#FFB3B3;margin-top:3px;line-height:1.6"></div>
+      <div id="rv-promos" style="font-size:10px;color:#FFD700;margin-top:2px;line-height:1.6"></div>
     </div>
-    <button class="back-btn" onclick="openInvoiceReview('returns')" style="background:rgba(197,91,72,.12);color:var(--c)">📋</button>
+    <button class="back-btn" onclick="openInvoiceReview('returns')" style="background:rgba(255,255,255,.2)">📋</button>
   </div>
   <div class="visit-body" id="ret-visit-body">
     <div>
@@ -394,6 +396,10 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Cairo',sans-serif;
         <div class="tax-btn" onclick="setRetTax(5,this)">ضريبة 5%</div>
         <div class="tax-btn" onclick="setRetTax(14,this)">ضريبة 14%</div>
       </div>
+    </div>
+    <div id="ret-fea-section">
+      <div class="sec-lbl">النوع</div>
+      <div class="fea-row" id="ret-fea-row"></div>
     </div>
     <div id="ret-cat-section" style="display:none">
       <div class="sec-lbl">التصنيف</div>
@@ -409,7 +415,7 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Cairo',sans-serif;
       <div class="sub-items" id="ret-sub-items">0 صنف</div>
       <div class="sub-total" id="ret-sub-total">0.00 ج.م</div>
     </div>
-    <button class="sub-btn" onclick="openInvoiceReview('returns')">📋 مراجعة</button>
+    <button class="sub-btn" style="background:#8B2635" onclick="openInvoiceReview('returns')">📋 مراجعة</button>
   </div>
 </div>
 
@@ -925,12 +931,6 @@ function setTax(pct, el){
   }
 }
 
-function setRetTax(pct, el){
-  returnState.taxPct = pct;
-  document.querySelectorAll('#ret-tax-selector .tax-btn').forEach(b=>b.classList.remove('act'));
-  el.classList.add('act');
-}
-
 function selectFea(fea,pdb){
   visitState.fea=fea;
   document.querySelectorAll('#fea-row .fea-btn').forEach(b=>b.classList.toggle('act',b.textContent===fea));
@@ -1281,24 +1281,36 @@ function filterRetBranches(q){
 }
 
 async function openRetVisit(branch){
-  returnState={branch:branch.branch_name,route:branch.route,client:branch.client_name||'',fea:null,cat:null,quantities:{},discounts:{},prices:{},editIdx:null,items:[]};
+  returnState={branch:branch.branch_name,route:branch.route,client:branch.client_name||'',fea:null,cat:null,quantities:{},discounts:{},prices:{},editIdx:null,items:[],taxPct:0};
   $('rv-branch').textContent=branch.branch_name;
   $('rv-client').textContent=branch.client_name||branch.route;
 
   if(branch.client_name){
     try{
-      const disc=await sbFetch('client_category_discounts','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&select=cat,discount_pct');
+      const [disc, promos] = await Promise.all([
+        sbFetch('client_category_discounts','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&select=cat,discount_pct'),
+        sbFetch('sales_promotions','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&active=eq.true&date_from=lte.'+today()+'&date_to=gte.'+today()+'&select=snf_name,promo_price,date_from,date_to')
+      ]);
       disc.forEach(d=>{returnState.discounts[d.cat]=d.discount_pct||0;});
-    }catch(e){}
+      const discEntries=disc.filter(d=>d.discount_pct>0);
+      $('rv-discounts').innerHTML=discEntries.length?'🎯 '+discEntries.map(d=>`${d.cat} ${d.discount_pct}%`).join(' | '):'';
+      $('rv-promos').innerHTML=(Array.isArray(promos)&&promos.length)?promos.map(p=>`🔖 عرض على ${p.snf_name} — ${p.promo_price} ج (${p.date_from} → ${p.date_to})`).join('<br>'):'';
+    }catch(e){$('rv-discounts').innerHTML='';$('rv-promos').innerHTML='';}
+  } else {
+    $('rv-discounts').innerHTML='';$('rv-promos').innerHTML='';
   }
 
+  document.querySelectorAll('#ret-tax-selector .tax-btn').forEach((b,i)=>b.classList.toggle('act',i===0));
   $('ret-cat-section').style.display='none';
   $('ret-prods-section').style.display='none';
   $('ret-sub-bar').classList.remove('on');
+  $('ret-fea-row').innerHTML='';
 
   try{
-    const pdb=await loadPdb();
-    const feaRow=$('ret-fea-row');feaRow.innerHTML='';
+    const [pdb, prices] = await Promise.all([loadPdb(), loadSalesPrices()]);
+    returnState._pdb=pdb;
+    returnState._prices=prices;
+    const feaRow=$('ret-fea-row');
     Object.keys(pdb).forEach(fea=>{
       const btn=document.createElement('button');btn.className='fea-btn';btn.textContent=fea;
       btn.onclick=()=>selectRetFea(fea,pdb);feaRow.appendChild(btn);
@@ -1308,11 +1320,21 @@ async function openRetVisit(branch){
   showScr('s-ret-visit');
 }
 
+function setRetTax(pct, el){
+  returnState.taxPct=pct;
+  document.querySelectorAll('#ret-tax-selector .tax-btn').forEach(b=>b.classList.remove('act'));
+  el.classList.add('act');
+  if(returnState.cat&&returnState.fea&&returnState._pdb){
+    const grpData=returnState._pdb[returnState.fea]?.[returnState.cat];
+    if(grpData) selectRetCat(returnState.cat,grpData);
+  }
+}
+
 function selectRetFea(fea,pdb){
   returnState.fea=fea;
   document.querySelectorAll('#ret-fea-row .fea-btn').forEach(b=>b.classList.toggle('act',b.textContent===fea));
   const cats=Object.keys(pdb[fea]||{});
-  const catRow=$('ret-cat-row');catRow.innerHTML='';
+  const catRow=$('ret-cat-chips');catRow.innerHTML='';
   cats.forEach(cat=>{
     const chip=document.createElement('div');chip.className='chip';chip.textContent=cat;
     chip.onclick=()=>selectRetCat(cat,pdb[fea][cat]);catRow.appendChild(chip);
@@ -1324,19 +1346,33 @@ function selectRetFea(fea,pdb){
 
 function selectRetCat(cat,grpData){
   returnState.cat=cat;
-  document.querySelectorAll('#ret-cat-row .chip').forEach(c=>c.classList.toggle('act',c.textContent===cat));
+  document.querySelectorAll('#ret-cat-chips .chip').forEach(c=>c.classList.toggle('act',c.textContent===cat));
   const disc=returnState.discounts[cat]||0;
-  $('ret-disc-info').textContent=disc>0?'خصم '+disc+'%':'';
+  const taxPct=returnState.taxPct||0;
+  const prices=returnState._prices||{};
+  $('ret-disc-info').textContent=disc>0?'خصم '+disc+'% على هذا التصنيف':'';
   const container=$('ret-prods-list');container.innerHTML='';
   Object.entries(grpData).forEach(([grp,items])=>{
     if(!items||!items.length) return;
+    const filtered=items.filter(item=>{
+      const p=prices[item.name];
+      if(!p) return true;
+      return p.tax_pct===taxPct;
+    });
+    if(!filtered.length) return;
     const card=document.createElement('div');card.className='prod-card';card.style.marginBottom='8px';
     let html='<div class="prod-grp-hd">'+grp+'</div>';
-    items.forEach(item=>{
+    filtered.forEach(item=>{
       const qty=returnState.quantities[item.name]||0;
       const key=item.name.replace(/[^a-zA-Z0-9]/g,'_');
+      const p=prices[item.name];
+      const price=p?p.price:0;
+      const priceAfterDisc=disc>0?(price*(1-disc/100)).toFixed(2):price;
+      const priceDisplay=disc>0
+        ?`${priceAfterDisc} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span>`
+        :`${price} ج`;
       html+=`<div class="prod-row">
-        <div class="prod-name">${item.name}</div>
+        <div class="prod-name">${item.name}<br><small style="color:#8B2635;font-weight:700">${priceDisplay}</small></div>
         <div class="qty-ctrl">
           <button class="qty-btn" style="background:#F9E8EA;color:#8B2635" onclick="changeRetQty('${item.name.replace(/'/g,"\\'")}',-1)">−</button>
           <input type="number" class="qty-inp${qty>0?' has':''}" id="retqty-${key}" value="${qty}" min="0"
