@@ -486,8 +486,253 @@ function showToast(msg, dur=2500) {
   const t=$('toast'); t.textContent=msg; t.classList.add('on');
   setTimeout(()=>t.classList.remove('on'), dur);
 }
-function fmt(n) { return Number(n||0).toLocaleString('ar-EG',{minimumFractionDigits:2,maximumFractionDigits:2}); }
-function today() { return new Date().toISOString().slice(0,10); }
+function fmt(n) {
+  return Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+
+// حساب الفاتورة الصح:
+// إجمالي قبل خصم = سعر × كمية
+// إجمالي بعد خصم = إجمالي قبل × (1 - خصم%)
+// ضريبة = إجمالي بعد خصم × (ضريبة%)
+// الصافي = إجمالي بعد خصم + ضريبة
+function calcItem(price, qty, discPct, taxPct) {
+  const before = price * qty;
+  const afterDisc = before * (1 - discPct/100);
+  const taxAmt = afterDisc * (taxPct/100);
+  const net = afterDisc + taxAmt;
+  return { before, afterDisc, taxAmt, net };
+}
+
+function buildInvoiceData(mode) {
+  const qtys = mode==='delivery' ? delQtys : retQtys;
+  const taxPct = mode==='delivery' ? delTaxPct : retTaxPct;
+  const branch = mode==='delivery' ? delBranch : retBranch;
+  const items = Object.entries(qtys).filter(([,q])=>q>0);
+
+  const rows = [];
+  let grandBefore=0, grandDisc=0, grandAfterDisc=0, grandTax=0, grandNet=0;
+
+  items.forEach(([snf,q])=>{
+    const p = allPrices.find(x=>x.snf_name===snf);
+    if(!p) return;
+    const cat = p.cat || 'عام';
+    const disc = getDiscountForCat(mode, cat, branch);
+    const c = calcItem(p.price, q, disc, taxPct);
+    grandBefore += c.before;
+    grandDisc += c.before - c.afterDisc;
+    grandAfterDisc += c.afterDisc;
+    grandTax += c.taxAmt;
+    grandNet += c.net;
+    rows.push({snf, q, price:p.price, cat, disc, taxPct, ...c});
+  });
+
+  return { rows, grandBefore, grandDisc, grandAfterDisc, grandTax, grandNet, taxPct, branch };
+}
+
+function openInvoiceReview(mode) {
+  const qtys = mode==='delivery' ? delQtys : retQtys;
+  const items = Object.entries(qtys).filter(([,q])=>q>0);
+  if(!items.length){showToast('لم تختر أي أصناف');return;}
+
+  const branch = mode==='delivery' ? delBranch : retBranch;
+  const scrId = mode==='delivery' ? 's-invoice' : 's-ret-invoice';
+  const branchEl = mode==='delivery' ? 'inv-branch' : 'ri-branch';
+  const clientEl = mode==='delivery' ? 'inv-client' : 'ri-client';
+  const bodyEl = mode==='delivery' ? 'inv-body' : 'ret-inv-body';
+
+  $(branchEl).textContent = branch.branch_name;
+  $(clientEl).textContent = branch.client_name || '—';
+
+  const {rows, grandBefore, grandDisc, grandAfterDisc, grandTax, grandNet, taxPct} = buildInvoiceData(mode);
+
+  // Group by cat
+  const byCat = {};
+  rows.forEach(r => {
+    if(!byCat[r.cat]) byCat[r.cat] = [];
+    byCat[r.cat].push(r);
+  });
+
+  const taxLabel = taxPct===0 ? 'بدون ضريبة' : `ضريبة ${taxPct}%`;
+  const taxTagCls = taxPct===0 ? 'tt0' : taxPct===5 ? 'tt5' : 'tt14';
+
+  let html = '';
+  Object.entries(byCat).forEach(([cat, catRows]) => {
+    const disc = catRows[0].disc;
+    let catBefore = 0, catAfterDisc = 0, catTax = 0, catNet = 0;
+    const rowsHtml = catRows.map(r => {
+      catBefore += r.before; catAfterDisc += r.afterDisc;
+      catTax += r.taxAmt; catNet += r.net;
+      return `<div class="inv-row">
+        <div class="ir-n">${r.snf}</div>
+        <div class="ir-q">${r.q}</div>
+        <div class="ir-p">${fmt(r.price)}</div>
+        <div class="ir-t">${fmt(r.net)}</div>
+      </div>`;
+    }).join('');
+
+    html += `<div class="inv-sec">
+      <div class="inv-sec-hd">
+        <span>${cat}</span>
+        <span class="tax-tag ${taxTagCls}">${taxLabel}</span>
+      </div>
+      <div class="inv-th">
+        <span class="th-n">الصنف</span>
+        <span class="th-q">كمية</span>
+        <span class="th-p">السعر</span>
+        <span class="th-t">الإجمالي</span>
+      </div>
+      ${rowsHtml}
+      ${disc>0 ? `<div class="inv-sub"><span class="l">إجمالي قبل الخصم</span><span class="v">${fmt(catBefore)} ج.م</span></div>
+      <div class="inv-sub"><span class="l">خصم ${disc}%</span><span class="v">− ${fmt(catBefore-catAfterDisc)} ج.م</span></div>
+      <div class="inv-sub"><span class="l">بعد الخصم</span><span class="v">${fmt(catAfterDisc)} ج.م</span></div>` : ''}
+      ${catTax>0 ? `<div class="inv-sub"><span class="l">ضريبة ${taxPct}%</span><span class="v">${fmt(catTax)} ج.م</span></div>` : ''}
+    </div>`;
+  });
+
+  html += `<div class="inv-total-box">
+    <div class="itr"><span>الإجمالي قبل الخصم</span><span>${fmt(grandBefore)} ج.م</span></div>
+    ${grandDisc>0 ? `<div class="itr"><span>خصم العميل</span><span>− ${fmt(grandDisc)} ج.م</span></div>
+    <div class="itr"><span>بعد الخصم</span><span>${fmt(grandAfterDisc)} ج.م</span></div>` : ''}
+    ${grandTax>0 ? `<div class="itr"><span>ضريبة ${taxPct}%</span><span>${fmt(grandTax)} ج.م</span></div>` : ''}
+    <div class="itr fin"><span>الإجمالي النهائي</span><span>${fmt(grandNet)} ج.م</span></div>
+  </div>`;
+
+  $(bodyEl).innerHTML = html;
+  showScr(scrId);
+}
+
+async function sendInvoice(mode) {
+  const branch = mode==='delivery' ? delBranch : retBranch;
+  const taxPct = mode==='delivery' ? delTaxPct : retTaxPct;
+  const btn = mode==='delivery' ? document.querySelector('#s-invoice .btn-send') : document.querySelector('#s-ret-invoice .btn-send');
+
+  btn.disabled=true; btn.textContent='جاري الإرسال...';
+  try {
+    const {rows, grandBefore, grandDisc, grandAfterDisc, grandTax, grandNet} = buildInvoiceData(mode);
+
+    const items = rows.map(r=>({
+      snf: r.snf,
+      qty: r.q,
+      price: r.price,
+      discount_pct: r.disc,
+      price_after_discount: r.afterDisc/r.q,
+      tax_pct: taxPct,
+      tax_amount: r.taxAmt,
+      total: r.net
+    }));
+
+    const payload = {
+      rep_name: currentRep.name,
+      branch_name: branch.branch_name,
+      client_name: branch.client_name||'',
+      grp: branch.grp||'',
+      route: branch.route||'',
+      items,
+      invoice_type: taxPct===0?'no_tax':taxPct===5?'tax_5':'tax_14',
+      discount_pct: branch.discount_pct||0,
+      total_before_discount: grandBefore,
+      total_after_discount: grandAfterDisc,
+      total_tax: grandTax,
+      total_net: grandNet,
+      status: 'sent'
+    };
+
+    const table = mode==='delivery' ? 'sales_deliveries' : 'sales_returns';
+    if(mode==='returns') payload.return_date = today();
+    else payload.delivery_date = today();
+
+    const res = await sbPost(table, payload);
+    if(res.error) throw new Error(res.error.message);
+
+    showToast(mode==='delivery' ? '✅ تم إرسال الفاتورة' : '✅ تم إرسال المرتجع');
+    if(mode==='delivery'){delQtys={};delBranch=null;switchTab('delivery');}
+    else{retQtys={};retBranch=null;switchTab('returns');}
+  } catch(e) {
+    showToast('❌ خطأ: '+e.message, 3000);
+    btn.disabled=false;
+    btn.textContent = mode==='delivery' ? '📤 إرسال الفاتورة' : '📤 إرسال المرتجع';
+  }
+}
+
+function exportPDF(mode) {
+  const branch = mode==='delivery' ? delBranch : retBranch;
+  const taxPct = mode==='delivery' ? delTaxPct : retTaxPct;
+  const {rows, grandBefore, grandDisc, grandAfterDisc, grandTax, grandNet} = buildInvoiceData(mode);
+  const isReturn = mode==='returns';
+  const taxLabel = taxPct===0?'بدون ضريبة':taxPct===5?'خاضعة للضريبة 5%':'خاضعة للضريبة 14%';
+  const dateStr = today();
+
+  // Group by cat
+  const byCat = {};
+  rows.forEach(r=>{ if(!byCat[r.cat]) byCat[r.cat]=[]; byCat[r.cat].push(r); });
+
+  let tableRows = '';
+  let counter = 1;
+  rows.forEach(r => {
+    tableRows += `<tr>
+      <td>${counter++}</td>
+      <td style="text-align:right">${r.snf}</td>
+      <td>${r.q}</td>
+      <td>${fmt(r.price)}</td>
+      <td>${r.disc>0?r.disc+'%':'—'}</td>
+      <td>${fmt(r.afterDisc/r.q)}</td>
+      <td>${fmt(r.net)}</td>
+    </tr>`;
+  });
+
+  const html = `<!DOCTYPE html><html lang="ar" dir="rtl">
+<head><meta charset="UTF-8">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:Arial,sans-serif;direction:rtl;padding:24px;font-size:12px;color:#2C1A10}
+  .logo{font-size:28px;font-weight:900;color:#C55B48;letter-spacing:4px;margin-bottom:4px}
+  .title{font-size:16px;font-weight:700;color:#2C1A10;margin-bottom:16px}
+  .info-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;background:#F5EFE6;border-radius:8px;padding:12px;margin-bottom:16px}
+  .info-item .lbl{font-size:10px;color:#9C7B6A;margin-bottom:2px}
+  .info-item .val{font-size:13px;font-weight:700;color:#2C1A10}
+  table{width:100%;border-collapse:collapse;margin-bottom:12px}
+  th{background:#C55B48;color:#fff;padding:8px 10px;text-align:center;font-size:11px}
+  th:first-child,td:first-child{width:30px}
+  th:nth-child(2),td:nth-child(2){text-align:right;width:35%}
+  td{padding:7px 10px;text-align:center;border-bottom:0.5px solid #EDE5D8;font-size:11px}
+  tr:nth-child(even) td{background:#faf8f4}
+  .totals{background:#F5EFE6;border-radius:8px;padding:12px;margin-top:8px}
+  .tot-row{display:flex;justify-content:space-between;padding:4px 0;font-size:12px;border-bottom:0.5px solid #DDD0BC}
+  .tot-row:last-child{border:none;font-size:14px;font-weight:700;color:#C55B48;padding-top:8px;margin-top:4px}
+  .footer{text-align:center;font-size:10px;color:#9C7B6A;margin-top:16px;border-top:0.5px solid #DDD0BC;padding-top:8px}
+  @media print{body{padding:12px}}
+</style>
+</head>
+<body>
+<div class="logo">SRP</div>
+<div class="title">${isReturn?'فاتورة مرتجع':'فاتورة توريد'} — أصناف ${taxLabel}</div>
+<div class="info-grid">
+  <div class="info-item"><div class="lbl">اسم العميل</div><div class="val">${branch.client_name||'—'}</div></div>
+  <div class="info-item"><div class="lbl">الفرع</div><div class="val">${branch.branch_name}</div></div>
+  <div class="info-item"><div class="lbl">المندوب</div><div class="val">${currentRep.name}</div></div>
+  <div class="info-item"><div class="lbl">التاريخ</div><div class="val">${dateStr}</div></div>
+  ${branch.discount_pct>0?`<div class="info-item"><div class="lbl">خصم العميل</div><div class="val">${branch.discount_pct}%</div></div>`:''}
+  <div class="info-item"><div class="lbl">نوع الفاتورة</div><div class="val">${taxLabel}</div></div>
+</div>
+<table>
+  <thead><tr><th>#</th><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الخصم</th><th>السعر بعد الخصم</th><th>الإجمالي</th></tr></thead>
+  <tbody>${tableRows}</tbody>
+</table>
+<div class="totals">
+  <div class="tot-row"><span>الإجمالي قبل الخصم</span><span>${fmt(grandBefore)} ج.م</span></div>
+  ${grandDisc>0?`<div class="tot-row"><span>خصم العميل</span><span>− ${fmt(grandDisc)} ج.م</span></div>
+  <div class="tot-row"><span>بعد الخصم</span><span>${fmt(grandAfterDisc)} ج.م</span></div>`:''}
+  ${grandTax>0?`<div class="tot-row"><span>ضريبة ${taxPct}%</span><span>${fmt(grandTax)} ج.م</span></div>`:''}
+  <div class="tot-row"><span>الإجمالي النهائي</span><span>${fmt(grandNet)} ج.م</span></div>
+</div>
+<div class="footer">الطحان جولدن داتس — SRP v1.0 — ${dateStr}</div>
+<script>window.onload=()=>window.print();<\/script>
+</body></html>`;
+
+  const w = window.open('','_blank');
+  w.document.write(html);
+  w.document.close();
+}
 function greeting() {
   const h=new Date().getHours();
   if(h<12) return 'صباح الخير 👋';
@@ -893,143 +1138,6 @@ function getDiscountForCat(mode,cat,branch){
 }
 
 // ══════════════ INVOICE REVIEW ══════════════
-function openInvoiceReview(mode) {
-  const qtys=mode==='delivery'?delQtys:retQtys;
-  const taxPct=mode==='delivery'?delTaxPct:retTaxPct;
-  const branch=mode==='delivery'?delBranch:retBranch;
-  const items=Object.entries(qtys).filter(([,q])=>q>0);
-
-  if(!items.length){showToast('لم تختر أي أصناف');return;}
-
-  const scrId=mode==='delivery'?'s-invoice':'s-ret-invoice';
-  const branchEl=mode==='delivery'?'inv-branch':'ri-branch';
-  const clientEl=mode==='delivery'?'inv-client':'ri-client';
-  const bodyEl=mode==='delivery'?'inv-body':'ret-inv-body';
-
-  $(branchEl).textContent=branch.branch_name;
-  $(clientEl).textContent=branch.client_name||'—';
-
-  // Group by cat
-  const byCat={};
-  items.forEach(([snf,q])=>{
-    const p=allPrices.find(x=>x.snf_name===snf);
-    if(!p) return;
-    const cat=p.cat||'عام';
-    if(!byCat[cat]) byCat[cat]=[];
-    byCat[cat].push({snf,q,price:p.price,taxPct:p.tax_pct});
-  });
-
-  let html='';
-  let grandBefore=0,grandDisc=0,grandTax=0,grandNet=0;
-
-  Object.entries(byCat).forEach(([cat,rows])=>{
-    const disc=getDiscountForCat(mode,cat,branch);
-    const taxTag=taxPct===0?'<span class="tax-tag tt0">بدون ضريبة</span>':taxPct===5?'<span class="tax-tag tt5">5%</span>':'<span class="tax-tag tt14">14%</span>';
-    let catBefore=0,catNet=0;
-
-    const rowsHtml=rows.map(r=>{
-      const pAfter=r.price*(1-disc/100);
-      const tax=pAfter*(taxPct/100);
-      const net=r.q*(pAfter+tax);
-      catBefore+=r.q*r.price;
-      catNet+=net;
-      grandBefore+=r.q*r.price;
-      grandDisc+=r.q*r.price*disc/100;
-      grandTax+=r.q*pAfter*(taxPct/100);
-      grandNet+=net;
-      return `<div class="inv-row">
-        <div class="ir-n">${r.snf}</div>
-        <div class="ir-q">${r.q}</div>
-        <div class="ir-p">${fmt(r.price)}</div>
-        <div class="ir-t">${fmt(net)}</div>
-        <div class="ir-e" onclick="editItem('${mode}','${r.snf}',this)">✏️</div>
-      </div>`;
-    }).join('');
-
-    html+=`<div class="inv-sec">
-      <div class="inv-sec-hd"><span>${cat}</span>${taxTag}</div>
-      <div class="inv-th">
-        <span class="th-n">الصنف</span>
-        <span class="th-q">الكمية</span>
-        <span class="th-p">السعر</span>
-        <span class="th-t">الإجمالي</span>
-        <span class="th-e"></span>
-      </div>
-      ${rowsHtml}
-      ${disc>0?`<div class="inv-sub"><span class="l">خصم ${disc}%</span><span class="v">${fmt(catBefore*disc/100)} ج.م</span></div>`:''}
-    </div>`;
-  });
-
-  html+=`<div class="inv-total-box">
-    <div class="itr"><span>قبل الخصم</span><span>${fmt(grandBefore)} ج.م</span></div>
-    ${grandDisc>0?`<div class="itr"><span>الخصم</span><span>− ${fmt(grandDisc)} ج.م</span></div>`:''}
-    ${grandTax>0?`<div class="itr"><span>الضريبة ${taxPct}%</span><span>${fmt(grandTax)} ج.م</span></div>`:''}
-    <div class="itr fin"><span>الإجمالي النهائي</span><span>${fmt(grandNet)} ج.م</span></div>
-  </div>`;
-
-  $(bodyEl).innerHTML=html;
-  showScr(scrId);
-}
-
-function editItem(mode,snf,el){/* TODO: inline edit */showToast('قريباً');}
-
-async function sendInvoice(mode) {
-  const qtys=mode==='delivery'?delQtys:retQtys;
-  const taxPct=mode==='delivery'?delTaxPct:retTaxPct;
-  const branch=mode==='delivery'?delBranch:retBranch;
-  const btn=mode==='delivery'?document.querySelector('#s-invoice .btn-send'):document.querySelector('#s-ret-invoice .btn-send');
-
-  btn.disabled=true; btn.textContent='جاري الإرسال...';
-  try {
-    const items=[];
-    let before=0,disc=0,tax=0,net=0;
-    Object.entries(qtys).filter(([,q])=>q>0).forEach(([snf,q])=>{
-      const p=allPrices.find(x=>x.snf_name===snf);
-      if(!p) return;
-      const cat=p.cat||'عام';
-      const d=getDiscountForCat(mode,cat,branch);
-      const pAfter=p.price*(1-d/100);
-      const taxAmt=pAfter*(taxPct/100);
-      const itemNet=q*(pAfter+taxAmt);
-      before+=q*p.price; disc+=q*p.price*d/100;
-      tax+=q*pAfter*(taxPct/100); net+=itemNet;
-      items.push({snf,qty:q,price:p.price,discount_pct:d,price_after_discount:pAfter,tax_pct:taxPct,tax_amount:taxAmt,total:itemNet});
-    });
-
-    const payload={
-      rep_name:currentRep.name,
-      branch_name:branch.branch_name,
-      client_name:branch.client_name||'',
-      grp:branch.grp||'',
-      route:branch.route||'',
-      items,
-      invoice_type:taxPct===0?'no_tax':taxPct===5?'tax_5':'tax_14',
-      discount_pct:branch.discount_pct||0,
-      total_before_discount:before,
-      total_after_discount:before-disc,
-      total_tax:tax,
-      total_net:net,
-      status:'sent'
-    };
-
-    const table=mode==='delivery'?'sales_deliveries':'sales_returns';
-    if(mode==='returns'){payload.return_date=today();}
-    else{payload.delivery_date=today();}
-
-    const res=await sbPost(table,payload);
-    if(res.error) throw new Error(res.error.message);
-
-    showToast(mode==='delivery'?'✅ تم إرسال الفاتورة':'✅ تم إرسال المرتجع');
-    if(mode==='delivery'){delQtys={};delBranch=null;switchTab('delivery');}
-    else{retQtys={};retBranch=null;switchTab('returns');}
-  } catch(e){
-    showToast('❌ خطأ: '+e.message,3000);
-    btn.disabled=false; btn.textContent=mode==='delivery'?'📤 إرسال الفاتورة':'📤 إرسال المرتجع';
-  }
-}
-
-function exportPDF(mode){showToast('قريباً — PDF');}
-
 function goBack(to){
   const map={delivery:'s-delivery',returns:'s-returns',visit:'s-visit','ret-visit':'s-ret-visit'};
   if(map[to]) showScr(map[to]);
