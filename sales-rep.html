@@ -669,7 +669,8 @@ let currentRep = null;
 let pdbData = null;
 let _salesPricesCache = null;
 let _clientDiscCache = null;
-let _branchSpecialPLCache = null; // قوائم الأسعار الاستثنائية
+let _branchSpecialPLCache = null; // قوائم الأسعار الاستثنائية (خصم % على الفروع)
+let _clientPLCache = null;        // قوائم الأسعار الخاصة بالعملاء (أسعار محددة لكل صنف)
 let _branchClientCache = null;
 let _clientPromoCache = null;
 
@@ -809,7 +810,7 @@ async function doLogin(){
 
 function doLogout(){
   currentRep=null; pdbData=null; _salesPricesCache=null;
-  _clientDiscCache=null; _branchClientCache=null; _clientPromoCache=null; _branchSpecialPLCache=null;
+  _clientDiscCache=null; _branchClientCache=null; _clientPromoCache=null; _branchSpecialPLCache=null; _clientPLCache=null;
   visitState={branch:'',route:'',client:'',fea:null,cat:null,quantities:{},discounts:{},prices:{}};
   returnState={branch:'',route:'',client:'',fea:null,cat:null,quantities:{},discounts:{},prices:{},editIdx:null,items:[]};
   invoiceState={branch:'',client:'',route:'',discounts:{},prices:{},items:[],editIdx:null};
@@ -966,6 +967,23 @@ async function loadBranchSpecialPL(){
 function getSpecialDiscForBranch(branchName){
   if(!_branchSpecialPLCache) return null;
   return _branchSpecialPLCache[branchName]||null;
+}
+
+// ── قوائم الأسعار الخاصة بالعملاء ──
+async function loadClientPL(){
+  if(_clientPLCache) return _clientPLCache;
+  try{
+    const rows=await sbFetch('products_db','?key=eq.client_pricelists&select=value');
+    const list=rows.length?JSON.parse(rows[0].value||'[]'):[];
+    _clientPLCache={};
+    list.filter(pl=>pl.active).forEach(pl=>{
+      (pl.clients||[]).forEach(c=>{
+        if(!_clientPLCache[c]) _clientPLCache[c]={};
+        (pl.products||[]).forEach(p=>{ _clientPLCache[c][p.name]=p.price; });
+      });
+    });
+  }catch(e){ _clientPLCache={}; }
+  return _clientPLCache;
 }
 
 
@@ -1536,6 +1554,17 @@ async function openDelVisit(branch){
     $('v-promos').innerHTML = '';
   }
 
+  // ── قائمة أسعار خاصة بالعميل (أسعار محددة لكل صنف) ──
+  if(branch.client_name){
+    const clientPLMap = await loadClientPL();
+    const myPL = clientPLMap[branch.client_name];
+    if(myPL && Object.keys(myPL).length){
+      visitState.clientPL = myPL;
+      const badge=`<span style="background:#E8F5E9;color:#2E7D32;padding:2px 8px;border-radius:10px;font-weight:700;font-size:11px;display:inline-block;margin-top:3px">💲 أسعار خاصة مطبّقة (${Object.keys(myPL).length} صنف)</span>`;
+      $('v-discounts').innerHTML=($('v-discounts').innerHTML?$('v-discounts').innerHTML+'<br>':'')+badge;
+    } else { visitState.clientPL=null; }
+  } else { visitState.clientPL=null; }
+
   // reset UI كامل
   document.querySelectorAll('#tax-selector .tax-btn').forEach((b,i)=>b.classList.toggle('act',i===0));
   $('cat-section').style.display='none';
@@ -1620,10 +1649,12 @@ function selectCat(cat,grpData){
       const key=item.name.replace(/[^a-zA-Z0-9]/g,'_');
       const p=prices[item.name];
       const price=p?p.price:0;
-      const priceAfterDisc=disc>0?(price*(1-disc/100)).toFixed(2):price;
-      const priceDisplay=disc>0
-        ?`${priceAfterDisc} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span>`
-        :`${price} ج`;
+      const clientSpecialPrice=(visitState.clientPL&&visitState.clientPL[item.name]!==undefined)?visitState.clientPL[item.name]:null;
+      const effectiveDisc=clientSpecialPrice!==null?0:disc;
+      const priceAfterDisc=clientSpecialPrice!==null?clientSpecialPrice:(effectiveDisc>0?(price*(1-effectiveDisc/100)).toFixed(2):price);
+      const priceDisplay=clientSpecialPrice!==null
+        ?`<span style="color:#2E7D32;font-weight:800">${clientSpecialPrice} ج</span> <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span> <span style="font-size:9px;background:#E8F5E9;color:#2E7D32;padding:1px 5px;border-radius:6px">💲خاص</span>`
+        :(effectiveDisc>0?`${priceAfterDisc} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span>`:`${price} ج`);
       html+=`<div class="prod-row">
         <div class="prod-name">${item.name}<br><small style="color:var(--c);font-weight:700">${priceDisplay}</small></div>
         <div class="qty-ctrl">
@@ -1695,10 +1726,14 @@ async function openInvoiceReview(mode){
   invoiceState.editIdx=null;
 
   const prices=await loadSalesPrices();
+  const clientPLPrices=state.clientPL||{};
   invoiceState.items=[];
   Object.entries(state.quantities).filter(([k,v])=>v>0).forEach(([name,qty])=>{
     const p=prices[name]||{price:0,tax_pct:0};
-    invoiceState.items.push({name,qty,price:p.price,tax_pct:p.tax_pct,total:p.price*qty});
+    const clientSpecial=clientPLPrices[name];
+    const finalPrice=clientSpecial!==undefined?clientSpecial:p.price;
+    const isClientPL=clientSpecial!==undefined;
+    invoiceState.items.push({name,qty,price:finalPrice,tax_pct:p.tax_pct,total:finalPrice*qty,isClientPL});
   });
 
   $(isReturn?'ri-branch':'inv-branch').textContent=state.branch;
@@ -1716,6 +1751,7 @@ function renderInvoice(){
   if(!items.length){body.innerHTML='<div class="empty">لا توجد أصناف</div>';return;}
 
   const disc=getDiscount(items[0].name);
+  const hasClientPL=items.some(i=>i.isClientPL);
   const groups=[
     {label:'أصناف بدون ضريبة',tax:0,cls:'tt0',items:[]},
     {label:'أصناف خاضعة لضريبة 14%',tax:14,cls:'tt14',items:[]},
@@ -1726,18 +1762,26 @@ function renderInvoice(){
   let html='';let grandBefore=0,grandDisc=0,grandTax=0,grandTotal=0;
 
   groups.filter(g=>g.items.length).forEach(g=>{
-    const sub=g.items.reduce((s,i)=>s+i.total,0);
-    const dA=sub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
+    // الأصناف العادية تأخذ الخصم، الأصناف ذات السعر الخاص لا تأخذ خصماً إضافياً
+    const regularSub=g.items.filter(i=>!i.isClientPL).reduce((s,i)=>s+i.total,0);
+    const clientPLSub=g.items.filter(i=>i.isClientPL).reduce((s,i)=>s+i.total,0);
+    const sub=regularSub+clientPLSub;
+    const dA=regularSub*disc/100;
+    const after=(regularSub-dA)+clientPLSub;
+    const taxA=after*g.tax/100;const net=after+taxA;
     grandBefore+=sub;grandDisc+=dA;grandTax+=taxA;grandTotal+=net;
 
     html+=`<div class="inv-sec">
       <div class="inv-sec-hd"><span>${g.label}</span><span class="tax-tag ${g.cls}">${g.tax===0?'بدون ضريبة':g.tax+'%'}</span></div>
       <div class="inv-th"><span class="in">الصنف</span><span class="iq">عدد</span><span class="ip">سعر</span><span class="iv">إجمالي</span><span class="ie"></span></div>`;
 
-    g.items.forEach((item,idx)=>{
+    g.items.forEach((item)=>{
       const gIdx=items.indexOf(item);
       const isEditing=invoiceState.editIdx===gIdx;
-      html+=`<div class="irow"><div class="irn">${item.name}</div><div class="irq">${item.qty}</div><div class="irp">${item.price} ج</div><div class="irv">${item.total.toLocaleString('en-US')} ج</div><button class="ire" onclick="toggleEditItem(${gIdx})">${isEditing?'✕':'✏️'}</button></div>`;
+      const priceLabel=item.isClientPL
+        ?`<span style="color:#2E7D32;font-weight:700">${item.price} ج 💲</span>`
+        :`${item.price} ج`;
+      html+=`<div class="irow"><div class="irn">${item.name}</div><div class="irq">${item.qty}</div><div class="irp">${priceLabel}</div><div class="irv">${item.total.toLocaleString('en-US')} ج</div><button class="ire" onclick="toggleEditItem(${gIdx})">${isEditing?'✕':'✏️'}</button></div>`;
       if(isEditing) html+=editModal(gIdx,item,'inv');
     });
 
@@ -1746,7 +1790,8 @@ function renderInvoice(){
 
   html+=`<div class="igt">
     <div class="igr"><span>الإجمالي قبل الخصم</span><span>${grandBefore.toLocaleString('en-US')} ج</span></div>
-    <div class="igr"><span>خصم العميل ${disc}%</span><span>− ${grandDisc.toFixed(2)} ج</span></div>
+    ${disc>0?`<div class="igr"><span>خصم العميل ${disc}%</span><span>− ${grandDisc.toFixed(2)} ج</span></div>`:''}
+    ${hasClientPL?`<div class="igr"><span style="color:#2E7D32">💲 أسعار خاصة مطبّقة</span><span style="color:#2E7D32">✔</span></div>`:''}
     ${grandTax>0?`<div class="igr"><span>ضريبة</span><span>+ ${grandTax.toFixed(2)} ج</span></div>`:''}
     <div class="igr fin"><span>الإجمالي النهائي</span><span>${grandTotal.toFixed(2)} ج</span></div>
   </div>`;
@@ -1974,6 +2019,17 @@ async function openRetVisit(branch){
     if(!specialPL) $('rv-discounts').innerHTML='';
     $('rv-promos').innerHTML='';
   }
+
+  // ── قائمة أسعار خاصة بالعميل ──
+  if(branch.client_name){
+    const clientPLMap=await loadClientPL();
+    const myPL=clientPLMap[branch.client_name];
+    if(myPL&&Object.keys(myPL).length){
+      returnState.clientPL=myPL;
+      const badge=`<span style="background:#E8F5E9;color:#2E7D32;padding:2px 8px;border-radius:10px;font-weight:700;font-size:11px;display:inline-block;margin-top:3px">💲 أسعار خاصة مطبّقة (${Object.keys(myPL).length} صنف)</span>`;
+      $('rv-discounts').innerHTML=($('rv-discounts').innerHTML?$('rv-discounts').innerHTML+'<br>':'')+badge;
+    } else { returnState.clientPL=null; }
+  } else { returnState.clientPL=null; }
 
   document.querySelectorAll('#ret-tax-selector .tax-btn').forEach((b,i)=>b.classList.toggle('act',i===0));
   $('ret-cat-section').style.display='none';
