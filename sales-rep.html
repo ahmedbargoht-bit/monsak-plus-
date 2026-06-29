@@ -669,6 +669,7 @@ let currentRep = null;
 let pdbData = null;
 let _salesPricesCache = null;
 let _clientDiscCache = null;
+let _branchSpecialPLCache = null; // قوائم الأسعار الاستثنائية
 let _branchClientCache = null;
 let _clientPromoCache = null;
 
@@ -768,7 +769,7 @@ async function doLogin(){
 
 function doLogout(){
   currentRep=null; pdbData=null; _salesPricesCache=null;
-  _clientDiscCache=null; _branchClientCache=null; _clientPromoCache=null;
+  _clientDiscCache=null; _branchClientCache=null; _clientPromoCache=null; _branchSpecialPLCache=null;
   visitState={branch:'',route:'',client:'',fea:null,cat:null,quantities:{},discounts:{},prices:{}};
   returnState={branch:'',route:'',client:'',fea:null,cat:null,quantities:{},discounts:{},prices:{},editIdx:null,items:[]};
   invoiceState={branch:'',client:'',route:'',discounts:{},prices:{},items:[],editIdx:null};
@@ -905,6 +906,26 @@ async function loadSalesPrices(){
     rows.forEach(r=>{ _salesPricesCache[r.snf_name]={price:r.price||0,tax_pct:r.tax_pct||0}; });
   }catch(e){ _salesPricesCache={}; }
   return _salesPricesCache;
+}
+
+// ── قوائم الأسعار الاستثنائية ──────────────────────────────
+async function loadBranchSpecialPL(){
+  if(_branchSpecialPLCache) return _branchSpecialPLCache;
+  try{
+    const rows = await sbFetch('products_db','?key=eq.branch_pricelists&select=value');
+    const list = rows.length ? JSON.parse(rows[0].value||'[]') : [];
+    // بناء map: branch_name → discount_pct (للقوائم النشطة فقط)
+    _branchSpecialPLCache = {};
+    list.filter(pl=>pl.active).forEach(pl=>{
+      (pl.branches||[]).forEach(b=>{ _branchSpecialPLCache[b] = {discount_pct: pl.discount_pct, name: pl.name}; });
+    });
+  }catch(e){ _branchSpecialPLCache={}; }
+  return _branchSpecialPLCache;
+}
+
+function getSpecialDiscForBranch(branchName){
+  if(!_branchSpecialPLCache) return null;
+  return _branchSpecialPLCache[branchName]||null;
 }
 
 
@@ -1422,9 +1443,17 @@ function filterDelBranches(q){
 
 // ══════════════ VISIT ══════════════
 async function openDelVisit(branch){
-  visitState={branch:branch.branch_name,route:branch.route,client:branch.client_name||'',fea:null,cat:null,quantities:{},discounts:{},prices:{},taxPct:0};
+  visitState={branch:branch.branch_name,route:branch.route,client:branch.client_name||'',fea:null,cat:null,quantities:{},discounts:{},prices:{},taxPct:0,specialDisc:0};
   $('v-branch').textContent=branch.branch_name;
   $('v-client').textContent=branch.client_name||branch.route;
+
+  // تحميل القوائم الاستثنائية لو لم تُحمّل
+  await loadBranchSpecialPL();
+  const specialPL = getSpecialDiscForBranch(branch.branch_name);
+  if(specialPL){
+    visitState.specialDisc = specialPL.discount_pct;
+    $('v-discounts').innerHTML = `<span style="background:#FFF3CD;color:#856404;padding:2px 8px;border-radius:10px;font-weight:700;font-size:11px">⭐ ${specialPL.name} — خصم ${specialPL.discount_pct}% على كل الأصناف</span>`;
+  }
 
   if(branch.client_name){
     try{
@@ -1436,10 +1465,12 @@ async function openDelVisit(branch){
       // خصومات التصنيفات
       disc.forEach(d=>{visitState.discounts[d.cat]=d.discount_pct||0;});
       const discEntries = disc.filter(d=>d.discount_pct>0);
-      if(discEntries.length){
-        $('v-discounts').innerHTML = '🎯 ' + discEntries.map(d=>`${d.cat} ${d.discount_pct}%`).join(' | ');
-      } else {
-        $('v-discounts').innerHTML = '';
+      if(!specialPL){
+        if(discEntries.length){
+          $('v-discounts').innerHTML = '🎯 ' + discEntries.map(d=>`${d.cat} ${d.discount_pct}%`).join(' | ');
+        } else {
+          $('v-discounts').innerHTML = '';
+        }
       }
 
       // عروض الأسعار الثابتة
@@ -1452,7 +1483,7 @@ async function openDelVisit(branch){
       }
     }catch(e){}
   } else {
-    $('v-discounts').innerHTML = '';
+    if(!specialPL) $('v-discounts').innerHTML = '';
     $('v-promos').innerHTML = '';
   }
 
@@ -1516,7 +1547,8 @@ function selectFea(fea,pdb){
 function selectCat(cat,grpData){
   visitState.cat=cat;
   document.querySelectorAll('#cat-chips .chip').forEach(c=>c.classList.toggle('act',c.textContent===cat));
-  const disc=visitState.discounts[cat]||0;
+  const catDisc = visitState.discounts[cat]||0;
+  const disc = Math.max(catDisc, visitState.specialDisc||0); // الخصم الاستثنائي يطغى إن كان أكبر
   const taxPct=visitState.taxPct||0;
   const prices=visitState._prices||{};
   $('disc-info').textContent=disc>0?'خصم '+disc+'% على هذا التصنيف':'';
@@ -1578,8 +1610,11 @@ function updateSubBar(){
   bar.classList.add('on');
   const total=entries.reduce((s,[k,v])=>s+v,0);
   $('sub-items').textContent=entries.length+' صنف / '+total+' قطعة';
-  const disc=visitState.discounts[visitState.cat]||0;
-  $('sub-total').textContent=disc>0?'خصم '+disc+'% مطبّق':'بدون خصم';
+  const catDisc = visitState.discounts[visitState.cat]||0;
+  const disc = Math.max(catDisc, visitState.specialDisc||0);
+  $('sub-total').textContent = disc>0
+    ? ((visitState.specialDisc||0)>catDisc ? '⭐ خصم استثنائي '+disc+'%' : 'خصم '+disc+'% مطبّق')
+    : 'بدون خصم';
 }
 
 // ══════════════ INVOICE ══════════════
@@ -1596,7 +1631,9 @@ function getDiscount(itemName){
     });
   });
   if(!disc&&Object.keys(visitState.discounts).length) disc=Math.max(0,...Object.values(visitState.discounts));
-  return disc;
+  // الخصم الاستثنائي — يُطبّق على كل الأصناف
+  const specialDisc = visitState.specialDisc||0;
+  return Math.max(disc, specialDisc);
 }
 
 async function openInvoiceReview(mode){
@@ -1852,9 +1889,17 @@ function filterRetBranches(q){
 }
 
 async function openRetVisit(branch){
-  returnState={branch:branch.branch_name,route:branch.route,client:branch.client_name||'',fea:null,cat:null,quantities:{},discounts:{},prices:{},editIdx:null,items:[],taxPct:0};
+  returnState={branch:branch.branch_name,route:branch.route,client:branch.client_name||'',fea:null,cat:null,quantities:{},discounts:{},prices:{},editIdx:null,items:[],taxPct:0,specialDisc:0};
   $('rv-branch').textContent=branch.branch_name;
   $('rv-client').textContent=branch.client_name||branch.route;
+
+  // قائمة الأسعار الاستثنائية
+  await loadBranchSpecialPL();
+  const specialPL = getSpecialDiscForBranch(branch.branch_name);
+  if(specialPL){
+    returnState.specialDisc = specialPL.discount_pct;
+    $('rv-discounts').innerHTML=`<span style="background:#FFF3CD;color:#856404;padding:2px 8px;border-radius:10px;font-weight:700;font-size:11px">⭐ ${specialPL.name} — خصم ${specialPL.discount_pct}% على كل الأصناف</span>`;
+  }
 
   if(branch.client_name){
     try{
@@ -1864,11 +1909,12 @@ async function openRetVisit(branch){
       ]);
       disc.forEach(d=>{returnState.discounts[d.cat]=d.discount_pct||0;});
       const discEntries=disc.filter(d=>d.discount_pct>0);
-      $('rv-discounts').innerHTML=discEntries.length?'🎯 '+discEntries.map(d=>`${d.cat} ${d.discount_pct}%`).join(' | '):'';
+      if(!specialPL) $('rv-discounts').innerHTML=discEntries.length?'🎯 '+discEntries.map(d=>`${d.cat} ${d.discount_pct}%`).join(' | '):'';
       $('rv-promos').innerHTML=(Array.isArray(promos)&&promos.length)?promos.map(p=>`🔖 عرض على ${p.snf_name} — ${p.promo_price} ج (${p.date_from} → ${p.date_to})`).join('<br>'):'';
-    }catch(e){$('rv-discounts').innerHTML='';$('rv-promos').innerHTML='';}
+    }catch(e){if(!specialPL)$('rv-discounts').innerHTML='';$('rv-promos').innerHTML='';}
   } else {
-    $('rv-discounts').innerHTML='';$('rv-promos').innerHTML='';
+    if(!specialPL) $('rv-discounts').innerHTML='';
+    $('rv-promos').innerHTML='';
   }
 
   document.querySelectorAll('#ret-tax-selector .tax-btn').forEach((b,i)=>b.classList.toggle('act',i===0));
@@ -1921,7 +1967,8 @@ function selectRetFea(fea,pdb){
 function selectRetCat(cat,grpData){
   returnState.cat=cat;
   document.querySelectorAll('#ret-cat-chips .chip').forEach(c=>c.classList.toggle('act',c.textContent===cat));
-  const disc=returnState.discounts[cat]||0;
+  const catDiscRet = returnState.discounts[cat]||0;
+  const disc = Math.max(catDiscRet, returnState.specialDisc||0);
   const taxPct=returnState.taxPct||0;
   const prices=returnState._prices||{};
   $('ret-disc-info').textContent=disc>0?'خصم '+disc+'% على هذا التصنيف':'';
@@ -1980,8 +2027,11 @@ function updateRetSubBar(){
   bar.classList.add('on');
   const total=entries.reduce((s,[k,v])=>s+v,0);
   $('ret-sub-items').textContent=entries.length+' صنف / '+total+' قطعة';
-  const disc=returnState.discounts[returnState.cat]||0;
-  $('ret-sub-total').textContent=disc>0?'خصم '+disc+'% مطبّق':'بدون خصم';
+  const catDiscRB = returnState.discounts[returnState.cat]||0;
+  const disc = Math.max(catDiscRB, returnState.specialDisc||0);
+  $('ret-sub-total').textContent = disc>0
+    ? ((returnState.specialDisc||0)>catDiscRB ? '⭐ خصم استثنائي '+disc+'%' : 'خصم '+disc+'% مطبّق')
+    : 'بدون خصم';
 }
 
 function getRetDiscount(){
