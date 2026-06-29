@@ -4630,6 +4630,9 @@ h2,h3{color:#2C1F0A}
           <!-- إجمالي -->
           <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px" id="sg-summary"></div>
 
+          <!-- خطوط السير -->
+          <div id="sg-routes-section"></div>
+
           <!-- كروت المشرفين -->
           <div class="card" style="margin-bottom:12px">
             <div style="font-size:11px;font-weight:700;color:#5C3D2E;margin-bottom:10px">📊 ملخص أداء المشرفين</div>
@@ -6537,9 +6540,17 @@ async function sgLoad(){
     const supRes = await fetch(`${SUPABASE_URL}/rest/v1/sales_staff?select=*&active=eq.true&order=name.asc`,{headers:H});
     const supData = supRes.ok ? await supRes.json() : [];
 
-    // 2. جيب المناديب
-    const repRes = await fetch(`${SUPABASE_URL}/rest/v1/users?select=id,name,route,routes,grp,groups,supervisors,status&role=eq.sales&status=eq.active&order=name.asc&limit=500`,{headers:H});
-    const repData = repRes.ok ? await repRes.json() : [];
+    // 2. جيب المناديب + الفروع بالتوازي
+    const [repRes, branchesRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/users?select=id,name,route,routes,grp,groups,supervisors,status&role=eq.sales&status=eq.active&order=name.asc&limit=500`,{headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route&status=eq.active&limit=2000`,{headers:H}),
+    ]);
+    const repData     = repRes.ok     ? await repRes.json()     : [];
+    const branchesRaw = branchesRes.ok? await branchesRes.json(): [];
+
+    // بناء map: route → عدد الفروع
+    const branchCountMap = {};
+    branchesRaw.forEach(b=>{ const r=(b.route||'').trim(); if(r) branchCountMap[r]=(branchCountMap[r]||0)+1; });
 
     // 3. جيب الأهداف الموجودة للشهر ده
     const monthStr = `${yr}-${String(mo).padStart(2,'0')}`;
@@ -6564,7 +6575,7 @@ async function sgLoad(){
     const salesMap = {};
     salesData.forEach(s=>{ salesMap[s.rep_name] = (salesMap[s.rep_name]||0) + (s.total_net||0); });
 
-    _sgData = { supervisors: supData, reps: repData, targets: tgtMap, sales: salesMap };
+    _sgData = { supervisors: supData, reps: repData, targets: tgtMap, sales: salesMap, branchCount: branchCountMap };
     sgRender();
   }catch(e){
     details.innerHTML = `<div style="text-align:center;padding:40px;color:#C55B48">تعذر التحميل: ${e.message}</div>`;
@@ -6663,6 +6674,10 @@ function sgRender(){
       <div style="font-size:17px;font-weight:700;color:${totalPct>=80?'#3B6D11':totalPct>=60?'#854F0B':'#A32D2D'};margin-top:3px">${totalPct}%</div>
     </div>`;
 
+  // خطوط السير
+  const routesSection = document.getElementById('sg-routes-section');
+  if(routesSection) routesSection.innerHTML = sgRenderRoutes();
+
   // كروت المشرفين
   const cardsEl = document.getElementById('sg-sup-cards');
   if(cardsEl){
@@ -6757,6 +6772,90 @@ function sgRender(){
   }
 
   details.innerHTML = html || '<div style="text-align:center;padding:40px;color:#aaa">لا توجد بيانات</div>';
+}
+
+// ── عرض خطوط السير مع الهدف وعدد العملاء ─────────────────
+function sgRenderRoutes(){
+  const { reps, targets, sales, branchCount } = _sgData;
+  const workDays = sgCalcWorkDays();
+  const routeMap = {}; // route → { goal, salesAmt, repNames }
+
+  reps.forEach(r=>{
+    let routeArr = [];
+    if(Array.isArray(r.routes) && r.routes.length) routeArr = r.routes;
+    else if(r.route && r.route.trim()) routeArr = [r.route.trim()];
+
+    const goal = targets[r.name]?.goal || 0;
+    const act  = sales[r.name] || 0;
+
+    routeArr.forEach(rt=>{
+      if(!rt) return;
+      if(!routeMap[rt]) routeMap[rt] = { goal:0, sales:0, reps:[] };
+      routeMap[rt].goal  += goal;
+      routeMap[rt].sales += act;
+      routeMap[rt].reps.push(r.name);
+    });
+  });
+
+  const routeEntries = Object.entries(routeMap).sort((a,b)=>b[1].goal-a[1].goal);
+  if(!routeEntries.length) return '';
+
+  let rows = '';
+  routeEntries.forEach(([rt, d], i)=>{
+    const pct     = d.goal>0 ? Math.round(d.sales/d.goal*100) : 0;
+    const daily   = d.goal>0&&workDays>0 ? Math.round(d.goal/workDays) : 0;
+    const clr     = pct>=80?'#3B6D11':pct>=60?'#854F0B':'#A32D2D';
+    const bgClr   = pct>=80?'#EAF3DE':pct>=60?'#FAEEDA':'#FCEBEB';
+    const branches = branchCount?.[rt] || 0;
+    const repLabel = d.reps.length ? d.reps.join(' / ') : '—';
+
+    rows += `<tr style="border-bottom:0.5px solid var(--border);${i%2===0?'':'background:#FDFAF5'}">
+      <td style="padding:9px 12px;color:#aaa;font-size:11px">${i+1}</td>
+      <td style="padding:9px 12px;font-weight:700;font-size:12px">${rt}</td>
+      <td style="padding:9px 12px;font-size:11px;color:var(--text-secondary)">${repLabel}</td>
+      <td style="padding:9px 12px;text-align:center">
+        <span style="background:#E3F2FD;color:#1565C0;font-weight:700;font-size:13px;padding:3px 10px;border-radius:20px">${branches}</span>
+      </td>
+      <td style="padding:9px 12px;font-weight:700;color:#7A3B1E;font-size:12px">${d.goal>0?d.goal.toLocaleString('en-US')+' ج':'—'}</td>
+      <td style="padding:9px 12px;font-size:11px;color:#185FA5">${daily>0?daily.toLocaleString('en-US')+' ج':'—'}</td>
+      <td style="padding:9px 12px">
+        <div style="font-weight:700;font-size:11px;color:${clr};margin-bottom:3px">${d.sales>0?Math.round(d.sales).toLocaleString('en-US')+' ج':'—'}</div>
+        <div style="display:flex;align-items:center;gap:5px">
+          <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;min-width:40px">
+            <div style="height:100%;width:${Math.min(pct,100)}%;background:${clr};border-radius:3px"></div>
+          </div>
+          <span style="font-size:11px;font-weight:700;color:${clr}">${pct}%</span>
+        </div>
+      </td>
+      <td style="padding:9px 12px;text-align:center">
+        <span style="background:${bgClr};color:${clr};padding:2px 10px;border-radius:20px;font-size:10px;font-weight:700">${pct>=80?'ممتاز':pct>=60?'متوسط':d.goal>0?'ضعيف':'—'}</span>
+      </td>
+    </tr>`;
+  });
+
+  return `
+    <div class="card" style="margin-bottom:12px">
+      <div style="font-size:12px;font-weight:700;color:#5C3D2E;margin-bottom:10px;display:flex;align-items:center;gap:6px">
+        <i class="ti ti-route" style="color:#C55B48"></i> هدف كل خط سير وعدد عملائه
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead>
+            <tr style="background:#3B1F12">
+              <th style="padding:8px 12px;text-align:right;font-size:11px;color:#F2E4DC">#</th>
+              <th style="padding:8px 12px;text-align:right;font-size:11px;color:#F2E4DC">خط السير</th>
+              <th style="padding:8px 12px;text-align:right;font-size:11px;color:#F2E4DC">المندوب</th>
+              <th style="padding:8px 12px;text-align:center;font-size:11px;color:#F2E4DC">عدد العملاء</th>
+              <th style="padding:8px 12px;text-align:right;font-size:11px;color:#F2E4DC">الهدف الشهري</th>
+              <th style="padding:8px 12px;text-align:right;font-size:11px;color:#F2E4DC">الهدف اليومي</th>
+              <th style="padding:8px 12px;text-align:right;font-size:11px;color:#F2E4DC">التحقيق</th>
+              <th style="padding:8px 12px;text-align:center;font-size:11px;color:#F2E4DC">الحالة</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`;
 }
 
 function sgRenderSupBlock(sup, reps, targets, sales, workDays){
