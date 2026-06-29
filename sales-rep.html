@@ -928,6 +928,8 @@ async function loadAllClientData(){
       promoRows.forEach(p=>{ _clientPromoCache[p.client_name]=true; });
     }catch(e){ _clientPromoCache={}; }
   }catch(e){ _clientDiscCache={}; _branchClientCache={}; _clientPromoCache={}; }
+  // preload قوائم الأسعار الخاصة للعملاء لعرض البادج في الفروع
+  await loadClientPL();
 }
 
 // ══════════════ PDB ══════════════
@@ -1466,8 +1468,10 @@ function doRenderBranches(rows, containerId, mode){
     const discEntries=Object.entries(discs).filter(([c,p])=>p>0);
     let badges='';
     if(client){
+      const hasClientPL=_clientPLCache&&_clientPLCache[client]&&Object.keys(_clientPLCache[client]).length>0;
       if(discEntries.length) discEntries.forEach(([c,p])=>{badges+=`<span class="disc-badge">🎯 ${c} ${p}%</span>`;});
-      else badges='<span class="no-disc-badge">بدون خصم</span>';
+      if(hasClientPL) badges+=`<span style="background:#E8F5E9;color:#2E7D32;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:700;display:inline-block;margin:1px 2px">💲 أسعار خاصة</span>`;
+      if(!discEntries.length&&!hasClientPL) badges='<span class="no-disc-badge">بدون خصم</span>';
     }
     const fn=mode==='delivery'?'openDelVisit':'openRetVisit';
     const bData={branch_name:b.branch_name,route:b.route,grp:b.grp,client_name:client};
@@ -1587,6 +1591,12 @@ async function openDelVisit(branch){
 }
 
 function buildFeaButtons(pdb){
+  // لو للعميل قائمة أسعار خاصة → اعرض أصنافها مباشرة بدون fea/cat
+  if(visitState.clientPL && Object.keys(visitState.clientPL).length){
+    $('fea-row').innerHTML='';
+    buildClientPLProducts(pdb, visitState._prices||{});
+    return;
+  }
   const feaRow=$('fea-row');
   feaRow.innerHTML='';
   Object.keys(pdb).forEach(fea=>{
@@ -1597,10 +1607,53 @@ function buildFeaButtons(pdb){
   });
 }
 
+// ── عرض أصناف القائمة الخاصة مباشرة ──
+function buildClientPLProducts(pdb, prices){
+  const taxPct=visitState.taxPct||0;
+  const plEntries=Object.entries(visitState.clientPL||{});
+  const container=$('prods-list');
+  // فلتر حسب نوع الضريبة المختارة
+  const filtered=plEntries.filter(([name])=>{
+    const p=prices[name]; if(!p) return taxPct===0; return p.tax_pct===taxPct;
+  });
+  if(!filtered.length){
+    container.innerHTML='<div class="empty">لا توجد أصناف بهذا النوع من الضريبة</div>';
+    $('prods-section').style.display='';updateSubBar();return;
+  }
+  let html='<div class="prod-card" style="margin-bottom:8px"><div class="prod-grp-hd">💲 أصناف القائمة الخاصة</div>';
+  filtered.forEach(([name,specialPrice])=>{
+    const qty=visitState.quantities[name]||0;
+    const key=name.replace(/[^a-zA-Z0-9]/g,'_');
+    const origPrice=prices[name]?.price||0;
+    const priceLine=`<span style="color:#2E7D32;font-weight:800">${specialPrice} ج</span>`
+      +(origPrice&&origPrice!==specialPrice?` <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${origPrice}</span>`:'')
+      +` <span style="font-size:9px;background:#E8F5E9;color:#2E7D32;padding:1px 5px;border-radius:6px">خاص</span>`;
+    html+=`<div class="prod-row">
+      <div class="prod-name">${name}<br><small>${priceLine}</small></div>
+      <div class="qty-ctrl">
+        <button class="qty-btn" onclick="changeQty('${name.replace(/'/g,"\\'")}  ',-1)">−</button>
+        <input type="number" class="qty-inp${qty>0?' has':''}" id="qty-${key}" value="${qty}" min="0"
+          oninput="onQtyInput(this,'${name.replace(/'/g,"\\'")}')"
+          onblur="onQtyBlur(this,'${name.replace(/'/g,"\\'")}')" />
+        <button class="qty-btn" onclick="changeQty('${name.replace(/'/g,"\\'")}',1)">+</button>
+      </div>
+    </div>`;
+  });
+  html+='</div>';
+  container.innerHTML=html;
+  $('prods-section').style.display='';
+  updateSubBar();
+}
+
 function setTax(pct, el){
   visitState.taxPct = pct;
   document.querySelectorAll('#tax-selector .tax-btn').forEach(b=>b.classList.remove('act'));
   el.classList.add('act');
+  // إذا كان في قائمة أسعار خاصة → أعد عرض أصنافها
+  if(visitState.clientPL && Object.keys(visitState.clientPL).length && visitState._pdb){
+    buildClientPLProducts(visitState._pdb, visitState._prices||{});
+    return;
+  }
   // إعادة بناء الأصناف لو في تصنيف مختار
   if(visitState.cat && visitState.fea && visitState._pdb){
     const grpData=visitState._pdb[visitState.fea]?.[visitState.cat];
