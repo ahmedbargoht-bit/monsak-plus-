@@ -10188,7 +10188,7 @@ async function loadBranchNotes(){
   list.innerHTML = `<div style="text-align:center;padding:2rem;color:#aaa">⏳ جارٍ التحميل...</div>`;
 
   // جيب الرسائل اللي نوعها visit_result وموجهة للمشرف الحالي
-  let url = `${SUPABASE_URL}/rest/v1/messages?to_rep=eq.${encodeURIComponent(cu.name)}&notif_type=eq.visit_result&select=*&order=created_at.desc&limit=100`;
+  let url = `${SUPABASE_URL}/rest/v1/messages?to_rep=eq.${encodeURIComponent(cu.name)}&notif_type=in.(visit_result,branch_note,branch_note_reply)&select=*&order=created_at.desc&limit=100`;
 
   try{
     const res = await fetch(url, {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
@@ -10202,12 +10202,12 @@ async function loadBranchNotes(){
 
   // إحصائيات
   document.getElementById('bn-total').textContent     = _bnNotes.length;
-  document.getElementById('bn-pending').textContent   = _bnNotes.filter(n=>!n.is_read).length;
-  document.getElementById('bn-confirmed').textContent = _bnNotes.filter(n=>n.is_read).length;
+  document.getElementById('bn-pending').textContent   = _bnNotes.filter(n=>!n.forwarded_to && !n.is_read).length;
+  document.getElementById('bn-confirmed').textContent = _bnNotes.filter(n=>n.forwarded_to).length;
 
   // badge في التاب
   const badge = document.getElementById('bn-badge');
-  const pending = _bnNotes.filter(n=>!n.is_read).length;
+  const pending = _bnNotes.filter(n=>!n.forwarded_to && !n.is_read).length;
   if(badge){ badge.style.display = pending>0?'':'none'; badge.textContent = pending; }
 
   if(!filtered.length){
@@ -10217,35 +10217,47 @@ async function loadBranchNotes(){
 
   list.innerHTML = filtered.map(n=>{
     const isConfirmed = n.is_read;
+    const isForwarded = !!n.forwarded_to;
     const date = n.created_at ? new Date(n.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}) : '—';
     const preview = (n.message||'').split('\n').slice(0,3).join(' · ');
+    const isBranchNote = n.notif_type === 'branch_note';
+    const isBranchReply = n.notif_type === 'branch_note_reply';
 
     return `
-    <div style="background:#fff;border:1.5px solid ${isConfirmed?'#C8E6C9':'#FFE0B2'};border-radius:14px;padding:14px;margin-bottom:10px;box-shadow:0 2px 8px rgba(0,0,0,.06)">
+    <div style="background:#fff;border:1.5px solid ${isBranchReply?'#F3E5F5':isForwarded?'#C8E6C9':isBranchNote?'#E3F2FD':'#FFE0B2'};border-radius:14px;padding:14px;margin-bottom:10px;box-shadow:0 2px 8px rgba(0,0,0,.06)">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
         <div>
-          <div style="font-size:13px;font-weight:900;color:#1A3A5C">📋 من: ${n.from_name||'—'}</div>
+          ${isBranchReply?'<div style="font-size:9px;font-weight:700;color:#7B1FA2;background:#F3E5F5;padding:2px 7px;border-radius:20px;display:inline-block;margin-bottom:4px">💬 رد من المندوب</div>':isBranchNote?'<div style="font-size:9px;font-weight:700;color:#1565C0;background:#E3F2FD;padding:2px 7px;border-radius:20px;display:inline-block;margin-bottom:4px">📋 ملاحظة تنسيق</div>':''}
+          <div style="font-size:13px;font-weight:900;color:#1A3A5C">من: ${n.from_name||'—'}</div>
+          ${n.branch_name?`<div style="font-size:11px;color:#1565C0;font-weight:600;margin-top:2px">🏪 ${n.branch_name}</div>`:''}
           <div style="font-size:10px;color:#8B6F47;margin-top:2px">${date}</div>
         </div>
         <span style="padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700;
-          background:${isConfirmed?'#E8F5E9':'#FFF3E0'};color:${isConfirmed?'#1A7A4A':'#E65100'}">
-          ${isConfirmed?'✅ تم التأكيد':'⏳ بانتظار التأكيد'}
+          background:${isForwarded?'#E8F5E9':isConfirmed?'#E3F2FD':'#FFF3E0'};color:${isForwarded?'#1A7A4A':isConfirmed?'#1565C0':'#E65100'}">
+          ${isForwarded?'✅ تم التحويل':isConfirmed?'👁️ تم الاطلاع':'⏳ جديدة'}
         </span>
       </div>
       <div style="font-size:11px;color:#555;margin-bottom:10px;line-height:1.6;background:#F8F9FA;padding:8px;border-radius:8px">
-        ${preview}...
+        ${preview}
       </div>
+      ${isForwarded?`<div style="font-size:10px;color:#1A7A4A;background:#E8F5E9;padding:6px 10px;border-radius:8px;margin-bottom:8px">✅ تم التحويل للمندوب: ${n.forwarded_to}</div>`:''}
       <div style="display:flex;gap:6px">
         <button onclick="bnViewDetail('${n.id}')"
           style="flex:1;padding:8px;background:#F5F0E8;color:#4B3C1A;border:1px solid #D4C4A8;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
-          👁️ عرض التفاصيل
+          👁️ عرض
         </button>
-        ${!isConfirmed?`
+        ${isBranchNote && !isForwarded && !isBranchReply?`
+          <button onclick="bnOpenForward('${n.id}','${(n.branch_name||'').replace(/'/g,"\\'")}','${(n.from_name||'').replace(/'/g,"\\'")}','${(n.message||'').replace(/'/g,"\\'").replace(/\n/g,' ').slice(0,200)}')"
+            style="flex:1;padding:8px;background:linear-gradient(135deg,#1565C0,#0D47A1);color:#fff;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+            📤 تحويل للمندوب
+          </button>
+        `:''}
+        ${!isBranchNote && !isConfirmed?`
           <button onclick="bnConfirm('${n.id}','${(n.from_name||'').replace(/'/g,"\\'")}')"
             style="flex:1;padding:8px;background:linear-gradient(135deg,#1A3A5C,#0D2137);color:#fff;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
             ✅ تأكيد الاستلام
           </button>
-        `:'<div style="flex:1;text-align:center;font-size:10px;color:#1A7A4A;padding:8px">✅ تم التأكيد</div>'}
+        `:''}
       </div>
     </div>`;
   }).join('');
@@ -10305,6 +10317,60 @@ async function bnConfirm(id, fromName){
   loadBranchNotes();
 }
 
+// ══ ملاحظات الفروع — تحويل للمندوب ══
+let _bnForwardData = {};
+
+async function bnOpenForward(msgId, branchName, fromName, noteText){
+  _bnForwardData = { msgId, branchName, fromName, noteText };
+  const repSel = document.getElementById('bn-forward-rep-sel');
+  if(repSel){
+    repSel.innerHTML = '<option value="">جارٍ التحميل...</option>';
+    try{
+      const url = `${SUPABASE_URL}/rest/v1/users?role=eq.rep&select=name&order=name.asc`;
+      const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+      const reps = res.ok ? await res.json() : [];
+      repSel.innerHTML = '<option value="">اختر المندوب</option>' + reps.map(r=>`<option value="${r.name}">${r.name}</option>`).join('');
+    }catch(e){ repSel.innerHTML = '<option value="">خطأ في التحميل</option>'; }
+  }
+  const noteEl = document.getElementById('bn-forward-note-preview');
+  if(noteEl) noteEl.textContent = noteText;
+  const branchEl = document.getElementById('bn-forward-branch');
+  if(branchEl) branchEl.textContent = branchName || '—';
+  document.getElementById('modal-bn-forward').style.display = 'flex';
+}
+
+async function bnSendForward(){
+  const repSel = document.getElementById('bn-forward-rep-sel');
+  const repName = repSel?.value?.trim();
+  if(!repName){ showToast('⚠️ اختر مندوباً أولاً'); return; }
+  const { msgId, branchName, fromName, noteText } = _bnForwardData;
+
+  await fetch(`${SUPABASE_URL}/rest/v1/messages`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body: JSON.stringify({
+      from_name      : cu.name,
+      to_rep         : repName,
+      notif_type     : 'branch_note_rep',
+      message        : noteText,
+      branch_name    : branchName,
+      original_msg_id: msgId,
+      is_read        : false,
+      created_at     : new Date().toISOString()
+    })
+  });
+
+  await fetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${msgId}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body: JSON.stringify({ forwarded_to: repName, is_read: true })
+  });
+
+  document.getElementById('modal-bn-forward').style.display = 'none';
+  showToast(`✅ تم تحويل الملاحظة للمندوب ${repName}`);
+  loadBranchNotes();
+}
+
 </script>
 
 <!-- VERSION BADGE -->
@@ -10316,6 +10382,39 @@ async function bnConfirm(id, fromName){
   border:1px solid #E91E6340;backdrop-filter:blur(4px)">
   sales-app v2.0 — New DB
 </div>
+<!-- ══ Modal: تحويل ملاحظة للمندوب ══ -->
+<div id="modal-bn-forward" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#fff;border-radius:20px;width:100%;max-width:420px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+    <div style="background:linear-gradient(135deg,#1565C0,#0D47A1);padding:16px 18px;display:flex;align-items:center;justify-content:space-between">
+      <div style="color:#fff;font-size:15px;font-weight:900">📤 تحويل الملاحظة للمندوب</div>
+      <button onclick="document.getElementById('modal-bn-forward').style.display='none'" style="background:rgba(255,255,255,.2);border:none;color:#fff;border-radius:50%;width:30px;height:30px;cursor:pointer;font-size:16px">✕</button>
+    </div>
+    <div style="padding:18px">
+      <div style="font-size:11px;color:#666;margin-bottom:4px">الفرع</div>
+      <div id="bn-forward-branch" style="font-size:13px;font-weight:700;color:#1A3A5C;background:#F0F4FF;padding:8px 12px;border-radius:10px;margin-bottom:14px">—</div>
+
+      <div style="font-size:11px;color:#666;margin-bottom:4px">نص الملاحظة</div>
+      <div id="bn-forward-note-preview" style="font-size:12px;color:#333;background:#F8F9FA;padding:10px 12px;border-radius:10px;line-height:1.7;margin-bottom:14px;max-height:100px;overflow-y:auto"></div>
+
+      <div style="font-size:11px;color:#666;margin-bottom:6px">اختر المندوب</div>
+      <select id="bn-forward-rep-sel" style="width:100%;padding:10px 12px;border:1.5px solid #CBD5E1;border-radius:10px;font-family:Cairo,sans-serif;font-size:13px;margin-bottom:16px">
+        <option value="">اختر المندوب</option>
+      </select>
+
+      <div style="display:flex;gap:8px">
+        <button onclick="document.getElementById('modal-bn-forward').style.display='none'"
+          style="flex:1;padding:11px;background:#F1F5F9;color:#475569;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          إلغاء
+        </button>
+        <button onclick="bnSendForward()"
+          style="flex:2;padding:11px;background:linear-gradient(135deg,#1565C0,#0D47A1);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          📤 إرسال للمندوب
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
                                                                                                                                                                                                                                                                                                                                      
