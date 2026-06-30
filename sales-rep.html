@@ -1470,6 +1470,120 @@ async function submitMktMiss(type){
 // ══════════════ END MARKET MISSING TAB ══════════════
 
 
+// ══════════════ GOAL TAB ══════════════
+async function loadGoalTab(){
+  const body = document.getElementById('goal-body');
+  const sel  = document.getElementById('goal-month-sel');
+  if(!body || !currentRep) return;
+
+  // تعبئة قائمة الأشهر (أول مرة بس)
+  if(!sel.options.length){
+    const now = new Date();
+    for(let i=0; i<6; i++){
+      const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+      const val = d.toISOString().slice(0,7);
+      const lbl = d.toLocaleDateString('ar-EG',{year:'numeric',month:'long'});
+      const o = document.createElement('option');
+      o.value = val; o.textContent = lbl;
+      sel.appendChild(o);
+    }
+  }
+
+  const month = sel.value || new Date().toISOString().slice(0,7);
+  const monthStart = month + '-01';
+  const lastDay = new Date(+month.split('-')[0], +month.split('-')[1], 0).getDate();
+  const monthEnd = month + '-' + String(lastDay).padStart(2,'0');
+  const repEnc = encodeURIComponent(currentRep.name);
+
+  body.innerHTML = '<div class="loading"><div class="spin"></div><span>جاري التحميل...</span></div>';
+
+  try{
+    const [tgtRes, salesRes, retRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${month}&rep_name=eq.${repEnc}&select=target_amount,work_days&limit=1`,{headers:SB_HEADERS}),
+      fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=eq.${repEnc}&delivery_date=gte.${monthStart}&delivery_date=lte.${monthEnd}&select=total_net,delivery_date&limit=3000`,{headers:SB_HEADERS}),
+      fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=eq.${repEnc}&return_date=gte.${monthStart}&return_date=lte.${monthEnd}&select=total_net&limit=1000`,{headers:SB_HEADERS}),
+    ]);
+
+    const tgtData   = tgtRes.ok   ? await tgtRes.json()   : [];
+    const salesData = salesRes.ok ? await salesRes.json() : [];
+    const retData   = retRes.ok   ? await retRes.json()   : [];
+
+    const target   = tgtData[0]?.target_amount || 0;
+    const workDays = tgtData[0]?.work_days     || 26;
+    const totalSales = salesData.reduce((s,r)=>s+(r.total_net||0),0);
+    const totalRet   = retData.reduce((s,r)=>s+(r.total_net||0),0);
+    const net        = totalSales - totalRet;
+    const pct        = target>0 ? Math.min(100, Math.round(net/target*100)) : 0;
+
+    const salesDays  = new Set(salesData.map(r=>r.delivery_date)).size || 1;
+    const dailyAvg   = net / salesDays;
+    const projected  = Math.round(dailyAvg * workDays);
+    const projPct    = target>0 ? Math.round(projected/target*100) : 0;
+
+    const fmt = n => Math.round(n).toLocaleString('en-US');
+    const ringClr = pct>=80?'#15803D':pct>=50?'#D97706':'#DC2626';
+    const r=65, circ=2*Math.PI*r;
+    const dash = circ*(pct/100);
+
+    body.innerHTML = `
+      <div class="goal-ring-card">
+        <div class="goal-month-badge">${sel.options[sel.selectedIndex]?.text||month}</div>
+        <div class="goal-ring-wrap">
+          <svg viewBox="0 0 150 150" width="150" height="150">
+            <circle cx="75" cy="75" r="${r}" fill="none" stroke="#EDE5D8" stroke-width="12"/>
+            <circle cx="75" cy="75" r="${r}" fill="none" stroke="${ringClr}" stroke-width="12"
+              stroke-dasharray="${dash.toFixed(1)} ${circ.toFixed(1)}"
+              stroke-linecap="round" style="transition:stroke-dasharray .6s ease"/>
+          </svg>
+          <div class="goal-ring-center">
+            <div class="goal-ring-pct" style="color:${ringClr}">${pct}%</div>
+            <div class="goal-ring-sub">من الهدف</div>
+          </div>
+        </div>
+        <div class="goal-amount-row">
+          <div class="goal-amt"><div class="goal-amt-num">${target>0?fmt(target):'—'}</div><div class="goal-amt-lbl">الهدف</div></div>
+          <div class="goal-amt"><div class="goal-amt-num" style="color:#15803D">${fmt(net)}</div><div class="goal-amt-lbl">الصافي</div></div>
+        </div>
+      </div>
+      <div class="goal-grid">
+        <div class="goal-box g">
+          <div class="goal-box-ico">📦</div>
+          <div class="goal-box-num g">${fmt(totalSales)}</div>
+          <div class="goal-box-lbl">إجمالي التوريد</div>
+        </div>
+        <div class="goal-box r">
+          <div class="goal-box-ico">↩️</div>
+          <div class="goal-box-num r">${fmt(totalRet)}</div>
+          <div class="goal-box-lbl">إجمالي المرتجع</div>
+        </div>
+        <div class="goal-box b">
+          <div class="goal-box-ico">📅</div>
+          <div class="goal-box-num b">${salesDays}</div>
+          <div class="goal-box-lbl">أيام عمل فعلية</div>
+        </div>
+        <div class="goal-box o">
+          <div class="goal-box-ico">📊</div>
+          <div class="goal-box-num o">${fmt(dailyAvg)}</div>
+          <div class="goal-box-lbl">متوسط يومي</div>
+        </div>
+      </div>
+      <div class="goal-proj-card">
+        <div class="goal-proj-title">التوقع حتى نهاية الشهر (${workDays} يوم عمل)</div>
+        <div class="goal-proj-row">
+          <span class="goal-proj-label">الإيراد المتوقع</span>
+          <span class="goal-proj-value ${projPct>=80?'ok':projPct>=50?'warn':'bad'}">${fmt(projected)} ج</span>
+        </div>
+        <div class="goal-proj-row">
+          <span class="goal-proj-label">نسبة الهدف المتوقعة</span>
+          <span class="goal-proj-value ${projPct>=80?'ok':projPct>=50?'warn':'bad'}">${projPct}%</span>
+        </div>
+        ${target===0?'<div style="font-size:10px;opacity:.6;margin-top:8px;text-align:center">لم يُحدَّد هدف لهذا الشهر بعد</div>':''}
+      </div>`;
+  }catch(e){
+    body.innerHTML = '<div style="text-align:center;padding:30px;color:#bbb">تعذّر تحميل البيانات</div>';
+  }
+}
+
 // ══════════════ TAB SWITCHING ══════════════
 function switchTab(tab){
   const map={home:'s-home',delivery:'s-delivery',returns:'s-returns',goal:'s-goal',mktret:'s-mktret',profile:'s-profile',branchnotes:'s-branchnotes'};
