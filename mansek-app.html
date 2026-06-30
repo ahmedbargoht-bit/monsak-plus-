@@ -1608,6 +1608,7 @@ function confirmLogout(){
   // جهّز التطبيق لاستقبال فرع وزيارة جديدة في المرة الجاية —
   // هنا فقط (الخروج الكامل من التطبيق) تُمسح كل بيانات الزيارة الحالية
   resetVisitState();
+  window._currentVisitId = null;
   cu=null;attIn=null;attOut=null;visits=[];products=[];missing=[];selectedReason=null;
   document.getElementById('l-name').value='';
   document.getElementById('l-pass').value='';
@@ -2197,7 +2198,8 @@ async function submitReturns(){
       snf:         r.snf,
       qty:         r.qty,
       reason:      r.reason,
-      note:        r.note || null
+      note:        r.note || null,
+      visit_id:    window._currentVisitId || null
     };
     try{
       // تحقق من التكرار
@@ -2736,6 +2738,8 @@ async function saveVisit(){
 }
 
 function resetVisitData(){
+  // مسح visit_id الحالي — جاهز للزيارة الجديدة
+  window._currentVisitId = null;
   // للمتحرك — نمسح بس الأصناف والنواقص ونوع العرض ونفضل الفرع والحضور
   // فرع ونوع العميل — نفضلهم ظاهرين
   // إخفاء خطوة العرض والحفظ بس
@@ -3870,9 +3874,79 @@ function resetVisitState(){
 }
 
 
+// ── checklist الانصراف ──────────────────────────────────────
+const _chkState = {prods:false, rets:false, miss:false};
+
+function openCheckoutModal(){
+  if(!attIn){alert('سجّل الحضور أولاً من صفحة إدخال');return;}
+  if(attOut){alert('سبق وسجّلت الانصراف الساعة '+attOut.time);return;}
+
+  const branch = document.getElementById('f-branch')?.value || '';
+  const lbl = document.getElementById('chk-branch-label');
+  if(lbl) lbl.textContent = branch ? 'فرع: '+branch : '';
+
+  // تحقق الأصناف
+  const prodCount = products?.length || 0;
+  _chkState.prods = prodCount > 0;
+  document.getElementById('chk-icon-prods').textContent = _chkState.prods ? '✅' : '📦';
+  document.getElementById('chk-label-prods').textContent = _chkState.prods ? prodCount+' صنف مسجّل' : 'لم تُسجَّل بعد';
+  document.getElementById('chk-btn-prods-none').style.display = _chkState.prods ? 'none' : 'block';
+
+  // مرتجعات — نعتبرها محتاجة تأكيد دايماً (المنسق يضغط "لا يوجد" أو تكون مسجلة)
+  const retCount = retItems?.length || 0;
+  _chkState.rets = retCount > 0;
+  document.getElementById('chk-icon-rets').textContent = _chkState.rets ? '✅' : '↩️';
+  document.getElementById('chk-label-rets').textContent = _chkState.rets ? retCount+' مرتجع مسجّل' : 'لم تُسجَّل بعد';
+  document.getElementById('chk-btn-rets-none').style.display = _chkState.rets ? 'none' : 'block';
+
+  // نواقص
+  const missCount = missing?.length || 0;
+  _chkState.miss = missCount > 0;
+  document.getElementById('chk-icon-miss').textContent = _chkState.miss ? '✅' : '⚠️';
+  document.getElementById('chk-label-miss').textContent = _chkState.miss ? missCount+' نقص مسجّل' : 'لم تُسجَّل بعد';
+  document.getElementById('chk-btn-miss-none').style.display = _chkState.miss ? 'none' : 'block';
+
+  updateCheckoutConfirmBtn();
+  document.getElementById('modal-checkout-check').style.display = 'flex';
+}
+
+function chkConfirmNone(type){
+  _chkState[type] = true;
+  const icons = {prods:'✅', rets:'✅', miss:'✅'};
+  const labels = {prods:'لا يوجد أصناف', rets:'لا يوجد مرتجعات', miss:'لا يوجد نواقص'};
+  document.getElementById('chk-icon-'+type).textContent = '✅';
+  document.getElementById('chk-label-'+type).textContent = labels[type];
+  document.getElementById('chk-btn-'+type+'-none').style.display = 'none';
+  updateCheckoutConfirmBtn();
+}
+
+function updateCheckoutConfirmBtn(){
+  const allDone = _chkState.prods && _chkState.rets && _chkState.miss;
+  const btn = document.getElementById('chk-confirm-btn');
+  if(btn){
+    btn.disabled = !allDone;
+    btn.style.background = allDone ? '#1A7A4A' : '#ccc';
+    btn.style.cursor = allDone ? 'pointer' : 'not-allowed';
+  }
+}
+
+function closeCheckoutModal(){
+  document.getElementById('modal-checkout-check').style.display = 'none';
+}
+
+function confirmCheckoutNow(){
+  document.getElementById('modal-checkout-check').style.display = 'none';
+  _doRecordAttFromDash();
+}
+
 function recordAttFromDash(){
   if(!attIn){alert('سجّل الحضور أولاً من صفحة إدخال');return;}
   if(attOut){alert('سبق وسجّلت الانصراف الساعة '+attOut.time);return;}
+  // افتح checklist أولاً
+  openCheckoutModal();
+}
+
+function _doRecordAttFromDash(){
   const btn=document.getElementById('dash-checkout-btn');
   btn.disabled=true;
   btn.innerHTML='<i class="ti ti-loader spin"></i> جاري التسجيل والإرسال...';
@@ -4178,6 +4252,25 @@ async function sbInsert(table, data){
   }catch(e){ console.warn('sbInsert error:', e); return false; }
 }
 
+// نفس sbInsert لكن بترجع الـ id المُنشأ
+async function sbInsertGetId(table, data){
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify(data)
+    });
+    if(!res.ok) return null;
+    const rows = await res.json();
+    return Array.isArray(rows) && rows[0] ? rows[0].id : null;
+  }catch(e){ console.warn('sbInsertGetId error:', e); return null; }
+}
+
 async function sbSelect(table, params={}){
   try{
     let url = `${SUPABASE_URL}/rest/v1/${table}?select=*`;
@@ -4267,8 +4360,8 @@ async function apiPost(data){
         lng_out:  d.type==='out' ? d.lng||'' : '',
       });
 
-    case 'saveVisit':
-      return sbInsert('visits', {
+    case 'saveVisit':{
+      const visitId = await sbInsertGetId('visits', {
         name:d.name, grp:d.group||'', route:d.route, branch:d.branch,
         date:d.date, time_in:d.timeIn||'', time_out:d.timeOut||'',
         lat:d.lat||'', lng:d.lng||'', client_type:d.clientType||'',
@@ -4277,6 +4370,9 @@ async function apiPost(data){
         space_used:d.spaceUsed||0, sku_on:d.skuOn||0, sku_stock:d.skuStock||0,
         missing_count:d.missing||0, points:d.points||0, coord_type:d.coordType||'متحرك'
       });
+      if(visitId) window._currentVisitId = visitId;
+      return !!visitId;
+    }
 
     case 'saveProduct':{
       // فحص تكرار دقيق — نفس المنسق + الفرع + الصنف + تواريخ الصلاحية + الكميات في نفس اليوم
@@ -4306,7 +4402,8 @@ async function apiPost(data){
         fea:d.fea, cat:d.cat||'', grp:(cu&&cu.group)||d.grp||'', snf:d.snf,
         shelf_qty:d.shelf||0, stock_qty:d.stock||0,
         date_shelf:d.dateShelf||'', months_shelf:d.monthsShelf||'',
-        date_stock:d.dateStock||'', months_stock:d.monthsStock||''
+        date_stock:d.dateStock||'', months_stock:d.monthsStock||'',
+        visit_id: window._currentVisitId || null
       });
     }
 
@@ -4326,7 +4423,8 @@ async function apiPost(data){
       return sbInsert('missing', {
         name:d.name, route:d.route, branch:d.branch||'',
         fea:d.fea, grp:(cu&&cu.group)||d.grp||'', snf:d.snf,
-        reason:d.reasonText||'', note:d.note||''
+        reason:d.reasonText||'', note:d.note||'',
+        visit_id: window._currentVisitId || null
       });
     }
 
@@ -5441,6 +5539,69 @@ function closePromoBanner(){
   border:1px solid #F0A50040;backdrop-filter:blur(4px)">
   v2.1
 </div>
+<!-- Modal checklist الانصراف -->
+<div id="modal-checkout-check" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#FFFDF8;border-radius:16px;width:100%;max-width:360px;overflow:hidden;border:1px solid #E8D9C0">
+    <div style="background:linear-gradient(135deg,#1A4A2E,#1A7A4A);padding:16px;color:#fff;text-align:center">
+      <i class="ti ti-clipboard-check" style="font-size:28px"></i>
+      <div style="font-size:15px;font-weight:700;margin-top:6px">قبل الانصراف — تأكيد اكتمال الزيارة</div>
+      <div id="chk-branch-label" style="font-size:11px;opacity:.8;margin-top:4px"></div>
+    </div>
+    <div style="padding:16px;display:flex;flex-direction:column;gap:10px">
+
+      <!-- أصناف -->
+      <div style="display:flex;align-items:center;gap:12px;background:#F5F0E8;border-radius:10px;padding:12px">
+        <span id="chk-icon-prods" style="font-size:22px">📦</span>
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:700;color:#2C1F0A">الأصناف</div>
+          <div id="chk-label-prods" style="font-size:11px;color:#888">لم تُسجَّل بعد</div>
+        </div>
+        <button id="chk-btn-prods-none" onclick="chkConfirmNone('prods')"
+          style="font-size:11px;padding:5px 10px;border-radius:8px;border:1.5px solid #C55B48;background:#FFF5F0;color:#C55B48;cursor:pointer;font-family:Cairo,sans-serif;display:none">
+          لا يوجد
+        </button>
+      </div>
+
+      <!-- مرتجعات -->
+      <div style="display:flex;align-items:center;gap:12px;background:#F5F0E8;border-radius:10px;padding:12px">
+        <span id="chk-icon-rets" style="font-size:22px">↩️</span>
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:700;color:#2C1F0A">المرتجعات</div>
+          <div id="chk-label-rets" style="font-size:11px;color:#888">لم تُسجَّل بعد</div>
+        </div>
+        <button id="chk-btn-rets-none" onclick="chkConfirmNone('rets')"
+          style="font-size:11px;padding:5px 10px;border-radius:8px;border:1.5px solid #C55B48;background:#FFF5F0;color:#C55B48;cursor:pointer;font-family:Cairo,sans-serif">
+          لا يوجد
+        </button>
+      </div>
+
+      <!-- نواقص -->
+      <div style="display:flex;align-items:center;gap:12px;background:#F5F0E8;border-radius:10px;padding:12px">
+        <span id="chk-icon-miss" style="font-size:22px">⚠️</span>
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:700;color:#2C1F0A">النواقص</div>
+          <div id="chk-label-miss" style="font-size:11px;color:#888">لم تُسجَّل بعد</div>
+        </div>
+        <button id="chk-btn-miss-none" onclick="chkConfirmNone('miss')"
+          style="font-size:11px;padding:5px 10px;border-radius:8px;border:1.5px solid #C55B48;background:#FFF5F0;color:#C55B48;cursor:pointer;font-family:Cairo,sans-serif">
+          لا يوجد
+        </button>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button onclick="closeCheckoutModal()"
+          style="flex:1;padding:10px;border-radius:10px;border:1.5px solid #ccc;background:#fff;color:#555;font-family:Cairo,sans-serif;font-size:13px;cursor:pointer">
+          رجوع
+        </button>
+        <button id="chk-confirm-btn" onclick="confirmCheckoutNow()" disabled
+          style="flex:2;padding:10px;border-radius:10px;border:none;background:#ccc;color:#fff;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:not-allowed">
+          <i class="ti ti-logout"></i> تسجيل الانصراف
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Modal تأكيد الخروج -->
 <div id="modal-logout-confirm" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:20px">
   <div style="background:#FFFDF8;border-radius:16px;width:100%;max-width:380px;overflow:hidden;border:1px solid #E8D9C0">
