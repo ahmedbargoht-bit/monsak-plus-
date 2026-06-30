@@ -2823,22 +2823,20 @@ async function runMissingStepsCheck(){
   if(!grps.length) return;
 
   try{
-    const [visitsData, productsData] = await Promise.all([
-      fetch(
-        `${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&date=eq.${checkDate}&select=name,branch,time_in,time_out,lat,lng&limit=1000`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
-      ).then(r=>r.ok?r.json():[]).catch(()=>[]),
-
-      fetch(
-        `${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&created_at=gte.${checkDate}T00:00:00&created_at=lte.${checkDate}T23:59:59&select=name,branch&limit=1000`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
-      ).then(r=>r.ok?r.json():[]).catch(()=>[])
+    const H = {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}};
+    const [visitsData, productsData, returnsData, missingData] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&date=eq.${checkDate}&select=id,name,branch,time_in,time_out,lat,lng&limit=1000`,H).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&created_at=gte.${checkDate}T00:00:00&created_at=lte.${checkDate}T23:59:59&select=name,branch,visit_id&limit=2000`,H).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/returns?grp=in.(${grps.join(',')})&created_at=gte.${checkDate}T00:00:00&created_at=lte.${checkDate}T23:59:59&select=name,branch,visit_id&limit=2000`,H).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/missing?grp=in.(${grps.join(',')})&created_at=gte.${checkDate}T00:00:00&created_at=lte.${checkDate}T23:59:59&select=name,branch,visit_id&limit=2000`,H).then(r=>r.ok?r.json():[]).catch(()=>[])
     ]);
 
     const visits   = Array.isArray(visitsData)   ? visitsData   : [];
     const products = Array.isArray(productsData) ? productsData : [];
+    const returns  = Array.isArray(returnsData)  ? returnsData  : [];
+    const missing  = Array.isArray(missingData)  ? missingData  : [];
 
-    if(!visits.length && !products.length){
+    if(!visits.length){
       document.getElementById('alerts-section').style.display = 'block';
       document.getElementById('alerts-list').innerHTML = `<div style="text-align:center;padding:12px;color:#aaa;font-size:12px">لا توجد زيارات في ${checkDate}</div>`;
       document.getElementById('alerts-count-badge').textContent = '0';
@@ -2846,20 +2844,26 @@ async function runMissingStepsCheck(){
       return;
     }
 
-    // Set لأصناف: "name|branch"
-    const prodSet = new Set(products.map(p=>`${p.name}|${p.branch}`));
+    // Sets للفحص — نستخدم visit_id لو موجود، fallback لـ name|branch
+    const prodSet  = new Set([...products.map(p=>p.visit_id||`${p.name}|${p.branch}`)]);
+    const retSet   = new Set([...returns.map(r=>r.visit_id||`${r.name}|${r.branch}`)]);
+    const missSet  = new Set([...missing.map(m=>m.visit_id||`${m.name}|${m.branch}`)]);
 
     // تجميع الزيارات: name → [{branch, steps}]
     const repBranches = {};
     visits.forEach(v=>{
       if(!v.name) return;
       if(!repBranches[v.name]) repBranches[v.name] = [];
+      const key = v.id || `${v.name}|${v.branch}`;
+      const fallKey = `${v.name}|${v.branch}`;
       repBranches[v.name].push({
-        branch  : v.branch || '—',
-        حضور   : !!v.time_in,
-        لوكيشن : !!(v.lat && v.lng),
-        أصناف  : prodSet.has(`${v.name}|${v.branch}`),
-        انصراف : !!v.time_out,
+        branch    : v.branch || '—',
+        حضور     : !!v.time_in,
+        لوكيشن   : !!(v.lat && v.lng),
+        أصناف    : prodSet.has(v.id) || prodSet.has(fallKey),
+        مرتجعات  : retSet.has(v.id)  || retSet.has(fallKey),
+        نواقص    : missSet.has(v.id)  || missSet.has(fallKey),
+        انصراف   : !!v.time_out,
       });
     });
 
@@ -2868,7 +2872,7 @@ async function runMissingStepsCheck(){
     Object.entries(repBranches).forEach(([name, branches])=>{
       const missingBranches = [];
       branches.forEach(b=>{
-        const missing = ['حضور','لوكيشن','أصناف','انصراف'].filter(k=>!b[k]);
+        const missing = ['حضور','لوكيشن','أصناف','مرتجعات','نواقص','انصراف'].filter(k=>!b[k]);
         if(missing.length > 0) missingBranches.push({ branch: b.branch, missing, steps: b });
       });
       if(missingBranches.length > 0) alerts.push({ name, missingBranches });
@@ -2901,7 +2905,7 @@ function renderMissingAlerts(alerts){
 
     // تفاصيل الفروع الناقصة
     const branchDetails = a.missingBranches.map(b=>{
-      const stepsHTML = ['حضور','لوكيشن','أصناف','انصراف'].map(k=>`
+      const stepsHTML = ['حضور','لوكيشن','أصناف','مرتجعات','نواقص','انصراف'].map(k=>`
         <span class="alert-step ${b.steps[k]?'ok':'missing'}">${b.steps[k]?'✓':'✗'} ${k}</span>
       `).join('');
       return `<div style="background:#FFF8F8;border:1px solid #FFCDD2;border-radius:8px;padding:6px 10px;margin-top:6px">
@@ -3216,27 +3220,74 @@ async function loadRepDetail(){
       attEl.innerHTML = '<div class="empty">لا توجد سجلات حضور في هذه الفترة</div>';
     }
 
-    // الفروع المزارة — تجميع بـ branch مع عدد الزيارات وآخر تاريخ ونقاط
+    // جلب الأصناف والمرتجعات والنواقص المربوطة بالزيارات
+    const visitIds = visitsArr.map(v=>v.id).filter(Boolean);
+    let prodsMap={}, retsMap={}, missMap={};
+
+    if(visitIds.length){
+      const H2 = {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}};
+      const [prodsData, retsData, missData] = await Promise.all([
+        fetch(`${SUPABASE_URL}/rest/v1/products?name=eq.${encodeURIComponent(name)}&date=gte.${from}&date=lte.${to}&select=visit_id,branch,snf,created_at&limit=3000`,H2).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        fetch(`${SUPABASE_URL}/rest/v1/returns?name=eq.${encodeURIComponent(name)}&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59&select=visit_id,branch,snf,qty&limit=2000`,H2).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        fetch(`${SUPABASE_URL}/rest/v1/missing?name=eq.${encodeURIComponent(name)}&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59&select=visit_id,branch,snf&limit=2000`,H2).then(r=>r.ok?r.json():[]).catch(()=>[])
+      ]);
+      // تجميع حسب visit_id أو branch كـ fallback
+      (Array.isArray(prodsData)?prodsData:[]).forEach(p=>{
+        const k = p.visit_id||p.branch||'?';
+        prodsMap[k]=(prodsMap[k]||0)+1;
+      });
+      (Array.isArray(retsData)?retsData:[]).forEach(r=>{
+        const k = r.visit_id||r.branch||'?';
+        retsMap[k]=(retsMap[k]||0)+1;
+      });
+      (Array.isArray(missData)?missData:[]).forEach(m=>{
+        const k = m.visit_id||m.branch||'?';
+        missMap[k]=(missMap[k]||0)+1;
+      });
+    }
+
+    // الزيارات — عرض كل زيارة مع تفاصيلها
     const visEl = document.getElementById('rd-visits-list');
     if(visitsArr.length){
-      const byBranch = {};
-      visitsArr.forEach(v=>{
-        const b = v.branch || '—';
-        if(!byBranch[b]) byBranch[b] = { branch:b, count:0, pts:0, lastDate:v.date, dates:new Set() };
-        byBranch[b].count++;
-        byBranch[b].pts += (+v.points||0);
-        byBranch[b].dates.add(v.date);
-        if(v.date > byBranch[b].lastDate) byBranch[b].lastDate = v.date;
-      });
-      visEl.innerHTML = Object.values(byBranch)
-        .sort((a,b)=>b.lastDate.localeCompare(a.lastDate))
-        .map(b=>`<div class="rd-visit-row">
-          <div>
-            <div style="font-size:12px;font-weight:700">${b.branch}</div>
-            <div style="font-size:10px;color:var(--text2)">${b.dates.size} زيارة · آخر زيارة ${b.lastDate}</div>
-          </div>
-          <span style="font-size:14px;font-weight:900;color:var(--navy)">${b.pts} نقطة</span>
-        </div>`).join('');
+      visEl.innerHTML = [...visitsArr]
+        .sort((a,b)=>b.date.localeCompare(a.date)||(b.time_in||'').localeCompare(a.time_in||''))
+        .map(v=>{
+          const pk = v.id||v.branch;
+          const fb = v.branch||'—';
+          const prods = prodsMap[pk]||prodsMap[fb]||0;
+          const rets  = retsMap[pk] ||retsMap[fb] ||0;
+          const miss  = missMap[pk] ||missMap[fb] ||0;
+          const steps = [
+            {k:'حضور',   ok:!!v.time_in},
+            {k:'لوكيشن', ok:!!(v.lat&&v.lng)},
+            {k:'أصناف',  ok:prods>0},
+            {k:'مرتجعات',ok:rets>0},
+            {k:'نواقص',  ok:miss>0},
+            {k:'انصراف', ok:!!v.time_out},
+          ];
+          const allOk = steps.every(s=>s.ok);
+          const stepsHTML = steps.map(s=>`
+            <span style="font-size:10px;padding:2px 7px;border-radius:999px;font-weight:700;
+              background:${s.ok?'#E8F5E9':'#FFF3E0'};color:${s.ok?'#1A7A4A':'#E65100'}">
+              ${s.ok?'✓':'✗'} ${s.k}
+            </span>`).join('');
+          return `<div style="background:${allOk?'#F0FFF4':'#FFFDF8'};border:1.5px solid ${allOk?'#A5D6A7':'#E8D9C0'};
+            border-radius:10px;padding:10px 12px;margin-bottom:8px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+              <div>
+                <div style="font-size:12px;font-weight:800;color:#2C1F0A">🏪 ${fb}</div>
+                <div style="font-size:10px;color:#888">${v.date} · ${v.time_in||'—'} ← ${v.time_out||'—'}</div>
+              </div>
+              <span style="font-size:13px;font-weight:900;color:var(--navy)">${v.points||0} نقطة</span>
+            </div>
+            <div style="display:flex;gap:4px;flex-wrap:wrap">${stepsHTML}</div>
+            ${prods||rets||miss?`<div style="display:flex;gap:8px;margin-top:6px;font-size:11px;color:#555">
+              ${prods?`<span>📦 ${prods} صنف</span>`:''}
+              ${rets ?`<span>↩️ ${rets} مرتجع</span>`:''}
+              ${miss ?`<span>⚠️ ${miss} نقص</span>`:''}
+            </div>`:''}
+          </div>`;
+        }).join('');
     } else {
       visEl.innerHTML = '<div class="empty">لا توجد زيارات في هذه الفترة</div>';
     }
@@ -8800,16 +8851,25 @@ async function teamPlansLoadSup(){
   let plans = await fetch(url,{headers:H}).then(r=>r.ok?r.json().catch(()=>[]):[]).catch(()=>[]);
   if(!Array.isArray(plans)) plans=[];
 
-  // فلتر: بس المشرفين اللي في مجموعات المدير
+  // فلتر: بس المشرفين اللي في مجموعات المدير — مع استثناء مشرفي ومديري المبيعات
+  const SALES_STAFF_NAMES = (window.SUPERVISORS||[])
+    .filter(s=>s.level==='sales'||s.user_type==='مبيعات')
+    .map(s=>s.name);
+  // fallback: الأسماء المعروفة من المبيعات (لو SUPERVISORS مش محمّل بعد)
+  const KNOWN_SALES = ['اسلام كمال','عز الدين عاطف','محمود راجح','عبد العزيز محمود'];
+  const excludeNames = [...new Set([...SALES_STAFF_NAMES, ...KNOWN_SALES])];
+
   if(cu?.level !== 'gm'){
     const cleanGroups = managerGroups.map(g=>g.replace(/"/g,'').trim()).filter(Boolean);
     if(cleanGroups.length){
       const supRes = await fetch(
-        `${SUPABASE_URL}/rest/v1/users?select=name,groups&role=eq.supervisor`,
+        `${SUPABASE_URL}/rest/v1/users?select=name,groups,user_type&role=eq.supervisor`,
         {headers:H}
       ).then(r=>r.ok?r.json().catch(()=>[]):[]).catch(()=>[]);
       const mySupNames = (Array.isArray(supRes)?supRes:[])
         .filter(u=>{
+          if(excludeNames.includes(u.name)) return false; // استثنِ المبيعات
+          if(u.user_type==='مبيعات') return false;
           const uGroups = (u.groups||'').replace(/"/g,'').split(',').map(g=>g.trim()).filter(Boolean);
           return uGroups.some(g=>cleanGroups.includes(g));
         })
