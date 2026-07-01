@@ -20838,10 +20838,10 @@ async function sinvLoad(){
       <tr style="border-bottom:0.5px solid var(--border);${i%2?'background:var(--surface-1)':''}">
         <td style="padding:8px;text-align:center"><input type="checkbox" class="sinv-cb" data-id="${r.id}" style="width:14px;height:14px;cursor:pointer"/></td>
         <td style="padding:8px 12px;font-size:11px;color:var(--text2)">${i+1}</td>
-        <td style="padding:8px 12px;font-weight:700;color:#731E2E">${r.invoice_number||'—'}</td>
+        <td style="padding:8px 12px;font-weight:700;color:#731E2E;cursor:pointer;text-decoration:underline" onclick="sinvShowInvoice(${r.id},'del')">${r.invoice_number||'—'}</td>
         <td style="padding:8px 12px;font-size:12px">${r.rep_name||'—'}</td>
         <td style="padding:8px 12px;font-size:11px">${r.branch_name||'—'}</td>
-        <td style="padding:8px 12px;font-size:11px;color:var(--text2)">${r.client_name||'—'}</td>
+        <td style="padding:8px 12px;font-size:11px;color:#185FA5;cursor:pointer;font-weight:600;text-decoration:underline" onclick="sinvShowClient('${(r.client_name||'').replace(/'/g,"\\'")}','${(r.branch_name||'').replace(/'/g,"\\'")}','${(r.rep_name||'').replace(/'/g,"\\'")}')">${r.client_name||'—'}</td>
         <td style="padding:8px;text-align:center">${typeLabel[r.invoice_type]||r.invoice_type||'—'}</td>
         <td style="padding:8px;text-align:center;font-size:11px">${(r.total_before_discount||0).toLocaleString('en-US')} ج</td>
         <td style="padding:8px;text-align:center;font-size:11px;color:#C55B48">${r.discount_pct||0}%</td>
@@ -20918,10 +20918,10 @@ async function sinvRetLoad(){
       <tr style="border-bottom:0.5px solid var(--border);${i%2?'background:#FFF5F5':''}">
         <td style="padding:8px;text-align:center"><input type="checkbox" class="sinvret-cb" data-id="${r.id}" style="width:14px;height:14px;cursor:pointer"/></td>
         <td style="padding:8px 12px;font-size:11px;color:var(--text2)">${i+1}</td>
-        <td style="padding:8px 12px;font-weight:700;color:#731E2E">${r.invoice_number||'—'}</td>
+        <td style="padding:8px 12px;font-weight:700;color:#731E2E;cursor:pointer;text-decoration:underline" onclick="sinvShowInvoice(${r.id},'ret')">${r.invoice_number||'—'}</td>
         <td style="padding:8px 12px;font-size:12px">${r.rep_name||'—'}</td>
         <td style="padding:8px 12px;font-size:11px">${r.branch_name||'—'}</td>
-        <td style="padding:8px 12px;font-size:11px;color:var(--text2)">${r.client_name||'—'}</td>
+        <td style="padding:8px 12px;font-size:11px;color:#185FA5;cursor:pointer;font-weight:600;text-decoration:underline" onclick="sinvShowClient('${(r.client_name||'').replace(/'/g,"\\'")}','${(r.branch_name||'').replace(/'/g,"\\'")}','${(r.rep_name||'').replace(/'/g,"\\'")}')">${r.client_name||'—'}</td>
         <td style="padding:8px;text-align:center">${typeLabel[r.invoice_type]||r.invoice_type||'—'}</td>
         <td style="padding:8px;text-align:center;font-size:11px">${(r.total_before_discount||0).toLocaleString('en-US')} ج</td>
         <td style="padding:8px;text-align:center;font-size:11px;color:#C55B48">${r.discount_pct||0}%</td>
@@ -20962,6 +20962,150 @@ async function sinvRetDeleteOne(id,invNo){
     if(r.ok||r.status===204){showToast('✅ تم حذف المرتجع');sinvRetLoad();sinvSummaryLoad();}
     else throw new Error(await r.text());
   }catch(e){showToast('❌ خطأ: '+e.message);}
+}
+
+// ══ popup تفاصيل الفاتورة ══
+function sinvShowInvoice(id, tab){
+  const src = tab==='ret' ? _sinvRetData : _sinvData;
+  const r = src.find(x=>x.id===id);
+  if(!r){ showToast('⚠️ لم يتم تحميل بيانات الفاتورة — اضغط عرض أولاً'); return; }
+  const items = Array.isArray(r.items)?r.items:[];
+  const typeMap={no_tax:'بدون ضريبة',tax_14:'ضريبة 14%',tax_5:'ضريبة 5%'};
+  const taxPct={no_tax:0,tax_14:14,tax_5:5}[r.invoice_type]||0;
+  const discAmt=((r.total_before_discount||0)*(r.discount_pct||0)/100);
+  const isRet=tab==='ret';
+  // أصناف الفاتورة
+  const itemRows=items.length?items.map((it,i)=>`
+    <tr style="${i%2?'background:#FFF8F4':''}">
+      <td style="padding:7px 10px;font-size:11px;color:var(--text2)">${i+1}</td>
+      <td style="padding:7px 10px;font-size:12px;font-weight:600">${it.name||'—'}</td>
+      <td style="padding:7px 10px;text-align:center;font-size:11px">${it.qty||0}</td>
+      <td style="padding:7px 10px;text-align:center;font-size:11px">${(it.price||0).toFixed(2)} ج</td>
+      <td style="padding:7px 10px;text-align:center;font-weight:700;font-size:11px">${(it.total||0).toFixed(2)} ج</td>
+    </tr>`).join(''):`<tr><td colspan="5" style="text-align:center;padding:20px;color:#aaa">لا توجد أصناف</td></tr>`;
+  // المرتجعات المرتبطة بنفس العميل والفرع (للفواتير فقط، مش للمرتجعات)
+  let retSection='';
+  if(!isRet){
+    const rels=_sinvRetData.filter(x=>x.client_name===r.client_name&&x.branch_name===r.branch_name);
+    if(rels.length){
+      retSection=`<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">
+        <div style="font-size:12px;font-weight:700;color:#B91C1C;margin-bottom:8px">↩️ المرتجعات لنفس العميل والفرع (${rels.length})</div>
+        ${rels.map(x=>{
+          const xItems=Array.isArray(x.items)?x.items:[];
+          const xItemsHtml=xItems.length?xItems.map((it,i)=>`<tr style="${i%2?'background:#FFF0F0':''}"><td style="padding:5px 8px;font-size:10px;color:var(--text2)">${i+1}</td><td style="padding:5px 8px;font-size:11px">${it.name||'—'}</td><td style="padding:5px 8px;text-align:center;font-size:10px">${it.qty||0}</td><td style="padding:5px 8px;text-align:center;font-size:10px">${(it.price||0).toFixed(2)} ج</td><td style="padding:5px 8px;text-align:center;font-size:10px;font-weight:700">${(it.total||0).toFixed(2)} ج</td></tr>`).join(''):`<tr><td colspan="5" style="text-align:center;padding:10px;color:#aaa;font-size:10px">لا توجد أصناف</td></tr>`;
+          return `<div style="background:#FFF5F5;border:1px solid #FECACA;border-radius:8px;padding:10px 12px;margin-bottom:8px">
+            <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px;font-size:11px">
+              <span><b>رقم:</b> ${x.invoice_number||'—'}</span>
+              <span><b>تاريخ:</b> ${x.return_date||x.delivery_date||''}</span>
+              <span style="color:#B91C1C"><b>صافي المرتجع:</b> ${(x.total_net||0).toFixed(2)} ج</span>
+            </div>
+            <table style="width:100%;border-collapse:collapse">
+              <thead><tr style="background:#B91C1C;color:#fff"><th style="padding:4px 8px;text-align:right;font-size:10px">#</th><th style="padding:4px 8px;text-align:right;font-size:10px">الصنف</th><th style="padding:4px 8px;text-align:center;font-size:10px">العدد</th><th style="padding:4px 8px;text-align:center;font-size:10px">السعر</th><th style="padding:4px 8px;text-align:center;font-size:10px">الإجمالي</th></tr></thead>
+              <tbody>${xItemsHtml}</tbody>
+            </table>
+          </div>`;
+        }).join('')}
+      </div>`;
+    }
+  }
+  document.getElementById('sinv-detail-title').textContent=(isRet?'مرتجع: ':'فاتورة: ')+(r.invoice_number||'—');
+  document.getElementById('sinv-detail-body').innerHTML=`
+    <div style="display:flex;gap:12px;flex-wrap:wrap;background:#FFF8F4;border:1px solid #EDE5D8;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:11px">
+      <div><span style="color:var(--text2)">المندوب: </span><b>${r.rep_name||'—'}</b></div>
+      <div><span style="color:var(--text2)">الفرع: </span><b>${r.branch_name||'—'}</b></div>
+      <div><span style="color:var(--text2)">العميل: </span><b>${r.client_name||'—'}</b></div>
+      <div><span style="color:var(--text2)">النوع: </span><b>${typeMap[r.invoice_type]||'—'}</b></div>
+      <div><span style="color:var(--text2)">التاريخ: </span><b>${r.delivery_date||r.return_date||''}</b></div>
+    </div>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:14px">
+      <thead><tr style="background:#4B3C1A;color:#EDE5D8"><th style="padding:8px 10px;text-align:right;font-size:11px">#</th><th style="padding:8px 10px;text-align:right;font-size:11px">الصنف</th><th style="padding:8px 10px;text-align:center;font-size:11px">العدد</th><th style="padding:8px 10px;text-align:center;font-size:11px">سعر القطعة</th><th style="padding:8px 10px;text-align:center;font-size:11px">الإجمالي</th></tr></thead>
+      <tbody>${itemRows}</tbody>
+    </table>
+    <div style="background:${isRet?'#B91C1C':'#C55B48'};border-radius:10px;padding:12px 16px;color:white;font-size:12px">
+      <div style="display:flex;justify-content:space-between;opacity:.85;margin-bottom:3px"><span>الإجمالي قبل الخصم</span><span>${(r.total_before_discount||0).toLocaleString('en-US')} ج</span></div>
+      <div style="display:flex;justify-content:space-between;opacity:.85;margin-bottom:3px"><span>خصم ${r.discount_pct||0}%</span><span>− ${discAmt.toFixed(2)} ج</span></div>
+      ${taxPct>0?`<div style="display:flex;justify-content:space-between;opacity:.85;margin-bottom:3px"><span>ضريبة ${taxPct}%</span><span>+ ${(r.total_tax||0).toFixed(2)} ج</span></div>`:''}
+      <div style="display:flex;justify-content:space-between;font-size:15px;font-weight:800;border-top:1px solid rgba(255,255,255,.3);padding-top:8px;margin-top:6px"><span>${isRet?'إجمالي المرتجع':'الإجمالي النهائي'}</span><span>${(r.total_net||0).toFixed(2)} ج</span></div>
+    </div>
+    ${retSection}`;
+  const ov=document.getElementById('sinv-detail-modal');
+  ov.style.display='flex';
+}
+
+// ══ popup كل فواتير العميل ══
+function sinvShowClient(clientName, branchName, repName){
+  const dels=_sinvData.filter(x=>x.client_name===clientName);
+  const rets=_sinvRetData.filter(x=>x.client_name===clientName);
+  const typeMap={no_tax:'بدون ضريبة',tax_14:'ضريبة 14%',tax_5:'ضريبة 5%'};
+  const typeColor={no_tax:'#065F46',tax_14:'#1D4ED8',tax_5:'#92400E'};
+  const typeColorBg={no_tax:'#D1FAE5',tax_14:'#DBEAFE',tax_5:'#FEF3C7'};
+  function renderInvCard(r,isRet){
+    const items=Array.isArray(r.items)?r.items:[];
+    const itemRows=items.length?items.map((it,i)=>`
+      <tr style="${i%2?'background:#FFF8F4':''}">
+        <td style="padding:5px 8px;font-size:10px;color:var(--text2)">${i+1}</td>
+        <td style="padding:5px 8px;font-size:11px;font-weight:600">${it.name||'—'}</td>
+        <td style="padding:5px 8px;text-align:center;font-size:10px">${it.qty||0}</td>
+        <td style="padding:5px 8px;text-align:center;font-size:10px">${(it.price||0).toFixed(2)} ج</td>
+        <td style="padding:5px 8px;text-align:center;font-size:10px;font-weight:700">${(it.total||0).toFixed(2)} ج</td>
+      </tr>`).join(''):`<tr><td colspan="5" style="text-align:center;padding:12px;color:#aaa;font-size:10px">لا توجد أصناف</td></tr>`;
+    const taxPct={no_tax:0,tax_14:14,tax_5:5}[r.invoice_type]||0;
+    const discAmt=((r.total_before_discount||0)*(r.discount_pct||0)/100);
+    const borderColor=isRet?'#FECACA':'#DDD0BC';
+    const headerBg=isRet?'#FFF5F5':'#FFF8F4';
+    return `<div style="border:1px solid ${borderColor};border-radius:10px;margin-bottom:12px;overflow:hidden">
+      <div style="background:${headerBg};padding:8px 12px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:11px;border-bottom:1px solid ${borderColor}">
+        <span style="font-weight:800;color:${isRet?'#B91C1C':'#731E2E'}">${isRet?'↩️':'📄'} ${r.invoice_number||'—'}</span>
+        <span style="background:${typeColorBg[r.invoice_type]||'#eee'};color:${typeColor[r.invoice_type]||'#333'};padding:1px 8px;border-radius:6px;font-size:10px;font-weight:700">${typeMap[r.invoice_type]||'—'}</span>
+        <span style="color:var(--text2)">${r.delivery_date||r.return_date||''}</span>
+        <span style="color:var(--text2)">خصم: <b>${r.discount_pct||0}%</b></span>
+        <span style="color:${isRet?'#B91C1C':'#1A7A4A'};font-weight:700;margin-right:auto">الصافي: ${(r.total_net||0).toFixed(2)} ج</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="background:${isRet?'#B91C1C':'#4B3C1A'};color:#EDE5D8">
+            <th style="padding:6px 8px;text-align:right;font-size:10px">#</th>
+            <th style="padding:6px 8px;text-align:right;font-size:10px">الصنف</th>
+            <th style="padding:6px 8px;text-align:center;font-size:10px">العدد</th>
+            <th style="padding:6px 8px;text-align:center;font-size:10px">السعر</th>
+            <th style="padding:6px 8px;text-align:center;font-size:10px">الإجمالي</th>
+          </tr></thead>
+          <tbody>${itemRows}</tbody>
+        </table>
+      </div>
+      <div style="background:${isRet?'#FFF0F0':'#FFFAF7'};padding:7px 12px;font-size:11px;border-top:1px solid ${borderColor};display:flex;gap:16px;flex-wrap:wrap">
+        <span>قبل الخصم: <b>${(r.total_before_discount||0).toLocaleString('en-US')} ج</b></span>
+        ${discAmt>0?`<span style="color:#C05621">خصم: <b>− ${discAmt.toFixed(2)} ج</b></span>`:''}
+        ${taxPct>0?`<span style="color:#C05621">ضريبة ${taxPct}%: <b>${(r.total_tax||0).toFixed(2)} ج</b></span>`:''}
+        <span style="color:${isRet?'#B91C1C':'#1A7A4A'};font-weight:700">الصافي: ${(r.total_net||0).toFixed(2)} ج</span>
+      </div>
+    </div>`;
+  }
+  const totalDel=dels.reduce((s,x)=>s+(x.total_net||0),0);
+  const totalRet=rets.reduce((s,x)=>s+(x.total_net||0),0);
+  const net=totalDel-totalRet;
+  document.getElementById('sinv-client-title').textContent=clientName||'—';
+  document.getElementById('sinv-client-body').innerHTML=`
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+      <div style="background:#F0FDF4;border:1px solid #86EFAC;border-radius:8px;padding:8px 16px;text-align:center">
+        <div style="font-size:10px;color:var(--text2)">فواتير التسليم</div>
+        <div style="font-size:16px;font-weight:800;color:#15803D">${dels.length} فاتورة</div>
+        <div style="font-size:11px;font-weight:700;color:#15803D">${totalDel.toFixed(2)} ج</div>
+      </div>
+      <div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:8px;padding:8px 16px;text-align:center">
+        <div style="font-size:10px;color:var(--text2)">المرتجعات</div>
+        <div style="font-size:16px;font-weight:800;color:#B91C1C">${rets.length} مرتجع</div>
+        <div style="font-size:11px;font-weight:700;color:#B91C1C">${totalRet.toFixed(2)} ج</div>
+      </div>
+      <div style="background:#F0F4FF;border:1px solid #BFDBFE;border-radius:8px;padding:8px 16px;text-align:center">
+        <div style="font-size:10px;color:var(--text2)">الصافي</div>
+        <div style="font-size:16px;font-weight:800;color:#1D4ED8">${net.toFixed(2)} ج</div>
+      </div>
+    </div>
+    ${dels.length?`<div style="font-size:12px;font-weight:700;color:#15803D;margin-bottom:8px">📦 فواتير التسليم (${dels.length})</div>${dels.map(r=>renderInvCard(r,false)).join('')}`:''}
+    ${rets.length?`<div style="font-size:12px;font-weight:700;color:#B91C1C;margin-bottom:8px;margin-top:10px">↩️ المرتجعات (${rets.length})</div>${rets.map(r=>renderInvCard(r,true)).join('')}`:''}
+    ${!dels.length&&!rets.length?'<div style="text-align:center;padding:30px;color:#aaa">لا توجد بيانات محملة — اضغط عرض أولاً</div>':''}`;
+  document.getElementById('sinv-client-modal').style.display='flex';
 }
 
 // ══ يومية المندوب ══
@@ -21219,6 +21363,28 @@ function sinvPDF(idx){
   const w=window.open('','_blank');w.document.write(html);w.document.close();setTimeout(()=>w.print(),600);
 }
 </script>
+<!-- ══ modal: تفاصيل فاتورة ══ -->
+<div id="sinv-detail-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;align-items:flex-start;justify-content:center;padding:24px 12px;overflow-y:auto" onclick="if(event.target===this)this.style.display='none'">
+  <div style="background:var(--surface-2,#fff);border-radius:14px;width:100%;max-width:640px;box-shadow:0 8px 40px rgba(0,0,0,.35);font-family:Cairo,sans-serif;direction:rtl;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:#731E2E;color:#fff">
+      <div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:800"><i class="ti ti-file-invoice"></i> <span id="sinv-detail-title">تفاصيل الفاتورة</span></div>
+      <button onclick="document.getElementById('sinv-detail-modal').style.display='none'" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center">✕</button>
+    </div>
+    <div id="sinv-detail-body" style="padding:16px 18px;max-height:80vh;overflow-y:auto"></div>
+  </div>
+</div>
+
+<!-- ══ modal: كل فواتير العميل ══ -->
+<div id="sinv-client-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;align-items:flex-start;justify-content:center;padding:24px 12px;overflow-y:auto" onclick="if(event.target===this)this.style.display='none'">
+  <div style="background:var(--surface-2,#fff);border-radius:14px;width:100%;max-width:720px;box-shadow:0 8px 40px rgba(0,0,0,.35);font-family:Cairo,sans-serif;direction:rtl;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:#185FA5;color:#fff">
+      <div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:800"><i class="ti ti-user"></i> <span id="sinv-client-title">سجل العميل</span></div>
+      <button onclick="document.getElementById('sinv-client-modal').style.display='none'" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center">✕</button>
+    </div>
+    <div id="sinv-client-body" style="padding:16px 18px;max-height:85vh;overflow-y:auto"></div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="modal-add-route">
   <div class="modal" style="max-width:400px">
     <div class="modal-title">إضافة خط سير <button class="modal-close" onclick="closeModal('modal-add-route')">✕</button></div>
