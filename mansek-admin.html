@@ -7295,11 +7295,15 @@ async function sgLoad(){
     const tgtRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_targets?select=*&month=eq.${monthStr}&limit=500`,{headers:H});
     const tgtData = tgtRes.ok ? await tgtRes.json() : [];
 
-    // 4. جيب المبيعات للشهر ده
+    // 4. جيب المبيعات والمرتجعات للشهر ده (بنفس منطق يومية المندوب: total_net - total_tax)
     const dateFrom = `${yr}-${String(mo).padStart(2,'0')}-01`;
     const dateTo   = `${yr}-${String(mo).padStart(2,'0')}-${new Date(yr,mo,0).getDate()}`;
-    const salesRes = await fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,total_net&delivery_date=gte.${dateFrom}&delivery_date=lte.${dateTo}&limit=5000`,{headers:H});
+    const [salesRes, retsRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,total_net,total_tax&delivery_date=gte.${dateFrom}&delivery_date=lte.${dateTo}&limit=5000`,{headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,total_net,total_tax&return_date=gte.${dateFrom}&return_date=lte.${dateTo}&limit=5000`,{headers:H})
+    ]);
     const salesData = salesRes.ok ? await salesRes.json() : [];
+    const retsData  = retsRes.ok  ? await retsRes.json()  : [];
 
     // بناء maps
     const tgtMap = {};
@@ -7310,8 +7314,10 @@ async function sgLoad(){
       const sel = document.getElementById('sg-workdays-sel');
       if(sel) sel.value = savedWd;
     }
+    // البيع الصافي = (total_net - total_tax) للتسليم − (total_net - total_tax) للمرتجع
     const salesMap = {};
-    salesData.forEach(s=>{ salesMap[s.rep_name] = (salesMap[s.rep_name]||0) + (s.total_net||0); });
+    salesData.forEach(s=>{ salesMap[s.rep_name] = (salesMap[s.rep_name]||0) + ((s.total_net||0)-(s.total_tax||0)); });
+    retsData.forEach(r=>{  salesMap[r.rep_name] = (salesMap[r.rep_name]||0) - ((r.total_net||0)-(r.total_tax||0)); });
 
     _sgData = { supervisors: supData, reps: repData, targets: tgtMap, sales: salesMap, branchCount: branchCountMap };
     sgRender();
