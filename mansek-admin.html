@@ -20707,7 +20707,7 @@ async function sinvYawmLoad(){
   const tbody= document.getElementById('sinvyawm-tbody');
   if(tbody) tbody.innerHTML='<tr><td colspan="11" style="text-align:center;padding:30px;color:#888">جاري التحميل...</td></tr>';
   let dUrl=`${SUPABASE_URL}/rest/v1/sales_deliveries?select=id,invoice_number,rep_name,branch_name,client_name,invoice_type,total_before_discount,discount_pct,total_tax,total_net,delivery_date&order=branch_name.asc,delivery_date.asc&limit=2000`;
-  let rUrl=`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,branch_name,total_net,delivery_date&order=branch_name.asc&limit=2000`;
+  let rUrl=`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,branch_name,total_net,total_tax,delivery_date&order=branch_name.asc&limit=2000`;
   if(rep){dUrl+=`&rep_name=eq.${encodeURIComponent(rep)}`;rUrl+=`&rep_name=eq.${encodeURIComponent(rep)}`;}
   if(from){dUrl+=`&delivery_date=gte.${from}`;rUrl+=`&delivery_date=gte.${from}`;}
   if(to){dUrl+=`&delivery_date=lte.${to}`;rUrl+=`&delivery_date=lte.${to}`;}
@@ -20723,16 +20723,21 @@ function sinvYawmRender(rep,from,to){
   const tbody=document.getElementById('sinvyawm-tbody');
   if(!tbody) return;
   if(!_sinvYawmDels.length){tbody.innerHTML='<tr><td colspan="11" style="text-align:center;padding:40px;color:#aaa">لا توجد فواتير للفترة المحددة</td></tr>';return;}
-  // مرتجع لكل فرع
+  // مرتجع لكل فرع — مبلغ المرتجع بدون الضريبة (الضريبة ترجع للحكومة مش إيراد)
   const retByBranch={};
-  _sinvYawmRets.forEach(r=>{if(!retByBranch[r.branch_name])retByBranch[r.branch_name]=0;retByBranch[r.branch_name]+=(r.total_net||0);});
+  _sinvYawmRets.forEach(r=>{
+    const b=r.branch_name||'—';
+    if(!retByBranch[b]) retByBranch[b]=0;
+    // المرتجع الحقيقي = total_net - total_tax (نفس منطق التسليم)
+    retByBranch[b]+=(r.total_net||0)-(r.total_tax||0);
+  });
   // تجميع التسليم بالفرع
   const byBranch={};
   _sinvYawmDels.forEach(d=>{const b=d.branch_name||'—';if(!byBranch[b])byBranch[b]=[];byBranch[b].push(d);});
-  let gNoTax=0,gTax5=0,gTax14=0,gDisc=0,gSell=0,gRet=0,rowNum=0,html='';
+  let gNoTax=0,gTax5=0,gTax14=0,gDisc=0,gSell=0,gSellNet=0,gRet=0,rowNum=0,html='';
   Object.entries(byBranch).forEach(([branch,invs])=>{
     html+=`<tr style="background:#f9f6f1"><td colspan="11" style="padding:5px 10px;font-size:11px;font-weight:700;color:#731E2E">📍 ${invs[0]?.client_name||branch}</td></tr>`;
-    let bNoTax=0,bTax5=0,bTax14=0,bDisc=0,bSell=0;
+    let bNoTax=0,bTax5=0,bTax14=0,bDisc=0,bSell=0,bSellNet=0;
     invs.forEach(inv=>{
       rowNum++;
       const n=inv.invoice_type==='no_tax'?(inv.total_before_discount||0):0;
@@ -20740,8 +20745,10 @@ function sinvYawmRender(rep,from,to){
       const t14=inv.invoice_type==='tax_14'?(inv.total_before_discount||0):0;
       const disc=(inv.total_before_discount||0)*(inv.discount_pct||0)/100;
       const sell=inv.total_net||0;
+      // الصافي لكل فاتورة = اللي اتحصّل - الضريبة (الضريبة للحكومة مش إيراد الشركة)
+      const invNet=(inv.total_net||0)-(inv.total_tax||0);
       const tot=inv.total_before_discount||0;
-      bNoTax+=n;bTax5+=t5;bTax14+=t14;bDisc+=disc;bSell+=sell;
+      bNoTax+=n;bTax5+=t5;bTax14+=t14;bDisc+=disc;bSell+=sell;bSellNet+=invNet;
       html+=`<tr style="border-bottom:0.5px solid var(--border);${rowNum%2?'background:var(--surface-1)':''}">
         <td style="padding:6px 6px;text-align:right;color:var(--text2);font-size:10px">${rowNum}</td>
         <td style="padding:6px 8px;font-size:11px;color:var(--text2)">${inv.branch_name||'—'}</td>
@@ -20753,13 +20760,13 @@ function sinvYawmRender(rep,from,to){
         <td style="padding:6px 6px;text-align:center;font-size:11px;color:#C05621">${disc?disc.toFixed(2):'—'}</td>
         <td style="padding:6px 6px;text-align:center;font-size:11px;color:#1A7A4A;font-weight:600">${sell.toFixed(2)}</td>
         <td style="padding:6px 6px;text-align:center;font-size:11px;color:#B91C1C">—</td>
-        <td style="padding:6px 6px;text-align:center;font-size:11px;font-weight:700;color:#731E2E">${sell.toFixed(2)}</td>
+        <td style="padding:6px 6px;text-align:center;font-size:11px;font-weight:700;color:#731E2E">${invNet.toFixed(2)}</td>
       </tr>`;
     });
     const bRet=retByBranch[branch]||0;
-    const bNet=bSell-bRet;
+    const bNet=bSellNet-bRet;   // صافي = إيراد (بدون ضريبة) - مرتجع (بدون ضريبته)
     const bTot=bNoTax+bTax5+bTax14;
-    gNoTax+=bNoTax;gTax5+=bTax5;gTax14+=bTax14;gDisc+=bDisc;gSell+=bSell;gRet+=bRet;
+    gNoTax+=bNoTax;gTax5+=bTax5;gTax14+=bTax14;gDisc+=bDisc;gSell+=bSell;gSellNet+=bSellNet;gRet+=bRet;
     html+=`<tr style="background:#f0ece5;border-top:1px solid #DDD0BC">
       <td colspan="3" style="padding:6px 10px;font-size:11px;font-weight:700;color:#5C3D2E;text-align:right">مجموع الفرع</td>
       <td style="padding:6px 6px;text-align:center;font-size:11px;font-weight:700">${bNoTax?bNoTax.toFixed(2):'—'}</td>
@@ -20773,6 +20780,7 @@ function sinvYawmRender(rep,from,to){
     </tr>`;
   });
   const gTot=gNoTax+gTax5+gTax14;
+  const gNet=gSellNet-gRet;
   html+=`<tr style="background:#731E2E;color:#fff">
     <td colspan="3" style="padding:8px 10px;font-weight:700;font-size:12px;text-align:right">الإجمالي الكلي</td>
     <td style="padding:8px 6px;text-align:center;font-weight:700">${gNoTax?gNoTax.toFixed(2):'—'}</td>
@@ -20782,7 +20790,7 @@ function sinvYawmRender(rep,from,to){
     <td style="padding:8px 6px;text-align:center;font-weight:700">${gDisc?gDisc.toFixed(2):'—'}</td>
     <td style="padding:8px 6px;text-align:center;font-weight:700">${gSell.toFixed(2)}</td>
     <td style="padding:8px 6px;text-align:center;font-weight:700">${gRet?gRet.toFixed(2):'—'}</td>
-    <td style="padding:8px 6px;text-align:center;font-weight:700;font-size:13px">${(gSell-gRet).toFixed(2)}</td>
+    <td style="padding:8px 6px;text-align:center;font-weight:700;font-size:13px">${gNet.toFixed(2)}</td>
   </tr>`;
   tbody.innerHTML=html;
   // رقم السيريال
