@@ -2005,7 +2005,6 @@ function renderInvoice(){
   const items=invoiceState.items;
   if(!items.length){body.innerHTML='<div class="empty">لا توجد أصناف</div>';return;}
 
-  const disc=getDiscount(items[0].name);
   const hasClientPL=items.some(i=>i.isClientPL);
   const groups=[
     {label:'أصناف بدون ضريبة',tax:0,cls:'tt0',items:[]},
@@ -2017,8 +2016,13 @@ function renderInvoice(){
   let html='';let grandBefore=0,grandDisc=0,grandTax=0,grandTotal=0;
 
   groups.filter(g=>g.items.length).forEach(g=>{
-    const sub=g.items.reduce((s,i)=>s+i.total,0);
-    const dA=sub*disc/100;
+    // خصم لكل قسم بناءً على أول صنف فيه (لضمان صحة الفئة)
+    const disc=getDiscount(g.items[0].name);
+    // أصناف بأسعار خاصة (clientPL) لا تخضع للخصم — سعرها نهائي
+    const normalSub=g.items.filter(i=>!i.isClientPL).reduce((s,i)=>s+i.total,0);
+    const plSub=g.items.filter(i=>i.isClientPL).reduce((s,i)=>s+i.total,0);
+    const sub=normalSub+plSub;
+    const dA=normalSub*disc/100;
     const after=sub-dA;
     const taxA=after*g.tax/100;const net=after+taxA;
     grandBefore+=sub;grandDisc+=dA;grandTax+=taxA;grandTotal+=net;
@@ -2042,7 +2046,7 @@ function renderInvoice(){
 
   html+=`<div class="igt">
     <div class="igr"><span>الإجمالي قبل الخصم</span><span>${grandBefore.toLocaleString('en-US')} ج</span></div>
-    ${disc>0?`<div class="igr"><span>خصم العميل ${disc}%</span><span>− ${grandDisc.toFixed(2)} ج</span></div>`:''}
+    ${grandDisc>0?`<div class="igr"><span>خصم العميل</span><span>− ${grandDisc.toFixed(2)} ج</span></div>`:''}
     ${hasClientPL?`<div class="igr"><span style="color:#2E7D32">💲 أسعار خاصة مطبّقة</span><span style="color:#2E7D32">✔</span></div>`:''}
     ${grandTax>0?`<div class="igr"><span>ضريبة</span><span>+ ${grandTax.toFixed(2)} ج</span></div>`:''}
     <div class="igr fin"><span>الإجمالي النهائي</span><span>${grandTotal.toFixed(2)} ج</span></div>
@@ -2081,7 +2085,6 @@ async function sendInvoice(mode){
   const items=invoiceState.items;
   if(!items.length){showToast('لا توجد أصناف');return;}
 
-  const disc=getDiscount(items[0].name);
   const groups=[{tax:0,prefix:'',items:[]},{tax:14,prefix:'A',items:[]},{tax:5,prefix:'B',items:[]}];
   items.forEach(item=>{const g=groups.find(g=>g.tax===item.tax_pct)||groups[0];g.items.push(item);});
 
@@ -2096,8 +2099,13 @@ async function sendInvoice(mode){
     const prefixBase=isReturn?'R':'';
 
     for(const g of groups.filter(g=>g.items.length)){
-      const sub=g.items.reduce((s,i)=>s+i.total,0);
-      const dA=sub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
+      // خصم لكل قسم: مرتجع → getRetDiscount، بيع → getDiscount بأول صنف في القسم
+      const disc=isReturn?getRetDiscount():getDiscount(g.items[0]?.name||'');
+      // أصناف بأسعار خاصة (clientPL) لا تخضع للخصم — سعرها نهائي
+      const normalSub=g.items.filter(i=>!i.isClientPL).reduce((s,i)=>s+i.total,0);
+      const plSub=g.items.filter(i=>i.isClientPL).reduce((s,i)=>s+i.total,0);
+      const sub=normalSub+plSub;
+      const dA=normalSub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
       const payload={
         rep_name:currentRep.name,
         branch_name:invoiceState.branch,
@@ -2135,7 +2143,6 @@ function exportPDF(mode){
   const items=invoiceState.items;
   if(!items.length){showToast('لا توجد أصناف');return;}
   const isReturn=mode==='returns';
-  const disc=getDiscount(items[0].name);
   const todayStr=new Date().toLocaleDateString('ar-EG');
   const groups=[
     {label:isReturn?'مرتجع بدون ضريبة':'أصناف لا تخضع للضريبة',tax:0,prefix:isReturn?'R':'',items:[]},
@@ -2145,10 +2152,17 @@ function exportPDF(mode){
   items.forEach(item=>{const g=groups.find(g=>g.tax===item.tax_pct)||groups[0];g.items.push(item);});
 
   let sections='';let grandTotal=0,grandBefore=0,grandDisc=0,grandTax=0;
+  // خصم إجمالي للـ header (للعرض فقط)
+  const discDisplay=isReturn?getRetDiscount():getDiscount(items[0]?.name||'');
   groups.filter(g=>g.items.length).forEach(g=>{
+    // خصم لكل قسم بناءً على أول صنف فيه
+    const disc=isReturn?getRetDiscount():getDiscount(g.items[0]?.name||'');
+    // أصناف بأسعار خاصة (clientPL) لا تخضع للخصم — سعرها نهائي
+    const normalSub=g.items.filter(i=>!i.isClientPL).reduce((s,i)=>s+i.total,0);
+    const plSub=g.items.filter(i=>i.isClientPL).reduce((s,i)=>s+i.total,0);
     const invNo=getInvoiceNumber(g.prefix);
-    const sub=g.items.reduce((s,i)=>s+i.total,0);
-    const dA=sub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
+    const sub=normalSub+plSub;
+    const dA=normalSub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
     grandBefore+=sub;grandDisc+=dA;grandTax+=taxA;grandTotal+=net;
     const rows=g.items.map((item,i)=>`<tr style="${i%2?'background:#FFF8F4':''}"><td>${i+1}</td><td style="text-align:right">${item.name}</td><td>${item.qty}</td><td>${item.price} ج</td><td style="font-weight:700">${item.total.toLocaleString('en-US')} ج</td></tr>`).join('');
     sections+=`<div style="margin-bottom:24px;page-break-inside:avoid">
@@ -2179,7 +2193,7 @@ function exportPDF(mode){
   <div style="background:#FFF8F4;border:1px solid #EDE5D8;border-radius:8px;padding:10px 14px;margin-bottom:16px;display:flex;gap:24px">
     <div><span style="font-size:10px;color:#9C7B6A">الفرع</span><div style="font-weight:700;font-size:13px">${invoiceState.branch}</div></div>
     <div><span style="font-size:10px;color:#9C7B6A">العميل</span><div style="font-weight:700;font-size:13px">${invoiceState.client||'—'}</div></div>
-    <div><span style="font-size:10px;color:#9C7B6A">خصم</span><div style="font-weight:700;font-size:13px;color:#C55B48">${disc}%</div></div>
+    <div><span style="font-size:10px;color:#9C7B6A">خصم</span><div style="font-weight:700;font-size:13px;color:#C55B48">${discDisplay}%</div></div>
   </div>
   ${sections}
   <div style="background:#C55B48;border-radius:10px;padding:12px 16px;color:white;margin-top:8px">
@@ -2476,8 +2490,11 @@ function renderReturnInvoice(){
   const hasClientPL=items.some(i=>i.isClientPL);
   let html='';let grandTotal=0,grandBefore=0,grandDisc=0,grandTax=0;
   groups.filter(g=>g.items.length).forEach(g=>{
-    const sub=g.items.reduce((s,i)=>s+i.total,0);
-    const dA=sub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
+    // أصناف بأسعار خاصة (clientPL) لا تخضع للخصم — سعرها نهائي
+    const normalSub=g.items.filter(i=>!i.isClientPL).reduce((s,i)=>s+i.total,0);
+    const plSub=g.items.filter(i=>i.isClientPL).reduce((s,i)=>s+i.total,0);
+    const sub=normalSub+plSub;
+    const dA=normalSub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
     grandBefore+=sub;grandDisc+=dA;grandTax+=taxA;grandTotal+=net;
     html+=`<div class="inv-sec"><div class="inv-sec-hd"><span>${g.label}</span><span class="tax-tag ${g.cls}">${g.tax===0?'بدون ضريبة':g.tax+'%'}</span></div><div class="inv-th"><span class="in">الصنف</span><span class="iq">عدد</span><span class="ip">سعر</span><span class="iv">إجمالي</span><span class="ie"></span></div>`;
     g.items.forEach(item=>{
