@@ -2863,6 +2863,7 @@ function showPanel(id){
   if(id==='target')   { tgtInitDate(); tgtLoadData(); }
   if(id==='plans-plus') { sppAppInit(); sppAppLoad(); }
   if(id==='team-plans') { teamPlansLoad(); }
+  if(id==='achieved')    { loadAchievedPanel(); }
   if(id==='branch-notes') { loadBranchNotes(); }
   if(id==='yawm')         { yawmInit(); }
   if(id==='dash') { setTimeout(()=>bnLoadBadge(),2000); }
@@ -8485,7 +8486,8 @@ function achRenderSppPlan(plan, items, today){
         📋 تنفيذ اليوم
       </button>`:''}
     </div>
-  </div>`;
+  </div>
+  \${plan.manager_note?`<div style="padding:8px 12px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;font-size:12px;color:#1E3A5F;margin-top:8px;font-weight:600">💬 ملاحظة المدير: \${plan.manager_note}</div>`:''}\`;
 
   if(!dayItems.length){
     container.innerHTML=hdrHtml+`<div style="text-align:center;padding:20px;color:#aaa">
@@ -8560,15 +8562,22 @@ function achSwitchTab(tab){
 }
 
 async function loadAchievedPanel(){
-  // أولاً: حاول تجيب الخطة من sales_plans_plus (خطط بلس)
   const today = localDateStr(new Date());
+  const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  // ══ مدير البيع / GM: يشوف منجز خطط الفريق ══
+  if(cu?.level==='manager' || cu?.level==='gm'){
+    await achLoadTeamPlans(today, H);
+    return;
+  }
+
+  // أولاً: حاول تجيب الخطة من sales_plans_plus (خطط بلس)
   const userName = cu?.name||'';
 
   // جيب خطط بلس الأسبوع الحالي
   let sppPlan = null;
   let sppItems = [];
   try{
-    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
     const _d=new Date(); const _day=_d.getDay(); const _diff=_day===6?0:_day+1;
     const _sat=new Date(_d); _sat.setDate(_d.getDate()-_diff); _sat.setHours(0,0,0,0);
     const ws=localDateStr(_sat);
@@ -9984,6 +9993,9 @@ async function teamPlansLoad(){
       </div>
       ${p.notes?`<div style="margin-top:8px;padding:6px 10px;background:#FFF8E1;border-radius:8px;font-size:11px;color:#8B6F47">📝 ${p.notes}</div>`:''}
       ${p.reject_reason?`<div style="margin-top:6px;padding:6px 10px;background:#FFEBEE;border-radius:8px;font-size:11px;color:#B71C1C">❌ ${p.reject_reason}</div>`:''}
+      ${p.manager_note?`<div style="margin-top:6px;padding:8px 10px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;font-size:11px;color:#1E3A5F">💬 ملاحظة المدير: ${p.manager_note}</div>`:''}
+      ${(cu?.level==='manager'||cu?.level==='gm')?`<button onclick="tpWriteNote('${p.id}','${(p.staff_name||'').replace(/'/g,"\\'")}','${(p.manager_note||'').replace(/'/g,"\\'")}')"
+        style="margin-top:6px;width:100%;padding:7px;background:#F0F4FF;color:#1E3A5F;border:1px solid #C7D2FE;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">✏️ ${p.manager_note?'تعديل الملاحظة':'إضافة ملاحظة للمشرف'}</button>":''}
     </div>`;
   }).join('');
 }
@@ -10936,7 +10948,154 @@ function yawmRenderBranch(){
   });
   el.innerHTML = html;
 }
+
+// ════════════════════════════════════════════════
+// achLoadTeamPlans — منجز الفريق للمدير / GM
+// ════════════════════════════════════════════════
+async function achLoadTeamPlans(today, H){
+  const el   = document.getElementById('ach-day-items');
+  const kpiEl= document.getElementById('ach-kpi');
+  const dayEl= document.getElementById('ach-day-chips');
+  const wl   = document.getElementById('ach-week-label');
+
+  if(el)    el.innerHTML='<div style="text-align:center;padding:30px;color:#aaa">⏳ تحميل...</div>';
+  if(dayEl) dayEl.innerHTML='';
+  if(wl)    wl.textContent='منجز خطط الفريق هذا الأسبوع';
+
+  // أسبوع الحالي (من السبت)
+  const _d=new Date(); const _day=_d.getDay();
+  const _diff=_day===6?0:_day+1;
+  const _sat=new Date(_d); _sat.setDate(_d.getDate()-_diff); _sat.setHours(0,0,0,0);
+  const ws=localDateStr(_sat);
+
+  const myGroups=Array.isArray(cu?.groups)
+    ? cu.groups.map(g=>String(g).trim()).filter(Boolean)
+    : (cu?.groups||'').toString().replace(/"/g,'').split(',').map(g=>g.trim()).filter(Boolean);
+
+  try{
+    const r=await fetch(
+      `${SUPABASE_URL}/rest/v1/sales_plans_plus?week_start=eq.${ws}&sector=in.(${myGroups.join(',')})&select=*&order=staff_name.asc&limit=100`,
+      {headers:H});
+    const plans=r.ok?await r.json().catch(()=>[]):[];
+
+    if(!plans.length){
+      if(el) el.innerHTML='<div style="text-align:center;padding:30px;color:#aaa"><i class="ti ti-calendar-off" style="font-size:30px;display:block;margin-bottom:8px;opacity:.3"></i>لا توجد خطط لهذا الأسبوع</div>';
+      if(kpiEl) kpiEl.innerHTML='';
+      return;
+    }
+
+    const approved=plans.filter(p=>p.status==='approved').length;
+    const pending =plans.filter(p=>p.status==='submitted'||p.status==='approved_manager').length;
+    const draft   =plans.filter(p=>p.status==='draft').length;
+    const ttgt    =plans.reduce((s,p)=>s+(+p.target_amount||0),0);
+    const tach    =plans.reduce((s,p)=>s+(+p.achieved_amount||0),0);
+    const achPct  =ttgt?Math.round(tach/ttgt*100):0;
+
+    if(kpiEl) kpiEl.innerHTML=`
+      <div class="stat-card green"><div class="stat-n">${approved}</div><div class="stat-l">✅ معتمدة</div></div>
+      <div class="stat-card orange"><div class="stat-n">${pending}</div><div class="stat-l">⏳ بانتظار الاعتماد</div></div>
+      <div class="stat-card blue"><div class="stat-n">${draft}</div><div class="stat-l">📝 مسودة</div></div>
+      <div class="stat-card purple"><div class="stat-n">${achPct}%</div><div class="stat-l">نسبة إنجاز الفريق</div></div>`;
+
+    const ST={draft:'⏳ مسودة',submitted:'📤 انتظار',approved_manager:'🔄 انتظار GM',approved:'🏆 معتمدة',rejected:'❌ مرفوضة'};
+    const stC={draft:'#8B6F47',submitted:'#E65100',approved_manager:'#1565C0',approved:'#1A7A4A',rejected:'#B71C1C'};
+
+    if(el) el.innerHTML=plans.map(p=>{
+      const sc=stC[p.status]||'#666';
+      const pct=p.target_amount?Math.round((+p.achieved_amount||0)/(+p.target_amount)*100):0;
+      const sn=(p.staff_name||'').replace(/\/g,'\\').replace(/'/g,"\'");
+      const mn=(p.manager_note||'').replace(/\/g,'\\').replace(/'/g,"\'");
+      return `<div style="border:1.5px solid ${sc}22;border-right:4px solid ${sc};border-radius:12px;padding:12px;margin-bottom:10px;background:#fff">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div style="font-size:14px;font-weight:700;color:var(--navy)">${p.staff_name||''}</div>
+          <span style="font-size:10px;background:${sc}22;color:${sc};border-radius:20px;padding:2px 10px;font-weight:700">${ST[p.status]||p.status}</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:8px">
+          <div style="text-align:center;background:#F8FAFF;border-radius:8px;padding:6px">
+            <div style="font-size:12px;font-weight:700;color:var(--navy)">${(+p.target_amount||0).toLocaleString('en-US',{maximumFractionDigits:0})}</div>
+            <div style="font-size:9px;color:#666">الهدف (ج)</div>
+          </div>
+          <div style="text-align:center;background:#F0FDF4;border-radius:8px;padding:6px">
+            <div style="font-size:12px;font-weight:700;color:#1A7A4A">${(+p.achieved_amount||0).toLocaleString('en-US',{maximumFractionDigits:0})}</div>
+            <div style="font-size:9px;color:#666">المنجز (ج)</div>
+          </div>
+          <div style="text-align:center;background:${pct>=80?'#F0FDF4':pct>=50?'#FFF8E1':'#FEF2F2'};border-radius:8px;padding:6px">
+            <div style="font-size:12px;font-weight:700;color:${pct>=80?'#1A7A4A':pct>=50?'#E65100':'#B71C1C'}">${pct}%</div>
+            <div style="font-size:9px;color:#666">الإنجاز</div>
+          </div>
+        </div>
+        ${p.manager_note?`<div style="padding:8px 10px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;font-size:11px;color:#1E3A5F;margin-bottom:6px">💬 ملاحظتك: ${p.manager_note}</div>`:''}
+        <button onclick="tpWriteNote('${p.id}','${sn}','${mn}')"
+          style="width:100%;padding:7px;background:#F0F4FF;color:#1E3A5F;border:1px solid #C7D2FE;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          ✏️ ${p.manager_note?'تعديل الملاحظة':'إضافة ملاحظة'}
+        </button>
+      </div>`;
+    }).join('');
+
+  }catch(e){
+    if(el) el.innerHTML='<div style="text-align:center;padding:20px;color:#B71C1C">خطأ في تحميل البيانات</div>';
+  }
+}
+
+// ════════════════════════════════════════════════
+// tpWriteNote / tpSaveNote — ملاحظة المدير
+// ════════════════════════════════════════════════
+let _tpNoteId=null;
+
+function tpWriteNote(id, staffName, currentNote){
+  _tpNoteId=id;
+  const staffEl=document.getElementById('tp-note-staff');
+  const textEl =document.getElementById('tp-note-text');
+  const btn    =document.getElementById('tp-note-save-btn');
+  if(staffEl) staffEl.textContent=staffName;
+  if(textEl)  textEl.value=currentNote||'';
+  if(btn)     { btn.disabled=false; btn.textContent='💾 حفظ الملاحظة'; }
+  const modal=document.getElementById('modal-tp-note');
+  if(modal){ modal.style.display='flex'; if(textEl) setTimeout(()=>textEl.focus(),100); }
+}
+
+async function tpSaveNote(){
+  if(!_tpNoteId) return;
+  const note=(document.getElementById('tp-note-text')?.value||'').trim();
+  const btn=document.getElementById('tp-note-save-btn');
+  if(btn){ btn.disabled=true; btn.textContent='⏳ جارٍ الحفظ...'; }
+  try{
+    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+    const r=await fetch(`${SUPABASE_URL}/rest/v1/sales_plans_plus?id=eq.${_tpNoteId}`,{
+      method:'PATCH',headers:H,body:JSON.stringify({manager_note:note})
+    });
+    if(r.ok||r.status===204){
+      document.getElementById('modal-tp-note').style.display='none';
+      // حدّث التابين اللي فيهم الخطة
+      const tpPanel=document.getElementById('panel-team-plans');
+      if(tpPanel?.classList.contains('active')) teamPlansLoad();
+      const achPanel=document.getElementById('panel-achieved');
+      if(achPanel?.classList.contains('active')) loadAchievedPanel();
+    } else {
+      alert('خطأ في حفظ الملاحظة — تأكد من صلاحيات الحساب');
+    }
+  }catch(e){ alert('خطأ في الاتصال'); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent='💾 حفظ الملاحظة'; } }
+}
+
 </script>
+
+<!-- Modal: ملاحظة المدير على خطة المشرف -->
+<div id="modal-tp-note" style="display:none;position:fixed;inset:0;background:#0008;z-index:9999;align-items:center;justify-content:center;padding:20px" onclick="if(event.target===this)this.style.display='none'">
+  <div style="background:#fff;border-radius:18px;padding:24px;width:100%;max-width:420px;font-family:Cairo,sans-serif;direction:rtl">
+    <div style="font-size:15px;font-weight:700;color:var(--navy);margin-bottom:4px">✏️ ملاحظة على خطة المشرف</div>
+    <div id="tp-note-staff" style="font-size:12px;color:#666;margin-bottom:14px;font-weight:600"></div>
+    <textarea id="tp-note-text" rows="4"
+      style="width:100%;border:1.5px solid var(--border);border-radius:10px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;resize:vertical;outline:none;box-sizing:border-box"
+      placeholder="اكتب ملاحظتك هنا..."></textarea>
+    <div style="display:flex;gap:10px;margin-top:14px">
+      <button id="tp-note-save-btn" onclick="tpSaveNote()"
+        style="flex:2;padding:11px;background:var(--navy);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">💾 حفظ الملاحظة</button>
+      <button onclick="document.getElementById('modal-tp-note').style.display='none'"
+        style="flex:1;padding:11px;background:#F3F4F6;color:#374151;border:none;border-radius:10px;font-size:13px;cursor:pointer;font-family:Cairo,sans-serif">إلغاء</button>
+    </div>
+  </div>
+</div>
 
 </body>
 </html>
