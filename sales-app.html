@@ -7713,117 +7713,219 @@ async function tgtLoadData(){
   const repsBody = document.getElementById('tgt-reps-body');
   if(repsBody) repsBody.innerHTML='<div style="text-align:center;padding:30px;color:#bbb;font-size:12px">جاري التحميل...</div>';
 
-  const enc = encodeURIComponent(supName);
+  const isManager = cu.level==='manager' || cu.level==='gm';
+
+  // تحديث عنوان الجدول
+  const tgtHdrSpan = document.querySelector('#panel-target .ti-users')?.closest('span');
+  if(tgtHdrSpan) tgtHdrSpan.innerHTML = `<i class="ti ${isManager?'ti-user-shield':'ti-users'}"></i> ${isManager?'أداء المشرفين':'أداء المناديب'}`;
 
   try{
-    // جيب مناديب المشرف
-    const repsRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/users?supervisors=eq.${enc}&role=eq.sales&status=eq.active&select=id,name,grp,route,routes&order=name.asc&limit=100`,
-      {headers:H});
-    const repsList = repsRes.ok ? await repsRes.json() : [];
+    if(isManager){
+      // ══ منطق مدير البيع / GM ══
+      const myGroups = Array.isArray(cu.groups) ? cu.groups : (cu.groups||'').split(',').map(g=>g.trim()).filter(Boolean);
 
-    if(!repsList.length){
-      if(repsBody) repsBody.innerHTML='<div style="text-align:center;padding:30px;color:#bbb;font-size:12px">لا يوجد مناديب مسجلون تحت هذا المشرف</div>';
-      return;
-    }
+      // جيب كل مناديب المناطق بتاعة المدير
+      const repsRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/users?grp=in.(${myGroups.join(',')})&role=eq.sales&status=eq.active&select=name,supervisors&limit=500`,
+        {headers:H});
+      const allReps = repsRes.ok ? await repsRes.json() : [];
 
-    const repNames = repsList.map(r=>encodeURIComponent(r.name)).join(',');
+      if(!allReps.length){
+        if(repsBody) repsBody.innerHTML='<div style="text-align:center;padding:30px;color:#bbb;font-size:12px">لا يوجد مناديب في هذه المناطق</div>';
+        return;
+      }
 
-    // جيب الأهداف، البيع، المرتجع بالتوازي
-    const [tgtRes, salesRes, retRes] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&supervisor_name=eq.${enc}&select=rep_name,target_amount,work_days&limit=200`,{headers:H}),
-      fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${repsList.map(r=>encodeURIComponent(r.name)).join(',')})&delivery_date=gte.${monthStart}&delivery_date=lte.${dateTo}&select=rep_name,total_net,delivery_date&limit=5000`,{headers:H}),
-      fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${repsList.map(r=>encodeURIComponent(r.name)).join(',')})&return_date=gte.${monthStart}&return_date=lte.${dateTo}&select=rep_name,total_net&limit=2000`,{headers:H}),
-    ]);
+      // جمّع المناديب تحت كل مشرف
+      const supMap = {};
+      allReps.forEach(r=>{
+        const sup = (r.supervisors||'').split(',')[0].trim() || 'غير محدد';
+        if(!supMap[sup]) supMap[sup]=[];
+        supMap[sup].push(r.name);
+      });
 
-    const tgtData   = tgtRes.ok   ? await tgtRes.json()   : [];
-    const salesData = salesRes.ok ? await salesRes.json() : [];
-    const retData   = retRes.ok   ? await retRes.json()   : [];
+      const allRepNames = allReps.map(r=>r.name);
+      const encReps = allRepNames.map(n=>encodeURIComponent(n)).join(',');
 
-    // بناء maps
-    const tgtMap   = {}; tgtData.forEach(t=>{ tgtMap[t.rep_name]  = t; });
-    const salesMap = {}; salesData.forEach(s=>{ salesMap[s.rep_name] = (salesMap[s.rep_name]||0)+(s.total_net||0); });
-    const retMap   = {}; retData.forEach(r=>{ retMap[r.rep_name]   = (retMap[r.rep_name]||0)+(r.total_net||0); });
+      // جيب الأهداف والبيع والمرتجع بالتوازي
+      const [tgtRes, salesRes, retRes] = await Promise.all([
+        fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&select=rep_name,supervisor_name,target_amount,work_days&limit=2000`,{headers:H}),
+        fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encReps})&delivery_date=gte.${monthStart}&delivery_date=lte.${dateTo}&select=rep_name,total_net,total_tax,delivery_date&limit=10000`,{headers:H}),
+        fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encReps})&return_date=gte.${monthStart}&return_date=lte.${dateTo}&select=rep_name,total_net,total_tax&limit=5000`,{headers:H}),
+      ]);
 
-    // أيام العمل (أول قيمة موجودة)
-    const workDays = tgtData.find(t=>t.work_days)?.work_days || 26;
+      const tgtData   = tgtRes.ok   ? await tgtRes.json()   : [];
+      const salesData = salesRes.ok ? await salesRes.json() : [];
+      const retData   = retRes.ok   ? await retRes.json()   : [];
 
-    // أيام لها مبيعات حتى الآن (لحساب المتوسط اليومي)
-    const salesDaysSet = new Set(salesData.map(s=>s.delivery_date));
-    const salesDays = salesDaysSet.size || 1;
+      const tgtByRep   = {}; tgtData.forEach(t=>{ tgtByRep[t.rep_name]=(tgtByRep[t.rep_name]||0)+(t.target_amount||0); });
+      const salesByRep = {}; salesData.forEach(s=>{ salesByRep[s.rep_name]=(salesByRep[s.rep_name]||0)+((s.total_net||0)-(s.total_tax||0)); });
+      const retByRep   = {}; retData.forEach(r=>{ retByRep[r.rep_name]=(retByRep[r.rep_name]||0)+((r.total_net||0)-(r.total_tax||0)); });
 
-    // إجماليات
-    let totalGoal=0, totalSales=0, totalRet=0;
-    repsList.forEach(r=>{
-      totalGoal  += (tgtMap[r.name]?.target_amount||0);
-      totalSales += (salesMap[r.name]||0);
-      totalRet   += (retMap[r.name]||0);
-    });
-    const totalNet = totalSales - totalRet;
-    const pct = totalGoal>0 ? Math.min(100,Math.round(totalNet/totalGoal*100)) : 0;
-    const dailyAvg = totalNet / salesDays;
-    const projected = Math.round(dailyAvg * workDays);
-    const projPct = totalGoal>0 ? Math.round(projected/totalGoal*100) : 0;
+      const salesDays = new Set(salesData.map(s=>s.delivery_date)).size || 1;
+      const workDays  = tgtData.find(t=>t.work_days)?.work_days || 26;
+      const fmt = n => Math.round(n).toLocaleString('en-US');
 
-    const fmt = n => Math.round(n).toLocaleString('en-US');
-    const clr = pct>=80?'#15803D':pct>=60?'#D97706':'#DC2626';
+      // تجميع نتائج المشرفين
+      const supResults = Object.entries(supMap).map(([sup, reps])=>{
+        const goal  = reps.reduce((s,r)=>s+(tgtByRep[r]||0), 0);
+        const sales = reps.reduce((s,r)=>s+(salesByRep[r]||0), 0);
+        const ret   = reps.reduce((s,r)=>s+(retByRep[r]||0), 0);
+        const net   = sales - ret;
+        return {sup, reps, goal, sales, ret, net};
+      }).sort((a,b)=>b.net-a.net);
 
-    // تحديث كارت المشرف
-    document.getElementById('tgt-prog-bar').style.width = pct+'%';
-    document.getElementById('tgt-pct-lbl').textContent = pct+'% من الهدف';
-    document.getElementById('tgt-total-sales').textContent = fmt(totalSales)+' ج';
-    document.getElementById('tgt-total-ret').textContent   = fmt(totalRet)+' ج';
-    document.getElementById('tgt-total-net').textContent   = fmt(totalNet)+' ج';
-    document.getElementById('tgt-total-goal').textContent  = fmt(totalGoal)+' ج';
-    document.getElementById('tgt-daily-avg').textContent   = fmt(dailyAvg)+' ج';
-    document.getElementById('tgt-projected').textContent   = projPct+'%';
-    document.getElementById('tgt-work-days-lbl').textContent = workDays+' يوم';
-    document.getElementById('tgt-rep-count').textContent   = repsList.length+' مندوب';
+      const totalGoal  = supResults.reduce((s,x)=>s+x.goal, 0);
+      const totalSales = supResults.reduce((s,x)=>s+x.sales, 0);
+      const totalRet   = supResults.reduce((s,x)=>s+x.ret, 0);
+      const totalNet   = totalSales - totalRet;
+      const pct        = totalGoal>0 ? Math.min(100,Math.round(totalNet/totalGoal*100)) : 0;
+      const dailyAvg   = totalNet / salesDays;
+      const projPct    = totalGoal>0 ? Math.round((dailyAvg*workDays)/totalGoal*100) : 0;
 
-    // جدول المناديب
-    if(repsBody){
-      repsBody.innerHTML = repsList.map((r,i)=>{
-        const goal    = tgtMap[r.name]?.target_amount||0;
-        const sales   = salesMap[r.name]||0;
-        const ret     = retMap[r.name]||0;
-        const net     = sales - ret;
-        const rPct    = goal>0 ? Math.min(100,Math.round(net/goal*100)) : 0;
-        const rDailyAvg = net / salesDays;
-        const rProj   = Math.round(rDailyAvg * workDays);
-        const rProjPct= goal>0 ? Math.round(rProj/goal*100) : 0;
-        const rClr    = rPct>=80?'#15803D':rPct>=60?'#D97706':'#DC2626';
-        const routes  = Array.isArray(r.routes)&&r.routes.length ? r.routes.join('، ') : (r.route||'—');
-        return `<div style="border-bottom:1px solid #F0E8D8;padding:10px 4px;${i===repsList.length-1?'border-bottom:none':''}">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-            <div>
-              <div style="font-size:13px;font-weight:800;color:#2C1A10">${r.name}</div>
-              <div style="font-size:10px;color:#9C7B6A;margin-top:1px">${routes}</div>
+      // تحديث الكارت الرئيسي
+      document.getElementById('tgt-prog-bar').style.width = pct+'%';
+      document.getElementById('tgt-pct-lbl').textContent  = pct+'% من الهدف';
+      document.getElementById('tgt-total-sales').textContent = fmt(totalSales)+' ج';
+      document.getElementById('tgt-total-ret').textContent   = fmt(totalRet)+' ج';
+      document.getElementById('tgt-total-net').textContent   = fmt(totalNet)+' ج';
+      document.getElementById('tgt-total-goal').textContent  = fmt(totalGoal)+' ج';
+      document.getElementById('tgt-daily-avg').textContent   = fmt(dailyAvg)+' ج';
+      document.getElementById('tgt-projected').textContent   = projPct+'%';
+      document.getElementById('tgt-work-days-lbl').textContent = workDays+' يوم';
+      document.getElementById('tgt-rep-count').textContent   = supResults.length+' مشرف';
+
+      // جدول المشرفين
+      if(repsBody){
+        repsBody.innerHTML = supResults.map((x,i)=>{
+          const {sup, reps, goal, sales, ret, net} = x;
+          const rPct = goal>0 ? Math.min(100,Math.round(net/goal*100)) : 0;
+          const rClr = rPct>=80?'#15803D':rPct>=60?'#D97706':'#DC2626';
+          const rProjPct = goal>0 ? Math.round((net/salesDays*workDays)/goal*100) : 0;
+          return `<div style="border-bottom:1px solid #F0E8D8;padding:10px 4px;${i===supResults.length-1?'border-bottom:none':''}">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <div>
+                <div style="font-size:13px;font-weight:800;color:#2C1A10">👔 ${sup}</div>
+                <div style="font-size:10px;color:#9C7B6A;margin-top:1px">${reps.length} مندوب</div>
+              </div>
+              <span style="padding:3px 10px;border-radius:20px;font-size:11px;font-weight:800;background:${rClr}20;color:${rClr}">${rPct}%</span>
             </div>
-            <span style="padding:3px 10px;border-radius:20px;font-size:11px;font-weight:800;background:${rClr}20;color:${rClr}">${rPct}%</span>
-          </div>
-          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">
-            <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
-              <div style="font-size:11px;font-weight:800;color:#185FA5">${goal>0?fmt(goal):'—'}</div>
-              <div style="font-size:9px;color:#9C7B6A;margin-top:1px">الهدف</div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">
+              <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
+                <div style="font-size:11px;font-weight:800;color:#185FA5">${goal>0?fmt(goal):'—'}</div>
+                <div style="font-size:9px;color:#9C7B6A">الهدف</div>
+              </div>
+              <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
+                <div style="font-size:11px;font-weight:800;color:#15803D">${fmt(net)}</div>
+                <div style="font-size:9px;color:#9C7B6A">الصافي</div>
+              </div>
+              <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
+                <div style="font-size:11px;font-weight:800;color:#DC2626">${fmt(ret)}</div>
+                <div style="font-size:9px;color:#9C7B6A">المرتجع</div>
+              </div>
+              <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
+                <div style="font-size:11px;font-weight:800;color:${rClr}">${rProjPct}%</div>
+                <div style="font-size:9px;color:#9C7B6A">المتوقع</div>
+              </div>
             </div>
-            <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
-              <div style="font-size:11px;font-weight:800;color:#15803D">${fmt(net)}</div>
-              <div style="font-size:9px;color:#9C7B6A;margin-top:1px">الصافي</div>
+            <div style="background:#F0E8D8;border-radius:999px;height:5px;overflow:hidden">
+              <div style="height:100%;width:${Math.min(rPct,100)}%;background:${rClr};border-radius:999px;transition:width .6s"></div>
             </div>
-            <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
-              <div style="font-size:11px;font-weight:800;color:#DC2626">${fmt(ret)}</div>
-              <div style="font-size:9px;color:#9C7B6A;margin-top:1px">المرتجع</div>
+          </div>`;
+        }).join('');
+      }
+
+    } else {
+      // ══ منطق المشرف العادي ══
+      const enc = encodeURIComponent(supName);
+
+      const repsRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/users?supervisors=eq.${enc}&role=eq.sales&status=eq.active&select=id,name,grp,route,routes&order=name.asc&limit=100`,
+        {headers:H});
+      const repsList = repsRes.ok ? await repsRes.json() : [];
+
+      if(!repsList.length){
+        if(repsBody) repsBody.innerHTML='<div style="text-align:center;padding:30px;color:#bbb;font-size:12px">لا يوجد مناديب مسجلون تحت هذا المشرف</div>';
+        return;
+      }
+
+      const [tgtRes, salesRes, retRes] = await Promise.all([
+        fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&supervisor_name=eq.${enc}&select=rep_name,target_amount,work_days&limit=200`,{headers:H}),
+        fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${repsList.map(r=>encodeURIComponent(r.name)).join(',')})&delivery_date=gte.${monthStart}&delivery_date=lte.${dateTo}&select=rep_name,total_net,total_tax,delivery_date&limit=5000`,{headers:H}),
+        fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${repsList.map(r=>encodeURIComponent(r.name)).join(',')})&return_date=gte.${monthStart}&return_date=lte.${dateTo}&select=rep_name,total_net,total_tax&limit=2000`,{headers:H}),
+      ]);
+
+      const tgtData   = tgtRes.ok   ? await tgtRes.json()   : [];
+      const salesData = salesRes.ok ? await salesRes.json() : [];
+      const retData   = retRes.ok   ? await retRes.json()   : [];
+
+      const tgtMap   = {}; tgtData.forEach(t=>{ tgtMap[t.rep_name]=t; });
+      const salesMap = {}; salesData.forEach(s=>{ salesMap[s.rep_name]=(salesMap[s.rep_name]||0)+((s.total_net||0)-(s.total_tax||0)); });
+      const retMap   = {}; retData.forEach(r=>{ retMap[r.rep_name]=(retMap[r.rep_name]||0)+((r.total_net||0)-(r.total_tax||0)); });
+
+      const workDays  = tgtData.find(t=>t.work_days)?.work_days || 26;
+      const salesDays = new Set(salesData.map(s=>s.delivery_date)).size || 1;
+      const fmt = n => Math.round(n).toLocaleString('en-US');
+
+      let totalGoal=0, totalSales=0, totalRet=0;
+      repsList.forEach(r=>{ totalGoal+=(tgtMap[r.name]?.target_amount||0); totalSales+=(salesMap[r.name]||0); totalRet+=(retMap[r.name]||0); });
+      const totalNet = totalSales - totalRet;
+      const pct      = totalGoal>0 ? Math.min(100,Math.round(totalNet/totalGoal*100)) : 0;
+      const dailyAvg = totalNet / salesDays;
+      const projPct  = totalGoal>0 ? Math.round((dailyAvg*workDays)/totalGoal*100) : 0;
+
+      document.getElementById('tgt-prog-bar').style.width = pct+'%';
+      document.getElementById('tgt-pct-lbl').textContent  = pct+'% من الهدف';
+      document.getElementById('tgt-total-sales').textContent = fmt(totalSales)+' ج';
+      document.getElementById('tgt-total-ret').textContent   = fmt(totalRet)+' ج';
+      document.getElementById('tgt-total-net').textContent   = fmt(totalNet)+' ج';
+      document.getElementById('tgt-total-goal').textContent  = fmt(totalGoal)+' ج';
+      document.getElementById('tgt-daily-avg').textContent   = fmt(dailyAvg)+' ج';
+      document.getElementById('tgt-projected').textContent   = projPct+'%';
+      document.getElementById('tgt-work-days-lbl').textContent = workDays+' يوم';
+      document.getElementById('tgt-rep-count').textContent   = repsList.length+' مندوب';
+
+      if(repsBody){
+        repsBody.innerHTML = repsList.map((r,i)=>{
+          const goal  = tgtMap[r.name]?.target_amount||0;
+          const sales = salesMap[r.name]||0;
+          const ret   = retMap[r.name]||0;
+          const net   = sales - ret;
+          const rPct  = goal>0 ? Math.min(100,Math.round(net/goal*100)) : 0;
+          const rClr  = rPct>=80?'#15803D':rPct>=60?'#D97706':'#DC2626';
+          const rProjPct = goal>0 ? Math.round((net/salesDays*workDays)/goal*100) : 0;
+          const routes= Array.isArray(r.routes)&&r.routes.length ? r.routes.join('، ') : (r.route||'—');
+          return `<div style="border-bottom:1px solid #F0E8D8;padding:10px 4px;${i===repsList.length-1?'border-bottom:none':''}">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <div>
+                <div style="font-size:13px;font-weight:800;color:#2C1A10">${r.name}</div>
+                <div style="font-size:10px;color:#9C7B6A;margin-top:1px">${routes}</div>
+              </div>
+              <span style="padding:3px 10px;border-radius:20px;font-size:11px;font-weight:800;background:${rClr}20;color:${rClr}">${rPct}%</span>
             </div>
-            <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
-              <div style="font-size:11px;font-weight:800;color:${rClr}">${rProjPct}%</div>
-              <div style="font-size:9px;color:#9C7B6A;margin-top:1px">المتوقع</div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">
+              <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
+                <div style="font-size:11px;font-weight:800;color:#185FA5">${goal>0?fmt(goal):'—'}</div>
+                <div style="font-size:9px;color:#9C7B6A">الهدف</div>
+              </div>
+              <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
+                <div style="font-size:11px;font-weight:800;color:#15803D">${fmt(net)}</div>
+                <div style="font-size:9px;color:#9C7B6A">الصافي</div>
+              </div>
+              <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
+                <div style="font-size:11px;font-weight:800;color:#DC2626">${fmt(ret)}</div>
+                <div style="font-size:9px;color:#9C7B6A">المرتجع</div>
+              </div>
+              <div style="background:#F9F5F0;border-radius:8px;padding:6px;text-align:center">
+                <div style="font-size:11px;font-weight:800;color:${rClr}">${rProjPct}%</div>
+                <div style="font-size:9px;color:#9C7B6A">المتوقع</div>
+              </div>
             </div>
-          </div>
-          <div style="background:#F0E8D8;border-radius:999px;height:5px;overflow:hidden">
-            <div style="height:100%;width:${Math.min(rPct,100)}%;background:${rClr};border-radius:999px;transition:width .6s"></div>
-          </div>
-        </div>`;
-      }).join('');
+            <div style="background:#F0E8D8;border-radius:999px;height:5px;overflow:hidden">
+              <div style="height:100%;width:${Math.min(rPct,100)}%;background:${rClr};border-radius:999px;transition:width .6s"></div>
+            </div>
+          </div>`;
+        }).join('');
+      }
     }
 
   }catch(e){
