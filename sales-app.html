@@ -7725,36 +7725,66 @@ async function tgtLoadData(){
       // ══ منطق مدير البيع / GM ══
       const myGroups = Array.isArray(cu.groups) ? cu.groups : (cu.groups||'').split(',').map(g=>g.trim()).filter(Boolean);
 
-      // جيب كل مناديب المناطق بتاعة المدير
-      const repsRes = await fetch(
-        `${SUPABASE_URL}/rest/v1/users?grp=in.(${myGroups.join(',')})&role=eq.sales&status=eq.active&select=name,supervisors&limit=500`,
+      // 1) جيب المشرفين من sales_staff بالـ sector (مش من users.grp لتجنب التعارض في أسماء القطاعات)
+      const supsRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/sales_staff?role=eq.sales_sup&active=eq.true&select=name,sector&limit=200`,
         {headers:H});
-      const allReps = repsRes.ok ? await repsRes.json() : [];
+      const allSups = supsRes.ok ? await supsRes.json() : [];
 
-      if(!allReps.length){
-        if(repsBody) repsBody.innerHTML='<div style="text-align:center;padding:30px;color:#bbb;font-size:12px">لا يوجد مناديب في هذه المناطق</div>';
+      // فلتر المشرفين اللي قطاعهم في مناطق المدير (partial match عشان "الأسواق الخاصة" تطابق "الأسواق الخاصة القاهرة")
+      const mySups = allSups.filter(s=>{
+        const supSectors = (s.sector||'').split(',').map(x=>x.trim()).filter(Boolean);
+        return supSectors.some(ss => myGroups.some(mg => ss.includes(mg) || mg.includes(ss)));
+      });
+
+      // لو مفيش مشرفين، fallback: جيب أهداف الشهر ده وشوف المشرفين اللي عندهم مناديب
+      let supNames = mySups.map(s=>s.name);
+
+      // 2) جيب أهداف الشهر (لتحديد المناديب ومشرفيهم)
+      let tgtData = [];
+      if(supNames.length){
+        const encSups = supNames.map(n=>encodeURIComponent(n)).join(',');
+        const tgtRes2 = await fetch(
+          `${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&supervisor_name=in.(${encSups})&select=rep_name,supervisor_name,target_amount,work_days&limit=2000`,
+          {headers:H});
+        tgtData = tgtRes2.ok ? await tgtRes2.json() : [];
+      }
+
+      // fallback: لو مفيش بيانات، جيب كل أهداف الشهر
+      if(!tgtData.length){
+        const tgtResAll = await fetch(
+          `${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&select=rep_name,supervisor_name,target_amount,work_days&limit=2000`,
+          {headers:H});
+        tgtData = tgtResAll.ok ? await tgtResAll.json() : [];
+      }
+
+      if(!tgtData.length){
+        if(repsBody) repsBody.innerHTML='<div style="text-align:center;padding:30px;color:#bbb;font-size:12px">لا توجد أهداف لهذا الشهر</div>';
         return;
       }
 
-      // جمّع المناديب تحت كل مشرف
+      // بناء supMap من أهداف الشهر
       const supMap = {};
-      allReps.forEach(r=>{
-        const sup = (r.supervisors||'').split(',')[0].trim() || 'غير محدد';
+      tgtData.forEach(t=>{
+        const sup = (t.supervisor_name||'غير محدد').trim();
         if(!supMap[sup]) supMap[sup]=[];
-        supMap[sup].push(r.name);
+        if(!supMap[sup].includes(t.rep_name)) supMap[sup].push(t.rep_name);
       });
 
-      const allRepNames = allReps.map(r=>r.name);
+      // لو عندنا مشرفين محددين، فلتر supMap عليهم بس
+      if(supNames.length){
+        Object.keys(supMap).forEach(k=>{ if(!supNames.includes(k)) delete supMap[k]; });
+      }
+
+      const allRepNames = [...new Set(tgtData.map(t=>t.rep_name))];
       const encReps = allRepNames.map(n=>encodeURIComponent(n)).join(',');
 
-      // جيب الأهداف والبيع والمرتجع بالتوازي
-      const [tgtRes, salesRes, retRes] = await Promise.all([
-        fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&select=rep_name,supervisor_name,target_amount,work_days&limit=2000`,{headers:H}),
+      // 3) جيب المبيعات والمرتجعات
+      const [salesRes, retRes] = await Promise.all([
         fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encReps})&delivery_date=gte.${monthStart}&delivery_date=lte.${dateTo}&select=rep_name,total_net,total_tax,delivery_date&limit=10000`,{headers:H}),
         fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encReps})&return_date=gte.${monthStart}&return_date=lte.${dateTo}&select=rep_name,total_net,total_tax&limit=5000`,{headers:H}),
       ]);
 
-      const tgtData   = tgtRes.ok   ? await tgtRes.json()   : [];
       const salesData = salesRes.ok ? await salesRes.json() : [];
       const retData   = retRes.ok   ? await retRes.json()   : [];
 
