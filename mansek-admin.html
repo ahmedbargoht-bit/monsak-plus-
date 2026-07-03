@@ -29935,82 +29935,49 @@ function floatAIToggle(){
   }
 }
 
-// ══ جلب السياق المناسب حسب السؤال ══
-async function floatBuildContext(question){
-  const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
-  const ql = question.toLowerCase();
+// ══ قراءة البيانات المحملة مسبقاً في الصفحة (بدون fetch جديد) ══
+function floatBuildContext(question){
   const parts = [];
 
-  // ── دائماً: KPIs سريعة ──
-  const [products, deliveries, clients] = await Promise.all([
-    fetch(SUPABASE_URL+'/rest/v1/products?select=snf,shelf_qty,stock_qty,damage_qty,expire_date&limit=500',{headers:H}).then(r=>r.json()).catch(()=>[]),
-    fetch(SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,total_net,delivery_date,status&order=delivery_date.desc&limit=300',{headers:H}).then(r=>r.json()).catch(()=>[]),
-    fetch(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type,area&limit=200',{headers:H}).then(r=>r.json()).catch(()=>[])
-  ]);
-
-  const totalSales   = Array.isArray(deliveries)?deliveries.reduce((s,d)=>s+(+d.total_net||0),0).toFixed(0):'—';
-  const totalQty     = Array.isArray(products)?products.reduce((s,p)=>s+(+p.shelf_qty||0)+(+p.stock_qty||0),0):'—';
-  const damaged      = Array.isArray(products)?products.filter(p=>(+p.damage_qty||0)>0).length:0;
-  parts.push(`📊 KPIs: ${products.length} صنف | إجمالي مخزون: ${totalQty} وحدة | تالف: ${damaged} صنف | ${clients.length} عميل | إجمالي مبيعات حديثة: ${totalSales} جنيه`);
-
-  // ── مخزون / أصناف ──
-  if(/مخزون|صنف|أصناف|بضاعة|منتج|تالف|انتهاء|صلاحية|نفذ/.test(ql)){
-    const low = products.filter(p=>(+p.shelf_qty||0)+(+p.stock_qty||0)<10).map(p=>p.snf).slice(0,30);
-    const dmg = products.filter(p=>(+p.damage_qty||0)>0).map(p=>({snf:p.snf,تالف:p.damage_qty})).slice(0,20);
-    const exp = products.filter(p=>p.expire_date).map(p=>({snf:p.snf,تاريخ:p.expire_date})).slice(0,20);
-    parts.push('📦 مخزون منخفض (<10): '+low.join('، '));
-    if(dmg.length) parts.push('⚠️ أصناف تالفة: '+JSON.stringify(dmg));
-    if(exp.length) parts.push('📅 انتهاء الصلاحية: '+JSON.stringify(exp));
-  }
-
-  // ── مبيعات / توصيلات ──
-  if(/مبيعات|توصيل|فاتور|إيراد|دخل|أداء|عميل/.test(ql)){
-    const byClient = {};
-    deliveries.forEach(d=>{ byClient[d.client_name]=(byClient[d.client_name]||0)+(+d.total_net||0); });
-    const top = Object.entries(byClient).sort((a,b)=>b[1]-a[1]).slice(0,15).map(([k,v])=>k+': '+v.toFixed(0)+' جنيه');
-    const byStatus = deliveries.reduce((a,d)=>{a[d.status]=(a[d.status]||0)+1;return a},{});
-    parts.push('💰 أعلى العملاء مبيعاً: '+top.join(' | '));
-    parts.push('📋 حالة التوصيلات: '+JSON.stringify(byStatus));
-  }
-
-  // ── عملاء ──
-  if(/عميل|عملاء|زبون|منطقة/.test(ql)){
-    const byType = clients.reduce((a,c)=>{a[c.client_type]=(a[c.client_type]||0)+1;return a},{});
-    parts.push('👥 العملاء حسب النوع: '+JSON.stringify(byType));
-    parts.push('قائمة العملاء: '+clients.slice(0,50).map(c=>c.name+(c.area?' ('+c.area+')':'')).join('، '));
-  }
-
-  // ── خطط التنسيق ──
-  if(/خطة|خطط|تنسيق|منسق|مندوب|زيارة|حضور|انصراف/.test(ql)){
-    const plans = await fetch(SUPABASE_URL+'/rest/v1/plans?select=*&limit=150',{headers:H}).then(r=>r.json()).catch(()=>[]);
-    if(Array.isArray(plans) && plans.length){
-      const summary = plans.slice(0,40).map(p=>{
-        const name = p.supervisor_name||p.name||p.staff_name||JSON.stringify(p).slice(0,30);
-        const tgt  = p.target||p.plan_target||0;
-        const ach  = p.achieved||p.plan_achieved||0;
-        return `${name}: هدف ${tgt} / محقق ${ach}`;
-      });
-      parts.push('📋 خطط التنسيق ('+plans.length+' سجل): '+summary.join(' | '));
-      // أعمدة متاحة
-      parts.push('أعمدة الجدول: '+Object.keys(plans[0]||{}).join(', '));
+  // ── بيانات SWOT إن كانت محملة ──
+  try{
+    if(typeof _swotData !== 'undefined' && _swotData){
+      const s = _swotData;
+      parts.push(`📊 SWOT: إجمالي أصناف ${s.totalProducts||'—'} | مبيعات ${s.totalSales||'—'} | عملاء ${s.totalClients||'—'} | تالف ${s.damaged||'—'} | منخفض المخزون ${s.lowStock||'—'}`);
     }
-  }
+  }catch(e){}
 
-  // ── خطط المبيعات ──
-  if(/مبيعات|مندوب|طاقم|sales|خطة/.test(ql)){
-    const sp = await fetch(SUPABASE_URL+'/rest/v1/sales_plans_plus?select=*&limit=150',{headers:H}).then(r=>r.json()).catch(()=>[]);
-    if(Array.isArray(sp) && sp.length){
-      const summary = sp.slice(0,40).map(p=>{
-        const name = p.staff_name||p.name||p.supervisor_name||'—';
-        const tgt  = p.target||p.plan_target||0;
-        const ach  = p.achieved||p.plan_achieved||0;
-        return `${name}: هدف ${tgt} / محقق ${ach}`;
-      });
-      parts.push('💼 خطط المبيعات ('+sp.length+' سجل): '+summary.join(' | '));
+  // ── قائمة المنسقين/الموظفين إن كانت محملة ──
+  try{
+    if(typeof SUPERVISORS !== 'undefined' && Array.isArray(SUPERVISORS) && SUPERVISORS.length){
+      const names = SUPERVISORS.slice(0,30).map(s=>s.supervisor_name||s.staff_name||s.name||'').filter(Boolean);
+      parts.push('👥 الموظفون/المنسقون المحملون ('+SUPERVISORS.length+'): '+names.join('، '));
     }
-  }
+  }catch(e){}
 
-  return parts.join('\n');
+  // ── نص الصفحة الحالية المرئية ──
+  try{
+    const selectors = [
+      '#main-content','#page-content','.tab-content.active',
+      '.panel-active','[data-active="true"]','.content-area'
+    ];
+    let pageText = '';
+    for(const sel of selectors){
+      const el = document.querySelector(sel);
+      if(el && el.innerText && el.innerText.trim().length > 50){
+        pageText = el.innerText.trim().slice(0,800);
+        break;
+      }
+    }
+    // fallback: كل النص المرئي في body بدون القوائم الجانبية
+    if(!pageText){
+      const main = document.querySelector('main') || document.querySelector('.main') || document.body;
+      pageText = (main.innerText||'').replace(/\s+/g,' ').trim().slice(0,800);
+    }
+    if(pageText) parts.push('📄 محتوى الصفحة الحالية:\n'+pageText);
+  }catch(e){}
+
+  return parts.join('\n\n') || 'لا توجد بيانات محملة — اسأل سؤالاً محدداً وسأساعدك.';
 }
 
 async function floatAISend(){
@@ -30030,7 +29997,7 @@ async function floatAISend(){
 
   try{
     await aiEnsureGroqKey().catch(()=>{});
-    const context = await floatBuildContext(q);
+    const context = floatBuildContext(q);
 
     const aiText = await groqChat([
       {role:'system', content: ADVISOR_SYSTEM_PROMPT},
