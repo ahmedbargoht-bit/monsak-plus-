@@ -27364,7 +27364,98 @@ function supDeleteDispatch(idx){
 // ══════════════════════════════════════════════════════════════
 let _GROQ_KEY = null; // بيتحمل من products_db — مش محفوظ في الكود
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
+const GROQ_MODEL = 'llama-3.3-70b-versatile';          // النموذج الأساسي
+const GROQ_FALLBACK_MODEL = 'llama-3.1-8b-instant';    // احتياطي: 500k TPD
+
+// wrapper يجرب الأساسي أولاً ← يتراجع للاحتياطي عند rate limit
+async function groqChat(messages, maxTokens){
+  const models = [GROQ_MODEL, GROQ_FALLBACK_MODEL];
+  let lastErr = null;
+  for(const model of models){
+    try{
+      const res = await fetch(GROQ_URL,{
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+_GROQ_KEY},
+        body:JSON.stringify({model, messages, temperature:0.7, max_tokens:maxTokens||3000})
+      });
+      if(!res.ok){
+        const er = await res.json().catch(()=>({}));
+        const msg = er?.error?.message||'HTTP '+res.status;
+        // إذا rate limit جرب النموذج التالي
+        if(res.status===429){
+          console.warn('[Groq] rate limit على',model,'→ تجريب',models[models.indexOf(model)+1]||'لا يوجد');
+          lastErr = new Error(msg);
+          continue;
+        }
+        throw new Error(msg);
+      }
+      const data = await res.json();
+      const text = data?.choices?.[0]?.message?.content||'';
+      if(!text) throw new Error('رد فارغ من '+model);
+      console.log('[Groq] ✅ تم بنموذج:', model);
+      return text;
+    }catch(e){
+      if(e.message&&(e.message.includes('429')||e.message.includes('rate limit')||e.message.includes('Rate limit'))){
+        lastErr = e; continue;
+      }
+      throw e;
+    }
+  }
+  // Groq استنفد — نجرب Gemini
+  if(_GEMINI_KEY){
+    console.warn('[AI] Groq rate limit — التحويل لـ Gemini');
+    return await geminiChat(messages, maxTokens);
+  }
+  throw lastErr||new Error('كل النماذج وصلت حد الاستخدام — انتظر ساعة وأعد المحاولة');
+}
+
+// ══════════════════════════════════════════════════════
+// Gemini — نموذج احتياطي ثانٍ (مجاني: 1500 طلب/يوم)
+// ══════════════════════════════════════════════════════
+let _GEMINI_KEY = null;
+const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+
+async function aiEnsureGeminiKey(){
+  if(_GEMINI_KEY) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
+  const rows = await fetch(SUPABASE_URL+'/rest/v1/products_db?key=eq.gemini_api_key&select=value&limit=1',{headers:H})
+    .then(r=>r.json()).catch(()=>[]);
+  if(rows?.[0]?.value) _GEMINI_KEY = rows[0].value;
+}
+
+async function geminiChat(messages, maxTokens){
+  await aiEnsureGeminiKey();
+  if(!_GEMINI_KEY) throw new Error('مفتاح Gemini غير متاح — أضفه في قاعدة البيانات تحت المفتاح gemini_api_key');
+
+  // تحويل messages من صيغة OpenAI لصيغة Gemini
+  const system = messages.find(m=>m.role==='system');
+  const userMsgs = messages.filter(m=>m.role!=='system');
+
+  const body = {
+    contents: userMsgs.map(m=>({
+      role: m.role==='assistant' ? 'model' : 'user',
+      parts: [{text: m.content}]
+    })),
+    generationConfig: { maxOutputTokens: maxTokens||3000, temperature: 0.7 }
+  };
+  if(system) body.systemInstruction = { parts:[{text: system.content}] };
+
+  const res = await fetch(GEMINI_URL+'?key='+_GEMINI_KEY, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
+  if(!res.ok){
+    const er = await res.json().catch(()=>({}));
+    throw new Error('[Gemini] '+(er?.error?.message||'HTTP '+res.status));
+  }
+  const data = await res.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text||'';
+  if(!text) throw new Error('[Gemini] رد فارغ');
+  console.log('[Gemini] ✅ تم');
+  return text;
+}
+
 let _aiMode = 'week'; // 'week' or 'month'
 
 function aiSetMode(mode){
@@ -29035,10 +29126,7 @@ async function advisorRun(){
 
     setS('الذكاء الاصطناعي يكتب التقرير... (20–40 ثانية)');
 
-    const gRes=await fetch(GROQ_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_GROQ_KEY},body:JSON.stringify({model:GROQ_MODEL,messages:[{role:'system',content:ADVISOR_SYSTEM_PROMPT},{role:'user',content:prompt}],temperature:0.7,max_tokens:3500})});
-    if(!gRes.ok){ const er=await gRes.json().catch(()=>({})); throw new Error(er?.error?.message||'HTTP '+gRes.status); }
-    const gData=await gRes.json();
-    const aiText=gData?.choices?.[0]?.message?.content||'لم يُرجع الذكاء الاصطناعي نتيجة.';
+    const aiText = await groqChat([{role:'system',content:ADVISOR_SYSTEM_PROMPT},{role:'user',content:prompt}], 3500);
     window._advisorRawText=aiText;
 
     // ── Extract SWOT sections before rendering ──
@@ -29345,10 +29433,7 @@ async function advisorChatSend(){
     // Build prompt — explicit anti-hallucination instruction
     const prompt = 'أنت مستشار تجاري لشركة الطحان جولدن داتس (تمور مصري وسعودي ومصنعات — سلاسل سوبرماركت مصر).\n\nالسياق المختار: '+(CHAT_CTX_LABELS[ctx]||ctx)+'\n\n--- البيانات الفعلية من قاعدة البيانات ---\n'+dataSummary+'\n--- نهاية البيانات ---\n\nسؤال المستخدم: '+question+'\n\nتعليمات صارمة:\n- أجب فقط بناءً على البيانات الفعلية المقدمة أعلاه\n- استخدم الأرقام والأسماء الحقيقية الموجودة في البيانات\n- إذا لم تجد معلومة في البيانات، قل "لا تتوفر هذه البيانات" ولا تخترع أي معلومات\n- أجب بتفصيل عملي ومحدد';
 
-    const gRes = await fetch(GROQ_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_GROQ_KEY},body:JSON.stringify({model:GROQ_MODEL,messages:[{role:'system',content:ADVISOR_SYSTEM_PROMPT},{role:'user',content:prompt}],temperature:0.7,max_tokens:4000})});
-    if(!gRes.ok){ const er=await gRes.json().catch(()=>({})); throw new Error(er?.error?.message||'HTTP '+gRes.status); }
-    const gData = await gRes.json();
-    const aiText = gData?.choices?.[0]?.message?.content||'لم يُرجع الذكاء الاصطناعي نتيجة.';
+    const aiText = await groqChat([{role:'system',content:ADVISOR_SYSTEM_PROMPT},{role:'user',content:prompt}], 3000);
 
     // Render markdown
     const html = aiText
@@ -29693,11 +29778,7 @@ SWOT_ACTION_START
 (جملة واحدة — أهم قرار فوري هذا الأسبوع مع رقم محدد)
 SWOT_ACTION_END`;
 
-    const gRes = await fetch(GROQ_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_GROQ_KEY},
-      body:JSON.stringify({model:GROQ_MODEL,messages:[{role:'system',content:ADVISOR_SYSTEM_PROMPT},{role:'user',content:swotPrompt}],temperature:0.6,max_tokens:1800})});
-    if(!gRes.ok){ const er=await gRes.json().catch(()=>({})); throw new Error(er?.error?.message||'HTTP '+gRes.status); }
-    const gData=await gRes.json();
-    const aiText=gData?.choices?.[0]?.message?.content||'';
+    const aiText = await groqChat([{role:'system',content:ADVISOR_SYSTEM_PROMPT},{role:'user',content:swotPrompt}], 1800);
 
     function extractSec(tag){
       const m=aiText.match(new RegExp('SWOT_'+tag+'_START([\\s\\S]*?)SWOT_'+tag+'_END'));
