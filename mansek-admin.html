@@ -27386,8 +27386,8 @@ async function chnLoad(){
 
   // KPIs
   const totalDel=del.reduce((s,r)=>s+(r.total_before_discount||0),0);
-  const totalRet=ret.reduce((s,r)=>s+(r.total_net||0),0);
-  const totalNet=del.reduce((s,r)=>s+(r.total_net||0),0)-totalRet;
+  const totalRet=ret.reduce((s,r)=>s+((r.total_net||0)-(r.total_tax||0)),0);
+  const totalNet=del.reduce((s,r)=>s+((r.total_net||0)-(r.total_tax||0)),0)-totalRet;
   const avgDisc=del.length? del.reduce((s,r)=>s+(r.discount_pct||0),0)/del.length : 0;
   const fmt=n=>Math.round(n).toLocaleString('en-US');
   document.getElementById('chn-kpis').innerHTML=`
@@ -27475,13 +27475,13 @@ async function chnLoad(){
     chainMap[c].branches.add(r.branch_name||'');
     if(r._type==='del'){
       chainMap[c].delTotal+=(r.total_before_discount||0);
-      chainMap[c].netTotal+=(r.total_net||0);
+      chainMap[c].netTotal+=((r.total_net||0)-(r.total_tax||0));
       chainMap[c].discSum+=(r.discount_pct||0);
       chainMap[c].invCount++;
       (Array.isArray(r.items)?r.items:[]).forEach(it=>{ if(it?.name) chainMap[c].snfs.add(it.name); });
     } else {
-      chainMap[c].retTotal+=(r.total_net||0);
-      chainMap[c].netTotal-=(r.total_net||0);
+      chainMap[c].retTotal+=((r.total_net||0)-(r.total_tax||0));
+      chainMap[c].netTotal-=((r.total_net||0)-(r.total_tax||0));
     }
   });
 
@@ -28440,10 +28440,10 @@ async function archiveLoadList(){
         <td style="font-size:11px;color:var(--text-secondary);white-space:nowrap">${dt}</td>
         <td style="font-size:11px">${kb}</td>
         <td>
-          <a href="${url}" target="_blank" download="${f.name}"
-            style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:#1E3A5F;color:#fff;border-radius:6px;text-decoration:none;font-size:11px;font-weight:700;font-family:Cairo,sans-serif">
+          <button onclick="archiveDownload('${safeN}')"
+            style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:#1E3A5F;color:#fff;border-radius:6px;border:none;font-size:11px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
             <i class="ti ti-download"></i> تنزيل
-          </a>
+          </button>
         </td>
         <td>
           <button onclick="archiveDelete('${safeN}')"
@@ -28510,6 +28510,36 @@ async function archiveSaveNote(fileName, notes){
       body:JSON.stringify({file_name:fileName, notes:notes.trim(), updated_at:new Date().toISOString()})
     });
   }catch(e){ /* صامت */ }
+}
+
+async async function archiveDownload(name){
+  try{
+    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
+    // طلب Signed URL صالحة لمدة ساعة
+    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/letters-archive/${encodeURIComponent(name)}`,{
+      method:'POST', headers:H, body:JSON.stringify({expiresIn:3600})
+    });
+    const json = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(json.message||json.error||`HTTP ${res.status}`);
+
+    const signedPath = json.signedURL || json.signedUrl || json.signed_url;
+    if(!signedPath) throw new Error('لم يتم إنشاء رابط التنزيل');
+
+    // signedURL قد يكون كامل URL أو مسار فقط
+    const fullUrl = signedPath.startsWith('http') ? signedPath : `${SUPABASE_URL}${signedPath}`;
+
+    // تنزيل الملف
+    const a = document.createElement('a');
+    a.href = fullUrl;
+    a.download = name;
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }catch(e){
+    showToast('❌ فشل التنزيل: ' + e.message);
+    console.error('archiveDownload error:', e);
+  }
 }
 
 async function archiveDelete(name){
