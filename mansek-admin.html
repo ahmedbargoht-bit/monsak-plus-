@@ -24657,13 +24657,19 @@ async function sdLoad(){
   const tgtRes = await fetch(tgtUrl,{headers:H});
   sdTargetsData = tgtRes.ok ? await tgtRes.json() : [];
 
-  // جيب البيع
-  const lastDay = new Date(y,m,0).getDate();
+  // ── جيب المبيعات من daily_sales_entries ──
   const salesRes = await fetch(
-    `${SUPABASE_URL}/rest/v1/daily_sales?select=*&sale_date=gte.${month}-01&sale_date=lte.${month}-${String(lastDay).padStart(2,'0')}&limit=5000`,
+    `${SUPABASE_URL}/rest/v1/daily_sales_entries?month=eq.${month}&select=supervisor,sector,route,amount,entry_date&limit=5000`,
     {headers:H}
   );
-  sdSalesData = salesRes.ok ? await salesRes.json() : [];
+  const salesEntries = salesRes.ok ? await salesRes.json() : [];
+
+  // ── جيب مبيعات الفواتير من sales_deliveries ──
+  const delRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/sales_deliveries?delivery_date=gte.${month}-01&delivery_date=lte.${month}-31&select=supervisor,total_net,delivery_date&limit=5000`,
+    {headers:H}
+  );
+  const deliveries = delRes.ok ? await delRes.json() : [];
 
   // فلتر المشرف (للـ gm فقط)
   let filteredTargets = sdTargetsData;
@@ -24688,15 +24694,23 @@ async function sdLoad(){
     sectors[sec].target += +(t.target_amount||0);
   });
 
-  // تجميع البيع
+  // بناء map: supervisor → sector (من sales_targets)
+  const supSectorMap = {};
+  sdTargetsData.forEach(t=>{ if(t.supervisor_name) supSectorMap[t.supervisor_name]=t.sector||t.route||'غير محدد'; });
+
+  // تجميع البيع من daily_sales_entries
   const salesBySector = {}, todaySalesBySector = {};
   const todayStr = `${y}-${String(m).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
-  sdSalesData.forEach(s=>{
-    const sec = s.sector||s.route||'غير محدد';
-    salesBySector[sec] = (salesBySector[sec]||0) + (+(s.sale_amount||0));
-    if(s.sale_date===todayStr){
-      todaySalesBySector[sec] = (todaySalesBySector[sec]||0) + (+(s.sale_amount||0));
-    }
+  (Array.isArray(salesEntries)?salesEntries:[]).forEach(s=>{
+    const sec = s.sector||s.route||supSectorMap[s.supervisor]||'غير محدد';
+    salesBySector[sec] = (salesBySector[sec]||0) + (+(s.amount||0));
+    if(s.entry_date===todayStr) todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+(+(s.amount||0));
+  });
+  // أضف مبيعات الفواتير
+  (Array.isArray(deliveries)?deliveries:[]).forEach(d=>{
+    const sec = supSectorMap[d.supervisor]||'غير محدد';
+    salesBySector[sec] = (salesBySector[sec]||0) + (+(d.total_net||0));
+    if(d.delivery_date===todayStr) todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+(+(d.total_net||0));
   });
 
   // حساب الإجماليات
