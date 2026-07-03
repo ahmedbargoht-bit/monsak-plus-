@@ -24670,44 +24670,49 @@ async function sdLoad(){
   document.getElementById('sd-month-pct').textContent = monthPct+'%';
   document.getElementById('sd-month-bar').style.width = Math.min(monthPct,100)+'%';
 
-  // جيب كل البيانات بدون قيود
-  const tgtUrl = `${SUPABASE_URL}/rest/v1/sales_targets?month=eq.${month}&select=*&order=supervisor_name.asc,sector.asc&limit=500`;
+  // ── الأهداف: استخدم _stTargets لو محمّل بنفس الشهر، وإلا اعمل fetch ──
+  const stMonth = document.getElementById('st-month')?.value;
+  if(Array.isArray(_stTargets) && _stTargets.length>0 && stMonth===month){
+    sdTargetsData = _stTargets;
+  } else {
+    const tgtUrl = `${SUPABASE_URL}/rest/v1/sales_targets?month=eq.${month}&select=*&order=supervisor_name.asc,sector.asc&limit=500`;
+    try {
+      const tgtRes = await fetch(tgtUrl,{headers:H});
+      if(tgtRes.ok){
+        sdTargetsData = await tgtRes.json();
+        if(!Array.isArray(sdTargetsData)) sdTargetsData=[];
+      } else { console.error('sdLoad targets',tgtRes.status, await tgtRes.text()); sdTargetsData=[]; }
+    } catch(e){ console.error('sdLoad targets fetch failed',e); sdTargetsData=[]; }
+  }
 
-  let tgtStatus = '';
-  try {
-    const tgtRes = await fetch(tgtUrl,{headers:H});
-    tgtStatus = tgtRes.status;
-    if(tgtRes.ok){
-      sdTargetsData = await tgtRes.json();
-      if(!Array.isArray(sdTargetsData)) sdTargetsData=[];
-    } else {
-      const errText = await tgtRes.text();
-      console.error('sdLoad targets error',tgtRes.status, errText);
-      sdTargetsData = [];
-    }
-  } catch(e){ console.error('sdLoad targets fetch failed',e); sdTargetsData=[]; }
+  // ── المحقق: استخدم _stAchieved لو موجود بنفس الشهر ──
+  let useStAchieved = (stMonth===month && Object.keys(_stAchieved||{}).length>0);
 
   // ── جيب المبيعات من daily_sales_entries ──
   let salesEntries = [];
-  try {
-    const salesRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/daily_sales_entries?month=eq.${month}&select=supervisor,sector,route,amount,entry_date&limit=5000`,
-      {headers:H}
-    );
-    if(salesRes.ok){ salesEntries = await salesRes.json(); if(!Array.isArray(salesEntries)) salesEntries=[]; }
-    else { console.warn('daily_sales_entries error',salesRes.status, await salesRes.text()); }
-  } catch(e){ console.error('daily_sales_entries fetch failed',e); }
+  if(!useStAchieved){
+    try {
+      const salesRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/daily_sales_entries?month=eq.${month}&select=supervisor,sector,route,amount,entry_date&limit=5000`,
+        {headers:H}
+      );
+      if(salesRes.ok){ salesEntries = await salesRes.json(); if(!Array.isArray(salesEntries)) salesEntries=[]; }
+      else { console.warn('daily_sales_entries error',salesRes.status, await salesRes.text()); }
+    } catch(e){ console.error('daily_sales_entries fetch failed',e); }
+  }
 
   // ── جيب مبيعات الفواتير من sales_deliveries ──
   let deliveries = [];
-  try {
-    const delRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/sales_deliveries?delivery_date=gte.${month}-01&delivery_date=lte.${month}-31&select=supervisor,total_net,delivery_date&limit=5000`,
-      {headers:H}
-    );
-    if(delRes.ok){ deliveries = await delRes.json(); if(!Array.isArray(deliveries)) deliveries=[]; }
-    else { console.warn('sales_deliveries error',delRes.status, await delRes.text()); }
-  } catch(e){ console.error('sales_deliveries fetch failed',e); }
+  if(!useStAchieved){
+    try {
+      const delRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/sales_deliveries?delivery_date=gte.${month}-01&delivery_date=lte.${month}-31&select=rep_name,total_net,delivery_date&limit=5000`,
+        {headers:H}
+      );
+      if(delRes.ok){ deliveries = await delRes.json(); if(!Array.isArray(deliveries)) deliveries=[]; }
+      else { console.warn('sales_deliveries error',delRes.status, await delRes.text()); }
+    } catch(e){ console.error('sales_deliveries fetch failed',e); }
+  }
 
   // فلتر المشرف
   let filteredTargets = sdTargetsData;
@@ -24756,21 +24761,30 @@ async function sdLoad(){
     (Array.isArray(reps)?reps:[]).forEach(r=>{ repSupMap[r.name]=r.supervisors||''; });
   } catch(e){}
 
-  // تجميع البيع من daily_sales_entries
+  // تجميع البيع
   const salesBySector = {}, todaySalesBySector = {};
   const todayStr = `${y}-${String(m).padStart(2,'0')}-${String(selectedDay).padStart(2,'0')}`;
-  (Array.isArray(salesEntries)?salesEntries:[]).forEach(s=>{
-    const sec = s.sector||supSectorMap[s.supervisor]||'غير محدد';
-    salesBySector[sec] = (salesBySector[sec]||0) + (+(s.amount||0));
-    if(s.entry_date===todayStr) todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+(+(s.amount||0));
-  });
-  // أضف مبيعات الفواتير — sales_deliveries فيها rep_name مش supervisor
-  (Array.isArray(deliveries)?deliveries:[]).forEach(d=>{
-    const sup = repSupMap[d.rep_name]||'';
-    const sec = supSectorMap[sup]||sup||'غير محدد';
-    salesBySector[sec] = (salesBySector[sec]||0) + (+(d.total_net||0));
-    if(d.delivery_date===todayStr) todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+(+(d.total_net||0));
-  });
+
+  if(useStAchieved){
+    // استخدم _stAchieved (key = supervisor|sector → amount) واجمّع بالقطاع
+    Object.entries(_stAchieved).forEach(([key,amt])=>{
+      const sec = key.split('|')[1]||'غير محدد';
+      salesBySector[sec] = (salesBySector[sec]||0) + amt;
+    });
+    // todaySales من _stTargets مش متاحة بسهولة — نتركها 0 (سيظهر من fetch منفصل لو احتجنا)
+  } else {
+    (Array.isArray(salesEntries)?salesEntries:[]).forEach(s=>{
+      const sec = s.sector||supSectorMap[s.supervisor]||'غير محدد';
+      salesBySector[sec] = (salesBySector[sec]||0) + (+(s.amount||0));
+      if(s.entry_date===todayStr) todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+(+(s.amount||0));
+    });
+    (Array.isArray(deliveries)?deliveries:[]).forEach(d=>{
+      const sup = repSupMap[d.rep_name]||'';
+      const sec = supSectorMap[sup]||sup||'غير محدد';
+      salesBySector[sec] = (salesBySector[sec]||0) + (+(d.total_net||0));
+      if(d.delivery_date===todayStr) todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+(+(d.total_net||0));
+    });
+  }
 
   // لو مفيش أهداف، ابني القطاعات من بيانات المبيعات نفسها
   Object.keys(salesBySector).forEach(sec=>{
