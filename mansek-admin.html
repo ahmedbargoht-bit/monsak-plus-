@@ -29424,6 +29424,150 @@ function advisorChatPrint(msgId){
 }
 
 // ══════════════════════════════════════════════════════
+// SWOT Stats — تحميل الكروت تلقائياً عند فتح التاب
+// ══════════════════════════════════════════════════════
+let _swotData = null;
+let _swotStatsLoading = false;
+
+async function swotLoadStats(){
+  if(_swotStatsLoading) return;
+  _swotStatsLoading = true;
+
+  const setStat = (id,v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
+  const loadingEl = document.getElementById('swot-stats-loading');
+  const timeEl = document.getElementById('swot-stats-time');
+  if(loadingEl) loadingEl.style.display='';
+  ['swot-stat-products','swot-stat-slow','swot-stat-expiry','swot-stat-fast','swot-stat-clients']
+    .forEach(id=>setStat(id,'⏳'));
+
+  const H={'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
+  async function sf(url,lbl){
+    try{
+      const r=await fetch(url,{headers:H});
+      if(!r.ok){ const e=await r.json().catch(()=>({message:'HTTP '+r.status}));
+        console.error('[SWOT stats]',lbl,e); return []; }
+      const d=await r.json();
+      if(!Array.isArray(d)){ console.error('[SWOT stats]',lbl,'not array',d); return []; }
+      console.log('[SWOT stats] ✅',lbl,d.length,'سجل');
+      return d;
+    }catch(e){ console.error('[SWOT stats]',lbl,e); return []; }
+  }
+
+  try{
+    const [products,expiry,deliveries,returns_,clients] = await Promise.all([
+      sf(SUPABASE_URL+'/rest/v1/products?select=snf,cat,fea,branch,shelf_qty,stock_qty,date_shelf&order=created_at.desc&limit=3000','products'),
+      sf(SUPABASE_URL+'/rest/v1/market_expiry?select=snf,cat,branch,date_shelf,total_qty&order=total_qty.desc&limit=300','market_expiry'),
+      sf(SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,total_net,items&order=delivery_date.desc&limit=800','sales_deliveries'),
+      sf(SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,total_net&order=return_date.desc&limit=300','sales_returns'),
+      sf(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type&limit=100','sales_clients'),
+    ]);
+
+    const invMap={}, seen=new Set();
+    products.forEach(p=>{
+      const key=p.snf+'|'+p.branch; if(seen.has(key)) return; seen.add(key);
+      if(!invMap[p.snf]) invMap[p.snf]={sh:0,st:0,cat:p.cat||''};
+      invMap[p.snf].sh+=p.shelf_qty||0; invMap[p.snf].st+=p.stock_qty||0;
+    });
+
+    const snfSales={};
+    deliveries.forEach(d=>(Array.isArray(d.items)?d.items:[]).forEach(it=>{
+      const n=it.name||it.snf||''; if(n) snfSales[n]=(snfSales[n]||0)+(it.qty||0);
+    }));
+
+    const allSnfs=Object.keys(invMap);
+    const now=new Date();
+    const fastMovers=allSnfs.filter(s=>(snfSales[s]||0)>15);
+    const slowMovers=allSnfs.filter(s=>(invMap[s].sh+invMap[s].st)>25&&(snfSales[s]||0)<5);
+    const expiryAlerts=expiry.filter(e=>e.date_shelf&&e.total_qty>0&&(new Date(e.date_shelf)-now)/864e5<90);
+    const totalSales=deliveries.reduce((s,d)=>s+(d.total_net||0),0);
+    const totalReturns=returns_.reduce((s,r)=>s+(r.total_net||0),0);
+
+    _swotData={products,expiry,deliveries,returns_,clients,invMap,snfSales,allSnfs,fastMovers,slowMovers,expiryAlerts,totalSales,totalReturns};
+
+    setStat('swot-stat-products', allSnfs.length);
+    setStat('swot-stat-slow',     slowMovers.length);
+    setStat('swot-stat-expiry',   expiryAlerts.length);
+    setStat('swot-stat-fast',     fastMovers.length);
+    setStat('swot-stat-clients',  clients.length);
+
+    const ts = new Date().toLocaleString('ar-EG');
+    if(timeEl) timeEl.textContent = 'آخر تحديث: '+ts;
+    const upEl = document.getElementById('swot-updated-at');
+    if(upEl) upEl.textContent = 'آخر تحديث البيانات: '+ts;
+
+    // تفاصيل الكروت
+    const detailEl = document.getElementById('swot-stats-detail');
+    if(detailEl && _swotData){
+      const fNames = fastMovers.slice(0,8).join('، ');
+      const slNames = slowMovers.slice(0,8).join('، ');
+      const expNames = expiryAlerts.slice(0,8).map(e=>e.snf+'('+Math.round((new Date(e.date_shelf)-now)/864e5)+'ي)').join('، ');
+      detailEl.style.display='';
+      detailEl.innerHTML = `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:11px">
+          <div><span style="color:#065F46;font-weight:700">📦 سريع الدوران:</span><br>${fNames||'—'}</div>
+          <div><span style="color:#D97706;font-weight:700">🐢 راكد:</span><br>${slNames||'—'}</div>
+          <div><span style="color:#DC2626;font-weight:700">⚠️ قرب الانتهاء (90 يوم):</span><br>${expNames||'—'}</div>
+          <div><span style="color:#7C3AED;font-weight:700">🏪 العملاء:</span><br>${clients.slice(0,8).map(c=>c.name).join('، ')||'—'}</div>
+        </div>`;
+    }
+  }catch(e){
+    console.error('[SWOT stats] خطأ عام:',e);
+    ['swot-stat-products','swot-stat-slow','swot-stat-expiry','swot-stat-fast','swot-stat-clients']
+      .forEach(id=>setStat(id,'!'));
+  }finally{
+    if(loadingEl) loadingEl.style.display='none';
+    _swotStatsLoading=false;
+  }
+}
+
+function swotPrintStats(){
+  const d = _swotData;
+  const now = new Date().toLocaleString('ar-EG');
+  const fNames = d ? d.fastMovers.slice(0,15).join(' — ') : '—';
+  const slNames = d ? d.slowMovers.slice(0,15).join(' — ') : '—';
+  const expNames = d ? d.expiryAlerts.slice(0,15).map(e=>e.snf+' ('+Math.round((new Date(e.date_shelf)-new Date())/864e5)+' يوم)').join(' — ') : '—';
+  const clNames  = d ? d.clients.map(c=>c.name).join(' — ') : '—';
+
+  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8">
+  <title>تقرير SWOT — الكروت الميدانية</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap');
+    body{font-family:Cairo,Arial,sans-serif;padding:28px;direction:rtl;color:#111;background:#fff}
+    h2{color:#064E3B;font-size:17px;border-bottom:2px solid #6EE7B7;padding-bottom:8px;margin-bottom:18px}
+    .meta{font-size:10px;color:#9CA3AF;margin-bottom:20px}
+    .cards{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:24px}
+    .card{border:2px solid #E5E7EB;border-radius:10px;padding:14px 20px;text-align:center;min-width:130px;flex:1}
+    .num{font-size:34px;font-weight:900;line-height:1}
+    .lbl{font-size:11px;color:#6B7280;margin-top:6px;font-weight:700}
+    .s .num{color:#065F46} .w .num{color:#D97706} .e .num{color:#DC2626} .f .num{color:#2563EB} .c .num{color:#7C3AED}
+    .section{margin-bottom:18px;border:1px solid #E5E7EB;border-radius:8px;padding:12px 16px}
+    .section h3{font-size:12px;margin:0 0 6px;font-weight:700}
+    .section p{font-size:11px;color:#374151;line-height:1.8;margin:0}
+    @media print{.cards{flex-wrap:nowrap} body{padding:14px}}
+  </style></head><body>
+  <h2>🔍 لوحة SWOT — تقرير الكروت الميدانية | الطحان جولدن داتس</h2>
+  <div class="meta">تاريخ التقرير: ${now}</div>
+  <div class="cards">
+    <div class="card s"><div class="num">${d?d.allSnfs.length:'—'}</div><div class="lbl">📦 صنف مرصود</div></div>
+    <div class="card w"><div class="num">${d?d.slowMovers.length:'—'}</div><div class="lbl">🐢 صنف راكد</div></div>
+    <div class="card e"><div class="num">${d?d.expiryAlerts.length:'—'}</div><div class="lbl">⚠️ تنبيه انتهاء صلاحية</div></div>
+    <div class="card f"><div class="num">${d?d.fastMovers.length:'—'}</div><div class="lbl">🚀 صنف سريع الدوران</div></div>
+    <div class="card c"><div class="num">${d?d.clients.length:'—'}</div><div class="lbl">🏪 سلسلة / عميل</div></div>
+  </div>
+  <div class="section"><h3 style="color:#2563EB">🚀 الأصناف سريعة الدوران</h3><p>${fNames}</p></div>
+  <div class="section"><h3 style="color:#D97706">🐢 الأصناف الراكدة</h3><p>${slNames}</p></div>
+  <div class="section"><h3 style="color:#DC2626">⚠️ تنبيهات انتهاء الصلاحية (خلال 90 يوم)</h3><p>${expNames}</p></div>
+  <div class="section"><h3 style="color:#7C3AED">🏪 قائمة العملاء / السلاسل</h3><p>${clNames}</p></div>
+  <${'script'}>window.onload=()=>{setTimeout(()=>window.print(),400);};</${'script'}>
+  </body></html>`;
+
+  const win = window.open('','_blank');
+  if(!win){ alert('السماح بالنوافذ المنبثقة لهذا الموقع'); return; }
+  win.document.write(html);
+  win.document.close();
+}
+
+// ══════════════════════════════════════════════════════
 // SWOT Board — تحليل الوضع الميداني من بيانات المنسقين
 // ══════════════════════════════════════════════════════
 let _swotRunning = false;
@@ -29459,13 +29603,19 @@ async function swotRun(){
   }
 
   try {
-    const [products, expiry, deliveries, returns_, clients] = await Promise.all([
-      sf(SUPABASE_URL+'/rest/v1/products?select=snf,cat,fea,branch,shelf_qty,stock_qty,date_shelf,created_at&order=created_at.desc&limit=3000','products'),
-      sf(SUPABASE_URL+'/rest/v1/market_expiry?select=snf,cat,branch,date_shelf,total_qty&order=total_qty.desc&limit=300','market_expiry'),
-      sf(SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,branch_name,total_net,items&order=delivery_date.desc&limit=800','sales_deliveries'),
-      sf(SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,total_net,items&order=return_date.desc&limit=300','sales_returns'),
-      sf(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type&limit=100','sales_clients'),
-    ]);
+    // استخدام البيانات المحملة مسبقاً إن وُجدت
+    let products, expiry, deliveries, returns_, clients;
+    if(_swotData){
+      ({products,expiry,deliveries,returns_,clients} = _swotData);
+    } else {
+      [products, expiry, deliveries, returns_, clients] = await Promise.all([
+        sf(SUPABASE_URL+'/rest/v1/products?select=snf,cat,fea,branch,shelf_qty,stock_qty,date_shelf,created_at&order=created_at.desc&limit=3000','products'),
+        sf(SUPABASE_URL+'/rest/v1/market_expiry?select=snf,cat,branch,date_shelf,total_qty&order=total_qty.desc&limit=300','market_expiry'),
+        sf(SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,branch_name,total_net,items&order=delivery_date.desc&limit=800','sales_deliveries'),
+        sf(SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,total_net,items&order=return_date.desc&limit=300','sales_returns'),
+        sf(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type&limit=100','sales_clients'),
+      ]);
+    }
 
     const invMap={}, seen=new Set();
     products.forEach(p=>{
