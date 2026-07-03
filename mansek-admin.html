@@ -5942,6 +5942,36 @@ h2,h3{color:#2C1F0A}
               <div style="font-size:11px;margin-top:6px;color:#9CA3AF">سيتم تحليل المخزون · المبيعات · السلاسل · الراكد · المصنعات · وخطة الكوارتر القادم</div>
             </div>
           </div>
+        <!-- ══ Chat Section ══ -->
+          <div style="margin-top:20px;border-top:1.5px solid #A7F3D0;padding-top:18px">
+            <div style="font-size:13px;font-weight:800;color:#064E3B;margin-bottom:12px">💬 اسألني عن بياناتك</div>
+
+            <!-- Input Row -->
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <select id="advisor-chat-ctx" style="padding:8px 12px;border-radius:8px;border:1.5px solid #6EE7B7;background:var(--card-bg);color:var(--text-primary);font-family:Cairo,sans-serif;font-size:12px;min-width:200px">
+                <option value="sales">📊 المبيعات</option>
+                <option value="returns">🔄 مرتجعات المبيعات</option>
+                <option value="gaps">📉 نواقص المبيعات</option>
+                <option value="items">🏷️ أصناف المبيعات</option>
+                <option value="movement">📦 حركة رصيد الأصناف (بيع/توريد/لا حركة)</option>
+                <option value="expiry">⏰ تواريخ الأصناف</option>
+                <option value="chains">🏪 السلاسل والعملاء</option>
+                <option value="promos">🎯 العروض الترويجية</option>
+                <option value="all">📋 كل البيانات</option>
+              </select>
+              <input id="advisor-chat-input" type="text" placeholder="اكتب سؤالك هنا... مثلاً: حلل المرتجعات وأسبابها"
+                style="flex:1;min-width:220px;padding:8px 14px;border-radius:8px;border:1.5px solid #6EE7B7;background:var(--card-bg);color:var(--text-primary);font-family:Cairo,sans-serif;font-size:12px;outline:none"
+                onkeydown="if(event.key==='Enter')advisorChatSend()"/>
+              <button onclick="advisorChatSend()" id="advisor-chat-btn"
+                style="padding:8px 18px;background:linear-gradient(135deg,#059669,#047857);color:#fff;border:none;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap">
+                ⚡ إرسال
+              </button>
+            </div>
+
+            <!-- Chat History -->
+            <div id="advisor-chat-history" style="margin-top:14px;display:flex;flex-direction:column;gap:12px;max-height:600px;overflow-y:auto"></div>
+          </div>
+
         </div><!-- /aitab-advisor -->
 
         </div>
@@ -28822,6 +28852,275 @@ async function advisorRun(){
 function advisorCopy(){
   const txt=window._advisorRawText||'';
   navigator.clipboard.writeText(txt).then(()=>showToast('✅ تم نسخ التقرير')).catch(()=>{});
+}
+
+// ══ Chat functions ══════════════════════════════════════════════
+let _chatRunning = false;
+let _chatMsgId   = 0;
+
+const CHAT_CTX_LABELS = {
+  sales:    '📊 المبيعات',
+  returns:  '🔄 مرتجعات المبيعات',
+  gaps:     '📉 نواقص المبيعات',
+  items:    '🏷️ أصناف المبيعات',
+  movement: '📦 حركة رصيد الأصناف',
+  expiry:   '⏰ تواريخ الأصناف',
+  chains:   '🏪 السلاسل والعملاء',
+  promos:   '🎯 العروض الترويجية',
+  all:      '📋 كل البيانات',
+};
+
+async function advisorChatSend(){
+  if(_chatRunning) return;
+  const question = (document.getElementById('advisor-chat-input')||{}).value?.trim();
+  if(!question){ alert('اكتب سؤالك أولاً'); return; }
+
+  if(!_GROQ_KEY){
+    try{ await aiEnsureGroqKey(); }catch(e){}
+    if(!_GROQ_KEY){ alert('مفتاح Groq غير متاح'); return; }
+  }
+
+  _chatRunning = true;
+  const btn = document.getElementById('advisor-chat-btn');
+  const inp = document.getElementById('advisor-chat-input');
+  const ctx = (document.getElementById('advisor-chat-ctx')||{}).value||'all';
+  const history = document.getElementById('advisor-chat-history');
+  btn.disabled = true;
+  inp.value = '';
+
+  const msgId = ++_chatMsgId;
+
+  // Add user bubble
+  history.insertAdjacentHTML('beforeend', `
+    <div style="text-align:left;direction:ltr">
+      <div style="display:inline-block;background:#F0FDF4;border:1px solid #BBF7D0;border-radius:12px 12px 3px 12px;padding:10px 14px;max-width:85%;font-size:12px;color:#064E3B;direction:rtl;text-align:right">
+        <span style="font-size:10px;color:#6B7280;display:block;margin-bottom:4px">${CHAT_CTX_LABELS[ctx]||ctx}</span>
+        ${question}
+      </div>
+    </div>`);
+
+  // Add AI loading bubble
+  history.insertAdjacentHTML('beforeend', `
+    <div id="chat-msg-${msgId}" style="text-align:right;direction:ltr">
+      <div style="display:inline-block;background:var(--card-bg);border:1.5px solid #E5E7EB;border-radius:3px 12px 12px 12px;padding:12px 16px;max-width:92%;font-size:12px;direction:rtl;text-align:right;min-width:120px">
+        <div style="color:#6B7280;font-size:11px">🧠 جاري التحليل...</div>
+      </div>
+    </div>`);
+  history.scrollTop = history.scrollHeight;
+
+  const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
+
+  try {
+    // Fetch data based on context
+    let dataSummary = '';
+
+    if(ctx==='sales'||ctx==='all'){
+      const del = await fetch(SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,branch_name,delivery_date,items,total_net,discount_pct&order=delivery_date.desc&limit=500',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const agg={};
+      if(Array.isArray(del)) del.forEach(d=>{
+        const cn=d.client_name||d.branch_name||'غير محدد';
+        if(!agg[cn]) agg[cn]={total:0,inv:0,items:{}};
+        agg[cn].total+=d.total_net||0; agg[cn].inv++;
+        (Array.isArray(d.items)?d.items:[]).forEach(it=>{
+          const n=it.name||''; if(!n) return;
+          if(!agg[cn].items[n]) agg[cn].items[n]=0;
+          agg[cn].items[n]+=it.qty||0;
+        });
+      });
+      dataSummary += '
+
+═══ بيانات المبيعات ═══
+'+Object.entries(agg).map(([cn,d])=>{
+        const top=Object.entries(d.items).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([n,q])=>n+'('+q+')').join('، ');
+        return cn+': '+d.total.toFixed(0)+'ج | '+d.inv+' فاتورة | الأعلى: '+top;
+      }).join('
+');
+    }
+
+    if(ctx==='returns'||ctx==='all'){
+      const ret = await fetch(SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,branch_name,return_date,items,total_net&order=return_date.desc&limit=300',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const ragg={};
+      if(Array.isArray(ret)) ret.forEach(r=>{
+        const cn=r.client_name||r.branch_name||'غير محدد';
+        if(!ragg[cn]) ragg[cn]={total:0,cnt:0,items:{}};
+        ragg[cn].total+=r.total_net||0; ragg[cn].cnt++;
+        (Array.isArray(r.items)?r.items:[]).forEach(it=>{
+          const n=it.name||''; if(!n) return;
+          if(!ragg[cn].items[n]) ragg[cn].items[n]=0;
+          ragg[cn].items[n]+=it.qty||0;
+        });
+      });
+      dataSummary += '
+
+═══ بيانات المرتجعات ═══
+'+Object.entries(ragg).map(([cn,d])=>{
+        const topR=Object.entries(d.items).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([n,q])=>n+'('+q+')').join('، ');
+        return cn+': '+d.total.toFixed(0)+'ج | '+d.cnt+' مرتجع | الأكثر إرجاعًا: '+topR;
+      }).join('
+');
+    }
+
+    if(ctx==='inventory'||ctx==='gaps'||ctx==='movement'||ctx==='items'||ctx==='all'){
+      const inv = await fetch(SUPABASE_URL+'/rest/v1/products?select=snf,cat,fea,branch,shelf_qty,stock_qty,date_shelf,created_at&order=created_at.desc&limit=2000',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const imap={};
+      const seen=new Set();
+      if(Array.isArray(inv)) inv.forEach(p=>{
+        const key=p.snf+'|'+p.branch; if(seen.has(key)) return; seen.add(key);
+        const snf=p.snf||'';
+        if(!imap[snf]) imap[snf]={sh:0,st:0,cat:p.cat||'',fea:p.fea||'',date:p.date_shelf||''};
+        imap[snf].sh+=p.shelf_qty||0; imap[snf].st+=p.stock_qty||0;
+      });
+      if(ctx==='gaps'){
+        const noMove=Object.entries(imap).filter(([,v])=>(v.sh+v.st)>20).sort((a,b)=>(b[1].sh+b[1].st)-(a[1].sh+a[1].st)).slice(0,30);
+        dataSummary += '
+
+═══ أصناف بدون حركة / راكدة ═══
+'+noMove.map(([snf,v])=>snf+'|'+v.cat+': رصيد '+(v.sh+v.st)+' — تاريخ '+v.date).join('
+');
+      } else if(ctx==='movement'){
+        const sorted=Object.entries(imap).sort((a,b)=>(b[1].sh+b[1].st)-(a[1].sh+a[1].st));
+        dataSummary += '
+
+═══ حركة رصيد الأصناف ═══
+'+sorted.slice(0,40).map(([snf,v])=>snf+'|'+v.cat+'|'+v.fea+': رف '+v.sh+' مخزن '+v.st+' إجمالي '+(v.sh+v.st)+' تاريخ '+v.date).join('
+');
+      } else {
+        dataSummary += '
+
+═══ ملخص الأصناف ═══
+'+Object.entries(imap).slice(0,40).map(([snf,v])=>snf+'|'+v.cat+': رصيد '+(v.sh+v.st)).join('
+');
+      }
+    }
+
+    if(ctx==='expiry'||ctx==='all'){
+      const exp = await fetch(SUPABASE_URL+'/rest/v1/market_expiry?select=snf,cat,branch,date_shelf,total_qty,last_visit&order=total_qty.desc&limit=200',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const now=new Date();
+      dataSummary += '
+
+═══ تواريخ الأصناف ═══
+'+(Array.isArray(exp)?exp.slice(0,30).map(e=>{
+        const d=new Date(e.date_shelf); const days=Math.max(0,Math.floor((d-now)/864e5));
+        return e.snf+'|'+e.cat+'|'+e.branch+': '+e.total_qty+'وحدة — ينتهي بعد '+days+' يوم ('+e.date_shelf+')';
+      }).join('
+'):'لا بيانات');
+    }
+
+    if(ctx==='chains'||ctx==='all'){
+      const cl = await fetch(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type,discount_pct&limit=100',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const cd = await fetch(SUPABASE_URL+'/rest/v1/client_category_discounts?select=client_name,cat,discount_pct&limit=100',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      dataSummary += '
+
+═══ السلاسل والعملاء ═══
+'+(Array.isArray(cl)?cl.map(c=>c.name+'|'+c.client_type+': خصم '+c.discount_pct+'%').join('
+'):'');
+      dataSummary += '
+═══ خصومات التصنيف ═══
+'+(Array.isArray(cd)?cd.slice(0,20).map(d=>d.client_name+'|'+d.cat+': '+d.discount_pct+'%').join('
+'):'');
+    }
+
+    if(ctx==='promos'||ctx==='all'){
+      const pr = await fetch(SUPABASE_URL+'/rest/v1/sales_promotions?select=client_name,snf_name,promo_price,date_from,date_to&limit=100',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      dataSummary += '
+
+═══ العروض الترويجية ═══
+'+(Array.isArray(pr)&&pr.length?pr.map(p=>p.client_name+'|'+p.snf_name+': '+p.promo_price+'ج ('+p.date_from+' → '+p.date_to+')').join('
+'):'لا توجد عروض');
+    }
+
+    // Build prompt
+    const prompt = 'أنت مستشار تجاري لشركة الطحان جولدن داتس (تمور مصري وسعودي ومصنعات — سلاسل سوبرماركت مصر).
+
+السياق المختار: '+( CHAT_CTX_LABELS[ctx]||ctx)+'
+'+dataSummary+'
+
+سؤال المستخدم: '+question+'
+
+أجب بتفصيل عملي ومحدد. استخدم الأرقام الفعلية من البيانات. سمِّ الأصناف والعملاء بالاسم.';
+
+    const gRes = await fetch(GROQ_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_GROQ_KEY},body:JSON.stringify({model:GROQ_MODEL,messages:[{role:'user',content:prompt}],temperature:0.7,max_tokens:4000})});
+    if(!gRes.ok){ const er=await gRes.json().catch(()=>({})); throw new Error(er?.error?.message||'HTTP '+gRes.status); }
+    const gData = await gRes.json();
+    const aiText = gData?.choices?.[0]?.message?.content||'لم يُرجع الذكاء الاصطناعي نتيجة.';
+
+    // Render markdown
+    const html = aiText
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+      .replace(/^## (.+)$/gm,'<h4 style="color:#065F46;margin:12px 0 6px;font-size:13px;border-bottom:1px solid #D1FAE5;padding-bottom:4px">$1</h4>')
+      .replace(/^### (.+)$/gm,'<h5 style="color:#059669;margin:10px 0 4px;font-size:12px">$1</h5>')
+      .replace(/^[•\-] (.+)$/gm,'<li style="margin:3px 0 3px 16px;font-size:12px">$1</li>')
+      .replace(/
+
+/g,'</p><p style="margin:0 0 8px;font-size:12px">')
+      .replace(/
+/g,'<br>');
+
+    // Store for printing
+    window['_chatText_'+msgId] = aiText;
+    window['_chatCtx_'+msgId]  = (CHAT_CTX_LABELS[ctx]||ctx)+' — '+question;
+
+    // Replace loading bubble
+    const bubble = document.getElementById('chat-msg-'+msgId);
+    if(bubble) bubble.outerHTML = `
+      <div style="text-align:right;direction:ltr">
+        <div style="display:inline-block;background:var(--card-bg);border:1.5px solid #D1FAE5;border-radius:3px 12px 12px 12px;padding:14px 16px;max-width:95%;direction:rtl;text-align:right">
+          <div style="line-height:1.85"><p style="margin:0 0 8px;font-size:12px">${html}</p></div>
+          <div style="display:flex;gap:8px;margin-top:10px;justify-content:flex-end">
+            <button onclick="advisorChatPrint(${msgId})" style="padding:5px 12px;background:#065F46;color:#fff;border:none;border-radius:6px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">🖨️ طباعة PDF</button>
+            <button onclick="navigator.clipboard.writeText(window['_chatText_${msgId}']||'').then(()=>showToast('✅ تم النسخ'))" style="padding:5px 12px;background:#374151;color:#fff;border:none;border-radius:6px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">📋 نسخ</button>
+          </div>
+        </div>
+      </div>`;
+    history.scrollTop = history.scrollHeight;
+
+  } catch(e){
+    const bubble = document.getElementById('chat-msg-'+msgId);
+    if(bubble) bubble.innerHTML = '<div style="padding:10px;background:#FEF2F2;border-radius:8px;color:#991B1B;font-size:12px">❌ '+e.message+'</div>';
+  } finally {
+    _chatRunning = false;
+    btn.disabled = false;
+  }
+}
+
+function advisorChatPrint(msgId){
+  const text  = window['_chatText_'+msgId]||'';
+  const title = window['_chatCtx_'+msgId]||'تقرير المستشار الذكي';
+  const html = text
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/^## (.+)$/gm,'<h3 style="color:#065F46;border-bottom:1px solid #ccc;padding-bottom:4px">$1</h3>')
+    .replace(/^### (.+)$/gm,'<h4 style="color:#059669">$1</h4>')
+    .replace(/^[•\-] (.+)$/gm,'<li>$1</li>')
+    .replace(/
+
+/g,'</p><p>')
+    .replace(/
+/g,'<br>');
+  const win = window.open('','_blank');
+  if(!win) return;
+  win.document.write(`<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8">
+    <title>${title}</title>
+    <style>
+      body{font-family:Cairo,Arial,sans-serif;margin:30px;font-size:13px;line-height:1.9;color:#111}
+      h1{color:#064E3B;font-size:16px;border-bottom:2px solid #6EE7B7;padding-bottom:8px}
+      h3{color:#065F46;font-size:14px} h4{color:#059669;font-size:13px}
+      li{margin:4px 0} p{margin:0 0 10px}
+      .header{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+      .logo{font-size:24px} .company{font-size:12px;color:#6B7280}
+      @media print{body{margin:15px}}
+    </style>
+  </head><body>
+    <div class="header">
+      <div class="logo">🧠</div>
+      <div><div style="font-weight:800;font-size:15px;color:#064E3B">المستشار الذكي — Al Tahhan Golden Dates</div>
+      <div class="company">${title} | ${new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'})}</div></div>
+    </div>
+    <p>${html}</p>
+    <${'script'}>window.onload=()=>window.print();</${'script'}>
+  </body></html>`);
+  win.document.close();
 }
 </script>
 
