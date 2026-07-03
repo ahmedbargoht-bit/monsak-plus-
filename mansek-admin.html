@@ -13085,6 +13085,200 @@ function aeInit(){
   if(toEl   && !toEl.value)   toEl.value   = `${y}-${m}-${d}`;
 }
 
+// ══════════════════════════════════════════════════════════════
+// صلاحيات السوق — market_expiry
+// ══════════════════════════════════════════════════════════════
+let _seData = [];  // كاش البيانات
+
+async function seInit(){ await seLoadData(); }
+
+async function seLoadData(){
+  const tbody = document.getElementById('se-tbody');
+  const stats = document.getElementById('se-stats');
+  if(tbody) tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:2rem;color:#6B7280">⏳ جاري التحميل...</td></tr>';
+  if(stats) stats.innerHTML = '';
+
+  const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
+  try{
+    const rows = await fetch(
+      SUPABASE_URL+'/rest/v1/market_expiry?select=branch,route,grp,snf,cat,fea,date_shelf,total_qty,last_visit&order=last_visit.desc&limit=3000',
+      {headers:H}
+    ).then(r=>r.json());
+
+    if(!Array.isArray(rows)){ throw new Error(JSON.stringify(rows)); }
+    _seData = rows;
+
+    // ── تعبئة الفلاتر ──
+    const fill = (id, vals, allLabel)=>{
+      const el = document.getElementById(id);
+      if(!el) return;
+      const cur = el.value;
+      el.innerHTML = `<option value="all">${allLabel}</option>`
+        + [...new Set(vals.filter(Boolean).sort())].map(v=>`<option value="${v}">${v}</option>`).join('');
+      if([...el.options].some(o=>o.value===cur)) el.value = cur;
+    };
+    fill('se-grp',   rows.map(r=>r.grp),   'كل المجموعات');
+    fill('se-route', rows.map(r=>r.route), 'كل الخطوط');
+    fill('se-branch',rows.map(r=>r.branch),'كل الفروع');
+    fill('se-fea',   rows.map(r=>r.fea),   'كل الفئات');
+    fill('se-cat',   rows.map(r=>r.cat),   'كل التصنيفات');
+    fill('se-snf',   rows.map(r=>r.snf),   'كل الأصناف');
+
+    seSearch();
+  }catch(e){
+    if(tbody) tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:2rem;color:#DC2626">❌ ${e.message}</td></tr>`;
+  }
+}
+
+function seOnGrpChange(){
+  const grp = document.getElementById('se-grp')?.value;
+  const fil = grp==='all' ? _seData : _seData.filter(r=>r.grp===grp);
+  const fill = (id, vals, allLabel)=>{
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.innerHTML = `<option value="all">${allLabel}</option>`
+      + [...new Set(vals.filter(Boolean).sort())].map(v=>`<option value="${v}">${v}</option>`).join('');
+  };
+  fill('se-route', fil.map(r=>r.route), 'كل الخطوط');
+  fill('se-branch',fil.map(r=>r.branch),'كل الفروع');
+  seSearch();
+}
+
+function seOnRouteChange(){
+  const grp   = document.getElementById('se-grp')?.value;
+  const route = document.getElementById('se-route')?.value;
+  let fil = _seData;
+  if(grp  !=='all') fil = fil.filter(r=>r.grp===grp);
+  if(route!=='all') fil = fil.filter(r=>r.route===route);
+  const el = document.getElementById('se-branch');
+  if(el){
+    el.innerHTML = '<option value="all">كل الفروع</option>'
+      + [...new Set(fil.map(r=>r.branch).filter(Boolean).sort())].map(v=>`<option value="${v}">${v}</option>`).join('');
+  }
+  seSearch();
+}
+
+function seOnFeaChange(){
+  const fea = document.getElementById('se-fea')?.value;
+  const fil = fea==='all' ? _seData : _seData.filter(r=>r.fea===fea);
+  const el  = document.getElementById('se-cat');
+  if(el){
+    el.innerHTML = '<option value="all">كل التصنيفات</option>'
+      + [...new Set(fil.map(r=>r.cat).filter(Boolean).sort())].map(v=>`<option value="${v}">${v}</option>`).join('');
+  }
+  seOnCatChange();
+}
+
+function seOnCatChange(){
+  const fea = document.getElementById('se-fea')?.value;
+  const cat = document.getElementById('se-cat')?.value;
+  let fil = _seData;
+  if(fea!=='all') fil = fil.filter(r=>r.fea===fea);
+  if(cat!=='all') fil = fil.filter(r=>r.cat===cat);
+  const el = document.getElementById('se-snf');
+  if(el){
+    el.innerHTML = '<option value="all">كل الأصناف</option>'
+      + [...new Set(fil.map(r=>r.snf).filter(Boolean).sort())].map(v=>`<option value="${v}">${v}</option>`).join('');
+  }
+  seSearch();
+}
+
+function seGetFiltered(){
+  const g = document.getElementById('se-grp')?.value;
+  const ro= document.getElementById('se-route')?.value;
+  const b = document.getElementById('se-branch')?.value;
+  const fe= document.getElementById('se-fea')?.value;
+  const ca= document.getElementById('se-cat')?.value;
+  const sn= document.getElementById('se-snf')?.value;
+  return _seData.filter(r=>
+    (g ==='all'||r.grp===g) &&
+    (ro==='all'||r.route===ro) &&
+    (b ==='all'||r.branch===b) &&
+    (fe==='all'||r.fea===fe) &&
+    (ca==='all'||r.cat===ca) &&
+    (sn==='all'||r.snf===sn)
+  );
+}
+
+function seSearch(){
+  const data   = seGetFiltered();
+  const stats  = document.getElementById('se-stats');
+  const thead  = document.getElementById('se-thead');
+  const tbody  = document.getElementById('se-tbody');
+  if(!tbody) return;
+
+  // ── إحصائيات ──
+  const branches = new Set(data.map(r=>r.branch)).size;
+  const snfs     = new Set(data.map(r=>r.snf)).size;
+  const totalQty = data.reduce((s,r)=>s+(+r.total_qty||0),0);
+  const lastV    = data.map(r=>r.last_visit).filter(Boolean).sort().reverse()[0]||'—';
+  if(stats) stats.innerHTML = [
+    {icon:'📦',label:'سجلات',val:data.length},
+    {icon:'🏪',label:'فروع',val:branches},
+    {icon:'🏷️',label:'أصناف',val:snfs},
+    {icon:'🔢',label:'إجمالي الكميات',val:totalQty.toLocaleString()},
+    {icon:'📅',label:'آخر زيارة',val:lastV},
+  ].map(s=>`<div class="stat-card"><div class="stat-icon">${s.icon}</div><div class="stat-value">${s.val}</div><div class="stat-label">${s.label}</div></div>`).join('');
+
+  // ── الجدول ──
+  if(thead) thead.innerHTML = `<tr style="background:var(--surface-2)">
+    <th style="padding:8px;text-align:right;font-size:11px">#</th>
+    <th style="padding:8px;text-align:right;font-size:11px">الفرع</th>
+    <th style="padding:8px;text-align:right;font-size:11px">خط السير</th>
+    <th style="padding:8px;text-align:right;font-size:11px">المجموعة</th>
+    <th style="padding:8px;text-align:right;font-size:11px">الصنف</th>
+    <th style="padding:8px;text-align:right;font-size:11px">التصنيف</th>
+    <th style="padding:8px;text-align:right;font-size:11px">تاريخ الإنتاج</th>
+    <th style="padding:8px;text-align:right;font-size:11px">الكمية</th>
+    <th style="padding:8px;text-align:right;font-size:11px">آخر زيارة</th>
+  </tr>`;
+
+  if(!data.length){
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:2rem;color:#6B7280">لا توجد نتائج</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.slice(0,500).map((r,i)=>`
+    <tr style="border-bottom:1px solid var(--border);${i%2?'background:var(--surface-1)':''}">
+      <td style="padding:7px 8px;font-size:11px;color:#6B7280">${i+1}</td>
+      <td style="padding:7px 8px;font-size:12px;font-weight:600">${r.branch||'—'}</td>
+      <td style="padding:7px 8px;font-size:11px">${r.route||'—'}</td>
+      <td style="padding:7px 8px;font-size:11px">${r.grp||'—'}</td>
+      <td style="padding:7px 8px;font-size:12px;color:#065F46;font-weight:600">${r.snf||'—'}</td>
+      <td style="padding:7px 8px;font-size:11px">${r.cat||'—'}</td>
+      <td style="padding:7px 8px;font-size:12px;${seAgeColor(r.date_shelf)}">${r.date_shelf||'—'}</td>
+      <td style="padding:7px 8px;font-size:12px;text-align:center">${r.total_qty??'—'}</td>
+      <td style="padding:7px 8px;font-size:11px;color:#6B7280">${r.last_visit||'—'}</td>
+    </tr>`).join('');
+}
+
+function seAgeColor(ds){
+  if(!ds) return '';
+  try{
+    const d    = new Date(ds.split('/').reverse().join('-'));
+    const days = Math.floor((Date.now()-d)/(86400000));
+    if(days>180) return 'color:#DC2626;font-weight:700';
+    if(days>90)  return 'color:#D97706;font-weight:600';
+    return 'color:#065F46';
+  }catch(e){ return ''; }
+}
+
+function seExportExcel(){
+  const data = seGetFiltered();
+  if(!data.length){ alert('لا توجد بيانات للتصدير'); return; }
+  const header = ['الفرع','خط السير','المجموعة','الصنف','التصنيف','الفئة','تاريخ الإنتاج','الكمية','آخر زيارة'];
+  const rows   = data.map(r=>[r.branch,r.route,r.grp,r.snf,r.cat,r.fea,r.date_shelf,r.total_qty,r.last_visit]);
+  const csv    = [header,...rows].map(r=>r.map(v=>`"${v??''}"`).join(',')).join('\n');
+  const a      = document.createElement('a');
+  a.href       = 'data:text/csv;charset=utf-8,﻿'+encodeURIComponent(csv);
+  a.download   = 'صلاحيات_السوق.csv';
+  a.click();
+}
+
+function seExportPDF(){
+  window.print();
+}
+
 function aeGetParams(){
   return {
     from:         document.getElementById('ae-from').value,
