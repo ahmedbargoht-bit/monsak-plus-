@@ -27375,6 +27375,16 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';          // النموذج الأساسي
 const GROQ_FALLBACK_MODEL = 'llama-3.1-8b-instant';    // احتياطي: 500k TPD
 
+// يضمن تحميل مفتاح Groq من Supabase قبل أي طلب AI
+async function aiEnsureGroqKey(){
+  if(_GROQ_KEY) return;
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
+    const rows = await fetch(SUPABASE_URL+'/rest/v1/products_db?key=eq.groq_api_key&select=value&limit=1',{headers:H}).then(r=>r.json()).catch(()=>[]);
+    if(rows?.[0]?.value) _GROQ_KEY = rows[0].value;
+  }catch(e){ console.warn('[AI] فشل تحميل مفتاح Groq:',e.message); }
+}
+
 // wrapper يجرب الأساسي أولاً ← يتراجع للاحتياطي عند rate limit
 async function groqChat(messages, maxTokens){
   const models = [GROQ_MODEL, GROQ_FALLBACK_MODEL];
@@ -27389,9 +27399,14 @@ async function groqChat(messages, maxTokens){
       if(!res.ok){
         const er = await res.json().catch(()=>({}));
         const msg = er?.error?.message||'HTTP '+res.status;
-        // إذا rate limit جرب النموذج التالي
-        if(res.status===429){
-          console.warn('[Groq] rate limit على',model,'→ تجريب',models[models.indexOf(model)+1]||'لا يوجد');
+        // إذا rate limit أو الـ request أكبر من طاقة النموذج → جرب التالي
+        const isSkippable = res.status===429 || res.status===413
+          || msg.toLowerCase().includes('request too large')
+          || msg.toLowerCase().includes('tokens per minute')
+          || msg.toLowerCase().includes('tpm')
+          || msg.toLowerCase().includes('context_length_exceeded');
+        if(isSkippable){
+          console.warn('[Groq] skip على',model,'→',msg.slice(0,80));
           lastErr = new Error(msg);
           continue;
         }
@@ -27403,7 +27418,10 @@ async function groqChat(messages, maxTokens){
       console.log('[Groq] ✅ تم بنموذج:', model);
       return text;
     }catch(e){
-      if(e.message&&(e.message.includes('429')||e.message.includes('rate limit')||e.message.includes('Rate limit'))){
+      const eMsg = e.message||'';
+      if(eMsg.includes('429')||eMsg.includes('rate limit')||eMsg.includes('Rate limit')
+         ||eMsg.includes('Request too large')||eMsg.includes('tokens per minute')
+         ||eMsg.includes('context_length_exceeded')){
         lastErr = e; continue;
       }
       throw e;
