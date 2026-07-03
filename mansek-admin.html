@@ -28910,12 +28910,36 @@ async function advisorChatSend(){
 
   const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
 
+  // Helper: fetch with visible error logging
+  async function _safeFetch(url, label){
+    try{
+      const r = await fetch(url,{headers:H});
+      if(!r.ok){
+        const errBody = await r.json().catch(()=>({message:'HTTP '+r.status}));
+        console.error('[Advisor] ❌ '+label+' فشل:', errBody);
+        return [];
+      }
+      const data = await r.json();
+      if(!Array.isArray(data)){
+        console.error('[Advisor] ❌ '+label+' رجع غير array:', data);
+        return [];
+      }
+      console.log('[Advisor] ✅ '+label+': '+data.length+' سجل');
+      return data;
+    }catch(e){
+      console.error('[Advisor] ❌ '+label+' استثناء:', e);
+      return [];
+    }
+  }
+
   try {
     // Fetch data based on context
     let dataSummary = '';
+    let totalRecords = 0;
 
     if(ctx==='sales'||ctx==='all'){
-      const del = await fetch(SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,branch_name,delivery_date,items,total_net,discount_pct&order=delivery_date.desc&limit=500',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const del = await _safeFetch(SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,branch_name,delivery_date,items,total_net,discount_pct&order=delivery_date.desc&limit=500', 'sales_deliveries');
+      totalRecords += del.length;
       const agg={};
       if(Array.isArray(del)) del.forEach(d=>{
         const cn=d.client_name||d.branch_name||'غير محدد';
@@ -28937,7 +28961,8 @@ async function advisorChatSend(){
     }
 
     if(ctx==='returns'||ctx==='all'){
-      const ret = await fetch(SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,branch_name,return_date,items,total_net&order=return_date.desc&limit=300',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const ret = await _safeFetch(SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,branch_name,return_date,items,total_net&order=return_date.desc&limit=300', 'sales_returns');
+      totalRecords += ret.length;
       const ragg={};
       if(Array.isArray(ret)) ret.forEach(r=>{
         const cn=r.client_name||r.branch_name||'غير محدد';
@@ -28959,7 +28984,8 @@ async function advisorChatSend(){
     }
 
     if(ctx==='inventory'||ctx==='gaps'||ctx==='movement'||ctx==='items'||ctx==='all'){
-      const inv = await fetch(SUPABASE_URL+'/rest/v1/products?select=snf,cat,fea,branch,shelf_qty,stock_qty,date_shelf,created_at&order=created_at.desc&limit=2000',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const inv = await _safeFetch(SUPABASE_URL+'/rest/v1/products?select=snf,cat,fea,branch,shelf_qty,stock_qty,date_shelf,created_at&order=created_at.desc&limit=2000', 'products');
+      totalRecords += inv.length;
       const imap={};
       const seen=new Set();
       if(Array.isArray(inv)) inv.forEach(p=>{
@@ -28989,7 +29015,8 @@ async function advisorChatSend(){
     }
 
     if(ctx==='expiry'||ctx==='all'){
-      const exp = await fetch(SUPABASE_URL+'/rest/v1/market_expiry?select=snf,cat,branch,date_shelf,total_qty,last_visit&order=total_qty.desc&limit=200',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const exp = await _safeFetch(SUPABASE_URL+'/rest/v1/market_expiry?select=snf,cat,branch,date_shelf,total_qty,last_visit&order=total_qty.desc&limit=200', 'market_expiry');
+      totalRecords += exp.length;
       const now=new Date();
       dataSummary += `
 
@@ -29001,8 +29028,9 @@ async function advisorChatSend(){
     }
 
     if(ctx==='chains'||ctx==='all'){
-      const cl = await fetch(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type,discount_pct&limit=100',{headers:H}).then(r=>r.json()).catch(()=>[]);
-      const cd = await fetch(SUPABASE_URL+'/rest/v1/client_category_discounts?select=client_name,cat,discount_pct&limit=100',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const cl = await _safeFetch(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type,discount_pct&limit=100', 'sales_clients');
+      const cd = await _safeFetch(SUPABASE_URL+'/rest/v1/client_category_discounts?select=client_name,cat,discount_pct&limit=100', 'client_category_discounts');
+      totalRecords += cl.length + cd.length;
       dataSummary += `
 
 ═══ السلاسل والعملاء ═══
@@ -29013,15 +29041,35 @@ async function advisorChatSend(){
     }
 
     if(ctx==='promos'||ctx==='all'){
-      const pr = await fetch(SUPABASE_URL+'/rest/v1/sales_promotions?select=client_name,snf_name,promo_price,date_from,date_to&limit=100',{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const pr = await _safeFetch(SUPABASE_URL+'/rest/v1/sales_promotions?select=client_name,snf_name,promo_price,date_from,date_to&limit=100', 'sales_promotions');
+      totalRecords += pr.length;
       dataSummary += `
 
 ═══ العروض الترويجية ═══
 `+(Array.isArray(pr)&&pr.length?pr.map(p=>p.client_name+'|'+p.snf_name+': '+p.promo_price+'ج ('+p.date_from+' → '+p.date_to+')').join('\n'):'لا توجد عروض');
     }
 
-    // Build prompt
-    const prompt = 'أنت مستشار تجاري لشركة الطحان جولدن داتس (تمور مصري وسعودي ومصنعات — سلاسل سوبرماركت مصر).\n\nالسياق المختار: '+(CHAT_CTX_LABELS[ctx]||ctx)+'\n'+dataSummary+'\n\nسؤال المستخدم: '+question+'\n\nأجب بتفصيل عملي ومحدد. استخدم الأرقام الفعلية من البيانات. سمِّ الأصناف والعملاء بالاسم.';
+    // Log what we got
+    console.log('[Advisor] إجمالي السجلات:', totalRecords, '| dataSummary طول:', dataSummary.length);
+
+    // If no real data was fetched, show error instead of hallucinating
+    if(totalRecords === 0 || dataSummary.trim().length < 30){
+      const errBubble = document.getElementById('chat-msg-'+msgId);
+      if(errBubble) errBubble.outerHTML = `
+        <div style="text-align:right;direction:ltr">
+          <div style="display:inline-block;background:#FEF2F2;border:1.5px solid #FECACA;border-radius:3px 12px 12px 12px;padding:12px 16px;max-width:92%;direction:rtl;text-align:right">
+            <div style="color:#B91C1C;font-size:12px;font-weight:700">⚠️ لم يتم تحميل بيانات من قاعدة البيانات</div>
+            <div style="color:#7F1D1D;font-size:11px;margin-top:6px">السياق المختار: <strong>${CHAT_CTX_LABELS[ctx]||ctx}</strong> — تحقق من Console (F12) لمعرفة سبب فشل الـ fetch</div>
+          </div>
+        </div>`;
+      history.scrollTop = history.scrollHeight;
+      _chatRunning = false;
+      btn.disabled = false;
+      return;
+    }
+
+    // Build prompt — explicit anti-hallucination instruction
+    const prompt = 'أنت مستشار تجاري لشركة الطحان جولدن داتس (تمور مصري وسعودي ومصنعات — سلاسل سوبرماركت مصر).\n\nالسياق المختار: '+(CHAT_CTX_LABELS[ctx]||ctx)+'\n\n--- البيانات الفعلية من قاعدة البيانات ---\n'+dataSummary+'\n--- نهاية البيانات ---\n\nسؤال المستخدم: '+question+'\n\nتعليمات صارمة:\n- أجب فقط بناءً على البيانات الفعلية المقدمة أعلاه\n- استخدم الأرقام والأسماء الحقيقية الموجودة في البيانات\n- إذا لم تجد معلومة في البيانات، قل "لا تتوفر هذه البيانات" ولا تخترع أي معلومات\n- أجب بتفصيل عملي ومحدد';
 
     const gRes = await fetch(GROQ_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_GROQ_KEY},body:JSON.stringify({model:GROQ_MODEL,messages:[{role:'user',content:prompt}],temperature:0.7,max_tokens:4000})});
     if(!gRes.ok){ const er=await gRes.json().catch(()=>({})); throw new Error(er?.error?.message||'HTTP '+gRes.status); }
