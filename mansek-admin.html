@@ -24736,20 +24736,45 @@ async function sdLoad(){
   // بناء map: supervisor → sector (من sales_targets)
   const supSectorMap = {};
   sdTargetsData.forEach(t=>{ if(t.supervisor_name) supSectorMap[t.supervisor_name]=t.sector||t.route||'غير محدد'; });
+  // لو مفيش أهداف للشهر ده، جيب الـ mapping من أحدث شهر فيه بيانات
+  if(Object.keys(supSectorMap).length===0){
+    try{
+      const fallR = await fetch(`${SUPABASE_URL}/rest/v1/sales_targets?select=supervisor_name,sector,route&order=month.desc&limit=200`,{headers:H});
+      const fallT = fallR.ok ? await fallR.json() : [];
+      (Array.isArray(fallT)?fallT:[]).forEach(t=>{
+        if(t.supervisor_name && !supSectorMap[t.supervisor_name])
+          supSectorMap[t.supervisor_name]=t.sector||t.route||'غير محدد';
+      });
+    }catch(e){}
+  }
+
+  // جيب المناديب وربطهم بمشرفيهم (نفس stLoad)
+  let repSupMap = {};
+  try {
+    const repsR = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&select=name,supervisors&limit=500`,{headers:H});
+    const reps = repsR.ok ? await repsR.json() : [];
+    (Array.isArray(reps)?reps:[]).forEach(r=>{ repSupMap[r.name]=r.supervisors||''; });
+  } catch(e){}
 
   // تجميع البيع من daily_sales_entries
   const salesBySector = {}, todaySalesBySector = {};
   const todayStr = `${y}-${String(m).padStart(2,'0')}-${String(selectedDay).padStart(2,'0')}`;
   (Array.isArray(salesEntries)?salesEntries:[]).forEach(s=>{
-    const sec = s.sector||s.route||supSectorMap[s.supervisor]||'غير محدد';
+    const sec = s.sector||supSectorMap[s.supervisor]||'غير محدد';
     salesBySector[sec] = (salesBySector[sec]||0) + (+(s.amount||0));
     if(s.entry_date===todayStr) todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+(+(s.amount||0));
   });
-  // أضف مبيعات الفواتير
+  // أضف مبيعات الفواتير — sales_deliveries فيها rep_name مش supervisor
   (Array.isArray(deliveries)?deliveries:[]).forEach(d=>{
-    const sec = supSectorMap[d.supervisor]||'غير محدد';
+    const sup = repSupMap[d.rep_name]||'';
+    const sec = supSectorMap[sup]||sup||'غير محدد';
     salesBySector[sec] = (salesBySector[sec]||0) + (+(d.total_net||0));
     if(d.delivery_date===todayStr) todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+(+(d.total_net||0));
+  });
+
+  // لو مفيش أهداف، ابني القطاعات من بيانات المبيعات نفسها
+  Object.keys(salesBySector).forEach(sec=>{
+    if(!sectors[sec]) sectors[sec]={target:0};
   });
 
   // حساب الإجماليات
