@@ -30947,11 +30947,11 @@ const SER_VALID_GROUPS = ['giza','cairo','south','hyper','alex','tajmuat','middl
 
 async function serFetchOptions(p_grp, p_fea, p_cat){
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_distinct_products_filters`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`},
-      body: JSON.stringify({p_grp:p_grp||null, p_fea:p_fea||null, p_cat:p_cat||null})
-    });
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    let url = `${SUPABASE_URL}/rest/v1/products?select=fea,cat,snf&limit=5000`;
+    if(p_fea) url += `&fea=eq.${encodeURIComponent(p_fea)}`;
+    if(p_cat) url += `&cat=eq.${encodeURIComponent(p_cat)}`;
+    const res = await fetch(url,{headers:H});
     if(res.ok) return await res.json();
   }catch(e){}
   return [];
@@ -31013,6 +31013,20 @@ async function serInit(){
       grps.forEach(g=>{ const o=document.createElement('option'); o.value=g; o.textContent=GROUPS[g]?.label||g; grpSel.appendChild(o); });
     }catch(e){}
   }
+
+  // تهيئة _serFilterOptions من products مباشرةً وتعبية فئة (fea)
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/products?select=fea,cat,snf&limit=5000`,{headers:H});
+    if(res.ok){
+      _serFilterOptions = await res.json();
+      const feaSel = document.getElementById('ser-fea');
+      if(feaSel && feaSel.options.length <= 1){
+        const feas = [...new Set(_serFilterOptions.map(r=>r.fea).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+        feas.forEach(f=>{ const o=document.createElement('option'); o.value=f; o.textContent=f; feaSel.appendChild(o); });
+      }
+    }
+  }catch(e){}
 
   await serLoadFilters();
 }
@@ -31142,8 +31156,22 @@ async function serLoad(){
       return;
     }
 
-    let url = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,route,grp,shelf_qty,stock_qty,date_shelf,date_stock,created_at&order=snf.asc,branch.asc,created_at.desc&limit=5000`;
-    if(grp)    url += `&grp=eq.${encodeURIComponent(grp)}`;
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+    // إذا اختار المستخدم مجموعة ومش اختار خط سير، حوّل المجموعة لخطوط سير
+    let grpRoutes = [];
+    if(grp && !route){
+      try{
+        const cRes = await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=route&grp=eq.${encodeURIComponent(grp)}&limit=500`,{headers:H});
+        if(cRes.ok){
+          const cData = await cRes.json();
+          grpRoutes = [...new Set((Array.isArray(cData)?cData:[]).map(r=>r.route).filter(Boolean))];
+        }
+      }catch(e){}
+    }
+
+    let url = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,route,shelf_qty,stock_qty,date_shelf,months_shelf,date_stock,months_stock,cat,fea,created_at&order=snf.asc,branch.asc,created_at.desc&limit=5000`;
+    if(grpRoutes.length) url += `&route=in.(${grpRoutes.map(r=>encodeURIComponent(r)).join(',')})`;
     if(route)  url += `&route=eq.${encodeURIComponent(route)}`;
     if(branch) url += `&branch=eq.${encodeURIComponent(branch)}`;
     if(fea)    url += `&fea=eq.${encodeURIComponent(fea)}`;
@@ -31152,7 +31180,7 @@ async function serLoad(){
     if(from)   url += `&created_at=gte.${from}T00:00:00`;
     if(to)     url += `&created_at=lte.${to}T23:59:59`;
 
-    const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const res = await fetch(url,{headers:H});
     if(!res.ok){ tbody.innerHTML=`<tr><td colspan="11" style="text-align:center;padding:30px;color:#E65100">خطأ في جلب البيانات</td></tr>`; return; }
     const rawData = await res.json();
 
@@ -31181,8 +31209,8 @@ async function serLoad(){
 
     const now = new Date();
     tbody.innerHTML = data.map((r,idx)=>{
-      const shelfStatus = serExpiryStatus(r.date_shelf, r.snf);
-      const monthsFromPDB = r.snf ? serGetMonthsShelf(r.snf) : null;
+      const months = (r.months_shelf !== undefined && r.months_shelf !== null) ? Number(r.months_shelf) : null;
+      const shelfStatus = serExpiryStatus(r.date_shelf, months);
       const rowBg = idx%2===0?'#fff':'#FAF6EE';
       return `<tr style="background:${rowBg};border-bottom:1px solid #F0E8DE">
         <td style="padding:8px;color:#aaa;text-align:right">${idx+1}</td>
@@ -31192,7 +31220,7 @@ async function serLoad(){
         <td style="padding:8px;text-align:center;font-weight:700;color:#1A5276">${r.shelf_qty||0}</td>
         <td style="padding:8px;text-align:center;font-weight:700;color:#145A32">${r.stock_qty||0}</td>
         <td style="padding:8px;text-align:center">${r.date_shelf?`<span style="background:#E3F2FD;color:#1565C0;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${r.date_shelf}</span>`:'—'}</td>
-        <td style="padding:8px;text-align:center">${monthsFromPDB!==null?`<span style="background:#F3E5F5;color:#6A1B9A;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${monthsFromPDB} ش</span>`:'<span style="color:#aaa;font-size:11px">غير محدد</span>'}</td>
+        <td style="padding:8px;text-align:center">${months!==null?`<span style="background:#F3E5F5;color:#6A1B9A;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${months} ش</span>`:'<span style="color:#aaa;font-size:11px">غير محدد</span>'}</td>
         <td style="padding:8px;text-align:center">${shelfStatus.expiry!=='—'?`<span style="background:${shelfStatus.bg};color:${shelfStatus.color};padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${shelfStatus.expiry}</span>`:'—'}</td>
         <td style="padding:8px;text-align:center"><span style="background:${shelfStatus.bg};color:${shelfStatus.color};padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700">${shelfStatus.remaining}</span></td>
         <td style="padding:8px;text-align:center">${shelfStatus.label?`<span style="background:${shelfStatus.bg};color:${shelfStatus.color};padding:2px 6px;border-radius:5px;font-size:10px">${shelfStatus.label}</span>`:'—'}</td>
@@ -31221,12 +31249,11 @@ function serGetMonthsShelf(snfName){
   return null;
 }
 
-function serExpiryStatus(dateStr, snfName){
+function serExpiryStatus(dateStr, months){
   if(!dateStr) return {bg:'#F5F5F5',color:'#aaa',label:'',remaining:'—',expiry:'—'};
   // تاريخ الإنتاج
   const prodDate = new Date(dateStr+'-01');
-  // صلاحية الصنف من PDB
-  const months = snfName ? serGetMonthsShelf(snfName) : null;
+  // months = عدد أشهر الصلاحية (من سجل products مباشرةً)
   // تاريخ انتهاء الصلاحية
   const expiryDate = months
     ? new Date(prodDate.getFullYear(), prodDate.getMonth() + months, 1)
@@ -31257,7 +31284,7 @@ function serExportExcel(){
   if(!_serData.length){ alert('لا توجد بيانات للتصدير'); return; }
   const ws_data = [
     ['الصنف','الفرع','خط السير','المجموعة','كمية الرف','كمية المخزن','تاريخ الإنتاج','صلاحية المنتج (ش)','تاريخ الانتهاء','المتبقي','الحالة'],
-    ..._serData.map(r=>{ const s=serExpiryStatus(r.date_shelf,r.snf); const m=r.snf?serGetMonthsShelf(r.snf):null; return [r.snf||'',r.branch||'',r.route||'',r.grp||'',r.shelf_qty||0,r.stock_qty||0,r.date_shelf||'',m!==null?m:'',s.expiry||'',s.remaining||'',s.label||'']; })
+    ..._serData.map(r=>{ const m=(r.months_shelf!==undefined&&r.months_shelf!==null)?Number(r.months_shelf):null; const s=serExpiryStatus(r.date_shelf,m); return [r.snf||'',r.branch||'',r.route||'',r.cat||'',r.shelf_qty||0,r.stock_qty||0,r.date_shelf||'',m!==null?m:'',s.expiry||'',s.remaining||'',s.label||'']; })
   ];
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(ws_data);
@@ -31270,8 +31297,8 @@ function serExportPDF(){
   if(!_serData.length){ alert('لا توجد بيانات للتصدير'); return; }
 
   const rows = _serData.map((r,i)=>{
-    const s = serExpiryStatus(r.date_shelf, r.snf);
-    const m = r.snf ? serGetMonthsShelf(r.snf) : null;
+    const m = (r.months_shelf!==undefined&&r.months_shelf!==null)?Number(r.months_shelf):null;
+    const s = serExpiryStatus(r.date_shelf, m);
     const rowBg = i%2===0?'#FFFDF8':'#EDE5D8';
     return `<tr style="background:${rowBg}">
       <td style="text-align:center;color:#8B6F47">${i+1}</td>
