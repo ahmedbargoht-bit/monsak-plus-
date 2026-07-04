@@ -1747,12 +1747,15 @@ async function openDelVisit(branch){
         }
       }
 
-      // عروض الأسعار الثابتة
+      // عروض الأسعار الثابتة — احفظها في visitState للاستخدام في renderCatalog
       if(Array.isArray(promos) && promos.length){
+        visitState.promos = {};
+        promos.forEach(p=>{ if(p.snf_name) visitState.promos[p.snf_name] = p.promo_price; });
         $('v-promos').innerHTML = promos.map(p=>
           `🔖 عرض على ${p.snf_name} — ${p.promo_price} ج (${p.date_from} → ${p.date_to})`
         ).join('<br>');
       } else {
+        visitState.promos = {};
         $('v-promos').innerHTML = '';
       }
     }catch(e){}
@@ -1906,12 +1909,18 @@ function selectCat(cat,grpData){
       const qty=visitState.quantities[iname]||0;
       const key=iname.replace(/[^a-zA-Z0-9]/g,'_');
       const p=prices[iname];
-      const price=p?p.price:0;
+      const basePrice=p?p.price:0;
+      // لو مفيش سعر → جرب الـ promo price كـ fallback
+      const promoPrice=(visitState.promos&&visitState.promos[iname]!=null)?visitState.promos[iname]:null;
+      const price = basePrice || promoPrice || 0;
       const clientSpecialPrice=(visitState.clientPL&&visitState.clientPL[iname]!==undefined)?visitState.clientPL[iname]:null;
       const effectiveDisc=clientSpecialPrice!==null?0:disc;
       const priceAfterDisc=clientSpecialPrice!==null?clientSpecialPrice:(effectiveDisc>0?(price*(1-effectiveDisc/100)).toFixed(2):price);
+      const isPromoOnly = !basePrice && promoPrice;
       const priceDisplay=clientSpecialPrice!==null
         ?`<span style="color:#2E7D32;font-weight:800">${clientSpecialPrice} ج</span> <span style="font-size:9px;background:#E8F5E9;color:#2E7D32;padding:1px 5px;border-radius:6px">💲خاص</span>`
+        :isPromoOnly
+        ?`<span style="color:#E65100;font-weight:800">${promoPrice} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض</span>`
         :(effectiveDisc>0?`${priceAfterDisc} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span>`:`${price} ج`);
       html+=`<div class="prod-row">
         <div class="prod-name">${iname}<br><small style="color:var(--c);font-weight:700">${priceDisplay}</small></div>
@@ -1985,11 +1994,13 @@ async function openInvoiceReview(mode){
 
   const prices=await loadSalesPrices();
   const clientPLPrices=state.clientPL||{};
+  const statePromos=state.promos||{};
   invoiceState.items=[];
   Object.entries(state.quantities).filter(([k,v])=>v>0).forEach(([name,qty])=>{
     const p=prices[name]||{price:0,tax_pct:0};
     const clientSpecial=clientPLPrices[name];
-    const finalPrice=clientSpecial!==undefined?clientSpecial:p.price;
+    const promoFallback=(p.price===0&&statePromos[name]!=null)?statePromos[name]:null;
+    const finalPrice=clientSpecial!==undefined?clientSpecial:(promoFallback!==null?promoFallback:p.price);
     const isClientPL=clientSpecial!==undefined;
     invoiceState.items.push({name,qty,price:finalPrice,tax_pct:p.tax_pct,total:finalPrice*qty,isClientPL,cat:isReturn?(returnState.itemCats[name]||returnState.cat||''):''});
   });
@@ -2288,7 +2299,15 @@ async function openRetVisit(branch){
       disc.forEach(d=>{returnState.discounts[d.cat]=d.discount_pct||0;});
       const discEntries=disc.filter(d=>d.discount_pct>0);
       if(!specialPL) $('rv-discounts').innerHTML=discEntries.length?'🎯 '+discEntries.map(d=>`${d.cat} ${d.discount_pct}%`).join(' | '):'';
-      $('rv-promos').innerHTML=(Array.isArray(promos)&&promos.length)?promos.map(p=>`🔖 عرض على ${p.snf_name} — ${p.promo_price} ج (${p.date_from} → ${p.date_to})`).join('<br>'):'';
+      // احفظ الـ promos في returnState للاستخدام في عرض الأسعار
+      if(Array.isArray(promos)&&promos.length){
+        returnState.promos={};
+        promos.forEach(p=>{ if(p.snf_name) returnState.promos[p.snf_name]=p.promo_price; });
+        $('rv-promos').innerHTML=promos.map(p=>`🔖 عرض على ${p.snf_name} — ${p.promo_price} ج (${p.date_from} → ${p.date_to})`).join('<br>');
+      } else {
+        returnState.promos={};
+        $('rv-promos').innerHTML='';
+      }
     }catch(e){if(!specialPL)$('rv-discounts').innerHTML='';$('rv-promos').innerHTML='';}
   } else {
     if(!specialPL) $('rv-discounts').innerHTML='';
@@ -2426,11 +2445,14 @@ function selectRetCat(cat,grpData){
       const qty=returnState.quantities[iname]||0;
       const key=iname.replace(/[^a-zA-Z0-9]/g,'_');
       const p=prices[iname];
-      const price=p?p.price:0;
+      const basePrice=p?p.price:0;
+      const promoPrice=(returnState.promos&&returnState.promos[iname]!=null)?returnState.promos[iname]:null;
+      const price=basePrice||promoPrice||0;
+      const isPromoOnly=!basePrice&&promoPrice;
       const priceAfterDisc=disc>0?(price*(1-disc/100)).toFixed(2):price;
-      const priceDisplay=disc>0
-        ?`${priceAfterDisc} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span>`
-        :`${price} ج`;
+      const priceDisplay=isPromoOnly
+        ?`<span style="color:#E65100;font-weight:800">${promoPrice} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض</span>`
+        :(disc>0?`${priceAfterDisc} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span>`:`${price} ج`);
       html+=`<div class="prod-row">
         <div class="prod-name">${iname}<br><small style="color:#8B2635;font-weight:700">${priceDisplay}</small></div>
         <div class="qty-ctrl">
