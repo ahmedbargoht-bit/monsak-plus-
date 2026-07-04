@@ -9180,8 +9180,10 @@ async function sppAppLoad(){
 }
 
 let _sppBranchesMap = {};
+let _sppSupBranchesCache = {}; // للمدير: {supName: {route:[branches]}}
+let _sppSupGroupsCache   = {}; // للمدير: {supName: [grp, ...]}
 let _sppDayItems = {}; // {dateStr: [{...}]}
-let _sppReps = []; // المناديب
+let _sppReps = []; // المناديب / المشرفين
 
 const SPP_DAYS = ['السبت','الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة'];
 const SPP_DAY_COLORS = {
@@ -9195,12 +9197,14 @@ function sppGetDayName(dateStr){
   return days[d.getDay()];
 }
 
-function sppGetRoutes(){
-  return Object.keys(_sppBranchesMap).sort((a,b)=>a.localeCompare(b,'ar'));
+function sppGetRoutes(it){
+  const map = (it && it._supBranches) ? it._supBranches : _sppBranchesMap;
+  return Object.keys(map).sort((a,b)=>a.localeCompare(b,'ar'));
 }
 
-function sppGetBranches(route){
-  return (_sppBranchesMap[route]||[]);
+function sppGetBranches(route, it){
+  const map = (it && it._supBranches) ? it._supBranches : _sppBranchesMap;
+  return (map[route]||[]);
 }
 
 async function openSppNewPlan(){
@@ -9232,12 +9236,42 @@ async function openSppNewPlan(){
 
   // جيب المناديب/المشرفين حسب مستوى المستخدم
   _sppReps = [];
+  _sppSupBranchesCache = {};
+  _sppSupGroupsCache   = {};
   try{
     const H2 = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
     if(cu?.level==='manager'){
-      // مدير بيع → جيب المشرفين اللي تحته من staff
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/staff?reports_to=eq.${encodeURIComponent(cu.name)}&active=eq.true&select=name&order=name.asc&limit=100`,{headers:H2});
-      if(r.ok){ const d=await r.json(); _sppReps=d.map(x=>x.name); }
+      // مدير بيع → جيب المشرفين + مجموعاتهم من staff
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/staff?reports_to=eq.${encodeURIComponent(cu.name)}&active=eq.true&select=name,grp&order=name.asc&limit=100`,{headers:H2});
+      if(r.ok){
+        const sups = await r.json();
+        _sppReps = sups.map(x=>x.name);
+        // لكل مشرف خزّن مجموعاته
+        sups.forEach(s=>{
+          const sg = Array.isArray(s.grp) ? s.grp : (s.grp||'').replace(/[{}"']/g,'').split(',').map(x=>x.trim()).filter(Boolean);
+          _sppSupGroupsCache[s.name] = sg;
+        });
+        // جيب الفروع لكل المجموعات المجمّعة
+        const allGrps = [...new Set(sups.flatMap(s=>_sppSupGroupsCache[s.name]||[]))];
+        if(allGrps.length){
+          const br = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,grp&status=eq.active&grp=in.(${allGrps.join(',')})&order=route.asc&limit=5000`,{headers:H2});
+          if(br.ok){
+            const bdata = await br.json();
+            // ابنِ cache لكل مشرف
+            sups.forEach(s=>{
+              const sg = _sppSupGroupsCache[s.name]||[];
+              _sppSupBranchesCache[s.name] = {};
+              bdata.filter(b=>sg.includes(b.grp)).forEach(b=>{
+                if(!_sppSupBranchesCache[s.name][b.route]) _sppSupBranchesCache[s.name][b.route]=[];
+                if(!_sppSupBranchesCache[s.name][b.route].includes(b.branch_name))
+                  _sppSupBranchesCache[s.name][b.route].push(b.branch_name);
+              });
+            });
+          }
+        }
+        // للمدير: ابدأ بـ branches فاضية، تتملى لما يختار مشرف
+        _sppBranchesMap = {};
+      }
     } else {
       // مشرف → جيب المناديب اللي تحته من users
       const r = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&select=name,supervisors,groups,grp&order=name.asc&limit=200`,{headers:H2});
@@ -9316,8 +9350,8 @@ function sppBuildDays(){
 }
 
 function sppRenderDayItem(date, i, it){
-  const routes   = sppGetRoutes();
-  const branches = sppGetBranches(it.area||'');
+  const routes   = sppGetRoutes(it);
+  const branches = sppGetBranches(it.area||'', it);
 
   // chips خطوط السير
   const routeChips = routes.map(r=>`
@@ -9460,6 +9494,14 @@ function sppRemoveDayItem(date, i){
 function sppUpdateDayItem(date, i, field, val){
   if(!_sppDayItems[date]?.[i]) return;
   _sppDayItems[date][i][field] = val;
+  // لو المدير غيّر المشرف → حدّث branches للـ item ده وامسح الخط المحدد
+  if(field==='rep_name' && cu?.level==='manager'){
+    _sppDayItems[date][i].area = '';
+    _sppDayItems[date][i].client_name = '';
+    _sppDayItems[date][i].client_names = [];
+    _sppDayItems[date][i]._supBranches = _sppSupBranchesCache[val]||{};
+    sppRefreshDay(date);
+  }
 }
 
 function sppRefreshDay(date){
