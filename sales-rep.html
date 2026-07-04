@@ -1733,7 +1733,7 @@ async function openDelVisit(branch){
     try{
       const [disc, promos] = await Promise.all([
         sbFetch('client_category_discounts','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&select=cat,discount_pct'),
-        sbFetch('sales_promotions','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&active=eq.true&date_from=lte.'+today()+'&date_to=gte.'+today()+'&select=snf_name,promo_price,date_from,date_to')
+        sbFetch('sales_promotions','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&active=eq.true&date_from=lte.'+today()+'&date_to=gte.'+today()+'&select=snf_name,promo_price,notes,date_from,date_to')
       ]);
 
       // خصومات التصنيفات
@@ -1750,12 +1750,14 @@ async function openDelVisit(branch){
       // عروض الأسعار الثابتة — احفظها في visitState للاستخدام في renderCatalog
       if(Array.isArray(promos) && promos.length){
         visitState.promos = {};
-        promos.forEach(p=>{ if(p.snf_name) visitState.promos[p.snf_name] = p.promo_price; });
+        visitState.promoNotes = {};
+        promos.forEach(p=>{ if(p.snf_name){ visitState.promos[p.snf_name]=p.promo_price; visitState.promoNotes[p.snf_name]=p.notes||''; } });
         $('v-promos').innerHTML = promos.map(p=>
           `🔖 عرض على ${p.snf_name} — ${p.promo_price} ج (${p.date_from} → ${p.date_to})`
         ).join('<br>');
       } else {
         visitState.promos = {};
+        visitState.promoNotes = {};
         $('v-promos').innerHTML = '';
       }
     }catch(e){}
@@ -1910,17 +1912,19 @@ function selectCat(cat,grpData){
       const key=iname.replace(/[^a-zA-Z0-9]/g,'_');
       const p=prices[iname];
       const basePrice=p?p.price:0;
-      // لو مفيش سعر → جرب الـ promo price كـ fallback
+      // العرض الثابت يطغى على السعر الأساسي
       const promoPrice=(visitState.promos&&visitState.promos[iname]!=null)?visitState.promos[iname]:null;
-      const price = basePrice || promoPrice || 0;
+      const promoNote=(visitState.promoNotes&&visitState.promoNotes[iname])||'';
+      const isPromoActive=promoPrice!==null;
+      const price=isPromoActive?promoPrice:basePrice;
       const clientSpecialPrice=(visitState.clientPL&&visitState.clientPL[iname]!==undefined)?visitState.clientPL[iname]:null;
-      const effectiveDisc=clientSpecialPrice!==null?0:disc;
+      const effectiveDisc=(clientSpecialPrice!==null||isPromoActive)?0:disc;
       const priceAfterDisc=clientSpecialPrice!==null?clientSpecialPrice:(effectiveDisc>0?(price*(1-effectiveDisc/100)).toFixed(2):price);
-      const isPromoOnly = !basePrice && promoPrice;
+      const noteTag=promoNote?`<span style="font-size:9px;color:#E65100;display:block;margin-top:1px">${promoNote}</span>`:'';
       const priceDisplay=clientSpecialPrice!==null
         ?`<span style="color:#2E7D32;font-weight:800">${clientSpecialPrice} ج</span> <span style="font-size:9px;background:#E8F5E9;color:#2E7D32;padding:1px 5px;border-radius:6px">💲خاص</span>`
-        :isPromoOnly
-        ?`<span style="color:#E65100;font-weight:800">${promoPrice} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض</span>`
+        :isPromoActive
+        ?`<span style="color:#E65100;font-weight:800">${promoPrice} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض</span>${noteTag}`
         :(effectiveDisc>0?`${priceAfterDisc} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span>`:`${price} ج`);
       html+=`<div class="prod-row">
         <div class="prod-name">${iname}<br><small style="color:var(--c);font-weight:700">${priceDisplay}</small></div>
@@ -1999,10 +2003,12 @@ async function openInvoiceReview(mode){
   Object.entries(state.quantities).filter(([k,v])=>v>0).forEach(([name,qty])=>{
     const p=prices[name]||{price:0,tax_pct:0};
     const clientSpecial=clientPLPrices[name];
-    const promoFallback=(p.price===0&&statePromos[name]!=null)?statePromos[name]:null;
+    const promoFallback=(statePromos[name]!=null)?statePromos[name]:null;
+    const promoNote=(state.promoNotes&&state.promoNotes[name])||'';
     const finalPrice=clientSpecial!==undefined?clientSpecial:(promoFallback!==null?promoFallback:p.price);
     const isClientPL=clientSpecial!==undefined;
-    invoiceState.items.push({name,qty,price:finalPrice,tax_pct:p.tax_pct,total:finalPrice*qty,isClientPL,cat:isReturn?(returnState.itemCats[name]||returnState.cat||''):''});
+    const isPromo=clientSpecial===undefined&&promoFallback!==null;
+    invoiceState.items.push({name,qty,price:finalPrice,tax_pct:p.tax_pct,total:finalPrice*qty,isClientPL,isPromo,promoNote,cat:isReturn?(returnState.itemCats[name]||returnState.cat||''):''});
   });
 
   $(isReturn?'ri-branch':'inv-branch').textContent=state.branch;
@@ -2050,6 +2056,8 @@ function renderInvoice(){
       const isEditing=invoiceState.editIdx===gIdx;
       const priceLabel=item.isClientPL
         ?`<span style="color:#2E7D32;font-weight:700">${item.price} ج 💲</span>`
+        :item.isPromo
+        ?`<span style="color:#E65100;font-weight:700">${item.price} ج 🔖</span>${item.promoNote?`<div style="font-size:10px;color:#E65100">${item.promoNote}</div>`:''}`
         :`${item.price} ج`;
       html+=`<div class="irow"><div class="irn">${item.name}</div><div class="irq">${item.qty}</div><div class="irp">${priceLabel}</div><div class="irv">${item.total.toLocaleString('en-US')} ج</div><button class="ire" onclick="toggleEditItem(${gIdx})">${isEditing?'✕':'✏️'}</button></div>`;
       if(isEditing) html+=editModal(gIdx,item,'inv');
@@ -2178,7 +2186,7 @@ function exportPDF(mode){
     const sub=normalSub+plSub;
     const dA=sub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
     grandBefore+=sub;grandDisc+=dA;grandTax+=taxA;grandTotal+=net;
-    const rows=g.items.map((item,i)=>`<tr style="${i%2?'background:#FFF8F4':''}"><td>${i+1}</td><td style="text-align:right">${item.name}</td><td>${item.qty}</td><td>${item.price} ج</td><td style="font-weight:700">${item.total.toLocaleString('en-US')} ج</td></tr>`).join('');
+    const rows=g.items.map((item,i)=>`<tr style="${i%2?'background:#FFF8F4':''}"><td>${i+1}</td><td style="text-align:right">${item.name}${item.promoNote?`<div style="font-size:10px;color:#E65100">${item.promoNote}</div>`:''}</td><td>${item.qty}</td><td>${item.isPromo?`<span style="color:#E65100;font-weight:700">${item.price} ج 🔖</span>`:`${item.price} ج`}</td><td style="font-weight:700">${item.total.toLocaleString('en-US')} ج</td></tr>`).join('');
     sections+=`<div style="margin-bottom:24px;page-break-inside:avoid">
       <div style="background:#C55B48;color:white;padding:8px 14px;border-radius:8px 8px 0 0;display:flex;justify-content:space-between">
         <span style="font-size:13px;font-weight:700">${g.label}</span>
@@ -2294,7 +2302,7 @@ async function openRetVisit(branch){
     try{
       const [disc, promos] = await Promise.all([
         sbFetch('client_category_discounts','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&select=cat,discount_pct'),
-        sbFetch('sales_promotions','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&active=eq.true&date_from=lte.'+today()+'&date_to=gte.'+today()+'&select=snf_name,promo_price,date_from,date_to')
+        sbFetch('sales_promotions','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&active=eq.true&date_from=lte.'+today()+'&date_to=gte.'+today()+'&select=snf_name,promo_price,notes,date_from,date_to')
       ]);
       disc.forEach(d=>{returnState.discounts[d.cat]=d.discount_pct||0;});
       const discEntries=disc.filter(d=>d.discount_pct>0);
@@ -2302,10 +2310,12 @@ async function openRetVisit(branch){
       // احفظ الـ promos في returnState للاستخدام في عرض الأسعار
       if(Array.isArray(promos)&&promos.length){
         returnState.promos={};
-        promos.forEach(p=>{ if(p.snf_name) returnState.promos[p.snf_name]=p.promo_price; });
+        returnState.promoNotes={};
+        promos.forEach(p=>{ if(p.snf_name){ returnState.promos[p.snf_name]=p.promo_price; returnState.promoNotes[p.snf_name]=p.notes||''; } });
         $('rv-promos').innerHTML=promos.map(p=>`🔖 عرض على ${p.snf_name} — ${p.promo_price} ج (${p.date_from} → ${p.date_to})`).join('<br>');
       } else {
         returnState.promos={};
+        returnState.promoNotes={};
         $('rv-promos').innerHTML='';
       }
     }catch(e){if(!specialPL)$('rv-discounts').innerHTML='';$('rv-promos').innerHTML='';}
@@ -2447,11 +2457,13 @@ function selectRetCat(cat,grpData){
       const p=prices[iname];
       const basePrice=p?p.price:0;
       const promoPrice=(returnState.promos&&returnState.promos[iname]!=null)?returnState.promos[iname]:null;
-      const price=basePrice||promoPrice||0;
-      const isPromoOnly=!basePrice&&promoPrice;
-      const priceAfterDisc=disc>0?(price*(1-disc/100)).toFixed(2):price;
-      const priceDisplay=isPromoOnly
-        ?`<span style="color:#E65100;font-weight:800">${promoPrice} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض</span>`
+      const promoNote=(returnState.promoNotes&&returnState.promoNotes[iname])||'';
+      const isPromoActive=promoPrice!==null;
+      const price=isPromoActive?promoPrice:basePrice;
+      const priceAfterDisc=(!isPromoActive&&disc>0)?(price*(1-disc/100)).toFixed(2):price;
+      const noteTag=promoNote?`<span style="font-size:9px;color:#E65100;display:block;margin-top:1px">${promoNote}</span>`:'';
+      const priceDisplay=isPromoActive
+        ?`<span style="color:#E65100;font-weight:800">${promoPrice} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض</span>${noteTag}`
         :(disc>0?`${priceAfterDisc} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span>`:`${price} ج`);
       html+=`<div class="prod-row">
         <div class="prod-name">${iname}<br><small style="color:#8B2635;font-weight:700">${priceDisplay}</small></div>
@@ -2541,6 +2553,8 @@ function renderReturnInvoice(){
       const isEditing=invoiceState.editIdx===gIdx;
       const priceLabel=item.isClientPL
         ?`<span style="color:#2E7D32;font-weight:700">${item.price} ج 💲</span>`
+        :item.isPromo
+        ?`<span style="color:#E65100;font-weight:700">${item.price} ج 🔖</span>${item.promoNote?`<div style="font-size:10px;color:#E65100">${item.promoNote}</div>`:''}`
         :`${item.price} ج`;
       html+=`<div class="irow"><div class="irn">${item.name}</div><div class="irq" style="color:#8B2635">${item.qty}</div><div class="irp">${priceLabel}</div><div class="irv">${item.total.toLocaleString('en-US')} ج</div><button class="ire" onclick="toggleRetEditItem(${gIdx})">${isEditing?'✕':'✏️'}</button></div>`;
       if(isEditing) html+=editModal(gIdx,item,'ret');
