@@ -2411,6 +2411,8 @@ const GROUPS = {
   hyper:         {label:'🟣 الهايبر',            color:'#6A0DAD'},
   alex:          {label:'🌊 الإسكندرية',         color:'#0097A7'},
   markets:       {label:'🏪 الأسواق الخاصة',     color:'#8D6E63'},
+  private_cairo: {label:'🏬 أسواق خاصة القاهرة', color:'#E91E63'},
+  private_alex:  {label:'🏬 أسواق خاصة الإسكندرية', color:'#9C27B0'},
   tamraty_cairo: {label:'🟠 تمراتي القاهرة',     color:'#FF7043'},
   tamraty_alex:  {label:'🟡 تمراتي الإسكندرية',  color:'#FFA726'},
   fuel_cairo:    {label:'⛽ وقود القاهرة',        color:'#546E7A'},
@@ -2546,34 +2548,63 @@ async function doLogin(){
   if(!name||!pass){err.style.display='block';err.textContent='اختر اسمك وأدخل كلمة المرور';return;}
   btn.disabled=true; btn.innerHTML='<div class="spinner"></div>';
 
-  // جرب أولاً من sales_staff
-  let staffUser = null;
+  const H_login = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  // جرب أولاً من staff (المصدر الرسمي في لوحة التحكم)
+  let staffMain = null;
   try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/sales_staff?name=eq.${encodeURIComponent(name)}&select=*&limit=1`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/staff?name=eq.${encodeURIComponent(name)}&active=eq.true&select=*&limit=1`,{headers:H_login});
     const d = r.ok ? await r.json() : [];
-    if(d.length && (d[0].pass_hash||'')===pass && d[0].active) staffUser = d[0];
+    if(d.length && (d[0].pass_hash||'')===pass) staffMain = d[0];
   }catch(e){}
+
+  // جرب من sales_staff (legacy)
+  let staffUser = null;
+  if(!staffMain){
+    try{
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/sales_staff?name=eq.${encodeURIComponent(name)}&select=*&limit=1`,{headers:H_login});
+      const d = r.ok ? await r.json() : [];
+      if(d.length && (d[0].pass_hash||'')===pass && d[0].active) staffUser = d[0];
+    }catch(e){}
+  }
 
   // fallback لـ users
   let user = null;
-  if(!staffUser){
+  if(!staffMain && !staffUser){
     const fresh = await sbGet('users',{name,role:'sales'},{limit:1});
     user = fresh[0];
   }
 
   // تحقق من كلمة المرور
-  if(!staffUser && (!user||(user.pass_hash||'')!==pass)){
+  if(!staffMain && !staffUser && (!user||(user.pass_hash||'')!==pass)){
     err.style.display='block'; err.textContent='كلمة المرور غلط';
     btn.disabled=false; btn.innerHTML='<i class="ti ti-login"></i> دخول'; return;
   }
-  if(!staffUser && user?.status==='inactive'){
+  if(!staffMain && !staffUser && user?.status==='inactive'){
     err.style.display='block'; err.textContent='هذا الحساب موقوف';
     btn.disabled=false; btn.innerHTML='<i class="ti ti-login"></i> دخول'; return;
   }
 
   // بناء كائن المستخدم
-  if(staffUser){
+  if(staffMain){
+    // staff table: grp هو array PostgreSQL {private_cairo,...}
+    const grp = Array.isArray(staffMain.grp) ? staffMain.grp
+      : (staffMain.grp||'').replace(/[{}"']/g,'').split(',').map(s=>s.trim()).filter(Boolean);
+    const roleMap = {gm:'gm', sales_manager:'manager', hyper_sup:'sup', group_sup:'sup', merch_sup:'sup', special_sup:'sup', hyper_sales_sup:'sup'};
+    const level = staffMain.role==='gm' ? 'gm' : (staffMain.role||'').includes('manager') ? 'manager' : 'sup';
+    cu = {
+      id:         staffMain.id,
+      name:       staffMain.name,
+      level,
+      role:       staffMain.role,
+      groups:     level==='gm' ? Object.keys(GROUPS) : grp,
+      sector:     grp.join(','),
+      supervisors:[],
+      job_title:  level==='gm'?'GM':level==='manager'?'مدير بيع':'مشرف بيع',
+      from_staff: true,
+      staff_id:   staffMain.id,
+    };
+  } else if(staffUser){
     const roleMap = {sales_gm:'gm', sales_manager:'manager', sales_sup:'sup'};
     const level   = roleMap[staffUser.role] || 'sup';
     const sectors = (staffUser.sector||'').split(',').map(s=>s.trim()).filter(Boolean);
@@ -6527,11 +6558,17 @@ const SALES_ROUTES_DATA = [
 
 const RT_GRP_COLORS = {
   hyper:'#6A0DAD', giza:'#D62828', south:'#1A7A4A',
-  cairo:'#005CBF', tajmuat:'#F77F00', alex:'#0D7377'
+  cairo:'#005CBF', tajmuat:'#F77F00', alex:'#0D7377',
+  markets:'#8D6E63', private_cairo:'#E91E63', private_alex:'#9C27B0',
+  tamraty_cairo:'#FF7043', tamraty_alex:'#FFA726',
+  fuel_cairo:'#546E7A', fuel_alex:'#78909C'
 };
 const RT_GRP_LABELS = {
   hyper:'الهايبر ماركت', giza:'مجموعة الجيزة', south:'جنوب وشرق القاهرة',
-  cairo:'وسط القاهرة', tajmuat:'مجموعة التجمعات', alex:'مجموعة الإسكندرية'
+  cairo:'وسط القاهرة', tajmuat:'مجموعة التجمعات', alex:'مجموعة الإسكندرية',
+  markets:'الأسواق الخاصة', private_cairo:'أسواق خاصة القاهرة', private_alex:'أسواق خاصة الإسكندرية',
+  tamraty_cairo:'تمراتي القاهرة', tamraty_alex:'تمراتي الإسكندرية',
+  fuel_cairo:'وقود القاهرة', fuel_alex:'وقود الإسكندرية'
 };
 
 let _rtExpanded = {};
