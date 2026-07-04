@@ -29597,15 +29597,22 @@ async function advisorRun(){
   try {
     setS('جاري جلب بيانات المخزون والمبيعات...');
 
-    const [products, expiry, deliveries, returns_, bmap, catDiscs, promos, clients] = await Promise.all([
+    const [products, expiry, deliveries, returns_, bmap, catDiscs, promos, clients,
+           staffList, branches, plans, planItems, supplyReqs] = await Promise.all([
       fetch(SUPABASE_URL+'/rest/v1/products?select=snf,cat,fea,grp,branch,shelf_qty,stock_qty,date_shelf,created_at&order=created_at.desc&limit=3000',{headers:H}).then(r=>r.json()).catch(()=>[]),
       fetch(SUPABASE_URL+'/rest/v1/market_expiry?select=snf,cat,fea,branch,date_shelf,total_qty,last_visit&order=total_qty.desc&limit=500',{headers:H}).then(r=>r.json()).catch(()=>[]),
-      fetch(SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,branch_name,delivery_date,items,total_net,discount_pct&order=delivery_date.desc&limit=1200',{headers:H}).then(r=>r.json()).catch(()=>[]),
-      fetch(SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,branch_name,return_date,items,total_net&order=return_date.desc&limit=400',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,branch_name,rep_name,delivery_date,items,total_net,total_tax,total_before_discount,discount_pct&order=delivery_date.desc&limit=2000',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,branch_name,rep_name,return_date,items,total_net,total_tax,total_before_discount,discount_pct&order=return_date.desc&limit=600',{headers:H}).then(r=>r.json()).catch(()=>[]),
       fetch(SUPABASE_URL+'/rest/v1/branch_client_map?select=branch_name,client_name&limit=500',{headers:H}).then(r=>r.json()).catch(()=>[]),
       fetch(SUPABASE_URL+'/rest/v1/client_category_discounts?select=client_name,cat,discount_pct&limit=300',{headers:H}).then(r=>r.json()).catch(()=>[]),
       fetch(SUPABASE_URL+'/rest/v1/sales_promotions?select=client_name,snf_name,promo_price,date_from,date_to&limit=100',{headers:H}).then(r=>r.json()).catch(()=>[]),
       fetch(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type,discount_pct&limit=200',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      // ══ بيانات جديدة ══
+      fetch(SUPABASE_URL+'/rest/v1/staff?active=eq.true&select=name,role,grp,reports_to&order=role.asc&limit=100',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(SUPABASE_URL+'/rest/v1/branches?status=eq.active&select=branch_name,route,grp,rep_name,rep_name2,rep_name3,client_name&order=grp.asc,route.asc&limit=3000',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(SUPABASE_URL+'/rest/v1/sales_plans_plus?select=id,name,rep_name,created_at,period_from,period_to,status&order=created_at.desc&limit=60',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(SUPABASE_URL+'/rest/v1/sales_plan_items?select=plan_id,date,area,client_name,branch_name,rep_name,notes&limit=1500',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(SUPABASE_URL+'/rest/v1/supply_requests?select=name,route,snf,fea,qty,date,status,grp,note&order=created_at.desc&limit=300',{headers:H}).then(r=>r.json()).catch(()=>[]),
     ]);
 
     setS('جاري تحليل البيانات...');
@@ -29696,7 +29703,87 @@ async function advisorRun(){
     const msnfSum=msnf.slice(0,8).map(s=>s+':رصيد '+(invMap[s].sh+invMap[s].st)+' مبيعات '+(snfSales[s]||0)).join(' | ')||'لا بيانات';
     const discSum=Array.isArray(catDiscs)?catDiscs.slice(0,8).map(d=>d.client_name+'|'+d.cat+':'+d.discount_pct+'%').join(' | '):'';
 
-    const prompt='التاريخ: '+todayStr+' | Q'+quarter+'→Q'+nextQ+'\n'+typeInstruction+'\n\n[مبيعات السلاسل]\n'+clientsSummary+'\n\n[سريع الدوران]\n'+fastSum+'\n\n[راكد — رصيد عالٍ+مبيع منخفض]\n'+slowSum+'\n\n[انتهاء صلاحية <90يوم]\n'+expSum+'\n\n[مصنعات]\n'+msnfSum+'\n\n[خصومات]\n'+discSum+'\n\nاكتب تقريراً تجارياً يشمل:\n1. أداء السلاسل (أرقام فعلية)\n2. الراكد وخطة إنقاذه\n3. خطة Q'+nextQ+'\n4. SWOT بالوسوم:\nSWOT_STRENGTHS_START\n•...\nSWOT_STRENGTHS_END\nSWOT_WEAKNESSES_START\n•...\nSWOT_WEAKNESSES_END\nSWOT_OPPORTUNITIES_START\n•...\nSWOT_OPPORTUNITIES_END\nSWOT_THREATS_START\n•...\nSWOT_THREATS_END\n5. 3 قرارات فورية هذا الأسبوع\nاستخدم الأرقام والأسماء الفعلية فقط.';
+    // ══ بناء سياق فريق العمل ══
+    const ROLE_AR={'gm':'مدير عام','sales_manager':'مدير البيع','merch_manager':'مدير التنسيق','hyper_sup':'مشرف هايبر','group_sup':'مشرف مجموعة','merch_sup':'مشرف تنسيق','special_sup':'مشرف أسواق خاصة','hyper_sales_sup':'مشرف بيع هايبر'};
+    const staffSum = Array.isArray(staffList) ? staffList.map(s=>{
+      const grpStr = Array.isArray(s.grp)?s.grp.join('،'):(s.grp||'—');
+      return `${s.name}[${ROLE_AR[s.role]||s.role}] مجموعات:${grpStr}${s.reports_to?' يرفع لـ:'+s.reports_to:''}`;
+    }).join('\n') : '—';
+
+    // ══ بناء سياق خطوط السير والفروع ══
+    const routeMap = {};
+    if(Array.isArray(branches)){
+      branches.forEach(b=>{
+        if(!routeMap[b.route]) routeMap[b.route]={grp:b.grp,count:0,reps:new Set()};
+        routeMap[b.route].count++;
+        if(b.rep_name)  routeMap[b.route].reps.add(b.rep_name);
+        if(b.rep_name2) routeMap[b.route].reps.add(b.rep_name2);
+        if(b.rep_name3) routeMap[b.route].reps.add(b.rep_name3);
+      });
+    }
+    const routeSum = Object.entries(routeMap).slice(0,40).map(([rt,d])=>
+      `${rt}[${d.grp}] ${d.count}فرع منسقون:${[...d.reps].join('،')||'—'}`
+    ).join('\n');
+
+    // ══ بناء سياق خطط المبيعات ══
+    const planItemsByPlan = {};
+    if(Array.isArray(planItems)) planItems.forEach(it=>{
+      if(!planItemsByPlan[it.plan_id]) planItemsByPlan[it.plan_id]=[];
+      planItemsByPlan[it.plan_id].push(it);
+    });
+    const plansSum = Array.isArray(plans) ? plans.slice(0,20).map(p=>{
+      const items = planItemsByPlan[p.id]||[];
+      const branches_count = new Set(items.map(i=>i.branch_name)).size;
+      const clients_count  = new Set(items.map(i=>i.client_name)).size;
+      return `خطة:${p.name||p.id} | مشرف:${p.rep_name||'—'} | ${p.period_from||''}→${p.period_to||''} | ${items.length}بند | ${branches_count}فرع | ${clients_count}عميل`;
+    }).join('\n') : '—';
+
+    // ══ بناء سياق تقارير الميدان (supply_requests) ══
+    const supplyByStatus = {pending:0,approved:0,rejected:0};
+    const supplyByRoute  = {};
+    if(Array.isArray(supplyReqs)){
+      supplyReqs.forEach(r=>{
+        supplyByStatus[r.status] = (supplyByStatus[r.status]||0)+1;
+        if(!supplyByRoute[r.route]) supplyByRoute[r.route]={snfs:[],notes:[]};
+        if(r.snf) supplyByRoute[r.route].snfs.push(r.snf+'×'+(r.qty||1));
+        if(r.note) supplyByRoute[r.route].notes.push(r.note);
+      });
+    }
+    const supplySum = Object.entries(supplyByRoute).slice(0,20).map(([rt,d])=>
+      `${rt}: ${d.snfs.slice(0,4).join('، ')}${d.notes.length?' | ملاحظات:'+d.notes.slice(0,2).join('؛'):''}`
+    ).join('\n');
+    const supplyStatusSum = `معلق:${supplyByStatus.pending||0} | معتمد:${supplyByStatus.approved||0} | مرفوض:${supplyByStatus.rejected||0}`;
+
+    // ══ إجماليات الفواتير بالمندوب ══
+    const repSales={};
+    if(Array.isArray(deliveries)) deliveries.forEach(d=>{
+      const r=d.rep_name||'—';
+      if(!repSales[r]) repSales[r]={del:0,ret:0,inv:0};
+      repSales[r].del += (d.total_net||0)-(d.total_tax||0);
+      repSales[r].inv++;
+    });
+    if(Array.isArray(returns_)) returns_.forEach(d=>{
+      const r=d.rep_name||'—';
+      if(!repSales[r]) repSales[r]={del:0,ret:0,inv:0};
+      repSales[r].ret += (d.total_net||0)-(d.total_tax||0);
+    });
+    const repSum = Object.entries(repSales).sort((a,b)=>b[1].del-a[1].del).slice(0,15)
+      .map(([r,d])=>`${r}: تسليم ${d.del.toFixed(0)}ج | مرتجع ${d.ret.toFixed(0)}ج | صافي ${(d.del-d.ret).toFixed(0)}ج | ${d.inv}فاتورة`).join('\n');
+
+    const prompt='التاريخ: '+todayStr+' | Q'+quarter+'→Q'+nextQ+'\n'+typeInstruction+
+      '\n\n[فريق العمل والمشرفون — من قاعدة البيانات]\n'+staffSum+
+      '\n\n[خطوط السير والفروع — '+branches.length+' فرع نشط]\n'+routeSum+
+      '\n\n[خطط المبيعات والتنسيق]\n'+plansSum+
+      '\n\n[تقارير الميدان / طلبات التوريد — '+supplyStatusSum+']\n'+supplySum+
+      '\n\n[أداء المناديب/المشرفين — الفواتير]\n'+repSum+
+      '\n\n[مبيعات السلاسل والعملاء]\n'+clientsSummary+
+      '\n\n[سريع الدوران]\n'+fastSum+
+      '\n\n[راكد — رصيد عالٍ+مبيع منخفض]\n'+slowSum+
+      '\n\n[انتهاء صلاحية <90يوم]\n'+expSum+
+      '\n\n[مصنعات]\n'+msnfSum+
+      '\n\n[خصومات]\n'+discSum+
+      '\n\nاكتب تقريراً تجارياً يشمل:\n1. أداء المناديب والمشرفين (أرقام فعلية)\n2. تحليل خطوط السير والفروع\n3. تحليل خطط المبيعات ومدى تنفيذها\n4. أبرز ما في تقارير الميدان\n5. أداء السلاسل والعملاء\n6. الراكد وخطة إنقاذه\n7. خطة Q'+nextQ+
+      '\n8. SWOT بالوسوم:\nSWOT_STRENGTHS_START\n•...\nSWOT_STRENGTHS_END\nSWOT_WEAKNESSES_START\n•...\nSWOT_WEAKNESSES_END\nSWOT_OPPORTUNITIES_START\n•...\nSWOT_OPPORTUNITIES_END\nSWOT_THREATS_START\n•...\nSWOT_THREATS_END\n9. 3 قرارات فورية هذا الأسبوع\nاستخدم الأرقام والأسماء الفعلية من البيانات فقط — لا تخترع أرقاماً.';
 
     setS('الذكاء الاصطناعي يكتب التقرير... (20–40 ثانية)');
 
@@ -29775,7 +29862,7 @@ async function advisorRun(){
       .replace(/\n/g,'<br>');
 
     const t=new Date().toLocaleTimeString('ar-EG');
-    area.innerHTML='<div style="background:linear-gradient(135deg,#ECFDF5,#D1FAE5);border:1.5px solid #6EE7B7;border-radius:12px;padding:14px 18px;margin-bottom:18px;display:flex;align-items:center;gap:12px"><span style="font-size:30px">🧠</span><div style="flex:1"><div style="font-size:13px;font-weight:800;color:#064E3B">تقرير المستشار الذكي</div><div style="font-size:10px;color:#6B7280;margin-top:2px">'+t+' — '+deliveries.length+' فاتورة · '+allSnfs.length+' صنف · '+expiryAlerts.length+' تنبيه انتهاء صلاحية</div></div><button onclick="advisorCopy()" style="padding:7px 14px;background:#065F46;color:#fff;border:none;border-radius:8px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer;font-weight:700">📋 نسخ</button></div>'+swotGrid+'<div style="font-size:13px;line-height:1.95;color:var(--text-primary);direction:rtl"><p style="margin:0 0 10px">'+html+'</p></div>';
+    area.innerHTML='<div style="background:linear-gradient(135deg,#ECFDF5,#D1FAE5);border:1.5px solid #6EE7B7;border-radius:12px;padding:14px 18px;margin-bottom:18px;display:flex;align-items:center;gap:12px"><span style="font-size:30px">🧠</span><div style="flex:1"><div style="font-size:13px;font-weight:800;color:#064E3B">تقرير المستشار الذكي</div><div style="font-size:10px;color:#6B7280;margin-top:2px">'+t+' — '+deliveries.length+' فاتورة · '+branches.length+' فرع · '+staffList.length+' موظف · '+plans.length+' خطة · '+expiryAlerts.length+' تنبيه</div></div><button onclick="advisorCopy()" style="padding:7px 14px;background:#065F46;color:#fff;border:none;border-radius:8px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer;font-weight:700">📋 نسخ</button></div>'+swotGrid+'<div style="font-size:13px;line-height:1.95;color:var(--text-primary);direction:rtl"><p style="margin:0 0 10px">'+html+'</p></div>';
 
   } catch(e){
     area.innerHTML='<div style="padding:24px;background:#FEF2F2;border-radius:10px;color:#991B1B;text-align:center;font-weight:700">❌ خطأ: '+e.message+'</div>';
