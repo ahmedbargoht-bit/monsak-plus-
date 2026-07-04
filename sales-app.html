@@ -9531,7 +9531,10 @@ async function saveSppNewPlan(status){
 
   // جمع كل البنود
   // حوّل كل بند فيه أكتر من فرع لبنود منفصلة
-  const allItemsRaw = Object.values(_sppDayItems).flat().filter(it=>it.area||(it.client_name||it.client_names?.length));
+  const _allRaw = Object.values(_sppDayItems).flat();
+  console.log('🔍 فحص البنود — الإجمالي قبل الفلتر:', _allRaw.length, _allRaw.map(it=>({area:it.area,cn:it.client_name,cns:it.client_names,rep:it.rep_name})));
+  const allItemsRaw = _allRaw.filter(it=>it.area||(it.client_name||it.client_names?.length));
+  console.log('✅ بنود بعد الفلتر:', allItemsRaw.length);
   const allItems = [];
   allItemsRaw.forEach(it=>{
     const branches = Array.isArray(it.client_names) && it.client_names.length ? it.client_names : (it.client_name?[it.client_name]:[null]);
@@ -9582,14 +9585,38 @@ async function saveSppNewPlan(status){
 
   const [plan] = await planRes.json();
 
-  // احفظ البنود
+  // احفظ البنود — فقط الحقول اللي في جدول sales_plan_items (استبعاد _supBranches وغيرها)
   if(allItems.length && plan?.id){
-    const items = allItems.map(it=>({...it, plan_id:plan.id}));
-    await fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items`,{
+    const items = allItems.map(it=>({
+      plan_id:        plan.id,
+      visit_date:     it.visit_date||'',
+      area:           it.area||'',
+      client_name:    it.client_name||'',
+      client_type:    it.client_type||'B',
+      rep_name:       it.rep_name||'',
+      purpose:        it.purpose||'',
+      planned_amount: it.planned_amount||0,
+      actual_amount:  it.actual_amount||0,
+      visit_status:   it.visit_status||'planned',
+      notes:          it.notes||''
+    }));
+    console.log('📦 بنود للحفظ:', items.length, JSON.stringify(items).slice(0,300));
+    const iRes = await fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items`,{
       method:'POST',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
       body:JSON.stringify(items)
     });
+    if(!iRes.ok){
+      const err = await iRes.text().catch(()=>'');
+      console.error('❌ فشل حفظ بنود الخطة:', iRes.status, err);
+      msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';
+      msg.textContent=`❌ فشل حفظ البنود (${iRes.status}): ${err.slice(0,120)}`;
+      return;
+    } else {
+      console.log('✅ تم حفظ البنود بنجاح، العدد:', items.length);
+    }
+  } else {
+    console.warn('⚠️ لا توجد بنود للحفظ — allItemsRaw:', Object.values(_sppDayItems).flat().length, 'بند إجمالي قبل الفلتر');
   }
 
   document.getElementById('modal-spp-new').style.display='none';
