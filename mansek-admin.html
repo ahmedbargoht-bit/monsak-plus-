@@ -11047,12 +11047,15 @@ function setupApp(){
   if(attDateEl) attDateEl.value = new Date().toISOString().slice(0,10);
   const miFromEl = document.getElementById('mi-from');
   if(miFromEl) miFromEl.value = new Date().toISOString().slice(0,10);
+  await loadStaticData();           // بيانات ثابتة أولاً
   refreshAll();
-  refreshTimer=setInterval(refreshAll,2*60*1000);
+  refreshTimer=setInterval(refreshAll,5*60*1000);        // كل 5 دقائق بدل 2
+  _staticTimer=setInterval(loadStaticData,15*60*1000);   // بيانات ثابتة كل 15 دقيقة
 }
 
 function logout(){
   if(refreshTimer)clearInterval(refreshTimer);
+  if(_staticTimer){clearInterval(_staticTimer);_staticTimer=null;}
   stopExcBadgePolling();
   rtChannelsAdmin.forEach(c=>{try{c.close();}catch(e){}});rtChannelsAdmin=[];
   CU=null;
@@ -11069,21 +11072,36 @@ function getVisibleReps(){
 // ══════════════════════════════════════════════════════════════
 // REFRESH ALL DATA
 // ══════════════════════════════════════════════════════════════
+// ── بيانات ثابتة (branches / products / coord_route_assignments)
+// تُحمَّل مرة عند الدخول وتُجدَّد كل 15 دقيقة فقط
+let _staticTimer = null;
+async function loadStaticData(){
+  const [products,branches,coord_route_assignments] = await Promise.all([
+    sb('products',{},{order:'created_at.desc',limit:500}),
+    sb('branches',{status:'active'},{limit:1000}),
+    sb('coord_route_assignments',{},{limit:1000}),
+  ]);
+  cachedData.products             = Array.isArray(products)             ? products             : (cachedData.products||[]);
+  cachedData.branches             = Array.isArray(branches)             ? branches             : (cachedData.branches||[]);
+  cachedData.coord_route_assignments = Array.isArray(coord_route_assignments) ? coord_route_assignments : (cachedData.coord_route_assignments||[]);
+}
+
 async function refreshAll(){
   document.querySelectorAll('.live-update-text').forEach(el=>el.textContent='جاري التحديث...');
-  const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-  const [visits,missing,products,attendance,location,messages,orders,branches,coord_route_assignments] = await Promise.all([
-    sb('visits',{},{order:'created_at.desc',limit:5000}),
-    sb('missing',{},{order:'created_at.desc'}),
-    sb('products',{},{order:'created_at.desc'}),
-    sb('attendance',{},{order:'created_at.desc'}),
+  // البيانات اللحظية فقط — الثابتة في loadStaticData
+  const [visits,missing,attendance,location,messages,orders] = await Promise.all([
+    sb('visits',{},{order:'created_at.desc',limit:1000}),
+    sb('missing',{},{order:'created_at.desc',limit:500}),
+    sb('attendance',{},{order:'created_at.desc',limit:500}),
     sb('location'),
-    sb('messages',{},{order:'created_at.desc'}),
-    sb('orders',{},{order:'created_at.desc'}),
-    sb('branches',{status:'active'},{limit:2000}),
-    sb('coord_route_assignments',{},{limit:5000}),
+    sb('messages',{},{order:'created_at.desc',limit:200}),
+    sb('orders',{},{order:'created_at.desc',limit:500}),
   ]);
   let snapshots=[];
+  // نحتفظ بالبيانات الثابتة المحفوظة مسبقاً
+  const products              = cachedData.products              || [];
+  const branches              = cachedData.branches              || [];
+  const coord_route_assignments = cachedData.coord_route_assignments || [];
   cachedData={visits,missing,products,attendance,location,messages,orders,snapshots,branches,coord_route_assignments};
   const now=new Date();
   const timeStr='آخر تحديث: '+now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
@@ -14267,9 +14285,9 @@ function startOrdersPolling(){
   if(_ordersPolling) return;
   _ordersPolling = setInterval(async()=>{
     if(!document.getElementById('panel-orders')?.classList.contains('active')) return;
-    const res = await sb('orders',{},{order:'created_at.desc'});
+    const res = await sb('orders',{},{order:'created_at.desc',limit:500});
     if(Array.isArray(res)){ cachedData.orders=res; renderOrders(); }
-  }, 30000);
+  }, 90000);
 }
 
 function loadOrders(){ renderOrders(); startOrdersPolling(); }
