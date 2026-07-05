@@ -663,6 +663,9 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     <div class="tab" onclick="showTab('market-expiry')" id="tab-market-expiry">
       <i class="ti ti-calendar-stats"></i>صلاحيات
     </div>
+    <div class="tab" onclick="showTab('competitor')" id="tab-competitor">
+      <i class="ti ti-building-store"></i>المنافس
+    </div>
   </div>
 
   <!-- Content -->
@@ -1651,6 +1654,65 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       </div>
     </div>
 
+    <!-- ══ شاشة المنافس ══ -->
+    <div class="screen" id="screen-competitor">
+
+      <!-- فورم الإدخال -->
+      <div class="card">
+        <div class="card-title"><i class="ti ti-building-store" style="color:#C0392B"></i> رصد منتج منافس</div>
+
+        <div class="form-fld" style="margin-bottom:10px">
+          <label class="form-lbl">اسم العميل *</label>
+          <select id="sup-comp-client" class="filter-select" style="width:100%" onchange="supCompOnClientChange()">
+            <option value="">اختر العميل...</option>
+          </select>
+        </div>
+        <div class="form-fld" style="margin-bottom:10px">
+          <label class="form-lbl">اسم الفرع *</label>
+          <select id="sup-comp-branch" class="filter-select" style="width:100%">
+            <option value="">اختر العميل أولاً...</option>
+          </select>
+        </div>
+        <div class="form-fld" style="margin-bottom:10px">
+          <label class="form-lbl">الشركة المنافسة *</label>
+          <select id="sup-comp-company" class="filter-select" style="width:100%">
+            <option value="">اختر الشركة...</option>
+          </select>
+        </div>
+        <div class="form-fld" style="margin-bottom:10px">
+          <label class="form-lbl">التصنيف *</label>
+          <select id="sup-comp-category" class="filter-select" style="width:100%">
+            <option value="">اختر التصنيف...</option>
+            <option>مصري</option><option>سعودي</option><option>دبس</option><option>أكياس</option><option>معمول</option>
+          </select>
+        </div>
+        <div class="form-fld" style="margin-bottom:10px">
+          <label class="form-lbl">اسم المنتج *</label>
+          <input type="text" id="sup-comp-product" class="filter-select" style="width:100%" placeholder="اكتب اسم المنتج..."/>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+          <div class="form-fld">
+            <label class="form-lbl">الوزن</label>
+            <input type="text" id="sup-comp-weight" class="filter-select" style="width:100%" placeholder="مثال: 500 جم"/>
+          </div>
+          <div class="form-fld">
+            <label class="form-lbl">السعر</label>
+            <input type="number" id="sup-comp-price" class="filter-select" style="width:100%" placeholder="0.00" step="0.01"/>
+          </div>
+        </div>
+        <div id="sup-comp-msg" style="display:none;margin-bottom:8px;border-radius:8px;padding:8px 12px;font-size:12px;"></div>
+        <button class="btn btn-red" onclick="supCompSubmit()"><i class="ti ti-send"></i> إرسال</button>
+      </div>
+
+      <!-- سجل اليوم -->
+      <div class="card" style="margin-top:0">
+        <div class="card-title"><i class="ti ti-list"></i> سجلات اليوم</div>
+        <div id="sup-comp-today-list" style="font-size:12px;color:var(--text2);text-align:center;padding:12px 0;">لا يوجد سجلات اليوم</div>
+      </div>
+
+    </div>
+    <!-- ══ END: شاشة المنافس ══ -->
+
   </div><!-- end content -->
 
 <!-- ══ Modal: تعديل/حذف نقاط ══════════════════════════════════ -->
@@ -2638,6 +2700,7 @@ function showTab(tab){
     }, 30000);
   }
   if(tab==='field-support') initFieldSupport();
+  if(tab==='competitor') supCompInit();
   if(tab==='settings') loadMyReps();
   if(tab==='visits') runMissingStepsCheck(); // (v1.5) فحص فوري عند فتح التاب
   if(tab==='plan') { hierLoadPlan(); }
@@ -9596,6 +9659,128 @@ function checkWeeklyMotivationalPopup(){
   }catch(err){ console.warn('weekly popup error:', err); }
 }
 
+// ══════════════════════════════════════════════════════════════
+// تاب المنافس — تطبيق المشرف
+// ══════════════════════════════════════════════════════════════
+let _supCompBranchMap = [];
+let _supCompCompanies = [];
+
+async function supCompInit(){
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  // 1. جيب المنسقين التابعين للمشرف
+  let myReps = [];
+  for(const grp of (cu.groups||[])){
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/users?select=name,route,coordType&role=eq.rep&grp=eq.${encodeURIComponent(grp)}&limit=200`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+    myReps.push(...res);
+  }
+  // أزل التكرار
+  myReps = [...new Map(myReps.map(r=>[r.name,r])).values()];
+
+  // 2. جيب فروع كل منسق
+  const branchFetches = myReps.map(rep=>{
+    const enc = encodeURIComponent(rep.name);
+    const isFixed = (rep.coordType==='fixed'||rep.coordType==='ثابت');
+    if(isFixed){
+      return Promise.all([
+        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name2=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name3=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      ]).then(arr=>arr.flat());
+    } else {
+      const route = encodeURIComponent(rep.route||'');
+      if(!rep.route) return Promise.resolve([]);
+      return fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${route}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+    }
+  });
+
+  const [branchResults, mapRaw, companiesRaw] = await Promise.all([
+    Promise.all(branchFetches),
+    fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?select=client_name,branch_name&order=client_name.asc`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    fetch(`${SUPABASE_URL}/rest/v1/competitor_companies?select=name&order=name.asc`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+  ]);
+
+  // فروع المشرف الفريدة
+  const myBranchSet = new Set(branchResults.flat().map(b=>b.branch_name).filter(Boolean));
+
+  _supCompBranchMap  = (Array.isArray(mapRaw) ? mapRaw : []).filter(m=>myBranchSet.has(m.branch_name));
+  _supCompCompanies  = Array.isArray(companiesRaw) ? companiesRaw : [];
+
+  // عملاء من branch_client_map المفلترة
+  const clients = [...new Set(_supCompBranchMap.map(m=>m.client_name).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+  const clientSel = document.getElementById('sup-comp-client');
+  clientSel.innerHTML = '<option value="">اختر العميل...</option>';
+  clients.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; clientSel.appendChild(o); });
+
+  // شركات المنافسين
+  const companySel = document.getElementById('sup-comp-company');
+  companySel.innerHTML = '<option value="">اختر الشركة...</option>';
+  _supCompCompanies.forEach(c=>{ const o=document.createElement('option'); o.value=c.name; o.textContent=c.name; companySel.appendChild(o); });
+
+  supCompLoadToday();
+}
+
+function supCompOnClientChange(){
+  const client = document.getElementById('sup-comp-client').value;
+  const branchSel = document.getElementById('sup-comp-branch');
+  branchSel.innerHTML = '<option value="">اختر الفرع...</option>';
+  if(!client) return;
+  const branches = _supCompBranchMap.filter(m=>m.client_name===client).map(m=>m.branch_name).sort((a,b)=>a.localeCompare(b,'ar'));
+  branches.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=b; branchSel.appendChild(o); });
+}
+
+async function supCompSubmit(){
+  const client   = document.getElementById('sup-comp-client').value;
+  const branch   = document.getElementById('sup-comp-branch').value;
+  const company  = document.getElementById('sup-comp-company').value;
+  const category = document.getElementById('sup-comp-category').value;
+  const product  = document.getElementById('sup-comp-product').value.trim();
+  const weight   = document.getElementById('sup-comp-weight').value.trim();
+  const price    = document.getElementById('sup-comp-price').value;
+  const msgEl    = document.getElementById('sup-comp-msg');
+
+  if(!client||!branch||!company||!category||!product){
+    msgEl.style.display='block'; msgEl.style.background='#FCEBEB'; msgEl.style.color='#791F1F';
+    msgEl.textContent='يرجى تعبئة جميع الحقول المطلوبة (*)'; return;
+  }
+
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
+  const body = { client_name:client, branch_name:branch, route: cu?.route||cu?.groups?.[0]||'', company_name:company, category, product_name:product, weight:weight||null, price:price?+price:null, coordinator_name:cu?.name||'' };
+
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/competitor_logs`,{method:'POST',headers:H,body:JSON.stringify(body)});
+    if(!r.ok) throw new Error();
+    msgEl.style.display='block'; msgEl.style.background='#E8F5E9'; msgEl.style.color='#1B5E20';
+    msgEl.textContent='✓ تم الإرسال بنجاح';
+    ['sup-comp-client','sup-comp-branch','sup-comp-company','sup-comp-category'].forEach(id=>document.getElementById(id).value='');
+    ['sup-comp-product','sup-comp-weight','sup-comp-price'].forEach(id=>document.getElementById(id).value='');
+    document.getElementById('sup-comp-branch').innerHTML='<option value="">اختر العميل أولاً...</option>';
+    setTimeout(()=>{ msgEl.style.display='none'; supCompLoadToday(); }, 2000);
+  }catch(e){
+    msgEl.style.display='block'; msgEl.style.background='#FCEBEB'; msgEl.style.color='#791F1F';
+    msgEl.textContent='حدث خطأ، حاول مرة أخرى';
+  }
+}
+
+async function supCompLoadToday(){
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const today = new Date().toISOString().slice(0,10);
+  const enc   = encodeURIComponent(cu?.name||'');
+  const res   = await fetch(`${SUPABASE_URL}/rest/v1/competitor_logs?coordinator_name=eq.${enc}&created_at=gte.${today}T00:00:00&order=created_at.desc&limit=20`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+  const list  = document.getElementById('sup-comp-today-list');
+  if(!res.length){ list.innerHTML='<div style="text-align:center;padding:12px;color:var(--text2);font-size:12px;">لا يوجد سجلات اليوم</div>'; return; }
+  list.innerHTML = res.map(r=>`
+    <div style="border-bottom:1px solid var(--border);padding:8px 0;font-size:12px;">
+      <div style="font-weight:700;color:var(--text);margin-bottom:3px;">${r.company_name||'—'} — ${r.product_name||'—'}</div>
+      <div style="color:var(--text2);display:flex;gap:10px;flex-wrap:wrap;">
+        <span>${r.branch_name||'—'}</span>
+        <span>${r.category||'—'}</span>
+        ${r.weight?`<span>${r.weight}</span>`:''}
+        ${r.price?`<span style="color:#C0392B;font-weight:700">${r.price} ج</span>`:''}
+      </div>
+    </div>`).join('');
+}
 </script>
 
 <!-- VERSION BADGE -->
