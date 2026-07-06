@@ -7943,19 +7943,47 @@ async function tgtLoadData(){
     } else {
       // ══ منطق المشرف العادي ══
       const enc = encodeURIComponent(supName);
+      // اسم المشرف بدون آخر كلمة (fallback لبيانات قديمة مخزنة بالاسم القصير)
+      const _supParts = supName.trim().split(/\s+/);
+      const _supShort = _supParts.length > 1 ? _supParts.slice(0, -1).join(' ') : '';
+      const encShort  = _supShort ? encodeURIComponent(_supShort) : null;
 
-      const repsRes = await fetch(
-        `${SUPABASE_URL}/rest/v1/users?supervisors=eq.${enc}&role=eq.sales&status=eq.active&select=id,name,grp,route,routes&order=name.asc&limit=100`,
-        {headers:H});
-      const repsList = repsRes.ok ? await repsRes.json() : [];
+      // جيب المناديب: exact match + اسم قصير + اسم أطول (لو الاسم محفوظ بصيغة مختلفة)
+      const _repsIds = new Set();
+      let repsList = [];
+      const _addReps = (list) => (list||[]).forEach(r=>{ if(!_repsIds.has(r.id)){ _repsIds.add(r.id); repsList.push(r); } });
+
+      const [r1, r2, r3] = await Promise.all([
+        fetch(`${SUPABASE_URL}/rest/v1/users?supervisors=eq.${enc}&role=eq.sales&status=eq.active&select=id,name,grp,route,routes&limit=100`,{headers:H}),
+        encShort ? fetch(`${SUPABASE_URL}/rest/v1/users?supervisors=eq.${encShort}&role=eq.sales&status=eq.active&select=id,name,grp,route,routes&limit=100`,{headers:H}) : Promise.resolve(null),
+        fetch(`${SUPABASE_URL}/rest/v1/users?supervisors=like.${enc}%20%25&role=eq.sales&status=eq.active&select=id,name,grp,route,routes&limit=100`,{headers:H}),
+      ]);
+      _addReps(r1.ok ? await r1.json() : []);
+      if(r2) _addReps(r2.ok ? await r2.json() : []);
+      _addReps(r3 && r3.ok ? await r3.json() : []);
+      repsList.sort((a,b)=>(a.name||'').localeCompare(b.name||'', 'ar'));
 
       if(!repsList.length){
         if(repsBody) repsBody.innerHTML='<div style="text-align:center;padding:30px;color:#bbb;font-size:12px">لا يوجد مناديب مسجلون تحت هذا المشرف</div>';
         return;
       }
 
-      const [tgtRes, salesRes, retRes] = await Promise.all([
+      // جيب الأهداف: exact + short form
+      const _tgtFetches = [
         fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&supervisor_name=eq.${enc}&select=rep_name,target_amount,work_days&limit=200`,{headers:H}),
+        encShort ? fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&supervisor_name=eq.${encShort}&select=rep_name,target_amount,work_days&limit=200`,{headers:H}) : Promise.resolve(null),
+      ];
+      const _tgtResults = await Promise.all(_tgtFetches);
+      const _tgtAll = [];
+      const _tgtNames = new Set();
+      for(const tr of _tgtResults){
+        if(!tr || !tr.ok) continue;
+        const d = await tr.json();
+        (d||[]).forEach(t=>{ if(!_tgtNames.has(t.rep_name)){ _tgtNames.add(t.rep_name); _tgtAll.push(t); } });
+      }
+
+      const [tgtRes, salesRes, retRes] = await Promise.all([
+        Promise.resolve({ok:true, _data:_tgtAll, json(){ return Promise.resolve(this._data); }}),
         fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${repsList.map(r=>encodeURIComponent(r.name)).join(',')})&delivery_date=gte.${monthStart}&delivery_date=lte.${dateTo}&select=rep_name,total_net,total_tax,delivery_date&limit=5000`,{headers:H}),
         fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${repsList.map(r=>encodeURIComponent(r.name)).join(',')})&return_date=gte.${monthStart}&return_date=lte.${dateTo}&select=rep_name,total_net,total_tax&limit=2000`,{headers:H}),
       ]);
@@ -10789,13 +10817,21 @@ async function yawmLoadReps(){
     let reps = [];
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
     if(cu.level === 'sup'){
-      // جلب مناديب المشرف الحالي
+      // جلب مناديب المشرف الحالي (exact + short form fallback)
       const enc = encodeURIComponent(cu.name);
-      const r = await fetch(
-        `${SUPABASE_URL}/rest/v1/users?supervisors=eq.${enc}&role=eq.sales&status=eq.active&select=name&order=name.asc&limit=100`,
-        {headers:H});
-      const d = r.ok ? await r.json() : [];
-      reps = Array.isArray(d) ? d.map(x=>x.name).filter(Boolean) : [];
+      const _parts = cu.name.trim().split(/\s+/);
+      const _short = _parts.length > 1 ? _parts.slice(0,-1).join(' ') : '';
+      const encS   = _short ? encodeURIComponent(_short) : null;
+      const _rIds  = new Set();
+      const _fetchReps = async (url) => { try{ const r=await fetch(url,{headers:H}); return r.ok?await r.json():[]; }catch(e){return [];} };
+      const [d1, d2, d3] = await Promise.all([
+        _fetchReps(`${SUPABASE_URL}/rest/v1/users?supervisors=eq.${enc}&role=eq.sales&status=eq.active&select=name&limit=100`),
+        encS ? _fetchReps(`${SUPABASE_URL}/rest/v1/users?supervisors=eq.${encS}&role=eq.sales&status=eq.active&select=name&limit=100`) : [],
+        _fetchReps(`${SUPABASE_URL}/rest/v1/users?supervisors=like.${enc}%20%25&role=eq.sales&status=eq.active&select=name&limit=100`),
+      ]);
+      const _addNames = (arr) => (arr||[]).forEach(x=>{ if(x.name&&!_rIds.has(x.name)){_rIds.add(x.name);reps.push(x.name);} });
+      _addNames(d1); _addNames(d2); _addNames(d3);
+      reps.sort((a,b)=>a.localeCompare(b,'ar'));
     } else {
       // manager أو gm — كل المناديب في السيكتور
       let url = `${SUPABASE_URL}/rest/v1/sales_staff?role=eq.sales_rep&select=name&order=name.asc&limit=500`;
