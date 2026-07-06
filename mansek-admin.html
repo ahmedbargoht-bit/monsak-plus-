@@ -5189,6 +5189,22 @@ h2,h3{color:#2C1F0A}
             </div>
           </div>
 
+          <!-- ── كروت تصنيف الأداء ── -->
+          <div id="sd-classify-wrap" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+            <div style="background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 2px 12px rgba(0,0,0,.07)">
+              <div style="font-size:12px;font-weight:800;color:#1A1A2E;margin-bottom:10px;display:flex;align-items:center;gap:6px">
+                <i class="ti ti-user-star" style="color:#6B1E2E"></i> تصنيف المشرفين
+              </div>
+              <div id="sd-sup-classify"><div style="color:#aaa;font-size:11px;text-align:center;padding:10px">جاري الحساب...</div></div>
+            </div>
+            <div style="background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 2px 12px rgba(0,0,0,.07)">
+              <div style="font-size:12px;font-weight:800;color:#1A1A2E;margin-bottom:10px;display:flex;align-items:center;gap:6px">
+                <i class="ti ti-users" style="color:#6B1E2E"></i> تصنيف المناديب
+              </div>
+              <div id="sd-rep-classify"><div style="color:#aaa;font-size:11px;text-align:center;padding:10px">جاري الحساب...</div></div>
+            </div>
+          </div>
+
           <!-- ── تنبيهات ── -->
           <div id="sd-alerts" style="margin-bottom:12px"></div>
 
@@ -8294,7 +8310,12 @@ function sgModalLoadReps(){
   tbody.innerHTML       = '';
   if(!supName) return;
 
-  const repsList = (_sgData.reps||[]).filter(r => r.supervisors === supName);
+  const norm = s => (s||'').trim().replace(/\s+/g,' ');
+  const repsList = (_sgData.reps||[]).filter(r => {
+    const rSup = norm(r.supervisors);
+    const sName = norm(supName);
+    return rSup === sName || rSup.includes(sName) || sName.includes(rSup);
+  });
   if(!repsList.length){ empty.style.display='block'; return; }
 
   repSel.innerHTML = '<option value="">— اختر مندوب —</option>';
@@ -25260,6 +25281,14 @@ function smonFillChecks(sups){
 let sdTargetsData = [];
 let sdSalesData   = [];
 
+// ── كاش الداشبورد: يحفظ البيانات لمدة 5 دقايق بدل ما يعمل fetch كل مرة ──
+const _sdCache = {};
+const SD_CACHE_TTL = 5 * 60 * 1000; // 5 دقايق بالميلي ثانية
+
+function sdCacheGet(key){ const c=_sdCache[key]; return (c&&Date.now()-c.ts<SD_CACHE_TTL)?c.data:null; }
+function sdCacheSet(key,data){ _sdCache[key]={data,ts:Date.now()}; }
+function sdCacheClear(){ Object.keys(_sdCache).forEach(k=>delete _sdCache[k]); }
+
 function sdInit(){
   const el = document.getElementById('sd-month');
   if(el && !el.value){
@@ -25326,14 +25355,19 @@ async function sdLoad(){
   if(Array.isArray(_stTargets) && _stTargets.length>0){
     sdTargetsData = _stTargets;
   } else {
-    const tgtUrl = `${SUPABASE_URL}/rest/v1/sales_targets?month=eq.${month}&select=*&order=supervisor_name.asc,sector.asc&limit=500`;
-    try {
-      const tgtRes = await fetch(tgtUrl,{headers:H});
-      if(tgtRes.ok){
-        sdTargetsData = await tgtRes.json();
-        if(!Array.isArray(sdTargetsData)) sdTargetsData=[];
-      } else { console.error('sdLoad targets',tgtRes.status, await tgtRes.text()); sdTargetsData=[]; }
-    } catch(e){ console.error('sdLoad targets fetch failed',e); sdTargetsData=[]; }
+    const tgtCacheKey = `sd_targets_${month}`;
+    sdTargetsData = sdCacheGet(tgtCacheKey);
+    if(!sdTargetsData){
+      const tgtUrl = `${SUPABASE_URL}/rest/v1/sales_targets?month=eq.${month}&select=*&order=supervisor_name.asc,sector.asc&limit=500`;
+      try {
+        const tgtRes = await fetch(tgtUrl,{headers:H});
+        if(tgtRes.ok){
+          sdTargetsData = await tgtRes.json();
+          if(!Array.isArray(sdTargetsData)) sdTargetsData=[];
+          else sdCacheSet(tgtCacheKey, sdTargetsData);
+        } else { console.error('sdLoad targets',tgtRes.status, await tgtRes.text()); sdTargetsData=[]; }
+      } catch(e){ console.error('sdLoad targets fetch failed',e); sdTargetsData=[]; }
+    }
   }
 
   // ── لو sales_targets فاضية، جيب من rep_targets (للمناديب الفعّالين فقط) ──
@@ -25367,24 +25401,32 @@ async function sdLoad(){
 
   // ── المحقق: استخدم _stAchieved لو موجود ──
   // ── جيب المبيعات من daily_sales_entries ──
-  let salesEntries = [];
-  try {
-    const salesRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/daily_sales_entries?month=eq.${month}&select=supervisor,sector,route,amount,entry_date&limit=5000`,
-      {headers:H}
-    );
-    if(salesRes.ok){ salesEntries = await salesRes.json(); if(!Array.isArray(salesEntries)) salesEntries=[]; }
-  } catch(e){}
+  const salesEntriesCacheKey = `sd_sales_entries_${month}`;
+  let salesEntries = sdCacheGet(salesEntriesCacheKey);
+  if(!salesEntries){
+    salesEntries = [];
+    try {
+      const salesRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/daily_sales_entries?month=eq.${month}&select=supervisor,sector,route,amount,entry_date&limit=5000`,
+        {headers:H}
+      );
+      if(salesRes.ok){ salesEntries = await salesRes.json(); if(!Array.isArray(salesEntries)) salesEntries=[]; else sdCacheSet(salesEntriesCacheKey, salesEntries); }
+    } catch(e){}
+  }
 
   // ── جيب مبيعات الفواتير من sales_deliveries ──
-  let deliveries = [];
-  try {
-    const delRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/sales_deliveries?delivery_date=gte.${month}-01&delivery_date=lte.${month}-31&select=rep_name,total_net,delivery_date&limit=5000`,
-      {headers:H}
-    );
-    if(delRes.ok){ deliveries = await delRes.json(); if(!Array.isArray(deliveries)) deliveries=[]; }
-  } catch(e){}
+  const deliveriesCacheKey = `sd_deliveries_${month}`;
+  let deliveries = sdCacheGet(deliveriesCacheKey);
+  if(!deliveries){
+    deliveries = [];
+    try {
+      const delRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/sales_deliveries?delivery_date=gte.${month}-01&delivery_date=lte.${month}-31&select=rep_name,total_net,delivery_date&limit=5000`,
+        {headers:H}
+      );
+      if(delRes.ok){ deliveries = await delRes.json(); if(!Array.isArray(deliveries)) deliveries=[]; else sdCacheSet(deliveriesCacheKey, deliveries); }
+    } catch(e){}
+  }
 
   // فلتر المشرف
   let filteredTargets = sdTargetsData;
@@ -25426,12 +25468,27 @@ async function sdLoad(){
   }
 
   // جيب المناديب وربطهم بمشرفيهم (نفس stLoad)
-  let repSupMap = {};
-  try {
-    const repsR = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&select=name,supervisors&limit=500`,{headers:H});
-    const reps = repsR.ok ? await repsR.json() : [];
-    (Array.isArray(reps)?reps:[]).forEach(r=>{ repSupMap[r.name]=r.supervisors||''; });
-  } catch(e){}
+  const repSupCacheKey = `sd_rep_sup_map`;
+  let repSupMap = sdCacheGet(repSupCacheKey) || {};
+  if(!Object.keys(repSupMap).length){
+    try {
+      const repsR = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&select=name,supervisors&limit=500`,{headers:H});
+      const reps = repsR.ok ? await repsR.json() : [];
+      (Array.isArray(reps)?reps:[]).forEach(r=>{ repSupMap[r.name]=r.supervisors||''; });
+      if(Object.keys(repSupMap).length) sdCacheSet(repSupCacheKey, repSupMap);
+    } catch(e){}
+  }
+
+  // ── تحديث dropdown المشرفين ليشمل كل من له مناديب حتى بدون هدف مسجل ──
+  if(supSel){
+    const allSups = new Set([
+      ...sdTargetsData.map(t=>t.supervisor_name).filter(Boolean),
+      ...Object.values(repSupMap).filter(Boolean)
+    ]);
+    const cur = supSel.value;
+    supSel.innerHTML = '<option value="all">كل المشرفين</option>' +
+      [...allSups].sort().map(s=>`<option value="${s}" ${s===cur?'selected':''}>${s}</option>`).join('');
+  }
 
   // تجميع البيع من daily_sales_entries + sales_deliveries
   const salesBySector = {}, todaySalesBySector = {};
@@ -25449,9 +25506,12 @@ async function sdLoad(){
     if(d.delivery_date===todayStr) todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+(+(d.total_net||0));
   });
 
-  // لو مفيش أهداف، ابني القطاعات من بيانات المبيعات نفسها
+  // أضف القطاعات من بيانات المبيعات (للمشرفين بدون هدف مسجل)
+  // لو في فلتر = أضف فقط قطاع المشرف المحدد، لو كل المشرفين = أضف الكل
   Object.keys(salesBySector).forEach(sec=>{
-    if(!sectors[sec]) sectors[sec]={target:0};
+    if(!sectors[sec]){
+      if(supFilter==='all' || sec===supFilter) sectors[sec]={target:0};
+    }
   });
 
   // حساب الإجماليات
@@ -25605,6 +25665,66 @@ async function sdLoad(){
         <div style="height:5px;border-radius:99px;background:linear-gradient(90deg,#6B1E2E,#A0303F);width:${maxToday>0?Math.round(d.todaySale/maxToday*100):0}%"></div>
       </div>
     </div>`).join('');
+
+  // ── تصنيف المشرفين (من بيانات القطاعات الموجودة) ──
+  const supClassifyItems = Object.entries(sectors).map(([name,d])=>({
+    name,
+    expPct: d.target>0 ? Math.round(d.expected/d.target*100) : 0
+  }));
+  sdRenderClassify('sd-sup-classify', supClassifyItems);
+
+  // ── تصنيف المناديب (من rep_targets + deliveries) ──
+  try{
+    const rtR = await fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${month}&select=rep_name,target_amount&limit=1000`,{headers:H});
+    const rtD  = rtR.ok ? await rtR.json() : [];
+    if(Array.isArray(rtD) && rtD.length){
+      // تجميع محقق كل مندوب من deliveries (كل الشهر)
+      const repAch = {};
+      (Array.isArray(deliveries)?deliveries:[]).forEach(d=>{
+        repAch[d.rep_name] = (repAch[d.rep_name]||0) + (+(d.total_net||0));
+      });
+      const repClassifyItems = rtD.filter(r=>+(r.target_amount||0)>0).map(r=>({
+        name: r.rep_name,
+        expPct: workDaysPassed>0
+          ? Math.round(((repAch[r.rep_name]||0)/workDaysPassed)*workDays / r.target_amount * 100)
+          : 0
+      }));
+      sdRenderClassify('sd-rep-classify', repClassifyItems);
+    } else {
+      document.getElementById('sd-rep-classify').innerHTML='<div style="color:#aaa;font-size:11px;text-align:center;padding:10px">لا توجد أهداف مناديب مسجلة</div>';
+    }
+  }catch(e){
+    document.getElementById('sd-rep-classify').innerHTML='<div style="color:#aaa;font-size:11px;text-align:center;padding:10px">تعذّر تحميل بيانات المناديب</div>';
+  }
+}
+
+// ── تصنيف الأداء: ممتاز / جيد / سيئ / ضعيف ────────────────────────────
+function sdRenderClassify(elId, items){
+  // items = [{name, expPct}]
+  const cats = [
+    {label:'ممتاز', min:100, color:'#15803D', bg:'#F0FDF4', border:'#86EFAC', icon:'🌟'},
+    {label:'جيد',   min:80,  color:'#2563EB', bg:'#EFF6FF', border:'#93C5FD', icon:'✅'},
+    {label:'سيئ',   min:60,  color:'#D97706', bg:'#FFFBEB', border:'#FCD34D', icon:'⚠️'},
+    {label:'ضعيف',  min:0,   color:'#DC2626', bg:'#FEF2F2', border:'#FCA5A5', icon:'🔴'},
+  ];
+  cats.forEach(c=>{ c.items=[]; });
+  items.forEach(i=>{
+    const cat = cats.find(c=>i.expPct>=c.min)||cats[cats.length-1];
+    cat.items.push(i);
+  });
+  const el = document.getElementById(elId);
+  if(!el) return;
+  el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">` +
+    cats.map(cat=>`
+      <div style="background:${cat.bg};border-radius:10px;padding:10px 6px;text-align:center;border:1.5px solid ${cat.border}">
+        <div style="font-size:10px;margin-bottom:2px">${cat.icon}</div>
+        <div style="font-size:26px;font-weight:900;color:${cat.color};line-height:1.1">${cat.items.length}</div>
+        <div style="font-size:11px;font-weight:700;color:${cat.color};margin:3px 0">${cat.label}</div>
+        ${cat.items.length?`<div style="margin-top:4px;border-top:1px solid ${cat.border};padding-top:4px">
+          ${cat.items.map(i=>`<div style="font-size:9px;color:#444;line-height:1.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${i.name}</div>`).join('')}
+        </div>`:''}
+      </div>`).join('') +
+    `</div>`;
 }
 
 function sdExportPDF(){
