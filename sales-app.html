@@ -811,12 +811,12 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
                 <div>
                   <label style="font-size:10px;font-weight:700;color:#666;display:block;margin-bottom:3px">من تاريخ *</label>
-                  <input type="date" id="spp-new-from" onchange="sppBuildDays()"
+                  <input type="date" id="spp-new-from" onchange="sppBuildDays();if(cu?.level==='manager')sppAutoCalcManagerTarget();"
                     style="width:100%;box-sizing:border-box;padding:9px 10px;border:1.5px solid #ddd;border-radius:8px;font-family:Cairo,sans-serif;font-size:13px"/>
                 </div>
                 <div>
                   <label style="font-size:10px;font-weight:700;color:#666;display:block;margin-bottom:3px">إلى تاريخ *</label>
-                  <input type="date" id="spp-new-to" onchange="sppBuildDays()"
+                  <input type="date" id="spp-new-to" onchange="sppBuildDays();if(cu?.level==='manager')sppAutoCalcManagerTarget();"
                     style="width:100%;box-sizing:border-box;padding:9px 10px;border:1.5px solid #ddd;border-radius:8px;font-family:Cairo,sans-serif;font-size:13px"/>
                 </div>
                 <div>
@@ -9347,7 +9347,65 @@ async function openSppNewPlan(){
   if(toEl)   toEl.value   = fmt(fri);
 
   sppBuildDays();
+  // للمدير: هدفه الأسبوعي لازم يتحسب من مجموع أهداف فريقه، مش رقم يدخله بنفسه
+  if(cu?.level==='manager'){
+    sppAutoCalcManagerTarget();
+  } else {
+    const tgtInp = document.getElementById('spp-new-target');
+    if(tgtInp){ tgtInp.readOnly=false; tgtInp.style.background=''; }
+    const hint = document.getElementById('spp-target-hint');
+    if(hint) hint.textContent='';
+  }
   document.getElementById('modal-spp-new').style.display='block';
+}
+
+// هدف المدير في الخطة = مجموع أهداف مناديب فريقه الشهرية (rep_targets) موزّعة على أيام الفترة المختارة
+async function sppAutoCalcManagerTarget(){
+  if(cu?.level!=='manager' || !_sppReps.length) return;
+  const from = document.getElementById('spp-new-from')?.value;
+  const to   = document.getElementById('spp-new-to')?.value;
+  const tgtInp = document.getElementById('spp-new-target');
+  if(!from || !to || !tgtInp) return;
+  const month = from.slice(0,7);
+  const H2 = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  try{
+    const [repsRes, tgtRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&status=eq.active&select=name,supervisors&limit=500`,{headers:H2}),
+      fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${month}&select=rep_name,target_amount,work_days&limit=1000`,{headers:H2})
+    ]);
+    const repsAll = repsRes.ok ? await repsRes.json() : [];
+    const tgtAll  = tgtRes.ok  ? await tgtRes.json()  : [];
+    const tgtMap = {}; let wd = 26;
+    tgtAll.forEach(t=>{ tgtMap[t.rep_name]=(+t.target_amount||0); if(t.work_days) wd=t.work_days; });
+
+    const norm = s=>(s||'').trim().replace(/\s+/g,' ');
+    const mySups = _sppReps.map(norm);
+    const teamReps = repsAll.filter(r=>{
+      const rs = norm(r.supervisors);
+      return mySups.some(s=> rs===s || rs.startsWith(s) || s.startsWith(rs));
+    });
+    const monthlyTotal = teamReps.reduce((s,r)=>s+(tgtMap[r.name]||0),0);
+
+    // عدد أيام العمل في الفترة المختارة (بدون جمعة)
+    let daysInRange=0;
+    const cur = new Date(from), end=new Date(to);
+    while(cur<=end){ if(cur.getDay()!==5) daysInRange++; cur.setDate(cur.getDate()+1); }
+    const weekly = wd>0 ? Math.round(monthlyTotal/wd*daysInRange) : 0;
+
+    tgtInp.value = weekly;
+    tgtInp.readOnly = true;
+    tgtInp.style.background = '#F0F4FF';
+    tgtInp.title = 'محسوب تلقائياً من مجموع أهداف فريقك الشهرية — لا يمكن تعديله يدوياً';
+
+    let hint = document.getElementById('spp-target-hint');
+    if(!hint){
+      hint = document.createElement('div');
+      hint.id = 'spp-target-hint';
+      hint.style.cssText = 'font-size:10px;color:#1565C0;margin-top:3px';
+      tgtInp.insertAdjacentElement('afterend', hint);
+    }
+    hint.textContent = `📊 محسوب تلقائياً: هدف الفريق الشهري ${monthlyTotal.toLocaleString('en-US')} ج ÷ ${wd} يوم عمل × ${daysInRange} يوم بالفترة`;
+  }catch(e){ console.warn('sppAutoCalcManagerTarget failed', e); }
 }
 
 function sppBuildDays(){
