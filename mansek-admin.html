@@ -8540,7 +8540,9 @@ async function sgModalSave(){
 
       showToast(`✅ تم حفظ أهداف ${Object.keys(repGoalMap).length} مندوب بنجاح`);
       sgCloseAddGoals();
-      sgRender();
+      // لازم sgLoad (مش sgRender) عشان يجيب الـ id الحقيقي للصفوف اللي اتضافت لتوها من الداتابيز
+      // من غيره لو المستخدم فتح المودال تاني وحفظ، هيعتبرها هدف جديد ويضيف صف مكرر بدل ما يعدّل الموجود
+      sgLoad();
     }
   }catch(e){ showToast('❌ '+e.message); }
   finally{ saveBtn.disabled=false; saveBtn.innerHTML='<i class="ti ti-device-floppy"></i> حفظ الأهداف'; }
@@ -25491,52 +25493,53 @@ async function sdLoad(){
   document.getElementById('sd-month-pct').textContent = monthPct+'%';
   document.getElementById('sd-month-bar').style.width = Math.min(monthPct,100)+'%';
 
-  // ── الأهداف: استخدم _stTargets لو محمّل، وإلا اعمل fetch ──
-  if(Array.isArray(_stTargets) && _stTargets.length>0){
-    sdTargetsData = _stTargets;
-  } else {
-    const tgtCacheKey = `sd_targets_${month}`;
-    sdTargetsData = sdCacheGet(tgtCacheKey);
-    if(!sdTargetsData){
-      const tgtUrl = `${SUPABASE_URL}/rest/v1/sales_targets?month=eq.${month}&select=*&order=supervisor_name.asc,sector.asc&limit=500`;
-      try {
-        const tgtRes = await fetch(tgtUrl,{headers:H});
-        if(tgtRes.ok){
-          sdTargetsData = await tgtRes.json();
-          if(!Array.isArray(sdTargetsData)) sdTargetsData=[];
-          else sdCacheSet(tgtCacheKey, sdTargetsData);
-        } else { console.error('sdLoad targets',tgtRes.status, await tgtRes.text()); sdTargetsData=[]; }
-      } catch(e){ console.error('sdLoad targets fetch failed',e); sdTargetsData=[]; }
-    }
-  }
-
-  // ── لو sales_targets فاضية، جيب من rep_targets (للمناديب الفعّالين فقط) ──
-  if(!sdTargetsData.length){
-    try{
-      const [rtRes, activeRepsRes] = await Promise.all([
-        fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${month}&select=rep_name,supervisor_name,target_amount&limit=1000`,{headers:H}),
-        fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&status=eq.active&select=name&limit=500`,{headers:H})
-      ]);
-      if(rtRes.ok && activeRepsRes.ok){
-        const rtData      = await rtRes.json();
-        const activeReps  = await activeRepsRes.json();
-        if(Array.isArray(rtData) && rtData.length){
-          const activeSet = new Set((Array.isArray(activeReps)?activeReps:[]).map(r=>r.name));
-          const supMap = {};
-          rtData.forEach(r=>{
-            if(!activeSet.has(r.rep_name)) return; // استبعد المناديب غير الفعّالين
-            const sup = r.supervisor_name||'غير محدد';
-            supMap[sup] = (supMap[sup]||0) + (+(r.target_amount||0));
-          });
-          sdTargetsData = Object.entries(supMap).map(([sup,total])=>({
-            supervisor_name: sup,
-            sector: sup,
-            target_amount: total,
-            month
-          }));
-        }
+  // ── الأهداف: rep_targets هو المصدر الحي (نفس شاشة "الأهداف الشهرية") — نبدأ بيه دايماً ──
+  sdTargetsData = [];
+  try{
+    const [rtRes, activeRepsRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${month}&select=rep_name,supervisor_name,target_amount&limit=1000`,{headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&status=eq.active&select=name&limit=500`,{headers:H})
+    ]);
+    if(rtRes.ok && activeRepsRes.ok){
+      const rtData      = await rtRes.json();
+      const activeReps  = await activeRepsRes.json();
+      if(Array.isArray(rtData) && rtData.length){
+        const activeSet = new Set((Array.isArray(activeReps)?activeReps:[]).map(r=>r.name));
+        const supMap = {};
+        rtData.forEach(r=>{
+          if(!activeSet.has(r.rep_name)) return; // استبعد المناديب غير الفعّالين
+          const sup = r.supervisor_name||'غير محدد';
+          supMap[sup] = (supMap[sup]||0) + (+(r.target_amount||0));
+        });
+        sdTargetsData = Object.entries(supMap).map(([sup,total])=>({
+          supervisor_name: sup,
+          sector: sup,
+          target_amount: total,
+          month
+        }));
       }
-    }catch(e){ console.error('rep_targets fallback failed',e); }
+    }
+  }catch(e){ console.error('sdLoad rep_targets failed',e); }
+
+  // ── fallback قديم: لو مفيش أهداف مُدخلة في rep_targets لهذا الشهر أصلاً، جرب جدول sales_targets القديم ──
+  if(!sdTargetsData.length){
+    if(Array.isArray(_stTargets) && _stTargets.length>0){
+      sdTargetsData = _stTargets;
+    } else {
+      const tgtCacheKey = `sd_targets_${month}`;
+      sdTargetsData = sdCacheGet(tgtCacheKey);
+      if(!sdTargetsData){
+        const tgtUrl = `${SUPABASE_URL}/rest/v1/sales_targets?month=eq.${month}&select=*&order=supervisor_name.asc,sector.asc&limit=500`;
+        try {
+          const tgtRes = await fetch(tgtUrl,{headers:H});
+          if(tgtRes.ok){
+            sdTargetsData = await tgtRes.json();
+            if(!Array.isArray(sdTargetsData)) sdTargetsData=[];
+            else sdCacheSet(tgtCacheKey, sdTargetsData);
+          } else { console.error('sdLoad targets',tgtRes.status, await tgtRes.text()); sdTargetsData=[]; }
+        } catch(e){ console.error('sdLoad targets fetch failed',e); sdTargetsData=[]; }
+      }
+    }
   }
 
   // ── المحقق: استخدم _stAchieved لو موجود ──
