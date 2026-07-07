@@ -7817,43 +7817,39 @@ async function tgtLoadData(){
   try{
     if(isManager){
       // ══ منطق مدير البيع / GM ══
-      const myGroups = Array.isArray(cu.groups) ? cu.groups : (cu.groups||'').split(',').map(g=>g.trim()).filter(Boolean);
-
-      // 1) جيب المشرفين من sales_staff بالـ sector (مش من users.grp لتجنب التعارض في أسماء القطاعات)
-      const supsRes = await fetch(
-        `${SUPABASE_URL}/rest/v1/sales_staff?role=eq.sales_sup&active=eq.true&select=name,sector&limit=200`,
-        {headers:H});
-      const allSups = supsRes.ok ? await supsRes.json() : [];
-
-      // فلتر المشرفين اللي قطاعهم في مناطق المدير (partial match عشان "الأسواق الخاصة" تطابق "الأسواق الخاصة القاهرة")
-      const mySups = allSups.filter(s=>{
-        const supSectors = (s.sector||'').split(',').map(x=>x.trim()).filter(Boolean);
-        return supSectors.some(ss => myGroups.some(mg => ss.includes(mg) || mg.includes(ss)));
-      });
-
-      // لو مفيش مشرفين، fallback: جيب أهداف الشهر ده وشوف المشرفين اللي عندهم مناديب
-      let supNames = mySups.map(s=>s.name);
-
-      // 2) جيب أهداف الشهر (لتحديد المناديب ومشرفيهم)
+      // المصدر الرسمي لفريق المدير: staff.reports_to (نفس مصدر "خططي بلس" و"خطط الفريق")
+      // ملحوظة: اتشال الاعتماد على sales_staff.sector (جدول قديم) لأنه كان بيرجّع مطابقة جزئية غلط،
+      // ولو مفيش مطابقة كان بيعمل fallback يجيب أهداف الشركة كلها بدون فلتر — تسريب بيانات بين المديرين
+      let supNames = [];
+      if(cu.level==='manager'){
+        const supsRes = await fetch(
+          `${SUPABASE_URL}/rest/v1/staff?reports_to=eq.${encodeURIComponent(cu.name)}&active=eq.true&select=name&limit=200`,
+          {headers:H});
+        const mySups = supsRes.ok ? await supsRes.json() : [];
+        supNames = mySups.map(s=>s.name);
+      }
+      // GM فقط هو اللي يشوف كل المشرفين بدون فلتر
+      const encSups = supNames.map(n=>encodeURIComponent(n)).join(',');
       let tgtData = [];
-      if(supNames.length){
-        const encSups = supNames.map(n=>encodeURIComponent(n)).join(',');
+      if(cu.level==='gm'){
+        const tgtResAll = await fetch(
+          `${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&select=rep_name,supervisor_name,target_amount,work_days&limit=2000`,
+          {headers:H});
+        tgtData = tgtResAll.ok ? await tgtResAll.json() : [];
+      } else if(supNames.length){
         const tgtRes2 = await fetch(
           `${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&supervisor_name=in.(${encSups})&select=rep_name,supervisor_name,target_amount,work_days&limit=2000`,
           {headers:H});
         tgtData = tgtRes2.ok ? await tgtRes2.json() : [];
       }
 
-      // fallback: لو مفيش بيانات، جيب كل أهداف الشهر
       if(!tgtData.length){
-        const tgtResAll = await fetch(
-          `${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&select=rep_name,supervisor_name,target_amount,work_days&limit=2000`,
-          {headers:H});
-        tgtData = tgtResAll.ok ? await tgtResAll.json() : [];
-      }
-
-      if(!tgtData.length){
-        if(repsBody) repsBody.innerHTML='<div style="text-align:center;padding:30px;color:#bbb;font-size:12px">لا توجد أهداف لهذا الشهر</div>';
+        if(repsBody) repsBody.innerHTML='<div style="text-align:center;padding:30px;color:#bbb;font-size:12px">لا توجد أهداف لهذا الشهر لفريقك</div>';
+        document.getElementById('tgt-total-goal').textContent='0 ج';
+        document.getElementById('tgt-total-sales').textContent='0 ج';
+        document.getElementById('tgt-total-ret').textContent='0 ج';
+        document.getElementById('tgt-total-net').textContent='0 ج';
+        document.getElementById('tgt-rep-count').textContent='0 مشرف';
         return;
       }
 
