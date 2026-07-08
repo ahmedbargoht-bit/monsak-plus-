@@ -6621,10 +6621,14 @@ h2,h3{color:#2C1F0A}
       <datalist id="eu-all-branches-datalist"></datalist>
     </div>
     <div class="form-fld" id="eu-fixed-branch-wrap" style="display:none">
-      <label class="form-lbl">اسم الفرع (للمنسق الثابت)</label>
-      <select id="eu-fixed-branch" style="width:100%">
-        <option value="">— اختر الفرع —</option>
-      </select>
+      <label class="form-lbl">فروع المنسق الثابت — حدد فرع واحد أو أكتر</label>
+      <div id="eu-fixed-assign-hint" style="font-size:10px;color:#8B6F47;margin-bottom:4px">فرع واحد محدد = هيتقفل تلقائياً عليه في تطبيق المنسق · أكتر من فرع = هيختار بينهم كل يوم</div>
+      <input type="text" id="eu-fixed-branch-search" placeholder="🔍 بحث عن فرع..." style="width:100%;margin-bottom:6px" oninput="euFilterFixedBranches()"/>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <button type="button" class="btn btn-sm" style="background:#E8F5E9;color:#1A7A4A" onclick="euSelectAllFixedBranches(true)"><i class="ti ti-checkbox"></i> تحديد الكل</button>
+        <button type="button" class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C" onclick="euSelectAllFixedBranches(false)"><i class="ti ti-square"></i> إلغاء التحديد كله</button>
+      </div>
+      <div id="eu-fixed-branch-list" style="max-height:220px;overflow-y:auto;border:1px solid #E8D9C0;border-radius:8px;padding:6px;background:#FFFDF8;margin-bottom:4px;font-size:12px"></div>
     </div>
     <div class="form-fld">
       <label class="form-lbl">يوم الإجازة الأسبوعية</label>
@@ -14697,15 +14701,107 @@ async function euOnTypeChange(keepVal){
     if(wrapRoute)    wrapRoute.style.display='none';
     if(wrapRouteBrs) wrapRouteBrs.style.display='none';
     if(wrapBranch)   wrapBranch.style.display='';
-    const grp = document.getElementById('eu-group')?.value||'giza';
-    const branches = await _fetchBranchesForGrp(grp);
-    const cur = keepVal!==undefined ? keepVal : (document.getElementById('eu-fixed-branch')?.value||'');
-    _fillBranchSelect('eu-fixed-branch', branches, cur);
+    euLoadFixedBranches(keepVal);
   } else {
     if(wrapRoute)  wrapRoute.style.display='';
     if(wrapBranch) wrapBranch.style.display='none';
     const routeVal = document.getElementById('eu-route')?.value||'';
     euLoadRouteBranches(routeVal);
+  }
+}
+
+// ── فروع المنسق الثابت — checkbox متعدد بدل السيليكت الواحد ─────
+// (نفس مصدر البيانات اللي بيقرأه تطبيق المنسق popBranches() للمنسق الثابت: coord_route_assignments)
+let _euFixedAllBranches = []; // كل فروع المجموعة الحالية (للفلترة بالبحث)
+let _euFixedAssignedSet = new Set(); // الفروع المحددة لهذا المنسق تحديداً
+
+async function euLoadFixedBranches(legacyFixedBranch){
+  const list = document.getElementById('eu-fixed-branch-list');
+  const searchInp = document.getElementById('eu-fixed-branch-search');
+  if(!list) return;
+  if(searchInp) searchInp.value='';
+  list.innerHTML='<div style="color:#999;text-align:center;padding:8px">جاري التحميل...</div>';
+
+  const grp     = document.getElementById('eu-group')?.value||'giza';
+  const repName = document.getElementById('eu-id')?.value||'';
+  try{
+    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const [branchesRes, assignedRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&grp=eq.${encodeURIComponent(grp)}&status=eq.active&order=branch_name.asc&limit=2000`,{headers:H}),
+      repName ? fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?rep_name=eq.${encodeURIComponent(repName)}&select=branch_name`,{headers:H}) : Promise.resolve(null)
+    ]);
+    const branchesData = branchesRes.ok ? await branchesRes.json() : [];
+    const assignedData = assignedRes && assignedRes.ok ? await assignedRes.json() : [];
+
+    _euFixedAllBranches = [...new Set(branchesData.map(b=>b.branch_name).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+    _euFixedAssignedSet = new Set(assignedData.map(a=>a.branch_name));
+    // توافق مع الفرع القديم (users.fixed_branch) لو كان محفوظ ومفيش تخصيص جديد بعد
+    if(legacyFixedBranch){
+      _euFixedAssignedSet.add(legacyFixedBranch);
+      if(!_euFixedAllBranches.includes(legacyFixedBranch)) _euFixedAllBranches.push(legacyFixedBranch);
+    }
+    euRenderFixedBranchList(_euFixedAllBranches);
+  }catch(e){
+    list.innerHTML='<div style="color:#B71C1C;text-align:center;padding:8px">تعذر التحميل</div>';
+  }
+}
+
+function euRenderFixedBranchList(branches){
+  const list = document.getElementById('eu-fixed-branch-list');
+  if(!list) return;
+  if(!branches.length){
+    list.innerHTML='<div style="color:#999;text-align:center;padding:8px">لا توجد فروع في هذه المجموعة</div>';
+    return;
+  }
+  list.innerHTML = branches.map(b=>`
+    <div style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-bottom:1px solid #F0E8D8">
+      <input type="checkbox" class="eu-fixed-branch-cb" data-branch="${b.replace(/"/g,'&quot;')}"
+        ${_euFixedAssignedSet.has(b)?'checked':''} onchange="euToggleFixedBranchAssign(this)"
+        style="cursor:pointer;width:16px;height:16px"/>
+      <span style="flex:1">${b}</span>
+    </div>`).join('');
+}
+
+function euFilterFixedBranches(){
+  const q=(document.getElementById('eu-fixed-branch-search')?.value||'').toLowerCase();
+  const filtered = q ? _euFixedAllBranches.filter(b=>b.toLowerCase().includes(q)) : _euFixedAllBranches;
+  euRenderFixedBranchList(filtered);
+}
+
+async function euToggleFixedBranchAssign(cb){
+  const branchName = cb.dataset.branch;
+  const repName = document.getElementById('eu-id')?.value||'';
+  const grp  = document.getElementById('eu-group')?.value||'giza';
+  const type = document.getElementById('eu-type')?.value||'ثابت';
+  if(!repName){ cb.checked=!cb.checked; alert('احفظ بيانات المنسق أولاً قبل التخصيص'); return; }
+  cb.disabled=true;
+  try{
+    const H={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+    if(cb.checked){
+      _euFixedAssignedSet.add(branchName);
+      await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments`,{
+        method:'POST', headers:H,
+        body: JSON.stringify({grp, route:'', branch_name:branchName, rep_name:repName, coord_type:type, shift:'كامل'})
+      });
+    } else {
+      _euFixedAssignedSet.delete(branchName);
+      await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?rep_name=eq.${encodeURIComponent(repName)}&branch_name=eq.${encodeURIComponent(branchName)}`,{
+        method:'DELETE', headers:H
+      });
+    }
+  }catch(e){
+    alert('خطأ في حفظ التخصيص: '+e.message);
+    cb.checked=!cb.checked;
+  }
+  cb.disabled=false;
+}
+
+async function euSelectAllFixedBranches(checked){
+  const boxes = [...document.querySelectorAll('#eu-fixed-branch-list .eu-fixed-branch-cb')];
+  for(const cb of boxes){
+    if(cb.checked===checked) continue;
+    cb.checked = checked;
+    await euToggleFixedBranchAssign(cb);
   }
 }
 
