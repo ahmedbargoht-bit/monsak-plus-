@@ -2408,27 +2408,13 @@ async function popBranches(route){
   const addedBranches = new Set();
   const coordType = cu?.coordType || 'متحرك';
 
-  // ══ منسق ثابت وله فرع محدد من الأدمن — استخدمه مباشرة وقفل الاختيار (يسمع على السيستيم) ══
-  if(isFixedRep(coordType) && cu?.fixedBranch){
-    const o=document.createElement('option');
-    o.value=cu.fixedBranch; o.textContent=cu.fixedBranch;
-    sel.appendChild(o);
-    sel.value=cu.fixedBranch;
-    sel.disabled=true;
-    sel.style.opacity='0.7'; sel.style.cursor='not-allowed'; sel.style.background='#F0EBE0';
-    const hint=document.getElementById('f-branch-locked-hint');
-    if(hint) hint.style.display='inline';
-    checkStep1Done();
-    return;
-  }
-
   // ══ المصدر الموحد: جدول branches في Supabase ══
   try{
     const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
     let allData=[];
 
     if(isFixedRep(coordType)){
-      // ثابت — جيب من 3 مصادر بالتوازي
+      // ثابت — جيب كل الفروع المخصصة له من 4 مصادر بالتوازي (بما فيها تخصيصات الأدمن الجديدة عبر checkbox)
       const enc=encodeURIComponent(cu.name);
       const [byRepName, byRepName2, byRepName3, byCoord] = await Promise.all([
         fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
@@ -2437,6 +2423,8 @@ async function popBranches(route){
         fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
       ]);
       allData=[...byRepName,...byRepName2,...byRepName3,...byCoord];
+      // توافق مع الفرع الفردي القديم (users.fixed_branch) لو لسه محفوظ ومفيش تخصيص جديد بعد
+      if(cu?.fixedBranch) allData.push({branch_name:cu.fixedBranch});
     } else {
       // متحرك — لو الأدمن خصّص له فروع معينة من خط السير (coord_route_assignments) استخدمها هي بس،
       // ولو مفيش تخصيص، ارجع للسلوك الافتراضي: كل فروع الخط
@@ -2466,13 +2454,25 @@ async function popBranches(route){
         o.value=b.branch_name; o.textContent=b.branch_name; sel.appendChild(o);
       });
       if(unique.length===1){
-        sel.value=unique[0].branch_name; checkStep1Done();
+        sel.value=unique[0].branch_name;
+        // المنسق الثابت وعنده فرع واحد بس مخصص له — اقفل الاختيار عليه تلقائياً (يسمع على السيستيم)
+        if(isFixedRep(coordType)){
+          sel.disabled=true;
+          sel.style.opacity='0.7'; sel.style.cursor='not-allowed'; sel.style.background='#F0EBE0';
+          const hint=document.getElementById('f-branch-locked-hint');
+          if(hint){ hint.textContent='🔒 ثابت حتى الخروج من التطبيق'; hint.style.color=''; hint.style.display='inline'; }
+        }
+        checkStep1Done();
       } else {
         const lastBranch=localStorage.getItem('last_branch_'+cu?.name);
         if(lastBranch && unique.find(b=>b.branch_name===lastBranch)){
           sel.value=lastBranch; checkStep1Done();
         }
       }
+    } else if(isFixedRep(coordType)){
+      // ثابت بدون أي فرع مخصص له من الأدمن بعد
+      const hint=document.getElementById('f-branch-locked-hint');
+      if(hint){ hint.textContent='⚠️ لم يحدد لك الأدمن فرعاً بعد'; hint.style.display='inline'; hint.style.color='#B71C1C'; }
     }
   }catch(e){
     console.warn('popBranches error:', e);
@@ -3986,7 +3986,17 @@ function resetVisitState(){
 // ── checklist الانصراف ──────────────────────────────────────
 const _chkState = {prods:false, rets:false, miss:false};
 
-function openCheckoutModal(){
+function renderChkRow(type, done, text){
+  const icons = {prods:'📦', rets:'↩️', miss:'⚠️'};
+  const icon  = document.getElementById('chk-icon-'+type);
+  const label = document.getElementById('chk-label-'+type);
+  const btn   = document.getElementById('chk-btn-'+type+'-none');
+  if(icon)  icon.textContent  = done ? '✅' : icons[type];
+  if(label) label.textContent = text;
+  if(btn)   btn.style.display = done ? 'none' : 'block';
+}
+
+async function openCheckoutModal(){
   if(!attIn){alert('سجّل الحضور أولاً من صفحة إدخال');return;}
   if(attOut){alert('سبق وسجّلت الانصراف الساعة '+attOut.time);return;}
 
@@ -3994,29 +4004,54 @@ function openCheckoutModal(){
   const lbl = document.getElementById('chk-branch-label');
   if(lbl) lbl.textContent = branch ? 'فرع: '+branch : '';
 
-  // تحقق الأصناف
+  // ── فحص فوري من الذاكرة المحلية (زي ما كان) — عشان الشاشة تفتح فوراً بدون انتظار ──
   const prodCount = products?.length || 0;
   _chkState.prods = prodCount > 0;
-  document.getElementById('chk-icon-prods').textContent = _chkState.prods ? '✅' : '📦';
-  document.getElementById('chk-label-prods').textContent = _chkState.prods ? prodCount+' صنف مسجّل' : 'لم تُسجَّل بعد';
-  document.getElementById('chk-btn-prods-none').style.display = _chkState.prods ? 'none' : 'block';
+  renderChkRow('prods', _chkState.prods, _chkState.prods ? prodCount+' صنف مسجّل' : 'جاري التحقق...');
 
-  // مرتجعات — نعتبرها محتاجة تأكيد دايماً (المنسق يضغط "لا يوجد" أو تكون مسجلة)
   const retCount = retItems?.length || 0;
   _chkState.rets = retCount > 0;
-  document.getElementById('chk-icon-rets').textContent = _chkState.rets ? '✅' : '↩️';
-  document.getElementById('chk-label-rets').textContent = _chkState.rets ? retCount+' مرتجع مسجّل' : 'لم تُسجَّل بعد';
-  document.getElementById('chk-btn-rets-none').style.display = _chkState.rets ? 'none' : 'block';
+  renderChkRow('rets', _chkState.rets, _chkState.rets ? retCount+' مرتجع مسجّل' : 'جاري التحقق...');
 
-  // نواقص
-  const missCount = missing?.length || 0;
+  // ملحوظة: النواقص ممكن تتسجل من شاشتين مختلفتين (إضافة فردية أو اختيار جماعي بالسبب) —
+  // الذاكرة المحلية لوحدها مش كافية دايماً، فبنجمع الاتنين ونتأكد بعدين من Supabase مباشرة
+  const missCount = (missing?.length||0) + (missItems?.length||0);
   _chkState.miss = missCount > 0;
-  document.getElementById('chk-icon-miss').textContent = _chkState.miss ? '✅' : '⚠️';
-  document.getElementById('chk-label-miss').textContent = _chkState.miss ? missCount+' نقص مسجّل' : 'لم تُسجَّل بعد';
-  document.getElementById('chk-btn-miss-none').style.display = _chkState.miss ? 'none' : 'block';
+  renderChkRow('miss', _chkState.miss, _chkState.miss ? missCount+' نقص مسجّل' : 'جاري التحقق...');
 
   updateCheckoutConfirmBtn();
   document.getElementById('modal-checkout-check').style.display = 'flex';
+
+  // ── تأكيد دقيق من Supabase مباشرة — عشان "حفظ الزيارة" بيصفّر الذاكرة المحلية للأصناف/النواقص
+  // فلو المنسق سجّل حاجة فعلاً وبعدين حفظ الزيارة، الذاكرة المحلية بتقول "لسه فاضي" وهي مش كده ──
+  if(!branch || !cu?.name) return;
+  try{
+    const today = localDateStr();
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const enc = encodeURIComponent(cu.name);
+    const encBranch = encodeURIComponent(branch);
+    const range = `created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59`;
+
+    const [prodRes, retRes, missRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/products?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/returns?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/missing?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    ]);
+
+    if(_chkState.prods){ /* اتأكد أصلاً محلياً */ }
+    else if(prodRes.length){ _chkState.prods=true; renderChkRow('prods', true, 'مسجّل بالفعل ✓'); }
+    else renderChkRow('prods', false, 'لم تُسجَّل بعد');
+
+    if(_chkState.rets){}
+    else if(retRes.length){ _chkState.rets=true; renderChkRow('rets', true, 'مسجّل بالفعل ✓'); }
+    else renderChkRow('rets', false, 'لم تُسجَّل بعد');
+
+    if(_chkState.miss){}
+    else if(missRes.length){ _chkState.miss=true; renderChkRow('miss', true, 'مسجّل بالفعل ✓'); }
+    else renderChkRow('miss', false, 'لم تُسجَّل بعد');
+
+    updateCheckoutConfirmBtn();
+  }catch(e){ console.warn('checkout verify error:', e); }
 }
 
 function chkConfirmNone(type){
