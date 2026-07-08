@@ -6606,12 +6606,19 @@ h2,h3{color:#2C1F0A}
       </select>
     </div>
     <div class="form-fld" id="eu-route-branches-wrap" style="display:none">
-      <label class="form-lbl">فروع خط السير (متزامنة مع Supabase وتطبيق المنسق)</label>
-      <div id="eu-route-branches-list" style="max-height:160px;overflow-y:auto;border:1px solid #E8D9C0;border-radius:8px;padding:6px;background:#FFFDF8;margin-bottom:8px;font-size:12px"></div>
-      <div style="display:flex;gap:6px">
-        <input type="text" id="eu-new-branch-name" placeholder="اسم فرع جديد لإضافته لهذا الخط" style="flex:1"/>
-        <button type="button" class="btn btn-sm btn-blue" onclick="euAddRouteBranch()"><i class="ti ti-plus"></i> إضافة</button>
+      <label class="form-lbl">فروع خط السير — حدد الفروع الخاصة بهذا المنسق تحديداً</label>
+      <div id="eu-assign-hint" style="font-size:10px;color:#8B6F47;margin-bottom:4px">لو ملهاش أي فرع محدد، هيظهر له كل فروع الخط بالكامل (السلوك الحالي)</div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <button type="button" class="btn btn-sm" style="background:#E8F5E9;color:#1A7A4A" onclick="euSelectAllRouteBranches(true)"><i class="ti ti-checkbox"></i> تحديد الكل</button>
+        <button type="button" class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C" onclick="euSelectAllRouteBranches(false)"><i class="ti ti-square"></i> إلغاء التحديد كله</button>
       </div>
+      <div id="eu-route-branches-list" style="max-height:200px;overflow-y:auto;border:1px solid #E8D9C0;border-radius:8px;padding:6px;background:#FFFDF8;margin-bottom:8px;font-size:12px"></div>
+      <div style="font-size:10px;color:#8B6F47;margin-bottom:4px">اكتب اسم فرع موجود بالفعل في النظام لربطه بهذا الخط، أو اسم جديد لإنشاء فرع جديد</div>
+      <div style="display:flex;gap:6px">
+        <input type="text" id="eu-new-branch-name" list="eu-all-branches-datalist" placeholder="اكتب اسم فرع (موجود أو جديد)..." style="flex:1"/>
+        <button type="button" class="btn btn-sm btn-blue" onclick="euAddRouteBranch()"><i class="ti ti-plus"></i> إضافة / ربط</button>
+      </div>
+      <datalist id="eu-all-branches-datalist"></datalist>
     </div>
     <div class="form-fld" id="eu-fixed-branch-wrap" style="display:none">
       <label class="form-lbl">اسم الفرع (للمنسق الثابت)</label>
@@ -14715,25 +14722,107 @@ async function euLoadRouteBranches(route){
   }
   wrap.style.display='';
   list.innerHTML='<div style="color:#999;text-align:center;padding:8px">جاري التحميل...</div>';
+  const repName = document.getElementById('eu-id')?.value||'';
   try{
     const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,status&route=eq.${encodeURIComponent(route)}&order=branch_name.asc&limit=500`,{headers:H});
-    const data = res.ok ? await res.json() : [];
+    const [branchesRes, assignedRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,status&route=eq.${encodeURIComponent(route)}&order=branch_name.asc&limit=500`,{headers:H}),
+      repName ? fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?rep_name=eq.${encodeURIComponent(repName)}&select=branch_name`,{headers:H}) : Promise.resolve(null)
+    ]);
+    const data     = branchesRes.ok ? await branchesRes.json() : [];
+    const assigned = assignedRes && assignedRes.ok ? await assignedRes.json() : [];
+    const assignedSet = new Set(assigned.map(a=>a.branch_name));
+
     if(!data.length){
       list.innerHTML='<div style="color:#999;text-align:center;padding:8px">لا توجد فروع مسجلة لهذا الخط بعد</div>';
-      return;
+    } else {
+      list.innerHTML = data.map(b=>`
+        <div style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-bottom:1px solid #F0E8D8">
+          <input type="checkbox" class="eu-branch-assign-cb" data-branch="${(b.branch_name||'').replace(/"/g,'&quot;')}"
+            ${assignedSet.has(b.branch_name)?'checked':''} onchange="euToggleBranchAssign(this,'${route.replace(/'/g,"\\'")}')"
+            style="cursor:pointer;width:16px;height:16px" title="مخصص لهذا المنسق"/>
+          <span style="flex:1">${b.status!=='active' ? '⚪ ' : '🟢 '}${b.branch_name}</span>
+          <button type="button" onclick="euDeleteRouteBranch('${b.id}','${(b.branch_name||'').replace(/'/g,"\\'")}','${route.replace(/'/g,"\\'")}')"
+            style="background:none;border:none;color:#B71C1C;cursor:pointer;font-size:13px" title="حذف الفرع من النظام">
+            <i class="ti ti-trash"></i>
+          </button>
+        </div>`).join('');
     }
-    list.innerHTML = data.map(b=>`
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 6px;border-bottom:1px solid #F0E8D8">
-        <span>${b.status!=='active' ? '⚪ ' : '🟢 '}${b.branch_name}</span>
-        <button type="button" onclick="euDeleteRouteBranch('${b.id}','${(b.branch_name||'').replace(/'/g,"\\'")}','${route.replace(/'/g,"\\'")}')"
-          style="background:none;border:none;color:#B71C1C;cursor:pointer;font-size:13px" title="حذف">
-          <i class="ti ti-trash"></i>
-        </button>
-      </div>`).join('');
+    euUpdateAssignHint(assignedSet.size, data.length);
   }catch(e){
     list.innerHTML='<div style="color:#B71C1C;text-align:center;padding:8px">تعذر التحميل</div>';
   }
+  // جهّز قائمة اقتراحات بكل الفروع الموجودة في النظام (لربط فرع حالي بدل تكراره)
+  euFillAllBranchesDatalist();
+}
+
+function euUpdateAssignHint(assignedCount, total){
+  const hint = document.getElementById('eu-assign-hint');
+  if(!hint) return;
+  if(!assignedCount){
+    hint.textContent = 'لو ملهاش أي فرع محدد، هيظهر له كل فروع الخط بالكامل (السلوك الحالي)';
+    hint.style.color = '#8B6F47';
+  } else {
+    hint.textContent = `محدد له ${assignedCount} فرع من أصل ${total} — هيشوف الفروع دي بس في التطبيق`;
+    hint.style.color = '#1A7A4A';
+  }
+}
+
+async function euToggleBranchAssign(cb, route){
+  const branchName = cb.dataset.branch;
+  const repName = document.getElementById('eu-id')?.value||'';
+  const grp  = document.getElementById('eu-group')?.value||'giza';
+  const type = document.getElementById('eu-type')?.value||'متحرك';
+  if(!repName){ cb.checked=!cb.checked; alert('احفظ بيانات المنسق أولاً قبل التخصيص'); return; }
+  cb.disabled=true;
+  try{
+    const H={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+    if(cb.checked){
+      await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments`,{
+        method:'POST', headers:H,
+        body: JSON.stringify({grp, route, branch_name:branchName, rep_name:repName, coord_type:type, shift:'كامل'})
+      });
+    } else {
+      await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?rep_name=eq.${encodeURIComponent(repName)}&branch_name=eq.${encodeURIComponent(branchName)}`,{
+        method:'DELETE', headers:H
+      });
+    }
+  }catch(e){
+    alert('خطأ في حفظ التخصيص: '+e.message);
+    cb.checked=!cb.checked;
+  }
+  cb.disabled=false;
+  const total = document.querySelectorAll('#eu-route-branches-list .eu-branch-assign-cb').length;
+  const assignedNow = document.querySelectorAll('#eu-route-branches-list .eu-branch-assign-cb:checked').length;
+  euUpdateAssignHint(assignedNow, total);
+}
+
+async function euSelectAllRouteBranches(checked){
+  const boxes = [...document.querySelectorAll('#eu-route-branches-list .eu-branch-assign-cb')];
+  const route = document.getElementById('eu-route')?.value||'';
+  for(const cb of boxes){
+    if(cb.checked===checked) continue;
+    cb.checked = checked;
+    await euToggleBranchAssign(cb, route);
+  }
+}
+
+// كاش كل الفروع في النظام (لكل خط) — يُستخدم للربط بدل التكرار
+let _allBranchesCache = null;
+async function euFillAllBranchesDatalist(){
+  const dl = document.getElementById('eu-all-branches-datalist');
+  if(!dl) return;
+  try{
+    if(!_allBranchesCache){
+      const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,route,grp&order=branch_name.asc&limit=5000`,{headers:H});
+      _allBranchesCache = res.ok ? await res.json() : [];
+    }
+    const seen = new Set();
+    dl.innerHTML = _allBranchesCache
+      .filter(b=>{ if(!b.branch_name||seen.has(b.branch_name)) return false; seen.add(b.branch_name); return true; })
+      .map(b=>`<option value="${b.branch_name}">${b.branch_name} — ${b.route||'بدون خط'}</option>`).join('');
+  }catch(e){}
 }
 
 async function euDeleteRouteBranch(id, name, route){
@@ -14748,6 +14837,43 @@ async function euAddRouteBranch(){
   const name  = (inp?.value||'').trim();
   if(!route){ alert('اختر خط السير أولاً'); return; }
   if(!name){ alert('أدخل اسم الفرع'); return; }
+
+  // ── لو الفرع ده موجود بالفعل في النظام — اربطه بالخط الحالي بدل إنشاء فرع مكرر ──
+  try{
+    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const chkRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?branch_name=eq.${encodeURIComponent(name)}&select=id,branch_name,route&limit=1`,{headers:H});
+    const chk = chkRes.ok ? await chkRes.json() : [];
+    if(chk.length){
+      const existing = chk[0];
+      if(existing.route===route){
+        alert('الفرع "'+name+'" موجود بالفعل على هذا الخط');
+        return;
+      }
+      const moveMsg = existing.route
+        ? `الفرع "${name}" مربوط حالياً بخط "${existing.route}" — هل تريد نقله لهذا الخط بدلاً منه؟`
+        : `الفرع "${name}" موجود في النظام بدون خط سير — هل تريد ربطه بهذا الخط؟`;
+      if(!confirm(moveMsg)) return;
+      const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${existing.id}`,{
+        method:'PATCH',
+        headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+        body: JSON.stringify({route, grp})
+      });
+      if(patchRes.ok){
+        if(inp) inp.value='';
+        if(typeof showToast==='function') showToast('✅ تم ربط الفرع "'+name+'" بهذا الخط');
+        _allBranchesCache = null;
+        euLoadRouteBranches(route);
+        if(typeof loadBranches==='function') loadBranches();
+        if(typeof rebuildBranchesMap==='function') rebuildBranchesMap();
+      } else {
+        const err = await patchRes.text();
+        alert('فشل الربط: '+err.substring(0,150));
+      }
+      return;
+    }
+  }catch(e){}
+
+  // ── فرع جديد بالكامل — أنشئه ──
   try{
     const res = await fetch(`${SUPABASE_URL}/rest/v1/branches`,{
       method:'POST',
@@ -14757,6 +14883,7 @@ async function euAddRouteBranch(){
     if(res.ok){
       if(inp) inp.value='';
       if(typeof showToast==='function') showToast('✅ تم إضافة الفرع: '+name);
+      _allBranchesCache = null;
       euLoadRouteBranches(route);
       if(typeof loadBranches==='function') loadBranches();
       if(typeof rebuildBranchesMap==='function') rebuildBranchesMap();
