@@ -5648,6 +5648,34 @@ function closeSplash(){
 // ══════════════════════════════════════════════════════════════
 // بانر العرض الترويجي — promo_banner (سجل واحد id=1)
 // ══════════════════════════════════════════════════════════════
+// بيرجع كل أسماء الفروع المخصصة للمنسق الحالي (نفس منطق popBranches) — تُستخدم لاستهداف البانر
+async function myAssignedBranchNames(){
+  try{
+    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const enc=encodeURIComponent(cu.name);
+    const coordType = cu?.coordType || 'متحرك';
+    let allData=[];
+    if(isFixedRep(coordType)){
+      const [byRepName, byRepName2, byRepName3, byCoord] = await Promise.all([
+        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name2=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name3=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      ]);
+      allData=[...byRepName,...byRepName2,...byRepName3,...byCoord];
+      if(cu?.fixedBranch) allData.push({branch_name:cu.fixedBranch});
+    } else {
+      const assignedData = await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+      if(assignedData.length){
+        allData=assignedData;
+      } else {
+        allData = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${encodeURIComponent(cu.route||'')}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+      }
+    }
+    return [...new Set(allData.map(b=>b.branch_name).filter(Boolean))];
+  }catch(e){ console.warn('myAssignedBranchNames error:', e); return []; }
+}
+
 async function checkPromoBanner(){
   try{
     const r = await fetch(`${SUPABASE_URL}/rest/v1/promo_banner?id=eq.1&select=*`,
@@ -5659,6 +5687,13 @@ async function checkPromoBanner(){
 
     const seenVersion = localStorage.getItem('promo_banner_seen_version');
     if(String(row.version) === String(seenVersion)) return; // المستخدم قفله قبل كده لنفس النسخة
+
+    // استهداف عميل معين — لو محدد، اتأكد إن عندي فرع بيحتوي على النص ده قبل ما أعرض البانر
+    if(row.target_client && row.target_client.trim()){
+      const myBranches = await myAssignedBranchNames();
+      const matched = myBranches.some(b=>b.includes(row.target_client.trim()));
+      if(!matched) return;
+    }
 
     document.getElementById('promo-popup-title').textContent = row.title || 'عرض جديد';
     document.getElementById('promo-popup-body').textContent = row.body || '';

@@ -3015,6 +3015,12 @@ h2,h3{color:#2C1F0A}
               <label class="form-lbl">نص البانر</label>
               <textarea id="pb-body" rows="3" placeholder="تفاصيل العرض..." style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:13px;resize:vertical"></textarea>
             </div>
+            <div class="form-fld">
+              <label class="form-lbl">استهداف عميل معين (اختياري)</label>
+              <input type="text" id="pb-client" list="pb-client-list" placeholder="مثال: كارفور — سيبه فاضي لو عايز البانر يوصل للكل" oninput="pbPreviewClient()"/>
+              <datalist id="pb-client-list"></datalist>
+              <div id="pb-client-preview" style="font-size:11px;color:#666;margin-top:6px"></div>
+            </div>
             <div class="ok" id="pb-ok"></div>
             <button class="btn btn-blue btn-sm" onclick="savePromoBanner()"><i class="ti ti-device-floppy"></i> حفظ ونشر البانر</button>
           </div>
@@ -15847,29 +15853,73 @@ async function loadPromoBanner(){
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
     const r = await fetch(`${SUPABASE_URL}/rest/v1/promo_banner?id=eq.1&select=*`,{headers:H});
     const d = r.ok ? await r.json() : [];
-    const row = d[0] || {active:false, title:'', body:'', version:0};
+    const row = d[0] || {active:false, title:'', body:'', version:0, target_client:''};
     document.getElementById('pb-active').checked = !!row.active;
     document.getElementById('pb-title').value = row.title || '';
     document.getElementById('pb-body').value  = row.body  || '';
+    document.getElementById('pb-client').value = row.target_client || '';
     window._pbCurrentVersion = row.version || 0;
     if(statusEl){
       statusEl.textContent = row.active ? '🟢 مفعّل حالياً' : '⚪ متوقف';
       statusEl.style.background = row.active ? '#EAF3DE' : '#eee';
       statusEl.style.color = row.active ? '#3B6D11' : '#666';
     }
+    pbBuildClientDatalist();
+    pbPreviewClient();
   }catch(e){ console.warn('loadPromoBanner error', e); }
+}
+
+// يبني قائمة اقتراحات أسماء العملاء من فروع النظام الفعلية (بدون تعديل يدوي)
+function pbBuildClientDatalist(){
+  const dl = document.getElementById('pb-client-list');
+  if(!dl) return;
+  const branches = cachedData.branches||[];
+  const tokens = new Set();
+  branches.forEach(b=>{
+    const name = (b.branch_name||'').trim();
+    if(!name) return;
+    // ناخد أول جزء قبل أول فاصل شائع (- أو _ أو /)
+    const first = name.split(/[-_\/]/)[0].trim();
+    if(first && first.length>=2) tokens.add(first);
+  });
+  dl.innerHTML = [...tokens].sort((a,b)=>a.localeCompare('ar')).map(t=>`<option value="${t}"></option>`).join('');
+}
+
+// معاينة حية: كام فرع/مستخدم هيوصلهم البانر لو استهدفنا العميل ده
+function pbPreviewClient(){
+  const el = document.getElementById('pb-client-preview');
+  if(!el) return;
+  const q = (document.getElementById('pb-client')?.value||'').trim();
+  if(!q){
+    el.textContent = 'مفيش استهداف محدد — البانر هيوصل لكل المستخدمين (مناديب، منسقين، مشرفين، مديرين).';
+    el.style.color = '#666';
+    return;
+  }
+  const branches = (cachedData.branches||[]).filter(b=>(b.branch_name||'').includes(q));
+  const coordAssign = (cachedData.coord_route_assignments||[]).filter(c=>(c.branch_name||'').includes(q));
+  const names = new Set();
+  branches.forEach(b=>{ [b.rep_name,b.rep_name2,b.rep_name3].forEach(n=>{ if(n) names.add(n); }); });
+  coordAssign.forEach(c=>{ if(c.rep_name) names.add(c.rep_name); });
+  if(!branches.length){
+    el.textContent = `⚠️ مفيش أي فرع في النظام اسمه بيحتوي على "${q}" — راجع الإملاء قبل النشر.`;
+    el.style.color = '#B71C1C';
+  } else {
+    el.textContent = `✅ هيوصل لأصحاب ${branches.length} فرع (تقريباً ${names.size} شخص) اسمهم بيحتوي على "${q}".`;
+    el.style.color = '#1A7A4A';
+  }
 }
 
 async function savePromoBanner(){
   const active = document.getElementById('pb-active').checked;
   const title  = document.getElementById('pb-title').value.trim();
   const body   = document.getElementById('pb-body').value.trim();
+  const target_client = document.getElementById('pb-client').value.trim();
   const okEl   = document.getElementById('pb-ok');
   const newVersion = (window._pbCurrentVersion||0) + 1; // نسخة جديدة عشان يظهر حتى للي قافلينه قبل كده
 
   try{
     const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
-    const payload = {active, title, body, version:newVersion, updated_at:new Date().toISOString()};
+    const payload = {active, title, body, target_client, version:newVersion, updated_at:new Date().toISOString()};
     const res = await fetch(`${SUPABASE_URL}/rest/v1/promo_banner?id=eq.1`,{method:'PATCH', headers:H, body:JSON.stringify(payload)});
     if(!res.ok && res.status!==204){
       // لو السجل مش موجود أصلاً — أضفه
