@@ -550,6 +550,10 @@ input[type=number] { -moz-appearance:textfield; }
           <button class="btn btn-green" id="p-send-all-btn" onclick="sendAllProducts()" style="display:none">
             <i class="ti ti-send"></i> إرسال كل التقرير
           </button>
+          <button class="btn" id="p-retry-failed-btn" onclick="sendAllProducts()"
+            style="display:none;margin-top:8px;background:#FFEBEE;color:#B71C1C;border:1.5px solid #FFCDD2;width:100%">
+            <i class="ti ti-refresh"></i> إعادة إرسال الأصناف الفاشلة
+          </button>
         </div>
       </div>
 
@@ -2722,11 +2726,31 @@ async function saveVisit(){
     kpi_pts:   isFixedRep(cu?.coordType) ? getKpiPoints() : 0,
     note: document.getElementById('fx-notes')?.value||''
   };
-  e.points=calcPts(e);cu.score=(cu.score||0)+e.points;
+  e.points=calcPts(e);
+  showOverlay(true);
+  // ── حاول الحفظ، ولو فشل جرّب مرة كمان (مشكلة شبكة مؤقتة) — عشان الزيارة متضيعش بصمت ──
+  let saveOk = await apiPost(e).catch(()=>false);
+  if(!saveOk){
+    saveOk = await apiPost(e).catch(()=>false);
+  }
+  showOverlay(false);
+  _savingVisit = false;
+  const btn2 = document.getElementById('save-visit-btn');
+  if(btn2){ btn2.disabled=false; btn2.innerHTML='<i class="ti ti-device-floppy"></i> حفظ الزيارة'; }
+
+  if(!saveOk){
+    const errEl=document.getElementById('entry-ok');
+    errEl.textContent='❌ فشل حفظ الزيارة — تأكد من الاتصال بالإنترنت واضغط "حفظ الزيارة" تاني';
+    errEl.style.background='#FFEBEE'; errEl.style.color='#B71C1C';
+    errEl.style.display='block';
+    setTimeout(()=>{ errEl.style.display='none'; errEl.style.background=''; errEl.style.color=''; },4000);
+    return;
+  }
+
+  // نجح فعلاً — دلوقتي بس حدّث الحالة المحلية
+  cu.score=(cu.score||0)+e.points;
   visits.push({...e,branch});
   window._lastVisitedBranch = branch;
-  showOverlay(true);
-  await apiPost(e);
   // حدّث جدول location بالفرع الفعلي اللي اتزار + الموقع اللحظي — عشان "اللوكيشن المباشر" يعكس آخر فرع حقيقي
   try{
     await sbUpsert('location', {
@@ -2734,10 +2758,6 @@ async function saveVisit(){
       lat:freshLoc.lat, lng:freshLoc.lng, active:true, updated_at:new Date().toISOString()
     }, 'name');
   }catch(e){ console.warn('location branch sync failed:', e); }
-  showOverlay(false);
-  _savingVisit = false;
-  const btn2 = document.getElementById('save-visit-btn');
-  if(btn2){ btn2.disabled=false; btn2.innerHTML='<i class="ti ti-device-floppy"></i> حفظ الزيارة'; }
   // حدّث badge تاب الزيارة
   const vBadge = document.getElementById('visit-badge');
   if(vBadge){ vBadge.textContent = visits.length; vBadge.style.display='block'; }
@@ -2966,6 +2986,31 @@ function pCalcRemain(i, type){
   }
 }
 
+// مسح خانات صنف واحد بس (بعد ما يتأكد إن إرساله نجح فعلاً على Supabase)
+function pClearProductRow(i){
+  const qShelf = document.getElementById(`pshelf-${i}`);
+  const qStock = document.getElementById(`pstock-${i}`);
+  const dShelf = document.getElementById(`pdate-shelf-${i}`);
+  const dStock = document.getElementById(`pdate-stock-${i}`);
+  const rShelf = document.getElementById(`premain-shelf-${i}`);
+  const rStock = document.getElementById(`premain-stock-${i}`);
+  if(qShelf){ qShelf.value=''; }
+  if(qStock){ qStock.value=''; }
+  if(dShelf){ dShelf.value=''; }
+  if(dStock){ dStock.value=''; }
+  if(rShelf){ rShelf.textContent=''; rShelf.style.background=''; }
+  if(rStock){ rStock.textContent=''; rStock.style.background=''; }
+  // مسح الـ rows الإضافية (اللي اتضافت بزر + تاريخ وكمية)
+  ['shelf','stock'].forEach(type => {
+    const container = document.getElementById(`prows-${type}-${i}`);
+    if(!container) return;
+    container.querySelectorAll('input[type="number"]').forEach(inp => inp.value='');
+    container.querySelectorAll('input[type="month"]').forEach(inp => inp.value='');
+    const rows = container.querySelectorAll(`.prow-${type}`);
+    rows.forEach((row, idx) => { if(idx > 0) row.remove(); });
+  });
+}
+
 async function sendAllProducts(){
   const snfList = window._pCurrentList||[];
   const monthsList = window._pCurrentMonths||[];
@@ -2973,9 +3018,13 @@ async function sendAllProducts(){
   const branch = document.getElementById('f-branch')?.value||'';
   if(!snfList.length){ alert('لا توجد أصناف'); return; }
   const btn = document.getElementById('p-send-all-btn');
+  const retryBtn = document.getElementById('p-retry-failed-btn');
   btn.disabled=true; btn.innerHTML='<i class="ti ti-loader spin"></i> جاري الإرسال...';
+  if(retryBtn){ retryBtn.disabled=true; }
   showOverlay(true);
   let sentCount=0;
+  const failedNames=[];
+  let attemptedAny=false;
   for(let i=0;i<snfList.length;i++){
     const snf=snfList[i];
     const monthsShelf = String((monthsList[i]?.monthsShelf)??10);
@@ -2987,7 +3036,8 @@ async function sendAllProducts(){
     const stock = String(stockRows.reduce((s,r)=>s+(parseFloat(r.qty)||0),0)||0);
     const dateShelf = shelfRows[0]?.date||'';
     const dateStock = stockRows[0]?.date||'';
-    if(!shelfRows.length && !stockRows.length) continue;
+    if(!shelfRows.length && !stockRows.length) continue; // صنف فاضي — متسجلش أصلاً (مش فشل)
+    attemptedAny=true;
     const pd={action:'saveProduct',name:cu.name,route:cu.route,
       fea:v1,cat:v2,grp:v3,snf,
       shelf,stock,dateShelf,
@@ -2995,53 +3045,56 @@ async function sendAllProducts(){
       dateStock,monthsStock,branch,
       shelfRows: JSON.stringify(shelfRows),
       stockRows:  JSON.stringify(stockRows)};
-    const prodEntry={snf,shelf,stock,fea:v1,dateShelf,monthsShelf,dateStock,monthsStock,
-      shelfRows,stockRows,branch};
-    products.push(prodEntry);
-    sessionProducts.push(prodEntry);
-    await apiPost(pd);
-    sentCount++;
+
+    // ── حاول الإرسال، ولو فشل جرّب مرة كمان (ممكن تكون مشكلة شبكة مؤقتة) ──
+    let result = await apiPost(pd).catch(()=>false);
+    if(result===false){
+      result = await apiPost(pd).catch(()=>false);
+    }
+    const ok = result===true || (result && result.duplicate);
+
+    if(ok){
+      const prodEntry={snf,shelf,stock,fea:v1,dateShelf,monthsShelf,dateStock,monthsStock,
+        shelfRows,stockRows,branch};
+      products.push(prodEntry);
+      sessionProducts.push(prodEntry);
+      sentCount++;
+      // امسح خانات الصنف ده بس — لأنه فعلاً اتسجل على Supabase
+      pClearProductRow(i);
+    } else {
+      // فشل الإرسال — سيب الخانات زي ما هي عشان المنسق يقدر يعيد المحاولة بدون ما يفقد البيانات
+      failedNames.push(snf);
+    }
   }
   showOverlay(false);
   updateProdBadge();
   renderProdList();
-  // reset كل الـ inputs لو الإرسال نجح
-  if(sentCount>0){
-    for(let i=0;i<snfList.length;i++){
-      const qShelf = document.getElementById(`pshelf-${i}`);
-      const qStock = document.getElementById(`pstock-${i}`);
-      const dShelf = document.getElementById(`pdate-shelf-${i}`);
-      const dStock = document.getElementById(`pdate-stock-${i}`);
-      const rShelf = document.getElementById(`premain-shelf-${i}`);
-      const rStock = document.getElementById(`premain-stock-${i}`);
-      if(qShelf){ qShelf.value=''; }
-      if(qStock){ qStock.value=''; }
-      if(dShelf){ dShelf.value=''; }
-      if(dStock){ dStock.value=''; }
-      if(rShelf){ rShelf.textContent=''; rShelf.style.background=''; }
-      if(rStock){ rStock.textContent=''; rStock.style.background=''; }
-      // مسح الـ rows الإضافية (اللي اتضافت بزر + تاريخ وكمية)
-      ['shelf','stock'].forEach(type => {
-        const container = document.getElementById(`prows-${type}-${i}`);
-        if(!container) return;
-        container.querySelectorAll('input[type="number"]').forEach(inp => inp.value='');
-        container.querySelectorAll('input[type="month"]').forEach(inp => inp.value='');
-        const rows = container.querySelectorAll(`.prow-${type}`);
-        rows.forEach((row, idx) => { if(idx > 0) row.remove(); });
-      });
-    }
-  }
+
   const ok=document.getElementById('p-report-ok');
-  if(sentCount>0){
+  if(failedNames.length){
+    ok.textContent=`⚠️ اتبعت ${sentCount} صنف بنجاح، وفشل إرسال ${failedNames.length} صنف: ${failedNames.join('، ')} — الكميات لسه محفوظة، اضغط "إعادة إرسال الأصناف الفاشلة"`;
+    ok.style.background='#FFEBEE'; ok.style.color='#B71C1C'; ok.style.border='1px solid #FFCDD2';
+    ok.style.display='block';
+    if(retryBtn) retryBtn.style.display='flex';
+  } else if(sentCount>0){
     ok.textContent=`✓ تم إرسال تقرير ${v3} بنجاح — ${sentCount} صنف`;
+    ok.style.background=''; ok.style.color=''; ok.style.border='';
+    ok.style.display='block';
+    if(retryBtn) retryBtn.style.display='none';
+    setTimeout(()=>{ ok.style.display='none'; ok.style.background=''; ok.style.color=''; ok.style.border=''; },4000);
+  } else if(attemptedAny){
+    // مفيش صنف نجح ومفيش صنف اتحط أصلاً فاضي — يبقى كله فشل
+    ok.textContent='❌ فشل إرسال كل الأصناف — تأكد من الاتصال بالإنترنت وحاول تاني';
+    ok.style.background='#FFEBEE'; ok.style.color='#B71C1C'; ok.style.border='1px solid #FFCDD2';
     ok.style.display='block';
   } else {
     ok.textContent='لم يتم إدخال أي بيانات — أدخل الكميات أولاً';
     ok.style.background='#FEF3C7'; ok.style.color='#B45309'; ok.style.border='1px solid #FFC72C';
     ok.style.display='block';
+    setTimeout(()=>{ ok.style.display='none'; ok.style.background=''; ok.style.color=''; ok.style.border=''; },4000);
   }
   btn.disabled=false; btn.innerHTML='<i class="ti ti-send"></i> إرسال كل التقرير';
-  setTimeout(()=>{ ok.style.display='none'; ok.style.background=''; ok.style.color=''; ok.style.border=''; },4000);
+  if(retryBtn) retryBtn.disabled=false;
 }
 
 function pRowInput(i){
@@ -3181,6 +3234,30 @@ async function saveProd(){
     monthsStock:document.getElementById('p-months-stock').value,
     branch:document.getElementById('f-branch').value||''
   };
+
+  const btn = document.getElementById('p-save-btn');
+  if(btn){ btn.disabled=true; }
+  showOverlay(true);
+  // ── حاول الإرسال، ولو فشل جرّب مرة كمان (مشكلة شبكة مؤقتة) ──
+  let result = await apiPost(pd).catch(()=>false);
+  if(result===false){
+    result = await apiPost(pd).catch(()=>false);
+  }
+  showOverlay(false);
+  if(btn){ btn.disabled=false; }
+  const success = result===true || (result && result.duplicate);
+  const ok=document.getElementById('p-ok');
+
+  if(!success){
+    // فشل الإرسال فعلاً — قول للمنسق بوضوح وسيب البيانات زي ما هي عشان يعيد المحاولة
+    ok.textContent='❌ فشل إرسال "'+snf+'" — تأكد من الاتصال بالإنترنت واضغط "حفظ" تاني';
+    ok.style.background='#FFEBEE'; ok.style.color='#B71C1C'; ok.style.border='1px solid #FFCDD2';
+    ok.style.display='block';
+    setTimeout(()=>{ ok.style.display='none'; ok.style.background=''; ok.style.color=''; ok.style.border=''; },4000);
+    return;
+  }
+
+  // نجح فعلاً — دلوقتي بس حدّث الحالة المحلية وامسح الخانات
   const prodEntry = {
     snf, shelf:pd.shelf, stock:pd.stock, fea:pd.fea,
     dateShelf:pd.dateShelf, monthsShelf:pd.monthsShelf,
@@ -3190,8 +3267,8 @@ async function saveProd(){
   products.push(prodEntry);
   sessionProducts.push(prodEntry);
   updateProdBadge();
-  showOverlay(true);await apiPost(pd);showOverlay(false);
-  const ok=document.getElementById('p-ok');ok.textContent='✓ تم إضافة "'+snf+'"!';ok.style.display='block';setTimeout(()=>ok.style.display='none',2500);
+  ok.textContent='✓ تم إضافة "'+snf+'"!'; ok.style.background=''; ok.style.color=''; ok.style.border='';
+  ok.style.display='block';setTimeout(()=>ok.style.display='none',2500);
   document.getElementById('p-s4').value='';
   document.getElementById('p-shelf').value='';document.getElementById('p-stock').value='';
   document.getElementById('p-date-shelf').value='';document.getElementById('p-months-shelf').value='';
