@@ -2729,8 +2729,10 @@ async function saveVisit(){
   e.points=calcPts(e);
   showOverlay(true);
   // ── حاول الحفظ، ولو فشل جرّب مرة كمان (مشكلة شبكة مؤقتة) — عشان الزيارة متضيعش بصمت ──
+  window._lastSbError = '';
   let saveOk = await apiPost(e).catch(()=>false);
   if(!saveOk){
+    window._lastSbError = '';
     saveOk = await apiPost(e).catch(()=>false);
   }
   showOverlay(false);
@@ -2740,10 +2742,11 @@ async function saveVisit(){
 
   if(!saveOk){
     const errEl=document.getElementById('entry-ok');
-    errEl.textContent='❌ فشل حفظ الزيارة — تأكد من الاتصال بالإنترنت واضغط "حفظ الزيارة" تاني';
+    const reason = window._lastSbError ? ` (${window._lastSbError})` : '';
+    errEl.textContent='❌ فشل حفظ الزيارة — تأكد من الاتصال بالإنترنت واضغط "حفظ الزيارة" تاني'+reason;
     errEl.style.background='#FFEBEE'; errEl.style.color='#B71C1C';
     errEl.style.display='block';
-    setTimeout(()=>{ errEl.style.display='none'; errEl.style.background=''; errEl.style.color=''; },4000);
+    setTimeout(()=>{ errEl.style.display='none'; errEl.style.background=''; errEl.style.color=''; },6000);
     return;
   }
 
@@ -3047,8 +3050,10 @@ async function sendAllProducts(){
       stockRows:  JSON.stringify(stockRows)};
 
     // ── حاول الإرسال، ولو فشل جرّب مرة كمان (ممكن تكون مشكلة شبكة مؤقتة) ──
+    window._lastSbError = '';
     let result = await apiPost(pd).catch(()=>false);
     if(result===false){
+      window._lastSbError = '';
       result = await apiPost(pd).catch(()=>false);
     }
     const ok = result===true || (result && result.duplicate);
@@ -3063,7 +3068,8 @@ async function sendAllProducts(){
       pClearProductRow(i);
     } else {
       // فشل الإرسال — سيب الخانات زي ما هي عشان المنسق يقدر يعيد المحاولة بدون ما يفقد البيانات
-      failedNames.push(snf);
+      const reason = window._lastSbError ? ` [${window._lastSbError}]` : '';
+      failedNames.push(snf+reason);
     }
   }
   showOverlay(false);
@@ -3239,8 +3245,10 @@ async function saveProd(){
   if(btn){ btn.disabled=true; }
   showOverlay(true);
   // ── حاول الإرسال، ولو فشل جرّب مرة كمان (مشكلة شبكة مؤقتة) ──
+  window._lastSbError = '';
   let result = await apiPost(pd).catch(()=>false);
   if(result===false){
+    window._lastSbError = '';
     result = await apiPost(pd).catch(()=>false);
   }
   showOverlay(false);
@@ -3250,10 +3258,11 @@ async function saveProd(){
 
   if(!success){
     // فشل الإرسال فعلاً — قول للمنسق بوضوح وسيب البيانات زي ما هي عشان يعيد المحاولة
-    ok.textContent='❌ فشل إرسال "'+snf+'" — تأكد من الاتصال بالإنترنت واضغط "حفظ" تاني';
+    const reason = window._lastSbError ? ' ('+window._lastSbError+')' : '';
+    ok.textContent='❌ فشل إرسال "'+snf+'" — تأكد من الاتصال بالإنترنت واضغط "حفظ" تاني'+reason;
     ok.style.background='#FFEBEE'; ok.style.color='#B71C1C'; ok.style.border='1px solid #FFCDD2';
     ok.style.display='block';
-    setTimeout(()=>{ ok.style.display='none'; ok.style.background=''; ok.style.color=''; ok.style.border=''; },4000);
+    setTimeout(()=>{ ok.style.display='none'; ok.style.background=''; ok.style.color=''; ok.style.border=''; },6000);
     return;
   }
 
@@ -4397,8 +4406,19 @@ async function sbInsert(table, data){
       },
       body: JSON.stringify(data)
     });
+    if(!res.ok){
+      // نسجل السبب الحقيقي للفشل عشان يبان للمنسق ولينا في التشخيص بدل "فشل" غامضة
+      let reason = 'HTTP '+res.status;
+      try{ const t = await res.text(); if(t) reason += ' — '+t.slice(0,150); }catch(e2){}
+      window._lastSbError = reason;
+      console.warn('sbInsert failed:', table, reason, data);
+    }
     return res.ok;
-  }catch(e){ console.warn('sbInsert error:', e); return false; }
+  }catch(e){
+    window._lastSbError = 'خطأ اتصال: '+e.message;
+    console.warn('sbInsert error:', e);
+    return false;
+  }
 }
 
 // نفس sbInsert لكن بترجع الـ id المُنشأ
@@ -4414,10 +4434,20 @@ async function sbInsertGetId(table, data){
       },
       body: JSON.stringify(data)
     });
-    if(!res.ok) return null;
+    if(!res.ok){
+      let reason = 'HTTP '+res.status;
+      try{ const t = await res.text(); if(t) reason += ' — '+t.slice(0,150); }catch(e2){}
+      window._lastSbError = reason;
+      console.warn('sbInsertGetId failed:', table, reason, data);
+      return null;
+    }
     const rows = await res.json();
     return Array.isArray(rows) && rows[0] ? rows[0].id : null;
-  }catch(e){ console.warn('sbInsertGetId error:', e); return null; }
+  }catch(e){
+    window._lastSbError = 'خطأ اتصال: '+e.message;
+    console.warn('sbInsertGetId error:', e);
+    return null;
+  }
 }
 
 async function sbSelect(table, params={}){
@@ -5678,36 +5708,53 @@ async function myAssignedBranchNames(){
 
 async function checkPromoBanner(){
   try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/promo_banner?id=eq.1&select=*`,
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/promo_banner?active=eq.true&select=*&order=id.asc`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     if(!r.ok) return;
-    const data = await r.json();
-    const row = data[0];
-    if(!row || !row.active) return;
+    const rows = await r.json();
+    if(!rows.length) return;
 
-    const seenVersion = localStorage.getItem('promo_banner_seen_version');
-    if(String(row.version) === String(seenVersion)) return; // المستخدم قفله قبل كده لنفس النسخة
+    const seenMap = JSON.parse(localStorage.getItem('promo_banner_seen')||'{}');
+    let myBranches = null; // نجيبها مرة واحدة بس لو فعلاً في بانر مستهدف
 
-    // استهداف عميل معين — لو محدد، اتأكد إن عندي فرع بيحتوي على النص ده قبل ما أعرض البانر
-    if(row.target_client && row.target_client.trim()){
-      const myBranches = await myAssignedBranchNames();
-      const matched = myBranches.some(b=>b.includes(row.target_client.trim()));
-      if(!matched) return;
+    const relevant = [];
+    for(const row of rows){
+      if(String(seenMap[row.id]) === String(row.version)) continue; // اتقفل قبل كده لنفس النسخة
+      const clients = row.target_clients||[];
+      if(clients.length){
+        if(myBranches===null) myBranches = await myAssignedBranchNames();
+        const matched = myBranches.some(b=>clients.some(c=>b.includes(c)));
+        if(!matched) continue;
+      }
+      relevant.push(row);
     }
-
-    document.getElementById('promo-popup-title').textContent = row.title || 'عرض جديد';
-    document.getElementById('promo-popup-body').textContent = row.body || '';
-    document.getElementById('promo-popup').style.display = 'flex';
-    window._promoBannerVersion = row.version;
+    if(!relevant.length) return;
+    window._pbQueue = relevant;
+    pbShowNext();
   }catch(e){ console.warn('checkPromoBanner error:', e); }
+}
+
+function pbShowNext(){
+  const row = (window._pbQueue||[]).shift();
+  if(!row) return;
+  window._pbCurrentBanner = row;
+  document.getElementById('promo-popup-title').textContent = row.title || 'عرض جديد';
+  document.getElementById('promo-popup-body').textContent = row.body || '';
+  document.getElementById('promo-popup').style.display = 'flex';
 }
 
 function closePromoBanner(){
   const popup = document.getElementById('promo-popup');
   if(popup) popup.style.display = 'none';
-  if(window._promoBannerVersion !== undefined){
-    try{ localStorage.setItem('promo_banner_seen_version', String(window._promoBannerVersion)); }catch(e){}
+  const row = window._pbCurrentBanner;
+  if(row){
+    try{
+      const seenMap = JSON.parse(localStorage.getItem('promo_banner_seen')||'{}');
+      seenMap[row.id] = row.version;
+      localStorage.setItem('promo_banner_seen', JSON.stringify(seenMap));
+    }catch(e){}
   }
+  setTimeout(pbShowNext, 400); // لو فيه بانر تاني في الطابور
 }
 
 // ── Month Picker ──────────────────────────────────────────────
