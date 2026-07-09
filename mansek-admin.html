@@ -8794,7 +8794,7 @@ async function loadAdminUsers(){
       REPS=data.filter(u=>u.role==='rep').map(u=>({
         name:u.name, route:u.route||'', group:u.grp||'', type:u.user_type||'متحرك',
         pass:u.pass_hash||'', goal:u.goal||0, status:u.status||'active', id:u.id, day_off:u.day_off||'none',
-        emp_code:u.emp_code||'', fixed_branch:u.fixed_branch||''
+        emp_code:u.emp_code||'', fixed_branch:u.fixed_branch||'', supervisors:u.supervisors||''
       }));
     } else {
       USERS_DB = {...USERS_DB_FALLBACK};
@@ -11864,27 +11864,25 @@ async function filterLocations(){
 
   // ── كروت الإحصائيات فوق — إجمالي المنسقين مقابل الحاضرين فعليًا في التاريخ المختار ──
   // (بدل "متصل الآن" اللي كانت بتتحسب من حالة اللحظة الحالية بغض النظر عن فلتر التاريخ)
-  const totalReps = (REPS||[]).filter(r=>visible.includes(r.group||'') && r.status!=='inactive').length;
-  const presentCount = (REPS||[]).filter(r=>visible.includes(r.group||'') && r.status!=='inactive' && attMap[r.name]?.hasIn).length;
+  const allVisibleReps = (REPS||[]).filter(r=>visible.includes(r.group||'') && r.status!=='inactive');
+  const totalReps = allVisibleReps.length;
+  const presentCount = allVisibleReps.filter(r=>attMap[r.name]?.hasIn).length;
   const absentCount = Math.max(totalReps-presentCount, 0);
   const attendancePct = totalReps ? Math.round(presentCount/totalReps*100) : 0;
-  const locStatCard = (bg, fg, icon, num, label) => `
-    <div class="stat-card" style="background:${bg};border:none">
-      <div style="display:flex;align-items:center;gap:10px">
-        <div style="width:38px;height:38px;border-radius:50%;background:${fg}22;display:flex;align-items:center;justify-content:center;flex-shrink:0">
-          <i class="ti ${icon}" style="font-size:19px;color:${fg}"></i>
-        </div>
-        <div>
-          <div class="stat-n" style="color:${fg}">${num}</div>
-          <div class="stat-l" style="color:${fg}cc">${label}</div>
-        </div>
-      </div>
+
+  // نسنپشوت بسيط يستخدمه البوب أب لما تضغط على أي كارت (بدون إعادة حساب)
+  window._locCardsSnapshot = { reps: allVisibleReps, attMap };
+
+  const locStatCard = (bg, fg, num, label, filterKey) => `
+    <div class="stat-card" style="background:${bg};border:none;cursor:pointer;text-align:center" onclick="locOpenStatModal('${filterKey}')">
+      <div class="stat-n" style="color:${fg}">${num}</div>
+      <div class="stat-l" style="color:${fg}">${label}</div>
     </div>`;
   document.getElementById('loc-stats').innerHTML =
-    locStatCard('#F3E8FF','#7C3AED','ti-users',   totalReps,      'إجمالي المنسقين') +
-    locStatCard('#DCFCE7','#16A34A','ti-user-check', presentCount, 'حضروا') +
-    locStatCard('#FFE4E0','#E8590C','ti-user-x',   absentCount,    'غائبون') +
-    locStatCard('#FEF3C7','#D97706','ti-chart-pie', attendancePct+'%', 'نسبة الحضور');
+    locStatCard('#F3E8FF','#7C3AED', totalReps,        'إجمالي المنسقين', 'all') +
+    locStatCard('#DCFCE7','#16A34A', presentCount,      'حضروا',           'present') +
+    locStatCard('#FFE4E0','#E8590C', absentCount,        'غائبون',          'absent') +
+    locStatCard('#FEF3C7','#D97706', attendancePct+'%',  'نسبة الحضور',    'all');
 
   // ── مصدر الصفوف بقى REPS + الحضور + الزيارات، مش جدول location ──
   // (location فيه صف واحد بس لكل شخص — آخر لوكيشن حية له بس، مش سجل تاريخي — فمكانش بيدعم تاريخ سابق خالص)
@@ -11994,6 +11992,69 @@ async function filterLocations(){
       <td>${statusBadge}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="9" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات للفترة المحددة</td></tr>';
+}
+
+// بوب أب أسماء المنسقين لما تضغط على أي من كروت الإحصائيات فوق (إجمالي/حضروا/غائبون/نسبة الحضور)
+function locOpenStatModal(filterKey){
+  const snap = window._locCardsSnapshot;
+  if(!snap) return;
+  const { reps, attMap } = snap;
+
+  let list = reps;
+  let title = 'كل المنسقين';
+  if(filterKey==='present'){ list = reps.filter(r=>attMap[r.name]?.hasIn); title = 'المنسقون الحاضرون'; }
+  else if(filterKey==='absent'){ list = reps.filter(r=>!attMap[r.name]?.hasIn); title = 'المنسقون الغائبون'; }
+
+  list = [...list].sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
+
+  let modal = document.getElementById('modal-loc-stat');
+  if(!modal){
+    modal = document.createElement('div');
+    modal.id = 'modal-loc-stat';
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:560px;max-height:80vh;display:flex;flex-direction:column">
+        <div class="modal-title" id="loc-stat-modal-title" style="display:flex;align-items:center;justify-content:space-between">
+          <span></span>
+          <span id="loc-stat-modal-count" style="font-size:12px;color:var(--text2);font-weight:400"></span>
+        </div>
+        <div id="loc-stat-modal-body" style="overflow-y:auto;flex:1;margin-bottom:12px"></div>
+        <div class="modal-btns">
+          <button class="btn-modal btn-cancel" onclick="document.getElementById('modal-loc-stat').classList.remove('open')">إغلاق</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+  }
+
+  document.getElementById('loc-stat-modal-title').querySelector('span').textContent = title;
+  document.getElementById('loc-stat-modal-count').textContent = `${list.length} منسق`;
+
+  const body = document.getElementById('loc-stat-modal-body');
+  if(!list.length){
+    body.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text2)">لا يوجد أحد في هذه الفئة</div>`;
+  } else {
+    body.innerHTML = `<table style="width:100%;font-size:12px">
+      <thead><tr style="border-bottom:1.5px solid var(--border)">
+        <th style="text-align:right;padding:6px 4px">الاسم</th>
+        <th style="text-align:right;padding:6px 4px">المجموعة</th>
+        <th style="text-align:right;padding:6px 4px">خط السير</th>
+        <th style="text-align:right;padding:6px 4px">المشرف</th>
+      </tr></thead>
+      <tbody>
+        ${list.map(r=>{
+          const gc = GROUPS[r.group]?.color || '#888';
+          return `<tr style="border-bottom:0.5px solid var(--border)">
+            <td style="padding:6px 4px;font-weight:600;cursor:pointer;color:var(--blue)" onclick="document.getElementById('modal-loc-stat').classList.remove('open');locQuickDetail('${(r.name||'').replace(/'/g,"&#39;")}')">${r.name}</td>
+            <td style="padding:6px 4px"><span class="badge" style="background:${gc}22;color:${gc};font-size:10px">${GROUPS[r.group]?.label||r.group||'—'}</span></td>
+            <td style="padding:6px 4px;font-size:11px">${r.route||'—'}</td>
+            <td style="padding:6px 4px;font-size:11px">${r.supervisors||'—'}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+  }
+
+  modal.classList.add('open');
 }
 
 function locToggleAll(cb){
