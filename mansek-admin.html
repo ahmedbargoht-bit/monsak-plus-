@@ -5767,9 +5767,9 @@ h2,h3{color:#2C1F0A}
 
           <!-- إعداد API Key -->
           <div class="card" style="margin-bottom:12px;border:1.5px solid #DDD6FE;background:#F5F3FF">
-            <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+            <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px">
               <div style="flex:1;min-width:240px">
-                <label style="font-size:11px;color:#7C3AED;font-weight:700;display:block;margin-bottom:4px"><i class="ti ti-key"></i> Groq API Key</label>
+                <label style="font-size:11px;color:#7C3AED;font-weight:700;display:block;margin-bottom:4px"><i class="ti ti-key"></i> Groq API Key (أساسي)</label>
                 <input type="password" id="ai-key-input" placeholder="أدخل الـ API Key وحفظه مرة واحدة فقط"
                   style="width:100%;padding:9px 12px;border:1.5px solid #DDD6FE;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:#fff;box-sizing:border-box"/>
               </div>
@@ -5777,9 +5777,31 @@ h2,h3{color:#2C1F0A}
                 style="background:#7C3AED;color:#fff;border:none;border-radius:8px;padding:10px 18px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif;white-space:nowrap">
                 <i class="ti ti-device-floppy"></i> حفظ الـ Key
               </button>
-              <div style="font-size:11px;color:#7C3AED;align-self:center">
-                الـ Key بيتحفظ في قاعدة البيانات فقط — مش في الكود
+            </div>
+            <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px">
+              <div style="flex:1;min-width:240px">
+                <label style="font-size:11px;color:#1D4ED8;font-weight:700;display:block;margin-bottom:4px"><i class="ti ti-key"></i> Gemini API Key (احتياطي أول — بيشتغل لو Groq وصل لحد الاستخدام)</label>
+                <input type="password" id="ai-gemini-key-input" placeholder="أدخل مفتاح Gemini من aistudio.google.com/apikey"
+                  style="width:100%;padding:9px 12px;border:1.5px solid #BFDBFE;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:#fff;box-sizing:border-box"/>
               </div>
+              <button onclick="aiSaveGeminiKey()"
+                style="background:#1D4ED8;color:#fff;border:none;border-radius:8px;padding:10px 18px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif;white-space:nowrap">
+                <i class="ti ti-device-floppy"></i> حفظ الـ Key
+              </button>
+            </div>
+            <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+              <div style="flex:1;min-width:240px">
+                <label style="font-size:11px;color:#B45309;font-weight:700;display:block;margin-bottom:4px"><i class="ti ti-key"></i> Claude API Key (احتياطي تاني — بيشتغل لو Groq وGemini فشلوا)</label>
+                <input type="password" id="ai-claude-key-input" placeholder="أدخل مفتاح Claude من console.anthropic.com (خدمة مدفوعة)"
+                  style="width:100%;padding:9px 12px;border:1.5px solid #FDE68A;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:#fff;box-sizing:border-box"/>
+              </div>
+              <button onclick="aiSaveClaudeKey()"
+                style="background:#B45309;color:#fff;border:none;border-radius:8px;padding:10px 18px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif;white-space:nowrap">
+                <i class="ti ti-device-floppy"></i> حفظ الـ Key
+              </button>
+            </div>
+            <div style="font-size:11px;color:#7C3AED;margin-top:8px">
+              المفاتيح بتتحفظ في قاعدة البيانات فقط — مش في الكود. الترتيب: Groq أولاً، لو وصل لحد الاستخدام يتحول لـ Gemini، ولو الاتنين فشلوا يتحول لـ Claude.
             </div>
           </div>
 
@@ -29554,7 +29576,14 @@ async function groqChat(messages, maxTokens){
     await aiEnsureGeminiKey();
     return await geminiChat(messages, maxTokens);
   }catch(ge){
-    throw new Error('Groq وGemini كلاهما غير متاحَين: '+ge.message);
+    // Gemini برضه فشل — نجرب Claude كاحتياطي تالت
+    console.warn('[AI] Gemini فشل كمان — جاري التحويل لـ Claude...');
+    try{
+      await aiEnsureClaudeKey();
+      return await claudeChat(messages, maxTokens);
+    }catch(ce){
+      throw new Error('Groq وGemini وClaude كلهم غير متاحين: '+ce.message);
+    }
   }
 }
 
@@ -29602,6 +29631,56 @@ async function geminiChat(messages, maxTokens){
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text||'';
   if(!text) throw new Error('[Gemini] رد فارغ');
   console.log('[Gemini] ✅ تم');
+  return text;
+}
+
+// ══════════════════════════════════════════════════════
+// Claude (Anthropic) — نموذج احتياطي ثالث (لو Groq وGemini فشلوا)
+// ══════════════════════════════════════════════════════
+let _CLAUDE_KEY = null;
+const CLAUDE_URL = 'https://api.anthropic.com/v1/messages';
+const CLAUDE_MODEL = 'claude-sonnet-5';
+
+async function aiEnsureClaudeKey(){
+  if(_CLAUDE_KEY) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
+  const rows = await fetch(SUPABASE_URL+'/rest/v1/products_db?key=eq.claude_api_key&select=value&limit=1',{headers:H})
+    .then(r=>r.json()).catch(()=>[]);
+  if(rows?.[0]?.value) _CLAUDE_KEY = rows[0].value;
+}
+
+async function claudeChat(messages, maxTokens){
+  await aiEnsureClaudeKey();
+  if(!_CLAUDE_KEY) throw new Error('مفتاح Claude غير متاح — أضفه في قاعدة البيانات تحت المفتاح claude_api_key');
+
+  const system = messages.find(m=>m.role==='system');
+  const userMsgs = messages.filter(m=>m.role!=='system').map(m=>({role:m.role==='assistant'?'assistant':'user', content:m.content}));
+
+  const body = {
+    model: CLAUDE_MODEL,
+    max_tokens: maxTokens||3000,
+    messages: userMsgs
+  };
+  if(system) body.system = system.content;
+
+  const res = await fetch(CLAUDE_URL, {
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'x-api-key': _CLAUDE_KEY,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify(body)
+  });
+  if(!res.ok){
+    const er = await res.json().catch(()=>({}));
+    throw new Error('[Claude] '+(er?.error?.message||'HTTP '+res.status));
+  }
+  const data = await res.json();
+  const text = data?.content?.[0]?.text||'';
+  if(!text) throw new Error('[Claude] رد فارغ');
+  console.log('[Claude] ✅ تم');
   return text;
 }
 
@@ -30078,6 +30157,10 @@ async function initAIAnalysisPanel(){
     if(rows&&rows[0]?.value){ _GROQ_KEY = rows[0].value; }
     const inp = document.getElementById('ai-key-input');
     if(inp && _GROQ_KEY) inp.value = _GROQ_KEY;
+    const rowsG = await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.gemini_api_key&select=value`,{headers:H}).then(r=>r.json());
+    if(rowsG&&rowsG[0]?.value){ _GEMINI_KEY = rowsG[0].value; }
+    const inpG = document.getElementById('ai-gemini-key-input');
+    if(inpG && _GEMINI_KEY) inpG.value = _GEMINI_KEY;
   }catch(e){}
   aiInitMonthPicker();
   aiLoadSupervisors();
@@ -30092,6 +30175,30 @@ async function aiSaveKey(){
     await fetch(`${SUPABASE_URL}/rest/v1/products_db?on_conflict=key`,{method:'POST',headers:H,body:JSON.stringify({key:'groq_api_key',value:key})});
     _GROQ_KEY = key;
     showToastAdmin('✅ تم حفظ الـ API Key');
+  }catch(e){ showToastAdmin('❌ فشل الحفظ'); }
+}
+
+async function aiSaveGeminiKey(){
+  const inp = document.getElementById('ai-gemini-key-input');
+  const key = inp?.value.trim();
+  if(!key){ showToastAdmin('أدخل مفتاح Gemini أولاً'); return; }
+  try{
+    const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'resolution=merge-duplicates,return=minimal'};
+    await fetch(`${SUPABASE_URL}/rest/v1/products_db?on_conflict=key`,{method:'POST',headers:H,body:JSON.stringify({key:'gemini_api_key',value:key})});
+    _GEMINI_KEY = key;
+    showToastAdmin('✅ تم حفظ مفتاح Gemini');
+  }catch(e){ showToastAdmin('❌ فشل الحفظ'); }
+}
+
+async function aiSaveClaudeKey(){
+  const inp = document.getElementById('ai-claude-key-input');
+  const key = inp?.value.trim();
+  if(!key){ showToastAdmin('أدخل مفتاح Claude أولاً'); return; }
+  try{
+    const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'resolution=merge-duplicates,return=minimal'};
+    await fetch(`${SUPABASE_URL}/rest/v1/products_db?on_conflict=key`,{method:'POST',headers:H,body:JSON.stringify({key:'claude_api_key',value:key})});
+    _CLAUDE_KEY = key;
+    showToastAdmin('✅ تم حفظ مفتاح Claude');
   }catch(e){ showToastAdmin('❌ فشل الحفظ'); }
 }
 
