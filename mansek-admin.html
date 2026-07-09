@@ -1174,8 +1174,8 @@ h2,h3{color:#2C1F0A}
               </select>
               <select id="loc-filter-status" onchange="filterLocations()">
                 <option value="all">الكل</option>
-                <option value="online">متصل فقط</option>
-                <option value="offline">غير متصل</option>
+                <option value="present">حضروا فقط</option>
+                <option value="absent">لم يسجلوا حضور</option>
               </select>
               <!-- قائمة التاريخ -->
               <select id="loc-filter-date" onchange="locOnDateChange()" style="min-width:140px">
@@ -1202,6 +1202,7 @@ h2,h3{color:#2C1F0A}
                     <th>آخر فرع</th>
                     <th>لوكيشن حضور</th>
                     <th>لوكيشن انصراف</th>
+                    <th>النشاط</th>
                     <th>الحالة</th>
                   </tr>
                 </thead>
@@ -11848,31 +11849,15 @@ function renderLocations(){
   filterLocations();
 }
 
-function filterLocations(){
-  const {location}=cachedData;
+async function filterLocations(){
   const visible=CU.groups;
   const grp=document.getElementById('loc-filter-group')?.value||'all';
   const status=document.getElementById('loc-filter-status')?.value||'all';
-  const TEN=10*60*1000,nowMs=Date.now();
   const range=locGetDateRange();
 
   // label
   const lbl=document.getElementById('loc-date-label');
   if(lbl) lbl.textContent=range.label?('📅 '+range.label):'';
-
-  let locs=location.filter(l=>visible.includes(l.grp||''));
-
-  // فلتر التاريخ على updated_at
-  if(range.single){
-    locs=locs.filter(l=>(l.updated_at||'').slice(0,10)===range.single);
-  } else if(range.from){
-    locs=locs.filter(l=>{const d=(l.updated_at||'').slice(0,10);return d>=range.from&&d<=range.to;});
-  }
-
-  if(grp!=='all') locs=locs.filter(l=>l.grp===grp);
-  locs=locs.map(l=>({...l,active:(nowMs-new Date(l.updated_at).getTime())<TEN}));
-  if(status==='online') locs=locs.filter(l=>l.active);
-  if(status==='offline') locs=locs.filter(l=>!l.active);
 
   const branchMap=buildLocBranchMap(range);
   const attMap=buildAttendanceMap(range);
@@ -11901,14 +11886,60 @@ function filterLocations(){
     locStatCard('#FFE4E0','#E8590C','ti-user-x',   absentCount,    'غائبون') +
     locStatCard('#FEF3C7','#D97706','ti-chart-pie', attendancePct+'%', 'نسبة الحضور');
 
-  document.getElementById('loc-table').innerHTML=locs.map(l=>{
-    const gc=GROUPS[l.grp]?.color||'#ccc';
-    const branch=branchMap[l.name]||'';
+  // ── مصدر الصفوف بقى REPS + الحضور + الزيارات، مش جدول location ──
+  // (location فيه صف واحد بس لكل شخص — آخر لوكيشن حية له بس، مش سجل تاريخي — فمكانش بيدعم تاريخ سابق خالص)
+  let reps = (REPS||[]).filter(r=>visible.includes(r.group||'') && r.status!=='inactive');
+  if(grp!=='all') reps = reps.filter(r=>r.group===grp);
+  if(status==='present') reps = reps.filter(r=>attMap[r.name]?.hasIn);
+  if(status==='absent')  reps = reps.filter(r=>!attMap[r.name]?.hasIn);
+
+  const inRange = (dateStr) => {
+    if(!dateStr) return false;
+    const d = dateStr.slice(0,10);
+    if(range.single) return d===range.single;
+    if(range.from)   return d>=range.from && d<=range.to;
+    return true; // فلتر "الكل"
+  };
+
+  const countByName = (list) => {
+    const map = {};
+    (list||[]).forEach(x=>{
+      if(!x.name || !inRange(x.created_at)) return;
+      map[x.name] = (map[x.name]||0)+1;
+    });
+    return map;
+  };
+  const visitsCountByName   = countByName(cachedData.visits);
+  const productsCountByName = countByName(cachedData.products);
+  const missingCountByName  = countByName(cachedData.missing);
+
+  // المرتجعات مش موجودة في cachedData — جيبها لايف مرة واحدة لكل تاريخ مختار وكاشها محليًا
+  const rangeKey = JSON.stringify(range);
+  if(window._locReturnsRangeKey !== rangeKey){
+    window._locReturnsRangeKey = rangeKey;
+    try{
+      const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/returns?select=name,created_at&limit=5000`,{headers:H});
+      window._locReturnsCache = r.ok ? await r.json().catch(()=>[]) : [];
+    }catch(e){ window._locReturnsCache = []; }
+  }
+  const returnsCountByName = countByName(window._locReturnsCache);
+
+  // الحاضرين الأول، وبعدين ترتيب أبجدي
+  reps = [...reps].sort((a,b)=>{
+    const ai = attMap[a.name]?.hasIn ? 1 : 0, bi = attMap[b.name]?.hasIn ? 1 : 0;
+    if(ai!==bi) return bi-ai;
+    return (a.name||'').localeCompare(b.name||'','ar');
+  });
+
+  document.getElementById('loc-table').innerHTML=reps.map(r=>{
+    const gc=GROUPS[r.group]?.color||'#ccc';
+    const branch=branchMap[r.name]||'';
     const branchHtml = branch
       ? `<span style="font-size:11px;background:#EEF6FF;color:#003A80;padding:2px 8px;border-radius:6px;font-weight:600">${branch}</span>`
       : `<span style="font-size:11px;color:#e53935;font-weight:600">لم يتم تسجيل فرع</span>`;
 
-    const att = attMap[l.name];
+    const att = attMap[r.name];
     const inUrl  = att?.hasGPSIn  ? `https://maps.google.com/?q=${att.latIn},${att.lngIn}`  : null;
     const outUrl = att?.hasGPSOut ? `https://maps.google.com/?q=${att.latOut},${att.lngOut}` : null;
 
@@ -11923,7 +11954,7 @@ function filterLocations(){
         </div>`;
 
     // لوكيشن انصراف — نفس الفكرة
-    const locOutHtml = !att
+    const locOutHtml = !att || !att.hasIn
       ? `<span style="color:#aaa;font-size:11px">—</span>`
       : att.hasOut
         ? `<div style="display:flex;flex-direction:column;align-items:center;gap:2px">
@@ -11934,17 +11965,35 @@ function filterLocations(){
           </div>`
         : `<span style="color:#aaa;font-size:11px">لسه في الفرع</span>`;
 
+    // كارت صغير لتفاصيل النشاط: عدد الزيارات/الأصناف/النواقص/المرتجعات في نفس التاريخ المختار
+    const vC=visitsCountByName[r.name]||0, pC=productsCountByName[r.name]||0,
+          mC=missingCountByName[r.name]||0, rC=returnsCountByName[r.name]||0;
+    const activityHtml = (vC||pC||mC||rC)
+      ? `<div style="display:flex;flex-wrap:wrap;gap:3px;justify-content:center;max-width:150px">
+          ${vC?`<span style="background:#EEF6FF;color:#003A80;padding:1px 6px;border-radius:6px;font-size:10px">🏬 ${vC} زيارة</span>`:''}
+          ${pC?`<span style="background:#F0FDF4;color:#166534;padding:1px 6px;border-radius:6px;font-size:10px">📦 ${pC} صنف</span>`:''}
+          ${mC?`<span style="background:#FEF2F2;color:#991B1B;padding:1px 6px;border-radius:6px;font-size:10px">⚠️ ${mC} نقص</span>`:''}
+          ${rC?`<span style="background:#FFF7ED;color:#9A3412;padding:1px 6px;border-radius:6px;font-size:10px">↩️ ${rC} مرتجع</span>`:''}
+        </div>`
+      : `<span style="color:#ccc;font-size:11px">—</span>`;
+
+    let statusBadge;
+    if(!att || !att.hasIn)  statusBadge = `<span class="badge b-gray">○ لم يسجل حضور</span>`;
+    else if(!att.hasOut)    statusBadge = `<span class="badge b-green">● لسه في الفرع</span>`;
+    else                    statusBadge = `<span class="badge" style="background:#EEF6FF;color:#003A80">○ انصرف</span>`;
+
     return`<tr>
-      <td><input type="checkbox" class="loc-rep-cb" value="${l.name}" onchange="locOnCheckChange()"/></td>
-      <td><b style="cursor:pointer;color:var(--blue)" onclick="locQuickDetail('${l.name.replace(/'/g,"&#39;")}')">${l.name}</b></td>
-      <td><span class="badge" style="background:${gc}22;color:${gc}">${GROUPS[l.grp]?.label||l.grp}</span></td>
-      <td style="font-size:11px">${l.route||'—'}</td>
+      <td><input type="checkbox" class="loc-rep-cb" value="${r.name}" onchange="locOnCheckChange()"/></td>
+      <td><b style="cursor:pointer;color:var(--blue)" onclick="locQuickDetail('${r.name.replace(/'/g,"&#39;")}')">${r.name}</b></td>
+      <td><span class="badge" style="background:${gc}22;color:${gc}">${GROUPS[r.group]?.label||r.group||'—'}</span></td>
+      <td style="font-size:11px">${r.route||'—'}</td>
       <td>${branchHtml}</td>
       <td style="text-align:center">${locInHtml}</td>
       <td style="text-align:center">${locOutHtml}</td>
-      <td><span class="badge ${l.active?'b-green':'b-gray'}">${l.active?'● متصل':'○ غير متصل'}</span></td>
+      <td>${activityHtml}</td>
+      <td>${statusBadge}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات للفترة المحددة</td></tr>';
+  }).join('') || '<tr><td colspan="9" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات للفترة المحددة</td></tr>';
 }
 
 function locToggleAll(cb){
@@ -11981,7 +12030,7 @@ function exportLocationPDF(){
     tRows += `<tr style="background:${bg}">
       ${cells.slice(1).map((c,ci)=>{
         const txt = c.innerText.trim();
-        if(ci===6) return `<td style="color:${statusColor};font-weight:700;text-align:center;padding:6px 8px">${txt}</td>`;
+        if(ci===7) return `<td style="color:${statusColor};font-weight:700;text-align:center;padding:6px 8px">${txt}</td>`;
         if(ci===3) return `<td style="color:${txt==='لم يتم تسجيل فرع'?'#e53935':'#003A80'};font-weight:600;text-align:right;padding:6px 8px">${txt}</td>`;
         return `<td style="padding:6px 8px;text-align:right;white-space:pre-line">${txt}</td>`;
       }).join('')}
