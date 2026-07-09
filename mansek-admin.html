@@ -15214,7 +15214,9 @@ async function loadSupervisors(){
     // المصدر الوحيد: جدول staff
     const [staffRes, usersRes] = await Promise.all([
       fetch(`${SUPABASE_URL}/rest/v1/staff?select=*&active=eq.true&order=id.asc`,{headers:H}),
-      fetch(`${SUPABASE_URL}/rest/v1/users?select=name,pass_hash,supervisors&role=eq.supervisor`,{headers:H})
+      // فريق التنسيق عنده role='supervisor' وفريق المبيعات عنده role='sales' في users —
+      // لازم الاتنين هنا وإلا باسورد فريق المبيعات مش هيظهر أبداً حتى لو اتحفظ صح
+      fetch(`${SUPABASE_URL}/rest/v1/users?select=name,pass_hash,supervisors&role=in.(supervisor,sales)`,{headers:H})
     ]);
     const staffData = staffRes.ok ? await staffRes.json().catch(()=>[]) : [];
     const usersData = usersRes.ok ? await usersRes.json().catch(()=>[]) : [];
@@ -29416,9 +29418,20 @@ async function saveEditStaff(){
 
   // كلمة المرور الفعلية بتتحفظ في users (المصدر اللي بيتحقق منه تسجيل الدخول)
   if(newPass){
-    await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(oldName)}`,{
-      method:'PATCH', headers:H, body:JSON.stringify({pass_hash:newPass})
+    const passRes = await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(oldName)}`,{
+      method:'PATCH', headers:{...H,'Prefer':'return=representation'}, body:JSON.stringify({pass_hash:newPass})
     });
+    const passText = await passRes.text().catch(()=>'');
+    if(!passRes.ok){
+      showToast('❌ فشل حفظ كلمة المرور: '+passText.slice(0,120), 5000);
+    } else {
+      let passBody = [];
+      try{ passBody = JSON.parse(passText); }catch(e){}
+      if(!Array.isArray(passBody) || !passBody.length){
+        // مفيش صف في users بنفس الاسم ده — يبقى الشخص ده ملوش حساب دخول أصلاً
+        showToast('⚠️ تم حفظ باقي البيانات، لكن ملوش حساب دخول في users بالاسم ده — كلمة المرور متسجلتش', 5000);
+      }
+    }
   }
 
   // لو الاسم اتغيّر — لازم نزامن كل الجداول اللي بتشاور عليه بالاسم عشان الربط ميتقطعش
