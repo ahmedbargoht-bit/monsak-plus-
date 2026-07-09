@@ -14233,7 +14233,7 @@ function attAllDays(from, to){
   return days;
 }
 
-function loadAttendance(){
+async function loadAttendance(){
   const from = document.getElementById('att-from')?.value||'';
   const to   = document.getElementById('att-to')?.value||'';
   const grp  = document.getElementById('att-group').value;
@@ -14278,6 +14278,23 @@ function loadAttendance(){
     }
   });
 
+  // ── خطوة 2.5: جلسات الدعم الميداني — من جدول field_support_logs (لكل منسق: عدد الجلسات + عدد الفروع المختلفة) ──
+  const supportByRep = {};
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    let sUrl = `${SUPABASE_URL}/rest/v1/field_support_logs?select=rep_name,branch_name,visit_date&limit=5000`;
+    if(from) sUrl += `&visit_date=gte.${from}`;
+    if(to)   sUrl += `&visit_date=lte.${to}`;
+    const sRes = await fetch(sUrl,{headers:H});
+    const sLogs = sRes.ok ? await sRes.json().catch(()=>[]) : [];
+    (Array.isArray(sLogs)?sLogs:[]).forEach(s=>{
+      const n = s.rep_name; if(!n) return;
+      if(!supportByRep[n]) supportByRep[n] = {sessions:0, branches:new Set()};
+      supportByRep[n].sessions++;
+      if(s.branch_name) supportByRep[n].branches.add(s.branch_name);
+    });
+  }catch(e){ /* لو الجلب فشل، تفضل الأعمدة صفر بدل ما توقف باقي الجدول */ }
+
   // ── خطوة 3: حساب الغياب مع الراحة الأسبوعية ──
   const totalDays = attDaysBetween(from,to);
   const summaryRows = Object.values(coordMap).map(c=>{
@@ -14290,7 +14307,10 @@ function loadAttendance(){
     const present  = c.presentSet.size;
     const absent   = Math.max(0, workDays - present);
     const pct      = workDays ? Math.round(present/workDays*100) : 0;
-    return { name:c.name, route:c.route, empCode, present, absent, totalDays, workDays, dayOff, dayOffCount, hrs:c.totalHrs, pct };
+    const sup = supportByRep[c.name];
+    const supportSessions = sup?.sessions||0;
+    const supportBranches = sup?.branches?.size||0;
+    return { name:c.name, route:c.route, empCode, present, absent, totalDays, workDays, dayOff, dayOffCount, hrs:c.totalHrs, pct, supportSessions, supportBranches };
   }).sort((a,b)=>b.present-a.present||a.name.localeCompare(b.name));
 
   // ── إحصائيات ──
