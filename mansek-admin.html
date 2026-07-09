@@ -1798,7 +1798,11 @@ h2,h3{color:#2C1F0A}
           <div class="card" style="margin-top:16px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
               <div class="card-title" style="margin-bottom:0"><i class="ti ti-arrows-exchange"></i> طلبيات مشرفي البيع لمشرفي التنسيق</div>
-              <div style="display:flex;gap:4px">
+              <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+                <select id="sso-month" onchange="renderSalesSupOrders()"
+                  style="padding:4px 10px;border-radius:6px;font-size:11px;border:1.5px solid var(--border);background:#fff;color:var(--text);cursor:pointer;font-family:Cairo,sans-serif">
+                  <option value="all">كل الشهور</option>
+                </select>
                 <button onclick="setSsoFilter('all')" id="sso-f-all"
                   style="padding:4px 10px;border-radius:6px;font-size:11px;border:1.5px solid var(--navy);background:var(--navy);color:#fff;cursor:pointer;font-family:Cairo,sans-serif">
                   الكل
@@ -14809,15 +14813,33 @@ function renderOrders(){
 // ══════════════════════════════════════════════════════════════
 let _ssoList = [];
 let _ssoFilter = 'all';
+let _ssoMonth  = 'all';
+let _ssoGrpSupMap = null;
+
+// تحويل أرقام لاتينية لعربية (٠١٢٣٤٥٦٧٨٩)
+const _AR_DIGITS = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'];
+function toArabicNum(v){
+  return String(v).replace(/[0-9]/g, d=>_AR_DIGITS[+d]);
+}
+
+const SSO_AR_MONTHS = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
 
 async function loadSalesSupOrders(){
   try{
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const url = `${SUPABASE_URL}/rest/v1/supply_requests?deal_source=eq.sales_supervisor&select=*&order=created_at.desc&limit=300`;
-    const res = await fetch(url,{headers:H});
+    const [res, supRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/supply_requests?deal_source=eq.sales_supervisor&select=*&order=created_at.desc&limit=300`,{headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/grp_supervisors?select=grp,supervisor`,{headers:H})
+    ]);
     _ssoList = res.ok ? await res.json().catch(()=>[]) : [];
     if(!Array.isArray(_ssoList)) _ssoList=[];
-  }catch(e){ _ssoList=[]; }
+
+    _ssoGrpSupMap = {};
+    if(supRes.ok){
+      const supData = await supRes.json().catch(()=>[]);
+      (Array.isArray(supData)?supData:[]).forEach(s=>{ if(s.grp) _ssoGrpSupMap[s.grp]=s.supervisor||'—'; });
+    }
+  }catch(e){ _ssoList=[]; _ssoGrpSupMap={}; }
   renderSalesSupOrders();
 }
 
@@ -14838,14 +14860,37 @@ function renderSalesSupOrders(){
   const tbody = document.getElementById('sso-table');
   if(!tbody) return;
 
-  const upd = (id,v)=>{ const e=document.getElementById(id); if(e) e.textContent=v; };
+  // ── دروب داون الشهر — بيتبني من الشهور الموجودة فعليًا في البيانات ──
+  const monthSel = document.getElementById('sso-month');
+  if(monthSel){
+    _ssoMonth = monthSel.value || 'all';
+    if(monthSel.dataset.built !== '1'){
+      const monthsSet = new Set();
+      _ssoList.forEach(o=>{
+        const d = o.created_at||o.delivery_date;
+        if(!d) return;
+        monthsSet.add(d.slice(0,7)); // YYYY-MM
+      });
+      const monthsArr = [...monthsSet].sort().reverse();
+      monthSel.innerHTML = '<option value="all">كل الشهور</option>' + monthsArr.map(ym=>{
+        const [y,m] = ym.split('-');
+        const label = `${SSO_AR_MONTHS[(+m)-1]||m} ${toArabicNum(y)}`;
+        return `<option value="${ym}">${label}</option>`;
+      }).join('');
+      monthSel.dataset.built = '1';
+      monthSel.value = _ssoMonth;
+    }
+  }
+
+  const upd = (id,v)=>{ const e=document.getElementById(id); if(e) e.textContent=toArabicNum(v); };
   upd('sso-count-pending',  _ssoList.filter(o=>o.status==='pending').length);
   upd('sso-count-received', _ssoList.filter(o=>o.status==='received').length);
   upd('sso-count-assigned', _ssoList.filter(o=>o.status==='assigned').length);
   upd('sso-count-done',     _ssoList.filter(o=>o.status==='done').length);
 
   let filtered = _ssoList;
-  if(_ssoFilter!=='all') filtered = _ssoList.filter(o=>o.status===_ssoFilter);
+  if(_ssoFilter!=='all') filtered = filtered.filter(o=>o.status===_ssoFilter);
+  if(_ssoMonth!=='all')  filtered = filtered.filter(o=>(o.created_at||o.delivery_date||'').slice(0,7)===_ssoMonth);
 
   const sMap = {
     pending:  {label:'⏳ بانتظار التحويل', bg:'#FEF3C7', color:'#B45309'},
@@ -14856,10 +14901,11 @@ function renderSalesSupOrders(){
 
   tbody.innerHTML = filtered.map(o=>{
     const s = sMap[o.status]||{label:o.status||'—', bg:'#f5f5f5', color:'#666'};
-    const dt = o.delivery_date ? new Date(o.delivery_date).toLocaleDateString('ar-EG') : '—';
+    const dt = o.delivery_date ? toArabicNum(new Date(o.delivery_date).toLocaleDateString('en-GB')) : '—';
+    const supName = (_ssoGrpSupMap && _ssoGrpSupMap[o.grp]) || o.supervisor || '—';
     return `<tr>
       <td><b>${o.from_name||'—'}</b></td>
-      <td>${o.supervisor||'—'}</td>
+      <td>${supName}</td>
       <td style="font-size:11px">${o.branch||'—'}${o.route?' · '+o.route:''}</td>
       <td><span style="background:${s.bg};color:${s.color};padding:2px 8px;border-radius:999px;font-size:10px;font-weight:700;white-space:nowrap">${s.label}</span></td>
       <td>${o.to_name?`<span style="color:#065F46;font-weight:700">${o.to_name}</span>`:'<span style="color:#9CA3AF">—</span>'}</td>
