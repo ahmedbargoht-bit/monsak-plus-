@@ -11877,41 +11877,29 @@ function filterLocations(){
   const branchMap=buildLocBranchMap(range);
   const attMap=buildAttendanceMap(range);
 
-  // ── كروت الإحصائيات فوق — بتتحدث حسب التاريخ المختار ──
-  // "متصل الآن" مفهوم حي بيهم بس لما بنبص على النهاردة. لو الأدمن مختار تاريخ فات
-  // (زي أمس)، "متصل/غير متصل" مالهاش معنى خالص — الأصح نعرض "سجّل حضور" فعليًا
-  // في التاريخ ده ولا لأ، عشان الكروت متبقاش بتناقض الجدول تحتها.
-  const _dToday = new Date();
-  const todayStr = _dToday.getFullYear()+'-'+String(_dToday.getMonth()+1).padStart(2,'0')+'-'+String(_dToday.getDate()).padStart(2,'0');
-  const isLiveView = !range.single && !range.from; // "الكل" — نفس المنطق القديم
-  const isTodayView = range.single === todayStr;
-
-  if(isLiveView || isTodayView){
-    const online = locs.filter(l=>l.active).length;
-    document.getElementById('loc-stats').innerHTML=`
-      <div class="stat-card green"><div class="stat-n">${online}</div><div class="stat-l">متصل الآن</div></div>
-      <div class="stat-card red"><div class="stat-n">${locs.length-online}</div><div class="stat-l">غير متصل</div></div>
-      <div class="stat-card blue"><div class="stat-n">${locs.length}</div><div class="stat-l">إجمالي</div></div>
-      <div class="stat-card yellow"><div class="stat-n">${locs.length?Math.round(online/locs.length*100):0}%</div><div class="stat-l">نسبة التغطية</div></div>
-    `;
-  } else {
-    // تاريخ في الماضي — اجمع كل الأسماء (من اللوكيشن + من الحضور في نفس اليوم لنفس المجموعات) وشوف مين سجل حضور فعلاً
-    const namesFromAtt = new Set(
-      (cachedData.attendance||[])
-        .filter(a=>visible.includes(a.grp||'') && (a.date||'').slice(0,10)===(range.single||'') )
-        .map(a=>a.name)
-    );
-    const namesFromLocs = new Set(locs.map(l=>l.name));
-    const allNames = new Set([...namesFromAtt, ...namesFromLocs]);
-    const checkedIn = [...allNames].filter(n=>attMap[n]?.hasIn).length;
-    const total = allNames.size;
-    document.getElementById('loc-stats').innerHTML=`
-      <div class="stat-card green"><div class="stat-n">${checkedIn}</div><div class="stat-l">سجّل حضور</div></div>
-      <div class="stat-card red"><div class="stat-n">${total-checkedIn}</div><div class="stat-l">لم يسجل حضور</div></div>
-      <div class="stat-card blue"><div class="stat-n">${total}</div><div class="stat-l">إجمالي</div></div>
-      <div class="stat-card yellow"><div class="stat-n">${total?Math.round(checkedIn/total*100):0}%</div><div class="stat-l">نسبة التغطية</div></div>
-    `;
-  }
+  // ── كروت الإحصائيات فوق — إجمالي المنسقين مقابل الحاضرين فعليًا في التاريخ المختار ──
+  // (بدل "متصل الآن" اللي كانت بتتحسب من حالة اللحظة الحالية بغض النظر عن فلتر التاريخ)
+  const totalReps = (REPS||[]).filter(r=>visible.includes(r.group||'') && r.status!=='inactive').length;
+  const presentCount = (REPS||[]).filter(r=>visible.includes(r.group||'') && r.status!=='inactive' && attMap[r.name]?.hasIn).length;
+  const absentCount = Math.max(totalReps-presentCount, 0);
+  const attendancePct = totalReps ? Math.round(presentCount/totalReps*100) : 0;
+  const locStatCard = (bg, fg, icon, num, label) => `
+    <div class="stat-card" style="background:${bg};border:none">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="width:38px;height:38px;border-radius:50%;background:${fg}22;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+          <i class="ti ${icon}" style="font-size:19px;color:${fg}"></i>
+        </div>
+        <div>
+          <div class="stat-n" style="color:${fg}">${num}</div>
+          <div class="stat-l" style="color:${fg}cc">${label}</div>
+        </div>
+      </div>
+    </div>`;
+  document.getElementById('loc-stats').innerHTML =
+    locStatCard('#F3E8FF','#7C3AED','ti-users',   totalReps,      'إجمالي المنسقين') +
+    locStatCard('#DCFCE7','#16A34A','ti-user-check', presentCount, 'حضروا') +
+    locStatCard('#FFE4E0','#E8590C','ti-user-x',   absentCount,    'غائبون') +
+    locStatCard('#FEF3C7','#D97706','ti-chart-pie', attendancePct+'%', 'نسبة الحضور');
 
   document.getElementById('loc-table').innerHTML=locs.map(l=>{
     const gc=GROUPS[l.grp]?.color||'#ccc';
@@ -12179,18 +12167,48 @@ function rdUpdateVisitDelBar(){
 async function rdDeleteSelectedVisits(){
   const checked = [...document.querySelectorAll('.rd-visit-cb:checked')];
   if(!checked.length){ showToast('⚠️ لم تحدد أي زيارة'); return; }
-  if(!confirm(`⚠️ هل أنت متأكد من حذف ${checked.length} زيارة؟ لا يمكن التراجع!`)) return;
+  if(!confirm(`⚠️ هيتم حذف ${checked.length} زيارة نهائيًا مع كل ما يتعلق بيها (تقرير الأصناف، النواقص، المرتجعات، وسجل الحضور/الانصراف لنفس اليوم لو معندوش زيارة تانية). لا يمكن التراجع — متأكد؟`)) return;
 
   const ids = checked.map(cb=>cb.value);
-  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const H    = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const HDel = {...H,'Prefer':'return=minimal'};
+
+  // هات بيانات الزيارات المحددة (اسم + تاريخ) من الكاش المحلي عشان نلاقي سجل الحضور المرتبط بيها
+  const visitsCache = window._rdAllData?.visits || [];
+  const selectedVisits = ids.map(id=>visitsCache.find(v=>String(v.id)===String(id))).filter(Boolean);
 
   try{
-    await Promise.all(ids.map(id=>
-      fetch(`${SUPABASE_URL}/rest/v1/visits?id=eq.${id}`,{
-        method:'DELETE', headers:H
-      })
-    ));
-    showToast(`✅ تم حذف ${ids.length} زيارة بنجاح`);
+    let failCount = 0;
+    // لكل زيارة محددة: امسح كل ما يتعلق بيها (أصناف/نواقص/مرتجعات مربوطة بـ visit_id) ثم الزيارة نفسها
+    for(const id of ids){
+      const results = await Promise.all([
+        fetch(`${SUPABASE_URL}/rest/v1/products?visit_id=eq.${id}`,{method:'DELETE',headers:HDel}),
+        fetch(`${SUPABASE_URL}/rest/v1/missing?visit_id=eq.${id}`,{method:'DELETE',headers:HDel}),
+        fetch(`${SUPABASE_URL}/rest/v1/returns?visit_id=eq.${id}`,{method:'DELETE',headers:HDel}),
+        fetch(`${SUPABASE_URL}/rest/v1/visits?id=eq.${id}`,{method:'DELETE',headers:HDel}),
+      ]);
+      if(results.some(r=>!r.ok)) failCount++;
+    }
+
+    // سجل الحضور مش مربوط بـ visit_id مباشرة (مربوط بالاسم + التاريخ) —
+    // امسحه بس لو مفيش زيارة تانية باقية لنفس المنسق في نفس اليوم ده (عشان منمسحش حضور يوم فيه زيارات تانية سليمة)
+    for(const v of selectedVisits){
+      if(!v.name || !v.date) continue;
+      const remain = await fetch(
+        `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(v.name)}&date=eq.${v.date}&select=id&limit=1`,
+        {headers:H}
+      ).then(r=>r.ok?r.json():[]).catch(()=>[]);
+      if(!remain.length){
+        await fetch(
+          `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(v.name)}&date=eq.${v.date}`,
+          {method:'DELETE',headers:HDel}
+        );
+      }
+    }
+
+    showToast(failCount
+      ? `⚠️ تم الحذف مع ${failCount} خطأ جزئي — راجع البيانات`
+      : `✅ تم حذف ${ids.length} زيارة وكل بياناتها المرتبطة بنجاح`);
     // حدّث الكاش المحلي
     if(window._rdAllData?.visits){
       window._rdAllData.visits = window._rdAllData.visits.filter(v=>!ids.includes(String(v.id)));
