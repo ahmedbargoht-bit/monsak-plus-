@@ -5220,6 +5220,7 @@ h2,h3{color:#2C1F0A}
               <input type="file" id="ca-import-file" accept=".xlsx,.xls" style="display:none" onchange="caImportExcel(event)"/>
               <button onclick="caExportExcel()" class="btn btn-ghost btn-sm"><i class="ti ti-file-export"></i> تصدير العميل الحالي</button>
               <button onclick="caExportAllExcel()" class="btn btn-ghost btn-sm"><i class="ti ti-files"></i> تصدير الكل</button>
+              <button onclick="caExportPDF()" class="btn btn-sm" style="background:#2C1F0A;color:#EDE5D8"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
               <button onclick="caOpenAIModal()" class="btn btn-sm" style="background:#5B21B6;color:#fff"><i class="ti ti-sparkles"></i> استخراج AI من PDF</button>
             </div>
           </div>
@@ -5249,7 +5250,7 @@ h2,h3{color:#2C1F0A}
               <div id="ca-ai-insights-result" style="display:none;margin-top:10px;padding:12px;background:var(--surface-2);border-radius:8px;font-size:13px;line-height:1.9;white-space:pre-wrap"></div>
             </div>
 
-            <div id="ca-summary" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px"></div>
+            <div id="ca-summary" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px"></div>
 
             <div class="card" style="margin-bottom:14px">
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -11549,15 +11550,27 @@ function caDiffHtml(v25, v26, section){
   return `<span style="color:${color};font-weight:700;font-size:12px">${arrow} ${diffDisp}</span>`;
 }
 
+// نسبة الخصم الفعلية من المبيعات = (المحقق قبل الخصم - المحقق بعد الخصم) / المحقق قبل الخصم
+function caDiscountPct(beforeV, afterV){
+  if(!caIsNum(beforeV) || !caIsNum(afterV)) return null;
+  const b = parseFloat(beforeV), a = parseFloat(afterV);
+  if(b===0) return null;
+  return (b-a)/b*100;
+}
+
 function caRenderAll(){
   const summary = _caItems.filter(it=>it.section==='summary');
   const beforeIt = summary.find(it=>(it.item_name||'').includes('بدون'));
   const afterIt  = summary.find(it=>(it.item_name||'').includes('بعد'));
+  const pct2025 = caDiscountPct(beforeIt?.value_2025, afterIt?.value_2025);
+  const pct2026 = caDiscountPct(beforeIt?.value_2026, afterIt?.value_2026);
   document.getElementById('ca-summary').innerHTML = `
     <div class="stat-card blue"><div class="stat-n">${beforeIt&&caIsNum(beforeIt.value_2025)?parseFloat(beforeIt.value_2025).toLocaleString('en-US'):'—'}</div><div class="stat-l">محقق 2025 قبل الخصم</div></div>
     <div class="stat-card green"><div class="stat-n">${afterIt&&caIsNum(afterIt.value_2025)?parseFloat(afterIt.value_2025).toLocaleString('en-US'):'—'}</div><div class="stat-l">محقق 2025 بعد الخصم</div></div>
+    <div class="stat-card red"><div class="stat-n">${pct2025!==null?pct2025.toLocaleString('en-US',{maximumFractionDigits:2})+'%':'—'}</div><div class="stat-l">نسبة الخصم الفعلية 2025</div></div>
     <div class="stat-card purple"><div class="stat-n">${beforeIt&&caIsNum(beforeIt.value_2026)?parseFloat(beforeIt.value_2026).toLocaleString('en-US'):'—'}</div><div class="stat-l">محقق 2026 قبل الخصم</div></div>
-    <div class="stat-card yellow"><div class="stat-n">${afterIt&&caIsNum(afterIt.value_2026)?parseFloat(afterIt.value_2026).toLocaleString('en-US'):'—'}</div><div class="stat-l">محقق 2026 بعد الخصم</div></div>`;
+    <div class="stat-card yellow"><div class="stat-n">${afterIt&&caIsNum(afterIt.value_2026)?parseFloat(afterIt.value_2026).toLocaleString('en-US'):'—'}</div><div class="stat-l">محقق 2026 بعد الخصم</div></div>
+    <div class="stat-card orange"><div class="stat-n">${pct2026!==null?pct2026.toLocaleString('en-US',{maximumFractionDigits:2})+'%':'—'}</div><div class="stat-l">نسبة الخصم الفعلية 2026</div></div>`;
 
   caRenderSection('fixed', 'ca-table-fixed');
   caRenderSection('percentage', 'ca-table-percentage');
@@ -11863,6 +11876,7 @@ async function caExportAllExcel(){
 // (بيستخدم نفس بنية groqChat/aiEnsureGroqKey الموجودة في تبويب "تحليل AI")
 // ══════════════════════════════════════════════════════════════
 let _caAIPreviewItems = [];
+let _caLastInsight = '';
 
 function caOpenAIModal(){
   const sel = document.getElementById('ca-ai-client-select');
@@ -12034,11 +12048,100 @@ async function caRunAIInsights(){
     const userMsg = `عميل: ${client?client.name:''}\n\nبنود العقد:\n${lines}`;
     const resp = await groqChat([{role:'system',content:sys},{role:'user',content:userMsg}], 1500);
     resultEl.textContent = resp;
+    _caLastInsight = resp;
   }catch(e){
     resultEl.textContent = '❌ فشل التحليل: '+e.message;
   }finally{
     btn.disabled = false;
   }
+}
+
+// ── تصدير PDF بألوان وهوية الطحان جولدن دايتس ──
+function caExportPDF(){
+  if(!_caCurrentClientId){ showToast('❌ اختار عميل الأول'); return; }
+  const client = _caClients.find(c=>String(c.id)===String(_caCurrentClientId));
+  const clientName = client ? client.name : 'عميل';
+
+  const summary = _caItems.filter(it=>it.section==='summary');
+  const beforeIt = summary.find(it=>(it.item_name||'').includes('بدون'));
+  const afterIt  = summary.find(it=>(it.item_name||'').includes('بعد'));
+  const pct2025 = caDiscountPct(beforeIt?.value_2025, afterIt?.value_2025);
+  const pct2026 = caDiscountPct(beforeIt?.value_2026, afterIt?.value_2026);
+  const credit  = _caItems.find(it=>it.section==='credit');
+
+  const fmtMoney = v => caIsNum(v) ? parseFloat(v).toLocaleString('en-US') : '—';
+  const fmtPct = v => v!==null ? v.toLocaleString('en-US',{maximumFractionDigits:2})+'%' : '—';
+
+  const sectionTitles = {fixed:'بنود الخصم الثابتة (مبالغ)', percentage:'نسب الخصم على المبيعات', tier:'خصومات الشرائح (حسب التارجت)', credit:'فترة الائتمان'};
+  const sectionColors = {fixed:'#EEF4FF', percentage:'#FFF3E0', tier:'#F5EEFF', credit:'#F0FFF4'};
+
+  const buildSectionTable = (sec) => {
+    const items = _caItems.filter(it=>it.section===sec);
+    if(!items.length) return '';
+    const rows = items.map(it=>{
+      const isTotal = (it.item_name||'').trim().startsWith('اجمالي');
+      return `<tr style="${isTotal?'font-weight:800;background:#F5F0E8':''}">
+        <td>${it.item_name||''}</td>
+        <td style="text-align:center">${caFmtVal(it.value_2025, sec).replace(/<[^>]*>/g,'')}</td>
+        <td style="text-align:center">${caFmtVal(it.value_2026, sec).replace(/<[^>]*>/g,'')}</td>
+        <td style="font-size:10px;color:#6B5B45">${it.extra_2025||''}</td>
+        <td style="font-size:10px;color:#6B5B45">${it.extra_2026||''}</td>
+      </tr>`;
+    }).join('');
+    return `<div style="margin-bottom:18px">
+      <div style="background:${sectionColors[sec]};color:#2C1F0A;font-weight:800;padding:7px 12px;border-radius:8px 8px 0 0;font-size:12px;border:1px solid #E0D8CC;border-bottom:none">${sectionTitles[sec]}</div>
+      <table><thead><tr><th>البند</th><th>2025</th><th>2026</th><th>ملاحظة 2025</th><th>ملاحظة 2026</th></tr></thead><tbody>${rows}</tbody></table>
+    </div>`;
+  };
+
+  let html = `<!DOCTYPE html><html dir="rtl" lang="ar">
+  <head><meta charset="UTF-8"><title>تحليل عقد ${clientName}</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap');
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Cairo',Arial,sans-serif;background:#fff;color:#2C1F0A;font-size:11px}
+    .hdr-co{background:#2C1F0A;color:#EDE5D8;text-align:center;padding:12px;font-size:16px;font-weight:900;border-radius:8px 8px 0 0}
+    .hdr-title{background:#C8A96E;color:#2C1F0A;text-align:center;padding:8px;font-size:14px;font-weight:700}
+    .hdr-info{background:#F5F0E8;color:#4B3C1A;text-align:center;padding:6px;font-size:10px;font-style:italic;border-bottom:2px solid #4B3C1A;margin-bottom:14px}
+    .kpi-bar{display:flex;gap:8px;padding:10px 0;margin-bottom:16px;flex-wrap:wrap}
+    .kpi{flex:1;min-width:140px;border-radius:8px;padding:10px;text-align:center;font-weight:700;border:1px solid #E0D8CC}
+    .kpi .n{font-size:16px;font-weight:900}
+    .kpi .l{font-size:10px;margin-top:3px}
+    table{width:100%;border-collapse:collapse;margin-bottom:2px}
+    th{background:#4B3C1A;color:#EDE5D8;padding:6px;font-size:10px;font-weight:700;text-align:center;border:1px solid #2C1F0A}
+    td{padding:6px;font-size:10px;border:1px solid #E0D8CC;text-align:center}
+    .insight-box{background:#FFF8E1;border:1.5px solid #C8A96E;border-radius:8px;padding:12px 14px;margin-bottom:18px;font-size:11px;line-height:1.9;white-space:pre-wrap}
+    .footer{background:#F5F0E8;color:#4B3C1A;text-align:center;padding:6px;font-size:9px;font-style:italic;margin-top:10px;border-radius:0 0 8px 8px}
+    @media print{body{font-size:10px}}
+  </style></head><body>
+    <div class="hdr-co">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
+    <div class="hdr-title">تحليل عقد العميل: ${clientName}</div>
+    <div class="hdr-info">مقارنة بنود ونسب العقد بين عام 2025 وعام 2026</div>
+
+    <div class="kpi-bar">
+      <div class="kpi" style="background:#EEF4FF;color:#1565C0"><div class="n">${fmtMoney(beforeIt?.value_2025)}</div><div class="l">محقق 2025 قبل الخصم</div></div>
+      <div class="kpi" style="background:#E8F5E9;color:#2E7D32"><div class="n">${fmtMoney(afterIt?.value_2025)}</div><div class="l">محقق 2025 بعد الخصم</div></div>
+      <div class="kpi" style="background:#FFEBEE;color:#B71C1C"><div class="n">${fmtPct(pct2025)}</div><div class="l">نسبة الخصم الفعلية 2025</div></div>
+      <div class="kpi" style="background:#F5EEFF;color:#6A1B9A"><div class="n">${fmtMoney(beforeIt?.value_2026)}</div><div class="l">محقق 2026 قبل الخصم</div></div>
+      <div class="kpi" style="background:#FFFDE7;color:#F57F17"><div class="n">${fmtMoney(afterIt?.value_2026)}</div><div class="l">محقق 2026 بعد الخصم</div></div>
+      <div class="kpi" style="background:#FFF3E0;color:#E65100"><div class="n">${fmtPct(pct2026)}</div><div class="l">نسبة الخصم الفعلية 2026</div></div>
+    </div>
+
+    ${_caLastInsight ? `<div class="insight-box"><b>🤖 تحليل AI للفروقات بين العقدين:</b><br/><br/>${_caLastInsight.replace(/</g,'&lt;')}</div>` : ''}
+
+    ${buildSectionTable('fixed')}
+    ${buildSectionTable('percentage')}
+    ${buildSectionTable('tier')}
+    ${credit ? `<div style="margin-bottom:10px"><div style="background:${sectionColors.credit};color:#2C1F0A;font-weight:800;padding:7px 12px;border-radius:8px;font-size:12px;border:1px solid #E0D8CC">فترة الائتمان — 2025: ${credit.extra_2025||'—'} &nbsp;|&nbsp; 2026: ${credit.extra_2026||'—'}</div></div>` : ''}
+
+    <div class="footer">Al Tahhan Golden Dates © 2026 — نظام تحليل عقود العملاء</div>
+  </body></html>`;
+
+  const win = window.open('','_blank','width=1000,height=750');
+  win.document.write(html);
+  win.document.close();
+  setTimeout(()=>{ win.focus(); win.print(); }, 800);
+  showToast('📄 جاري فتح نافذة PDF...');
 }
 
 
