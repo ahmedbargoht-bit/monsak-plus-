@@ -5245,9 +5245,13 @@ h2,h3{color:#2C1F0A}
             <div class="card" style="margin-bottom:14px">
               <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
                 <h3 style="font-size:14px;font-weight:800;color:var(--text-primary)">🤖 تحليل AI للفروقات بين العقدين</h3>
-                <button class="btn btn-xs" style="background:#EDE0FF;color:#5B21B6" onclick="caRunAIInsights()" id="ca-ai-insights-btn"><i class="ti ti-sparkles"></i> تحليل الآن</button>
+                <div style="display:flex;gap:6px;flex-wrap:wrap">
+                  <button class="btn btn-xs" style="background:#EDE0FF;color:#5B21B6" onclick="caRunAIInsights()" id="ca-ai-insights-btn"><i class="ti ti-sparkles"></i> تحليل الآن</button>
+                  <button class="btn btn-xs" style="background:#DCFCE7;color:#166534" onclick="caRunAIRecommendations()" id="ca-ai-reco-btn"><i class="ti ti-bulb"></i> اقتراحات لعقد أقوى</button>
+                </div>
               </div>
               <div id="ca-ai-insights-result" style="display:none;margin-top:10px;padding:12px;background:var(--surface-2);border-radius:8px;font-size:13px;line-height:1.9;white-space:pre-wrap"></div>
+              <div id="ca-ai-reco-result" style="display:none;margin-top:10px;padding:12px;background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;font-size:13px;line-height:1.9;white-space:pre-wrap"></div>
             </div>
 
             <div id="ca-summary" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px"></div>
@@ -12124,6 +12128,146 @@ async function caRunAIInsights(){
       .replace(/\bN\.A\.?\b/gi, 'غير مذكور');
     resultEl.textContent = cleaned;
     _caLastInsight = cleaned;
+  }catch(e){
+    resultEl.textContent = '❌ فشل التحليل: '+e.message;
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+// ── استخراج كلمات مفتاحية من اسم العميل عشان نطابقها مع أسماء الفروع في القاعدة ──
+// (مفيش عمود client_id مباشر في جدول branches، فبنعتمد على إن اسم العميل غالبًا موجود كجزء من اسم الفرع
+// زي "بنده -المعادى" أو "خير زمان - جليم" — فبنستخرج الكلمات المميزة من اسم العميل ونطابقها كـ substring)
+function caDeriveKeywords(clientName){
+  const name = (clientName||'').trim();
+  if(!name) return [];
+  const tokens = name.split(/\s+/).map(t=>t.replace(/^و/,'').trim()).filter(t=>t.length>=2);
+  return tokens.length ? tokens : [name];
+}
+
+// جلب عدد فروع العميل وعدد الأصناف المكودة عنده
+// المصدر الأساسي: جدول sales_clients (أسماء العملاء الرسمية) + branch_client_map (ربط فرع↔عميل تم توثيقه يدويًا من لوحة "أسعار الأصناف والخصومات")
+// ده مصدر دقيق وموثّق بعكس التخمين بمطابقة الاسم كنص داخل اسم الفرع. لو مفيش تطابق هناك، نرجع لطريقة المطابقة النصية القديمة كـ fallback فقط.
+async function caFetchClientContext(clientName){
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const keywords = caDeriveKeywords(clientName);
+  const result = {branchCount:null, itemsCount:null, keywords, matchedName:null, source:null};
+  if(!keywords.length) return result;
+
+  let matchedBranchNames = [];
+  try{
+    const [scRes, mapRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/sales_clients?select=id,name`, {headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?select=client_name,branch_name&limit=5000`, {headers:H}),
+    ]);
+    const salesClients = scRes.ok ? await scRes.json().catch(()=>[]) : [];
+    const branchMap    = mapRes.ok ? await mapRes.json().catch(()=>[]) : [];
+
+    // اختيار أفضل عميل من sales_clients عن طريق عدد الكلمات المفتاحية المطابقة داخل الاسم الرسمي
+    let best = null, bestScore = 0;
+    salesClients.forEach(sc=>{
+      const score = keywords.filter(k=>k.length>=2 && (sc.name||'').includes(k)).length;
+      if(score > bestScore){ bestScore = score; best = sc; }
+    });
+
+    if(best && bestScore>0){
+      const branches = branchMap.filter(m=>m.client_name===best.name);
+      if(branches.length){
+        result.matchedName  = best.name;
+        result.source       = 'branch_client_map';
+        result.branchCount  = branches.length;
+        matchedBranchNames  = [...new Set(branches.map(m=>m.branch_name).filter(Boolean))];
+      }
+    }
+  }catch(e){}
+
+  // fallback: لو مفيش ربط موثّق في branch_client_map، استخدم المطابقة النصية القديمة على اسم الفرع
+  if(!matchedBranchNames.length){
+    try{
+      const orFilter = 'or=(' + keywords.map(k=>`branch_name.ilike.*${encodeURIComponent(k)}*`).join(',') + ')';
+      const rB = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&${orFilter}&limit=3000`,{headers:H});
+      if(rB.ok){
+        const data = await rB.json().catch(()=>[]);
+        matchedBranchNames = [...new Set(data.map(b=>b.branch_name).filter(Boolean))];
+        result.branchCount = matchedBranchNames.length;
+        result.source = 'ilike_fallback';
+      }
+    }catch(e){}
+  }
+
+  // عدد الأصناف المكودة: لو عندنا قائمة فروع دقيقة (من branch_client_map) استخدمها لفلترة products.branch مباشرة
+  try{
+    let productsUrl;
+    if(matchedBranchNames.length){
+      const params = new URLSearchParams();
+      params.set('select','snf');
+      params.set('branch', `in.(${matchedBranchNames.map(b=>`"${b.replace(/"/g,'')}"`).join(',')})`);
+      params.set('limit','8000');
+      productsUrl = `${SUPABASE_URL}/rest/v1/products?${params.toString()}`;
+    } else {
+      const orFilterP = 'or=(' + keywords.map(k=>`branch.ilike.*${encodeURIComponent(k)}*`).join(',') + ')';
+      productsUrl = `${SUPABASE_URL}/rest/v1/products?select=snf&${orFilterP}&limit=8000`;
+    }
+    const rP = await fetch(productsUrl,{headers:H});
+    if(rP.ok){
+      const data = await rP.json().catch(()=>[]);
+      result.itemsCount = new Set(data.map(p=>p.snf).filter(Boolean)).size;
+    }
+  }catch(e){}
+
+  return result;
+}
+
+// ── اقتراحات AI لتفاوض عقد جديد أقوى، باستخدام بيانات فعلية من القاعدة (فروع + أصناف مكودة) ──
+async function caRunAIRecommendations(){
+  if(!_caCurrentClientId){ showToast('❌ اختار عميل الأول'); return; }
+  const btn = document.getElementById('ca-ai-reco-btn');
+  const resultEl = document.getElementById('ca-ai-reco-result');
+  btn.disabled = true;
+  resultEl.style.display = '';
+  resultEl.textContent = '⏳ جاري جمع بيانات العميل (الفروع والأصناف) وتحليلها...';
+  try{
+    await aiEnsureGroqKey();
+    const client = _caClients.find(c=>String(c.id)===String(_caCurrentClientId));
+    const clientName = client ? client.name : '';
+    const ctx = await caFetchClientContext(clientName);
+
+    const summary = _caItems.filter(it=>it.section==='summary');
+    const beforeIt = summary.find(it=>(it.item_name||'').includes('بدون'));
+    const afterIt  = summary.find(it=>(it.item_name||'').includes('بعد'));
+
+    const lines = _caItems.filter(it=>it.section!=='summary').map(it=>{
+      const v25 = (it.value_2025!==null&&it.value_2025!==undefined&&it.value_2025!=='') ? it.value_2025 : '—';
+      const v26 = (it.value_2026!==null&&it.value_2026!==undefined&&it.value_2026!=='') ? it.value_2026 : '—';
+      return `[${it.section}] ${it.item_name}: 2025=${v25} | 2026=${v26}`;
+    }).join('\n');
+
+    const sys = `أنت مستشار تفاوض تجاري خبير في عقود التوريد لسلاسل السوبر ماركت في مصر. الشركة اللي بتستشيرك عايزة تدخل مفاوضة عقد جديد مع العميل ده وعايزة رقم أكبر وشروط أفضل ماليًا.
+هيتم إعطاؤك: بنود العقد الحالية (2025 مقابل 2026)، المبيعات المحققة، عدد فروع العميل، وعدد الأصناف المسجلة/المكودة عنده. اديني توصيات عملية ومباشرة (بدون markdown، فقرات قصيرة) تساعد فريق المبيعات ياخد رقم أكبر أو شروط أفضل في التفاوض الجاي، تغطي:
+1. أي بنود في العقد الحالي أعلى من المعتاد وممكن نفاوض عليها للأقل، ونطالب بتخفيضها.
+2. إزاي نستغل عدد الفروع وعدد الأصناف المسجلة كأوراق ضغط تفاوضية لصالح الشركة.
+3. اقتراحات لبنود جديدة أو شروط ممكن تزود العائد المالي للشركة.
+4. رقم أو نسبة مستهدفة واقعية نطمح نوصلها في تحسين الشروط أو تقليل الخصومات.
+خليك عملي ومباشر، من غير مقدمات طويلة.
+مهم جدًا: اكتب بالعربي بالكامل، وممنوع تستخدم أي كلمة إنجليزية زي N/A أو TBD — لو معلومة مش موجودة اكتب "غير مذكور" بدل كده.`;
+
+    const userMsg = `عميل: ${clientName}
+عدد الفروع المعروفة في النظام: ${ctx.branchCount!==null?ctx.branchCount:'غير معروف'}
+عدد الأصناف المسجلة/المكودة عنده: ${ctx.itemsCount!==null?ctx.itemsCount:'غير معروف'}
+المبيعات المحققة 2025 قبل الخصم: ${beforeIt&&caIsNum(beforeIt.value_2025)?parseFloat(beforeIt.value_2025).toLocaleString('en-US'):'غير مذكور'}
+المبيعات المحققة 2025 بعد الخصم: ${afterIt&&caIsNum(afterIt.value_2025)?parseFloat(afterIt.value_2025).toLocaleString('en-US'):'غير مذكور'}
+
+بنود العقد:
+${lines}`;
+
+    const resp = await groqChat([{role:'system',content:sys},{role:'user',content:userMsg}], 1700);
+    const cleaned = resp
+      .replace(/\bN\/A\b/gi, 'غير مذكور')
+      .replace(/\bTBD\b/gi, 'غير محدد')
+      .replace(/\bN\.A\.?\b/gi, 'غير مذكور');
+    const matchNote = ctx.matchedName ? ` (مطابق لعميل "${ctx.matchedName}" ${ctx.source==='branch_client_map'?'— من ربط الفروع الموثّق':'— بمطابقة تقريبية'})` : '';
+    const dataNote = `📊 البيانات المستخدمة من القاعدة: ${ctx.branchCount!==null?ctx.branchCount+' فرع':'عدد الفروع غير معروف'} | ${ctx.itemsCount!==null?ctx.itemsCount+' صنف مكوّد':'عدد الأصناف غير معروف'}${matchNote}\n\n`;
+    resultEl.textContent = dataNote + cleaned;
   }catch(e){
     resultEl.textContent = '❌ فشل التحليل: '+e.message;
   }finally{
