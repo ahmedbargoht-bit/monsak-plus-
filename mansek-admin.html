@@ -11608,11 +11608,22 @@ function caRenderAll(){
   caRenderSection('credit', 'ca-table-credit');
 }
 
+// مجموع البنود الفعلية في قسم معين (مستبعدين أي بند "اجمالي..." موجود أصلاً في البيانات نفسها عشان منجمعش مرتين)
+function caSectionTotal(section){
+  const items = _caItems.filter(it=>it.section===section && !(it.item_name||'').trim().startsWith('اجمالي'));
+  let sum2025 = 0, has2025 = false, sum2026 = 0, has2026 = false;
+  items.forEach(it=>{
+    if(caIsNum(it.value_2025)){ sum2025 += parseFloat(it.value_2025); has2025 = true; }
+    if(caIsNum(it.value_2026)){ sum2026 += parseFloat(it.value_2026); has2026 = true; }
+  });
+  return { sum2025: has2025?sum2025:null, sum2026: has2026?sum2026:null };
+}
+
 function caRenderSection(section, tbodyId){
   const items = _caItems.filter(it=>it.section===section);
   const el = document.getElementById(tbodyId);
   if(!el) return;
-  el.innerHTML = items.map(it=>{
+  const rowsHtml = items.map(it=>{
     const isTotal = (it.item_name||'').trim().startsWith('اجمالي');
     const nameEsc = (it.item_name||'').replace(/</g,'&lt;');
     return `<tr style="${isTotal?'font-weight:800;background:var(--surface-2)':''}">
@@ -11628,6 +11639,19 @@ function caRenderSection(section, tbodyId){
       </td>
     </tr>`;
   }).join('') || `<tr><td colspan="7" style="text-align:center;padding:10px;color:var(--text2)">لا توجد بنود — اضغط "إضافة" لإضافة بند</td></tr>`;
+
+  let footerHtml = '';
+  if(section!=='credit' && items.length){
+    const {sum2025, sum2026} = caSectionTotal(section);
+    footerHtml = `<tr style="font-weight:800;background:#FFF3CD">
+      <td>الإجمالي</td>
+      <td>${sum2025!==null?caFmtVal(String(sum2025), section):'—'}</td>
+      <td>${sum2026!==null?caFmtVal(String(sum2026), section):'—'}</td>
+      <td>${(sum2025!==null&&sum2026!==null)?caDiffHtml(String(sum2025), String(sum2026), section):'<span style="color:#9CA3AF;font-size:11px">—</span>'}</td>
+      <td></td><td></td><td></td>
+    </tr>`;
+  }
+  el.innerHTML = rowsHtml + footerHtml;
 }
 
 function caOpenAddClientModal(){
@@ -12140,9 +12164,17 @@ function caExportPDF(){
         <td style="font-size:10px;color:#6B5B45">${it.extra_2026||''}</td>
       </tr>`;
     }).join('');
+    const {sum2025, sum2026} = caSectionTotal(sec);
+    const totalRow = `<tr style="font-weight:800;background:#FFF3CD">
+      <td>الإجمالي</td>
+      <td style="text-align:center">${sum2025!==null?caFmtVal(String(sum2025), sec).replace(/<[^>]*>/g,''):'—'}</td>
+      <td style="text-align:center">${sum2026!==null?caFmtVal(String(sum2026), sec).replace(/<[^>]*>/g,''):'—'}</td>
+      <td style="text-align:center">${(sum2025!==null&&sum2026!==null)?caDiffHtml(String(sum2025), String(sum2026), sec):'—'}</td>
+      <td></td><td></td>
+    </tr>`;
     return `<div style="margin-bottom:18px">
       <div style="background:${sectionColors[sec]};color:#2C1F0A;font-weight:800;padding:7px 12px;border-radius:8px 8px 0 0;font-size:12px;border:1px solid #E0D8CC;border-bottom:none">${sectionTitles[sec]}</div>
-      <table><thead><tr><th>البند</th><th>2025</th><th>2026</th><th>الفرق</th><th>ملاحظة 2025</th><th>ملاحظة 2026</th></tr></thead><tbody>${rows}</tbody></table>
+      <table><thead><tr><th>البند</th><th>2025</th><th>2026</th><th>الفرق</th><th>ملاحظة 2025</th><th>ملاحظة 2026</th></tr></thead><tbody>${rows}${totalRow}</tbody></table>
     </div>`;
   };
 
@@ -12178,8 +12210,6 @@ function caExportPDF(){
       <div class="kpi" style="background:#FFFDE7;color:#F57F17"><div class="n">${fmtMoney(afterIt?.value_2026)}</div><div class="l">محقق 2026 بعد الخصم</div></div>
       <div class="kpi" style="background:#FFF3E0;color:#E65100"><div class="n">${fmtPct(pct2026)}</div><div class="l">نسبة الخصم الفعلية 2026</div></div>
     </div>
-
-    ${_caLastInsight ? `<div class="insight-box"><b>🤖 تحليل AI للفروقات بين العقدين:</b><br/><br/>${_caLastInsight.replace(/</g,'&lt;')}</div>` : ''}
 
     ${buildSectionTable('fixed')}
     ${buildSectionTable('fees')}
@@ -30670,7 +30700,9 @@ async function groqChat(messages, maxTokens){
       await aiEnsureClaudeKey();
       return await claudeChat(messages, maxTokens);
     }catch(ce){
-      throw new Error('Groq وGemini وClaude كلهم غير متاحين: '+ce.message);
+      // نعرض سبب فشل Groq الحقيقي (مش بس آخر خدمة فشلت) عشان يبان السبب الفعلي بدل ما يتقنّع بخطأ "مفتاح Claude غير متاح"
+      const groqReason = lastErr ? lastErr.message : 'غير معروف';
+      throw new Error(`Groq: ${groqReason} — Gemini: ${ge.message} — Claude: ${ce.message}`);
     }
   }
 }
