@@ -12721,21 +12721,26 @@ function buildLocBranchMap(range){
   const res={};
   Object.entries(map).forEach(([k,o])=>res[k]=o.branch);
 
-  // 2. للمنسقين الثابتين — جيب الفرع من branches عن طريق rep_name
+  // 2. للمنسقين الثابتين فعلاً بس (type==='ثابت' في جدول users) — جيب الفرع من branches عن طريق rep_name
+  // مهم: منسق "متحرك" بيبقى rep_name ليه على كل فروع خط سيره (مش فرع واحد)، فلو طبّقنا الفallback ده
+  // عليه هيثبت أول فرع أبجديًا وكأنه "فرعه الدائم" حتى لو مزارهوش خالص — ده البق اللي كان بيحصل فعليًا.
+  const fixedRepNames = new Set((REPS||[]).filter(r=>r.type==='ثابت').map(r=>r.name));
   const branches = cachedData.branches||[];
   branches.forEach(b=>{
-    if(b.rep_name && !res[b.rep_name]){
+    if(b.rep_name && fixedRepNames.has(b.rep_name) && !res[b.rep_name]){
       res[b.rep_name] = b.branch_name;
     }
     // rep_name2 و rep_name3
-    if(b.rep_name2 && !res[b.rep_name2]) res[b.rep_name2] = b.branch_name;
-    if(b.rep_name3 && !res[b.rep_name3]) res[b.rep_name3] = b.branch_name;
+    if(b.rep_name2 && fixedRepNames.has(b.rep_name2) && !res[b.rep_name2]) res[b.rep_name2] = b.branch_name;
+    if(b.rep_name3 && fixedRepNames.has(b.rep_name3) && !res[b.rep_name3]) res[b.rep_name3] = b.branch_name;
   });
 
-  // 3. Fallback من coord_route_assignments للمنسقين الثابتين كبار العملاء
+  // 3. Fallback من coord_route_assignments — للمنسقين الثابتين بس برضه.
+  // (الجدول ده بقى فعليًا بيخزن قائمة كل الفروع المتاحة لمنسق متحرك، مش فرع واحد حالي —
+  // فاستخدامه كـ"آخر فرع" لمنسق متحرك غلط بنفس طريقة الخطوة اللي فوق، ولنفس السبب)
   const coordAssign = cachedData.coord_route_assignments||[];
   coordAssign.forEach(c=>{
-    if(c.rep_name && !res[c.rep_name]){
+    if(c.rep_name && fixedRepNames.has(c.rep_name) && !res[c.rep_name]){
       res[c.rep_name] = c.branch_name;
     }
   });
@@ -17090,8 +17095,14 @@ window._pbEditingId = null;
 async function pbLoadList(){
   try{
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/promo_banner?select=*&order=id.desc`,{headers:H});
-    window._pbAllBanners = r.ok ? await r.json() : [];
+    const [r, scRes, mapRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/promo_banner?select=*&order=id.desc`,{headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/sales_clients?select=id,name&order=name.asc`,{headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?select=client_name,branch_name&limit=5000`,{headers:H}),
+    ]);
+    window._pbAllBanners     = r.ok      ? await r.json().catch(()=>[])      : [];
+    window._pbSalesClients   = scRes.ok  ? await scRes.json().catch(()=>[])  : [];
+    window._pbBranchClientMap= mapRes.ok ? await mapRes.json().catch(()=>[]) : [];
     pbRenderList();
     pbBuildClientDatalist();
   }catch(e){ console.warn('pbLoadList error', e); }
@@ -17168,20 +17179,13 @@ async function pbDeleteBanner(id){
   }catch(e){ alert('خطأ في الحذف: '+e.message); }
 }
 
-// يبني قائمة اقتراحات أسماء العملاء من فروع النظام الفعلية (بدون تعديل يدوي)
+// يبني قائمة اقتراحات أسماء العملاء من الأسماء الرسمية في sales_clients
+// (بدل تخمين توكينز من اسم الفرع) — عشان القيمة المختارة تتطابق تمامًا مع branch_client_map
 function pbBuildClientDatalist(){
   const dl = document.getElementById('pb-client-list');
   if(!dl) return;
-  const branches = cachedData.branches||[];
-  const tokens = new Set();
-  branches.forEach(b=>{
-    const name = (b.branch_name||'').trim();
-    if(!name) return;
-    // ناخد أول جزء قبل أول فاصل شائع (- أو _ أو /)
-    const first = name.split(/[-_\/]/)[0].trim();
-    if(first && first.length>=2) tokens.add(first);
-  });
-  dl.innerHTML = [...tokens].sort((a,b)=>a.localeCompare('ar')).map(t=>`<option value="${t}"></option>`).join('');
+  const names = (window._pbSalesClients||[]).map(c=>c.name).filter(Boolean);
+  dl.innerHTML = names.sort((a,b)=>a.localeCompare(b,'ar')).map(n=>`<option value="${n}"></option>`).join('');
 }
 
 function pbAddClientChip(){
@@ -17211,6 +17215,8 @@ function pbRenderClientChips(){
 }
 
 // معاينة حية: كام فرع/مستخدم هيوصلهم البانر لو استهدفنا العملاء دول (OR بين كل العملاء المختارين)
+// المصدر الأساسي: branch_client_map (الربط الموثّق فرع↔عميل من لوحة "أسعار الأصناف والخصومات")
+// لو مفيش ربط موثّق لسه، بنرجع لتطابق تقريبي بالاسم كـ fallback مع تحذير للأدمن يربط العميل صح.
 function pbPreviewClient(){
   const el = document.getElementById('pb-client-preview');
   if(!el) return;
@@ -17220,18 +17226,28 @@ function pbPreviewClient(){
     el.style.color = '#666';
     return;
   }
-  const branches = (cachedData.branches||[]).filter(b=>clients.some(q=>(b.branch_name||'').includes(q)));
-  const coordAssign = (cachedData.coord_route_assignments||[]).filter(c=>clients.some(q=>(c.branch_name||'').includes(q)));
+  const map = window._pbBranchClientMap||[];
+  const linkedBranchNames = [...new Set(map.filter(m=>clients.includes(m.client_name)).map(m=>m.branch_name).filter(Boolean))];
+
+  if(!linkedBranchNames.length){
+    const branchesFallback = (cachedData.branches||[]).filter(b=>clients.some(q=>(b.branch_name||'').includes(q)));
+    if(!branchesFallback.length){
+      el.textContent = `⚠️ مفيش أي فرع مربوط رسميًا بالعملاء دول (${clients.join('، ')}) في لوحة "أسعار الأصناف والخصومات"، ولا حتى تطابق تقريبي بالاسم — راجع اختيار العميل.`;
+      el.style.color = '#B71C1C';
+    } else {
+      el.textContent = `⚠️ مفيش ربط رسمي موثّق للعملاء دول لسه، لكن في تطابق تقريبي بالاسم لـ ${branchesFallback.length} فرع — يفضّل تربط العميل من لوحة "أسعار الأصناف والخصومات" أولاً عشان الاستهداف يبقى دقيق 100%.`;
+      el.style.color = '#B8860B';
+    }
+    return;
+  }
+
+  const branches = (cachedData.branches||[]).filter(b=>linkedBranchNames.includes(b.branch_name));
+  const coordAssign = (cachedData.coord_route_assignments||[]).filter(c=>linkedBranchNames.includes(c.branch_name));
   const names = new Set();
   branches.forEach(b=>{ [b.rep_name,b.rep_name2,b.rep_name3].forEach(n=>{ if(n) names.add(n); }); });
   coordAssign.forEach(c=>{ if(c.rep_name) names.add(c.rep_name); });
-  if(!branches.length){
-    el.textContent = `⚠️ مفيش أي فرع في النظام مطابق للعملاء دول (${clients.join('، ')}) — راجع الإملاء قبل النشر.`;
-    el.style.color = '#B71C1C';
-  } else {
-    el.textContent = `✅ هيوصل لأصحاب ${branches.length} فرع (تقريباً ${names.size} شخص) من العملاء: ${clients.join('، ')}.`;
-    el.style.color = '#1A7A4A';
-  }
+  el.textContent = `✅ هيوصل لأصحاب ${linkedBranchNames.length} فرع مربوط رسميًا (تقريباً ${names.size} شخص) من العملاء: ${clients.join('، ')}.`;
+  el.style.color = '#1A7A4A';
 }
 
 async function savePromoBanner(){
