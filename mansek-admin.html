@@ -31622,12 +31622,11 @@ async function runAIAnalysis(){
     let visits = await fetch(`${SUPABASE_URL}/rest/v1/visits?select=rep_name,branch_name,date,created_at&date=gte.${ws}&date=lte.${we}&limit=2000`,{headers:H}).then(r=>r.json()).catch(()=>[]);
     if(!Array.isArray(visits)) visits=[];
 
-    // 4) بناء ملخص لكل مشرف
-    const summaries = plans.map(plan=>{
+    // 4) بناء ملخص لكل مشرف — بلوك مستقل لكل واحد عشان نقدر نقسّمهم على دفعات صغيرة بعدين
+    const summaryBlocks = plans.map(plan=>{
       const planItems   = items.filter(i=>i.plan_id===plan.id);
       const doneItems   = planItems.filter(i=>i.status==='done');
       const pendItems   = planItems.filter(i=>i.status!=='done');
-      const visitItems  = planItems.filter(i=>i.task_type==='visit'||!i.task_type);
       const donePct     = planItems.length ? Math.round(doneItems.length/planItems.length*100) : 0;
 
       // الزيارات الفعلية لهذا المشرف
@@ -31645,7 +31644,10 @@ async function runAIAnalysis(){
       const actualVisitBranches = repVisits.map(v=>v.branch_name||v.branch||'—').join('، ')||'لا توجد زيارات مسجلة';
 
       const planTypeLabel = plan.plan_type==='sales'||!plan.plan_type ? 'مشرف مبيعات' : 'مشرف تنسيق';
-      return `=== ${planTypeLabel}: ${plan.supervisor_name} ===
+      return {
+        name: plan.supervisor_name,
+        donePct,
+        text: `=== ${planTypeLabel}: ${plan.supervisor_name} ===
 نوع الخطة: ${planTypeLabel}
 حالة الخطة: ${plan.status==='approved'?'معتمدة':'مسودة/غير معتمدة'}
 الفترة: ${plan.week_start} إلى ${plan.week_end}
@@ -31653,32 +31655,68 @@ async function runAIAnalysis(){
 تفاصيل الأيام:
 ${daysDetail||'  (لا تفاصيل)'}
 الزيارات الفعلية المسجلة في النظام: ${actualVisitBranches}
-المهام غير المنجزة: ${pendItems.map(i=>'زيارة: '+(i.branch_name||'—')).join('، ')||'لا يوجد'}`;
-    }).join('\n\n');
+المهام غير المنجزة: ${pendItems.map(i=>'زيارة: '+(i.branch_name||'—')).join('، ')||'لا يوجد'}`
+      };
+    });
 
-    // 5) إرسال للـ AI (Groq أولاً ← Gemini احتياطي)
+    // 5) إرسال للـ AI على دفعات صغيرة (batches) — نماذج Groq المجانية عندها حد أقصى توكنات/دقيقة (TPM) منخفض
+    // (6000 توكن على النموذج الاحتياطي)، ولو بعتنا كل المشرفين في طلب واحد (خصوصًا مع "كل المشرفين")
+    // بيتجاوز الحد ويفشل الطلب كله برسالة "Request too large". فبنقسّمهم لمجموعات صغيرة، كل مجموعة
+    // في طلب منفصل، وبعدين نجمع النتايج + نطلب خلاصة عامة صغيرة مبنية على الأرقام بس.
     if(!_GROQ_KEY){ await aiEnsureGroqKey().catch(()=>{}); }
     const teamLabel = teamFilter==='coord' ? 'فريق التنسيق' : teamFilter==='sales' ? 'فريق المبيعات' : 'فريق التنسيق والمبيعات';
-    const prompt = `أنت محلل أداء خبير لـ${teamLabel} في شركة الطحان جولدن داتس.
-البيانات التالية تمثل خطط العمل الأسبوعية للمشرفين للأسبوع من ${ws} إلى ${we}.
 
-${summaries}
+    const AI_BATCH_SIZE = 4;
+    const aiBatches = [];
+    for(let i=0;i<summaryBlocks.length;i+=AI_BATCH_SIZE) aiBatches.push(summaryBlocks.slice(i,i+AI_BATCH_SIZE));
 
-المطلوب منك (اكتب بالعربية فقط):
-لكل مشرف اكتب:
+    const aiTextParts = [];
+    for(let bi=0; bi<aiBatches.length; bi++){
+      area.innerHTML = `<div style="text-align:center;padding:60px;color:var(--text2)">
+        <div style="font-size:40px;margin-bottom:16px">⏳</div>
+        <div style="font-size:14px;font-weight:700">جاري تحليل المشرفين (${bi+1}/${aiBatches.length})...</div>
+        <div style="font-size:12px;margin-top:8px;opacity:.7">بنحللهم على دفعات صغيرة عشان الدقة والاستقرار</div>
+      </div>`;
+      const batchText = aiBatches[bi].map(b=>b.text).join('\n\n');
+      const batchPrompt = `أنت محلل أداء خبير لـ${teamLabel} في شركة الطحان جولدن داتس.
+البيانات التالية تمثل خطط العمل الأسبوعية لمجموعة من المشرفين للأسبوع من ${ws} إلى ${we}.
+
+${batchText}
+
+المطلوب منك (اكتب بالعربية فقط): لكل مشرف من المشرفين دول اكتب:
 1. **ملخص الأداء**: تقييم موجز (ممتاز/جيد/يحتاج متابعة/ضعيف) مع السبب
 2. **ما اتنفذ**: المهام والزيارات التي أُنجزت
 3. **ما لم يتنفذ**: المهام المتأخرة أو الغائبة مقارنة بالخطة
 4. **الملاحظات**: هل الزيارات الفعلية تتوافق مع الخطة؟ أي فجوات؟
 5. **توصية للأسبوع القادم**: مهمة أو أولوية واحدة محددة
+اجعل ردك مباشراً وعملياً ومفيداً للمدير. ملحوظة: متكتبش "خلاصة الفريق" هنا، التحليل المطلوب هنا للمشرفين دول بس.`;
 
-في النهاية اكتب **خلاصة الفريق**: تقييم إجمالي ونقاط القوة والضعف.
-اجعل ردك مباشراً وعملياً ومفيداً للمدير.`;
+      try{
+        const part = await groqChat(
+          [{role:'system',content:ADVISOR_SYSTEM_PROMPT},{role:'user',content:batchPrompt}],
+          1800
+        );
+        aiTextParts.push(part);
+      }catch(batchErr){
+        aiTextParts.push(`⚠️ تعذّر تحليل هذه المجموعة (${aiBatches[bi].map(b=>b.name).join('، ')}): ${batchErr.message}`);
+      }
+    }
 
-    const aiText = await groqChat(
-      [{role:'system',content:ADVISOR_SYSTEM_PROMPT},{role:'user',content:prompt}],
-      3500
-    );
+    // خلاصة الفريق: طلب AI منفصل وصغير جدًا (أرقام فقط مش تفاصيل) عشان يفضل خفيف مهما كبر الفريق
+    let teamSummaryText = '';
+    try{
+      const statsLines = summaryBlocks.map(b=>`- ${b.name}: نسبة إنجاز ${b.donePct}%`).join('\n');
+      const summaryPrompt = `دي نسب إنجاز خطط الأسبوع لكل مشرفي ${teamLabel} من ${ws} إلى ${we}:
+${statsLines}
+
+اكتب **خلاصة الفريق** في فقرة أو فقرتين قصار: تقييم إجمالي لأداء الفريق، وأبرز نقاط القوة والضعف، بالعربي فقط.`;
+      teamSummaryText = await groqChat(
+        [{role:'system',content:ADVISOR_SYSTEM_PROMPT},{role:'user',content:summaryPrompt}],
+        600
+      );
+    }catch(sumErr){ teamSummaryText = ''; }
+
+    const aiText = aiTextParts.join('\n\n') + (teamSummaryText ? `\n\n**خلاصة الفريق**\n${teamSummaryText}` : '');
 
     // 6) عرض النتيجة
     const htmlText = aiText
