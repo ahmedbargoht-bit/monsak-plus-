@@ -489,7 +489,7 @@ const sb = sbGet;
 let CU = { name:'GM', uid:'gm', level:'gm', groups:Object.keys(GROUPS) };
 
 // نفس cachedData في لوحة التحكم — بيانات حية + ثابتة
-let cachedData = { visits:[], missing:[], products:[], attendance:[], location:[], messages:[], orders:[], snapshots:[], branches:[], coord_route_assignments:[] };
+let cachedData = { visits:[], missing:[], products:[], attendance:[], location:[], messages:[], orders:[], snapshots:[], branches:[], coord_route_assignments:[], grp_supervisors:[] };
 
 // نفس loadAdminUsers() في لوحة التحكم لكن مبسّطة (من غير fallback الثابت — مش محتاجينه هنا)
 async function loadCoordUsers(){
@@ -539,6 +539,7 @@ async function refreshCoordData(){
   await Promise.all([loadCoordUsers(), loadCoordStaticData()]);
   await loadCoordLiveData();
   renderLocations();
+  loadAttendance();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -993,6 +994,444 @@ function attDayNameToNum(name){
 }
 
 // ══════════════════════════════════════════════════════════════
+// ATTENDANCE — منقول حرفياً من لوحة التحكم (mansek-admin.html)
+// ══════════════════════════════════════════════════════════════
+async function cleanDuplicateAttendance(){
+  const btn = event.currentTarget;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="ti ti-loader"></i> جاري التحليل...';
+
+  try{
+    const all = [...(cachedData.attendance||[])];
+    const map = {};
+    all.forEach(r=>{
+      const key = `${r.name}__${r.date}`;
+      if(!map[key]) map[key] = [];
+      map[key].push(r);
+    });
+
+    const toDelete = [];
+    Object.values(map).forEach(recs=>{
+      if(recs.length <= 1) return;
+      recs.sort((a,b)=>{
+        if(a.time_in && !b.time_in) return -1;
+        if(!a.time_in && b.time_in) return 1;
+        return (a.id||0)-(b.id||0);
+      });
+      recs.slice(1).forEach(r=> toDelete.push(r.id));
+    });
+
+    if(!toDelete.length){ showToast('✅ لا توجد سجلات مكررة'); return; }
+
+    if(!confirm(`سيتم حذف ${toDelete.length} سجل مكرر. متأكد؟`)) return;
+
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/delete_attendance_ids`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`},
+      body: JSON.stringify({ids: toDelete})
+    });
+    const result = await res.json();
+
+    if(res.ok && result?.success){
+      showToast(`✅ تم حذف ${result.deleted} سجل مكرر`);
+      await loadCoordLiveData();
+      loadAttendance();
+    } else {
+      showToast('⚠️ شغّل delete_attendance_ids.sql في Supabase أولاً');
+    }
+  }catch(e){
+    showToast('خطأ: '+e.message);
+  }finally{
+    btn.disabled=false;
+    btn.innerHTML='<i class="ti ti-eraser"></i> تنظيف المكرر';
+  }
+}
+
+// حساب عدد الأيام بين تاريخين (شامل)
+function attDaysBetween(from, to){
+  if(!from||!to) return 0;
+  const d1 = new Date(from), d2 = new Date(to);
+  return Math.max(0, Math.floor((d2-d1)/86400000)+1);
+}
+
+// تحويل قيمة day_off لاسم عربي للعرض
+function attDayOffLabel(name){
+  if(!name||name==='none') return '—';
+  const map = {
+    friday:'الجمعة', saturday:'السبت', sunday:'الأحد',
+    monday:'الاثنين', tuesday:'الثلاثاء', wednesday:'الأربعاء', thursday:'الخميس'
+  };
+  return map[name.toLowerCase()]||name;
+}
+
+// عدد مرات وقوع يوم معين في الفترة
+function attCountDayOff(dayOffName, from, to){
+  if(!dayOffName||dayOffName==='none'||!from||!to) return 0;
+  const dow = attDayNameToNum(dayOffName);
+  if(dow<0) return 0;
+  let count=0;
+  const cur=new Date(from), end=new Date(to);
+  while(cur<=end){ if(cur.getDay()===dow) count++; cur.setDate(cur.getDate()+1); }
+  return count;
+}
+
+// بناء قائمة كل أيام الفترة
+function attAllDays(from, to){
+  const days = [];
+  if(!from||!to) return days;
+  const cur = new Date(from);
+  const end = new Date(to);
+  while(cur <= end){
+    days.push(cur.toISOString().slice(0,10));
+    cur.setDate(cur.getDate()+1);
+  }
+  return days;
+}
+
+async function loadAttendance(){
+  const from = document.getElementById('att-from')?.value||'';
+  const to   = document.getElementById('att-to')?.value||'';
+  const grp  = document.getElementById('att-group')?.value||'all';
+
+  let data = cachedData.attendance||[];
+
+  if(from) data = data.filter(a=>(a.date||'')>=from);
+  if(to)   data = data.filter(a=>(a.date||'')<=to);
+  if(grp!=='all') data = data.filter(a=>a.grp===grp);
+
+  // ── خطوة 1: دمج السجلات — منسق + يوم = سجل واحد ──
+  const dayMap = {};
+  data.forEach(a=>{
+    const key = (a.name||'')+'||'+(a.date||'');
+    if(!dayMap[key]) dayMap[key]={
+      name:a.name, route:a.route||'—', grp:a.grp||'—', date:a.date,
+      timeIn:null, timeOut:null
+    };
+    const r=dayMap[key];
+    if(a.time_in  &&(!r.timeIn ||a.time_in <r.timeIn))  r.timeIn =a.time_in;
+    if(a.time_out &&(!r.timeOut||a.time_out>r.timeOut)) r.timeOut=a.time_out;
+  });
+
+  // ── خطوة 2: تجميع لكل منسق ──
+  const coordMap = {};
+  Object.values(dayMap).forEach(r=>{
+    const n = r.name||'';
+    if(!coordMap[n]) coordMap[n]={
+      name:n, route:r.route, grp:r.grp,
+      presentSet: new Set(), totalHrs:0
+    };
+    const c = coordMap[n];
+    c.presentSet.add(r.date);
+    if(r.timeIn&&r.timeOut){
+      const [h1,m1]=r.timeIn.split(':').map(Number);
+      const [h2,m2]=r.timeOut.split(':').map(Number);
+      const diff=((h2*60+m2)-(h1*60+m1))/60;
+      if(diff>0&&diff<24) c.totalHrs+=diff;
+    }
+  });
+
+  // ── خطوة 2.5: جلسات الدعم الميداني — من جدول field_support_logs ──
+  const supportByRep = {};
+  try{
+    const Hh = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    let sUrl = `${SUPABASE_URL}/rest/v1/field_support_logs?select=rep_name,branch_name,visit_date&limit=5000`;
+    if(from) sUrl += `&visit_date=gte.${from}`;
+    if(to)   sUrl += `&visit_date=lte.${to}`;
+    const sRes = await fetch(sUrl,{headers:Hh});
+    const sLogs = sRes.ok ? await sRes.json().catch(()=>[]) : [];
+    (Array.isArray(sLogs)?sLogs:[]).forEach(s=>{
+      const n = s.rep_name; if(!n) return;
+      if(!supportByRep[n]) supportByRep[n] = {sessions:0, branches:new Set()};
+      supportByRep[n].sessions++;
+      if(s.branch_name) supportByRep[n].branches.add(s.branch_name);
+    });
+  }catch(e){ /* لو الجلب فشل، تفضل الأعمدة صفر بدل ما توقف باقي الجدول */ }
+
+  // ── خطوة 3: حساب الغياب مع الراحة الأسبوعية ──
+  const totalDays = attDaysBetween(from,to);
+  const summaryRows = Object.values(coordMap).map(c=>{
+    const repObj = (typeof REPS!=='undefined'?REPS:[]).find(r=>(r.name||r.staff_name)===c.name);
+    const dayOff = repObj?.day_off||'none';
+    const empCode = repObj?.emp_code||'';
+    const dayOffCount = attCountDayOff(dayOff, from, to);
+    const workDays = Math.max(0, totalDays - dayOffCount);
+    const present  = c.presentSet.size;
+    const absent   = Math.max(0, workDays - present);
+    const pct      = workDays ? Math.round(present/workDays*100) : 0;
+    const sup = supportByRep[c.name];
+    const supportSessions = sup?.sessions||0;
+    const supportBranches = sup?.branches?.size||0;
+    return { name:c.name, route:c.route, empCode, present, absent, totalDays, workDays, dayOff, dayOffCount, hrs:c.totalHrs, pct, supportSessions, supportBranches };
+  }).sort((a,b)=>b.present-a.present||a.name.localeCompare(b.name));
+
+  // ── إحصائيات ──
+  const totalPresent = summaryRows.reduce((s,r)=>s+r.present,0);
+  const totalAbsent  = summaryRows.reduce((s,r)=>s+r.absent,0);
+  const totalHrsAll  = summaryRows.reduce((s,r)=>s+r.hrs,0);
+
+  const attStatsEl = document.getElementById('att-stats');
+  if(attStatsEl) attStatsEl.innerHTML=`
+    <div class="stat-card green"><div class="stat-n">${summaryRows.length}</div><div class="stat-l">عدد المنسقين</div></div>
+    <div class="stat-card blue"><div class="stat-n">${totalDays}</div><div class="stat-l">أيام الفترة</div></div>
+    <div class="stat-card green"><div class="stat-n">${totalPresent}</div><div class="stat-l">إجمالي أيام الحضور</div></div>
+    <div class="stat-card red"><div class="stat-n">${totalAbsent}</div><div class="stat-l">إجمالي أيام الغياب</div></div>
+    <div class="stat-card orange"><div class="stat-n">${totalHrsAll.toFixed(0)}</div><div class="stat-l">إجمالي الساعات</div></div>
+    <button class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C" onclick="clearAllAttendance()"><i class="ti ti-trash"></i> مسح الكل</button>
+  `;
+
+  // ── رأس الجدول ──
+  const thead = document.querySelector('#att-main-table thead tr');
+  if(thead) thead.innerHTML=`
+    <th>الكود</th>
+    <th>المنسق</th>
+    <th>خط السير</th>
+    <th style="color:#F59E0B">يوم الراحة</th>
+    <th style="color:#065F46">أيام الحضور</th>
+    <th style="color:#DC2626">أيام الغياب</th>
+    <th style="color:#F59E0B">أيام الراحة<br>في الفترة</th>
+    <th>أيام العمل<br>الفعلية</th>
+    <th>ساعات العمل</th>
+    <th style="color:#7C3AED">جلسات دعم</th>
+    <th style="color:#7C3AED">فروع</th>
+    <th>نسبة الحضور</th>
+    <th>تفاصيل</th>
+  `;
+
+  // ── جسم الجدول ──
+  const attTableEl = document.getElementById('att-table');
+  if(attTableEl) attTableEl.innerHTML = summaryRows.map(r=>`
+    <tr style="cursor:pointer" onclick="attShowDetail('${r.name.replace(/'/g,"\\'")}','${from}','${to}')">
+      <td style="text-align:center;font-size:11px;color:#6B7280;font-family:monospace">${r.empCode||'—'}</td>
+      <td><b>${r.name}</b></td>
+      <td style="font-size:11px">${r.route}</td>
+      <td style="text-align:center">${r.dayOff&&r.dayOff!=='none'?`<span style="background:#FEF3C7;color:#92400E;padding:2px 8px;border-radius:20px;font-size:11px">${attDayOffLabel(r.dayOff)}</span>`:`<span style="color:#9CA3AF;font-size:11px">—</span>`}</td>
+      <td style="color:#065F46;font-weight:700;font-size:15px">${r.present}</td>
+      <td style="color:#DC2626;font-weight:700;font-size:15px">${r.absent}</td>
+      <td style="color:#D97706;font-weight:700;text-align:center">${r.dayOffCount}</td>
+      <td style="color:#6B7280;text-align:center">${r.workDays}</td>
+      <td>${r.hrs.toFixed(1)} ساعة</td>
+      <td style="text-align:center">
+        ${r.supportSessions>0
+          ? `<span style="background:#EDE9FE;color:#7C3AED;padding:2px 10px;border-radius:20px;font-weight:700;font-size:13px">${r.supportSessions}</span>`
+          : `<span style="color:#9CA3AF;font-size:11px">—</span>`}
+      </td>
+      <td style="text-align:center">
+        ${r.supportBranches>0
+          ? `<span style="background:#EDE9FE;color:#7C3AED;padding:2px 10px;border-radius:20px;font-size:12px">${r.supportBranches}</span>`
+          : `<span style="color:#9CA3AF;font-size:11px">—</span>`}
+      </td>
+      <td>
+        <div style="display:flex;align-items:center;gap:6px">
+          <div style="background:#E5E7EB;border-radius:4px;height:8px;width:60px">
+            <div style="background:${r.pct>=80?'#065F46':r.pct>=50?'#D97706':'#DC2626'};border-radius:4px;height:8px;width:${Math.min(r.pct,100)}%"></div>
+          </div>
+          <span style="font-size:11px">${r.pct}%</span>
+        </div>
+      </td>
+      <td><span style="font-size:10px;color:var(--blue);text-decoration:underline">عرض الأيام</span></td>
+    </tr>`
+  ).join('')||'<tr><td colspan="13" style="text-align:center;padding:1.5rem;color:var(--text2)">لا توجد بيانات — اختر فترة زمنية ومجموعة</td></tr>';
+
+  window._attRows = summaryRows;
+  window._attDayMap = dayMap;
+}
+
+// عرض تفاصيل أيام منسق معين
+function attShowDetail(name, from, to){
+  const allDays = attAllDays(from, to);
+  const present = new Set(
+    Object.values(window._attDayMap||{})
+      .filter(r=>r.name===name)
+      .map(r=>r.date)
+  );
+  const repObj = (typeof REPS!=='undefined'?REPS:[]).find(r=>(r.name||r.staff_name)===name);
+  const dayOff = repObj?.day_off||'none';
+  const dowOff = attDayNameToNum(dayOff);
+
+  const lines = allDays.map(d=>{
+    const rec = Object.values(window._attDayMap||{}).find(r=>r.name===name&&r.date===d);
+    const isPresent = present.has(d);
+    const isOff = dowOff>=0 && new Date(d).getDay()===dowOff;
+    let status;
+    if(isPresent)      status=`<span style="color:#065F46;font-weight:700">✅ حاضر</span>`;
+    else if(isOff)     status=`<span style="color:#D97706;font-weight:700">🏖️ راحة (${attDayOffLabel(dayOff)})</span>`;
+    else               status=`<span style="color:#DC2626;font-weight:700">❌ غائب</span>`;
+    return `<tr style="background:${isOff&&!isPresent?'#FFFBEB':'inherit'}">
+      <td style="padding:6px 10px">${d}</td>
+      <td style="padding:6px 10px">${status}</td>
+      <td style="padding:6px 10px">${rec?.timeIn||'—'}</td>
+      <td style="padding:6px 10px">${rec?.timeOut||'—'}</td>
+    </tr>`;
+  }).join('');
+
+  const modal = document.createElement('div');
+  modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  modal.innerHTML=`
+    <div style="background:#FFFDF8;border-radius:16px;padding:24px;max-width:500px;width:90%;max-height:80vh;overflow-y:auto;direction:rtl;font-family:Cairo,sans-serif">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h3 style="margin:0;font-size:15px">📅 تفاصيل ${name}</h3>
+        <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none;border:none;font-size:20px;cursor:pointer">✕</button>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:#F5F0E8">
+          <th style="padding:6px 10px;text-align:right">التاريخ</th>
+          <th style="padding:6px 10px;text-align:right">الحالة</th>
+          <th style="padding:6px 10px;text-align:right">أول حضور</th>
+          <th style="padding:6px 10px;text-align:right">آخر انصراف</th>
+        </tr></thead>
+        <tbody>${lines}</tbody>
+      </table>
+    </div>`;
+  modal.onclick=e=>{ if(e.target===modal) modal.remove(); };
+  document.body.appendChild(modal);
+}
+
+function exportAttendancePDF(){
+  const rows = window._attRows||[];
+  if(!rows.length){ alert('لا توجد بيانات للتصدير'); return; }
+
+  const from  = document.getElementById('att-from')?.value||'';
+  const to    = document.getElementById('att-to')?.value||'';
+  const grpEl = document.getElementById('att-group');
+  const grpLbl= grpEl.options[grpEl.selectedIndex]?.text||'كل المجموعات';
+  const now   = new Date().toLocaleString('ar-EG');
+
+  const grpVal = grpEl.value;
+  let supName = '—';
+  if(grpVal !== 'all'){
+    const supObj = (cachedData.grp_supervisors||[]).find(s=>s.grp===grpVal);
+    if(supObj) supName = supObj.supervisor||'—';
+  }
+
+  const totalPresent = rows.reduce((s,r)=>s+r.present,0);
+  const totalAbsent  = rows.reduce((s,r)=>s+r.absent,0);
+  const totalHrs     = rows.reduce((s,r)=>s+r.hrs,0);
+  const totalDays    = rows[0]?.totalDays||0;
+
+  let tRows = '';
+  rows.forEach((r,i)=>{
+    const bg  = i%2===0?'#fff':'#fdf5ee';
+    const pct = r.pct||0;
+    const barColor = pct>=80?'#065F46':pct>=50?'#D97706':'#DC2626';
+    tRows += `<tr style="background:${bg}">
+      <td style="text-align:center;font-family:monospace;color:#6B7280;font-size:11px">${r.empCode||'—'}</td>
+      <td style="font-weight:700">${r.name}</td>
+      <td style="font-size:10px;color:#555">${r.route}</td>
+      <td style="text-align:center;color:#92400E">${r.dayOff&&r.dayOff!=='none'?attDayOffLabel(r.dayOff):'—'}</td>
+      <td style="color:#065F46;font-weight:700;font-size:14px;text-align:center">${r.present}</td>
+      <td style="color:#DC2626;font-weight:700;font-size:14px;text-align:center">${r.absent}</td>
+      <td style="text-align:center;color:#D97706;font-weight:700">${r.dayOffCount||0}</td>
+      <td style="text-align:center;color:#6B7280">${r.workDays||r.totalDays}</td>
+      <td style="text-align:center">${r.hrs.toFixed(1)} ساعة</td>
+      <td style="text-align:center;color:#7C3AED;font-weight:700">${r.supportSessions>0?r.supportSessions:'—'}</td>
+      <td style="text-align:center;color:#7C3AED">${r.supportBranches>0?r.supportBranches:'—'}</td>
+      <td style="text-align:center">
+        <span style="display:inline-block;background:${barColor};color:#fff;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700">${pct}%</span>
+      </td>
+    </tr>`;
+  });
+
+  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8">
+  <title>سجل الحضور والانصراف</title>
+  <style>
+    *{box-sizing:border-box}
+    body{font-family:Arial,sans-serif;font-size:13px;direction:rtl;margin:0;padding:16px}
+    .header{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3A0800,#7B1500);color:#F5EDE0;padding:14px 20px;border-radius:10px;margin-bottom:14px}
+    .header-left{display:flex;flex-direction:column;gap:3px}
+    .header-title{font-size:19px;font-weight:700}
+    .header-sub{font-size:12px;opacity:0.85}
+    .info-bar{display:flex;gap:12px;margin-bottom:10px;flex-wrap:wrap}
+    .info-bar span{background:#fdf5ee;border:1px solid #e8d5b0;padding:4px 12px;border-radius:20px;font-size:12px}
+    table{width:100%;border-collapse:collapse;font-size:12px}
+    th{background:#3A0800;color:#F5EDE0;padding:9px 10px;text-align:right;font-weight:700;font-size:12px}
+    td{padding:8px 10px;border-bottom:0.5px solid #f0e8e0;text-align:right}
+    .footer{margin-top:24px;display:flex;justify-content:space-between;align-items:flex-end;padding-top:12px;border-top:1px solid #e0d0c0}
+    .sig-box{text-align:center;min-width:200px}
+    .sig-label{font-size:12px;color:#666;margin-bottom:36px}
+    .sig-line{border-top:1px solid #333;padding-top:5px;font-size:13px;font-weight:700;color:#3A0800}
+    .footer-note{font-size:11px;color:#aaa;text-align:center}
+    @media print{body{padding:0}}
+  </style></head><body>
+  <div class="header">
+    <div class="header-left">
+      <div class="header-title">🕐 سجل الحضور والانصراف</div>
+      <div class="header-sub">الطحان جولدن دايتس — منظومة منسق بلس</div>
+    </div>
+  </div>
+  <div class="info-bar">
+    <span>📅 الفترة: ${from||'—'} إلى ${to||'—'}</span>
+    <span>👥 ${grpLbl}</span>
+    <span>🕐 ${now}</span>
+    <span>👤 ${rows.length} منسق</span>
+    <span>📅 ${totalDays} يوم</span>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">
+    <div style="background:#F0FDF4;border:1px solid #A7F3D0;border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:20px;font-weight:700;color:#065F46">${totalPresent}</div>
+      <div style="font-size:10px;color:#065F46">إجمالي أيام الحضور</div>
+    </div>
+    <div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:20px;font-weight:700;color:#DC2626">${totalAbsent}</div>
+      <div style="font-size:10px;color:#DC2626">إجمالي أيام الغياب</div>
+    </div>
+    <div style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:20px;font-weight:700;color:#D97706">${totalHrs.toFixed(0)}</div>
+      <div style="font-size:10px;color:#D97706">إجمالي الساعات</div>
+    </div>
+    <div style="background:#F5F3FF;border:1px solid #DDD6FE;border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:20px;font-weight:700;color:#7C3AED">${rows.length > 0 ? Math.round(totalPresent/(rows.length*totalDays)*100) : 0}%</div>
+      <div style="font-size:10px;color:#7C3AED">متوسط نسبة الحضور</div>
+    </div>
+  </div>
+  <table>
+    <thead><tr>
+      <th>الكود</th><th>المنسق</th><th>خط السير</th><th style="color:#FCD34D">يوم الراحة</th>
+      <th style="color:#A7F3D0">أيام الحضور</th>
+      <th style="color:#FECACA">أيام الغياب</th>
+      <th style="color:#FCD34D">أيام الراحة</th>
+      <th>أيام العمل الفعلية</th><th>ساعات العمل</th><th style="color:#DDD6FE">جلسات دعم</th><th style="color:#DDD6FE">فروع</th><th>نسبة الحضور</th>
+    </tr></thead>
+    <tbody>${tRows}</tbody>
+  </table>
+  <div class="footer">
+    <div class="footer-note">تم إنشاء هذا التقرير من منظومة منسق بلس</div>
+    <div style="display:flex;gap:40px;align-items:flex-end">
+      <div class="sig-box">
+        <div class="sig-label">توقيع مدير مبيعات مودرن تريد</div>
+        <div class="sig-line">مدير مبيعات مودرن تريد</div>
+      </div>
+      <div class="sig-box">
+        <div class="sig-label">توقيع مدير التنسيق</div>
+        <div class="sig-line">${supName !== '—' ? supName : 'مدير التنسيق'}</div>
+      </div>
+    </div>
+  </div>
+  <${'script'}>window.onload=()=>window.print();</${'script'}>
+  </body></html>`;
+
+  const _blobW = new Blob([html], {type:'text/html;charset=utf-8'});
+  const _urlW = URL.createObjectURL(_blobW);
+  const w = window.open(_urlW, '_blank');
+  if(!w){ const a=document.createElement('a');a.href=_urlW;a.download='تقرير.html';a.click(); }
+  setTimeout(()=>URL.revokeObjectURL(_urlW), 30000);
+}
+
+// حذف كل سجلات الحضور — نسخة مبسطة (بدون بوابة باسورد الأدمن) لكن بنفس تأكيد الحذف الآمن المستخدم في تابات gm الأخرى
+function clearAllAttendance(){
+  confirmAction('⚠ حذف كل سجلات "الحضور" نهائياً؟ لا يمكن التراجع.', async ()=>{
+    try{
+      await fetch(`${SUPABASE_URL}/rest/v1/attendance?id=gte.0`,{
+        method:'DELETE',
+        headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+      });
+      await loadCoordLiveData();
+      loadAttendance();
+      showToast('✓ تم مسح كل سجلات الحضور');
+    }catch(e){ showToast('❌ فشل المسح'); }
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
 // AUTH
 // ══════════════════════════════════════════════════════════════
 async function doLogin(){
@@ -1047,8 +1486,13 @@ function showCoordTab(tab){
   document.querySelectorAll('#coord-tabs-bar .tab-btn').forEach(b=>b.classList.remove('active'));
   const btn = document.getElementById('coord-tab-btn-'+tab);
   if(btn) btn.classList.add('active');
-  // دلوقتي في تاب واحد بس (الموقع الحالي) — لما نضيف تابات تانية هنبني تبديل الـpanel هنا
-  if(tab==='location') renderLocations();
+
+  document.querySelectorAll('#screen-coord > .panel').forEach(p=>p.classList.remove('active'));
+  const panel = document.getElementById('panel-'+tab);
+  if(panel) panel.classList.add('active');
+
+  if(tab==='location')        renderLocations();
+  else if(tab==='attendance') loadAttendance();
 }
 
 // ══════════════════════════════════════════════════════════════
