@@ -285,9 +285,10 @@ tr:hover td{background:rgba(197,91,72,.04)}
 
   <!-- تابات المبيعات -->
   <div class="tabs-bar" id="sales-tabs-bar" style="display:none">
-    <button class="tab-btn active" id="sales-tab-btn-soon" onclick="">
-      🛠️ قريبًا
+    <button class="tab-btn active" id="sales-tab-btn-supply-orders" onclick="showSalesTab('supply-orders')">
+      🚚 الطلبيات
     </button>
+    <!-- تابات مبيعات تانية هتتضاف هنا تباعًا -->
   </div>
 
   <!-- تابات الضبط -->
@@ -548,10 +549,44 @@ tr:hover td{background:rgba(197,91,72,.04)}
 
     <!-- ══ سيادبار المبيعات ══ -->
     <div id="screen-sales" style="display:none">
-      <div style="text-align:center;padding:80px 20px;color:var(--text2)">
-        <div style="font-size:52px;margin-bottom:16px">🛠️</div>
-        <div style="font-size:16px;font-weight:700;margin-bottom:8px">تابات المبيعات قيد الإعداد</div>
-        <div style="font-size:13px">هتتضاف قريبًا</div>
+      <!-- ══ الطلبيات (طلبيات التوريد) — منقول حرفياً من لوحة التحكم ═══════════════════════════════════════ -->
+      <div id="panel-supply-orders" class="panel active">
+        <div class="page-header">
+          <div><h2>طلبيات التوريد</h2><p>طلبات التوريد من المنسقين الثابتين</p></div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-green btn-sm" onclick="exportSupplyOrders()"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px" id="supply-kpis"></div>
+        <div class="filter-bar">
+          <select id="so-status" onchange="loadSupplyOrders()">
+            <option value="all">كل الحالات</option>
+            <option value="pending">قيد المعالجة</option>
+            <option value="done">تم التوريد</option>
+            <option value="cancelled">ملغي</option>
+          </select>
+          <select id="so-group" onchange="loadSupplyOrders()">
+            <option value="all">كل المجموعات</option>
+            <option value="giza">الجيزة</option>
+            <option value="cairo">القاهرة</option>
+            <option value="south">جنوب</option>
+            <option value="tajmuat">التجمعات</option>
+            <option value="hyper">الهايبر</option>
+            <option value="alex">الإسكندرية</option>
+            <option value="markets">الأسواق الخاصة</option>
+            <option value="fuel_cairo">وقود القاهرة</option>
+            <option value="fuel_alex">وقود الإسكندرية</option>
+            <option value="private_cairo">أسواق خاصة القاهرة</option>
+            <option value="private_alex">أسواق خاصة الإسكندرية</option>
+          </select>
+          <input type="text" id="so-search" placeholder="ابحث عن صنف أو منسق..." oninput="loadSupplyOrders()" style="flex:1"/>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>المنسق</th><th>الفرع / خط السير</th><th>الصنف</th><th>الفئة</th><th>العدد</th><th>ميعاد التوريد</th><th>الملاحظة</th><th>الحالة</th><th>إجراءات</th></tr></thead>
+            <tbody id="supply-tbody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -6184,6 +6219,104 @@ async function savePromoBanner(){
 }
 
 // ══════════════════════════════════════════════════════════════
+// الطلبيات (طلبيات التوريد) — منقول حرفياً من لوحة التحكم (panel-supply-orders)
+// ══════════════════════════════════════════════════════════════
+async function loadSupplyOrders(){
+  const status = document.getElementById('so-status')?.value||'all';
+  const grp    = document.getElementById('so-group')?.value||'all';
+  const search = (document.getElementById('so-search')?.value||'').toLowerCase();
+  const tbody  = document.getElementById('supply-tbody');
+  if(!tbody) return;
+  let data = await sb('supply_requests',{},{order:'created_at.desc'});
+  if(status!=='all') data=data.filter(d=>d.status===status);
+  if(grp!=='all')    data=data.filter(d=>d.grp===grp);
+  if(search)         data=data.filter(d=>(d.snf||'').toLowerCase().includes(search)||(d.name||'').toLowerCase().includes(search));
+
+  tbody.innerHTML = data.map((d,i)=>{
+    const isPending = d.status==='pending_supervisor'||d.status==='pending';
+    const isApproved= d.status==='approved';
+    const isRejected= d.status==='rejected';
+    const isSup     = d.deal_source==='supervisor';
+    const statusBadge = isApproved
+      ? '<span class="badge b-green">✅ معتمد</span>'
+      : isRejected
+      ? '<span class="badge b-red">❌ مرفوض</span>'
+      : '<span class="badge b-orange">⏳ بانتظار المشرف</span>';
+
+    return`<tr style="background:${isPending?'#FFFDE7':''}">
+      <td>${i+1}</td>
+      <td><b>${d.name||'—'}</b></td>
+      <td style="font-size:11px">${d.route||'—'}</td>
+      <td>${d.snf||'—'}</td>
+      <td>${d.fea||'—'}</td>
+      <td>${d.qty||1}</td>
+      <td>${d.date||'—'}</td>
+      <td>${d.note||'—'}</td>
+      <td>
+        ${statusBadge}
+        ${isSup?'<br><span style="font-size:10px;color:#1565C0;font-weight:600">👔 اتفاق المشرف</span>':''}
+        ${d.reject_reason?`<br><span style="font-size:10px;color:#B71C1C">${d.reject_reason}</span>`:''}
+      </td>
+      <td>
+        ${isPending?`
+          <button class="btn btn-xs btn-green" onclick="approveSupplyWithSource(${d.id})">اعتماد</button>
+          <button class="btn btn-xs btn-red" onclick="rejectSupplyAdmin(${d.id})">رفض</button>`:''}
+        <button class="btn btn-xs" onclick="deleteSupplyOrder(${d.id})"
+          style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2" title="حذف الطلبية">
+          <i class="ti ti-trash"></i></button>
+      </td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="10" style="text-align:center;padding:1.5rem;color:#aaa">لا توجد طلبيات</td></tr>';
+}
+
+async function approveSupplyWithSource(id){
+  const isSup = confirm('هل هذا اتفاق المشرف؟\nاضغط OK للاتفاق المشرف، Cancel لعمل المنسق');
+  const dealSource = isSup ? 'supervisor' : 'rep';
+  await sbUpdate('supply_requests',{id},{status:'approved', deal_source:dealSource});
+  loadSupplyOrders();
+}
+async function rejectSupplyAdmin(id){
+  const reason = prompt('سبب الرفض:');
+  if(!reason) return;
+  await sbUpdate('supply_requests',{id},{status:'rejected', reject_reason:reason});
+  loadSupplyOrders();
+}
+async function approveSupply(id){ await sbUpdate('supply_requests',{id},{status:'approved'}); loadSupplyOrders(); }
+async function rejectSupply(id){  await sbUpdate('supply_requests',{id},{status:'rejected'}); loadSupplyOrders(); }
+
+// حذف طلبية — بدل بوابة الباسورد secureDelete المستخدمة في الأدمن، بنستخدم نفس confirmAction
+// الموجودة أصلاً في gm-app (نفس السلوك: تأكيد ثم تنفيذ الحذف)
+function deleteSupplyOrder(id){
+  confirmAction('حذف هذه الطلبية نهائياً؟', async ()=>{
+    const ok = await sbDelete('supply_requests',{id});
+    if(ok){ showToast('🗑️ تم حذف الطلبية'); loadSupplyOrders(); }
+    else showToast('❌ خطأ في الحذف');
+  });
+}
+
+// تصدير Excel لطلبيات التوريد
+async function exportSupplyOrders(){
+  const data = await sb('supply_requests',{},{order:'created_at.desc'});
+  if(!data?.length){ showToast('❌ لا توجد بيانات'); return; }
+  const wb=XLSX.utils.book_new();
+  const ws=XLSX.utils.json_to_sheet(data);
+  XLSX.utils.book_append_sheet(wb,ws,'طلبيات التوريد');
+  XLSX.writeFile(wb,'طلبيات_التوريد_'+new Date().toLocaleDateString('en-US').replace(/\//g,'-')+'.xlsx');
+}
+
+function showSalesTab(tab){
+  document.querySelectorAll('#sales-tabs-bar .tab-btn').forEach(b=>b.classList.remove('active'));
+  const btn = document.getElementById('sales-tab-btn-'+tab);
+  if(btn) btn.classList.add('active');
+
+  document.querySelectorAll('#screen-sales > .panel').forEach(p=>p.classList.remove('active'));
+  const panel = document.getElementById('panel-'+tab);
+  if(panel) panel.classList.add('active');
+
+  if(tab==='supply-orders') loadSupplyOrders();
+}
+
+// ══════════════════════════════════════════════════════════════
 // AUTH
 // ══════════════════════════════════════════════════════════════
 async function doLogin(){
@@ -6234,6 +6367,7 @@ function switchSidebarMode(mode){
   });
 
   if(mode==='coord') refreshCoordData();
+  else if(mode==='sales') loadSupplyOrders();
 }
 
 function showCoordTab(tab){
