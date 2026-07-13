@@ -1859,6 +1859,11 @@ h2,h3{color:#2C1F0A}
                 <option value="ثابت">ثابت</option>
                 <option value="ثابت كبار عملاء">ثابت كبار عملاء</option>
               </select>
+              <select id="usr-status" onchange="loadUsers()">
+                <option value="active">نشط</option>
+                <option value="inactive">غير نشط</option>
+                <option value="all">الكل</option>
+              </select>
               <input type="text" id="usr-search" placeholder="ابحث عن اسم أو خط سير..." oninput="loadUsers()" style="flex:1"/>
             </div>
             <div class="table-wrap">
@@ -3637,7 +3642,7 @@ h2,h3{color:#2C1F0A}
           <div class="page-header">
             <div>
               <h2><i class="ti ti-map-2" style="color:#D62828"></i> خريطة حرارة الفروع</h2>
-              <p>توزيع الأنشطة الميدانية لكل فرع — زيارات · مرتجعات · نواقص · أصناف</p>
+              <p>توزيع الأنشطة الميدانية لكل فرع — الزيارات من فواتير المناديب · قيمة الفاتورة والمرتجع · نواقص · أصناف</p>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn btn-ghost btn-sm" onclick="hmLoad()"><i class="ti ti-refresh"></i> تحديث</button>
@@ -3671,7 +3676,9 @@ h2,h3{color:#2C1F0A}
               <div class="fld" style="margin:0">
                 <label class="lbl">المقياس</label>
                 <select id="hm-metric">
-                  <option value="visits">الزيارات</option>
+                  <option value="visits">الزيارات (فواتير)</option>
+                  <option value="invoiceValue">قيمة الفواتير (ج)</option>
+                  <option value="returnValue">قيمة المرتجع (ج)</option>
                   <option value="products">الأصناف</option>
                   <option value="returns">المرتجعات</option>
                   <option value="missing">النواقص</option>
@@ -3710,16 +3717,18 @@ h2,h3{color:#2C1F0A}
                   <tr style="background:#003049;color:#fff">
                     <th style="padding:10px 12px;text-align:right">الفرع</th>
                     <th style="padding:10px 8px;text-align:center">المجموعة</th>
-                    <th style="padding:10px 8px;text-align:center">الزيارات</th>
+                    <th style="padding:10px 8px;text-align:center">الزيارات (فواتير)</th>
+                    <th style="padding:10px 8px;text-align:center">قيمة الفواتير</th>
+                    <th style="padding:10px 8px;text-align:center">قيمة المرتجع</th>
+                    <th style="padding:10px 8px;text-align:center">نسبة المرتجع من الصافي</th>
                     <th style="padding:10px 8px;text-align:center">الأصناف</th>
                     <th style="padding:10px 8px;text-align:center">المرتجعات</th>
                     <th style="padding:10px 8px;text-align:center">النواقص</th>
-                    <th style="padding:10px 8px;text-align:center">معدل المرتجعات</th>
-                    <th style="padding:10px 8px;text-align:center">آخر زيارة</th>
+                    <th style="padding:10px 8px;text-align:center">آخر فاتورة</th>
                   </tr>
                 </thead>
                 <tbody id="hm-tbody">
-                  <tr><td colspan="8" style="text-align:center;padding:20px;color:#888">—</td></tr>
+                  <tr><td colspan="10" style="text-align:center;padding:20px;color:#888">—</td></tr>
                 </tbody>
               </table>
             </div>
@@ -15852,12 +15861,41 @@ async function deleteMessage(id){
 // ══════════════════════════════════════════════════════════════
 // USERS
 // ══════════════════════════════════════════════════════════════
-function loadUsers(){
+// REPS العادي فيه النشطين بس (كده باقي شاشات لوحة التحكم اللي بتستخدم REPS —
+// الداشبورد والتصدير وربط الخطوط... إلخ — تفضل شغالة زي ما هي بدون أي تغيير).
+// عشان تاب "إدارة المنسقين" يقدر يعرض المعطّلين كمان لما المستخدم يطلب، بنعمل
+// كاش منفصل بيجيب كل المنسقين (نشط وغير نشط) مرة واحدة بس عند الحاجة.
+let _allRepsCache = null;
+async function _loadAllRepsCache(){
+  if(_allRepsCache) return _allRepsCache;
+  try{
+    const data = await sb('users', {role:'rep'}, {limit:1000});
+    _allRepsCache = (Array.isArray(data)?data:[]).map(u=>({
+      name:u.name, route:u.route||'', group:u.grp||'', type:u.user_type||'متحرك',
+      pass:u.pass_hash||'', goal:u.goal||0, status:u.status||'active', id:u.id, day_off:u.day_off||'none',
+      emp_code:u.emp_code||'', fixed_branch:u.fixed_branch||'', supervisors:u.supervisors||''
+    }));
+  }catch(e){ _allRepsCache = [...REPS]; }
+  return _allRepsCache;
+}
+
+async function loadUsers(){
   const grp=document.getElementById('usr-group')?.value||'all';
   const type=document.getElementById('usr-type')?.value||'all';
+  const status=document.getElementById('usr-status')?.value||'active';
   const search=(document.getElementById('usr-search')?.value||'').toLowerCase();
+
+  // "نشط" (الافتراضي) = نفس REPS القديم بدون أي تغيير — أي فلتر تاني (غير نشط/الكل) يجيب من الكاش الشامل
+  let source;
+  if(status==='active'){
+    source = REPS;
+  } else {
+    source = await _loadAllRepsCache();
+    if(status==='inactive') source = source.filter(r=>(r.status||'active')==='inactive');
+  }
+
   // الأدمين (gm) يشوف كل المنسقين بدون فلتر
-  let data = CU.level==='gm' ? [...REPS] : REPS.filter(r=>CU.groups.includes(r.group));
+  let data = CU.level==='gm' ? [...source] : source.filter(r=>CU.groups.includes(r.group));
   if(grp!=='all') data=data.filter(r=>r.group===grp);
   if(type!=='all') data=data.filter(r=>r.type===type);
   if(search) data=data.filter(r=>r.name.toLowerCase().includes(search) || (r.route||'').toLowerCase().includes(search));
@@ -15866,9 +15904,9 @@ function loadUsers(){
   const scores={},vc={};
   visits.forEach(v=>{scores[v.name]=(scores[v.name]||0)+(+v.points||0);vc[v.name]=(vc[v.name]||0)+1;});
 
-  document.getElementById('users-table').innerHTML=data.map((r,i)=>`<tr>
+  document.getElementById('users-table').innerHTML=data.map((r,i)=>`<tr${r.status==='inactive'?' style="opacity:.6"':''}>
     <td>${i+1}</td>
-    <td><b>${r.name}</b></td>
+    <td><b>${r.name}</b>${r.status==='inactive'?' <span class="badge b-gray" style="font-size:10px">غير نشط</span>':''}</td>
     <td style="font-size:11px">${r.route}</td>
     <td><span class="badge" style="background:${GROUPS[r.group]?.color||'#ccc'}22;color:${GROUPS[r.group]?.color||'#555'}">${GROUPS[r.group]?.label||r.group}</span></td>
     <td><span class="badge ${r.type==='ثابت'?'b-purple':'b-blue'}">${r.type}</span></td>
@@ -16388,6 +16426,11 @@ async function editUser(){
   // 3. تحديث في REPS المحلي
   const repIdx=REPS.findIndex(x=>x.name===oldName);
   if(repIdx!==-1) REPS[repIdx]={...REPS[repIdx],name,pass,route,group,type,goal,status,day_off:dayOff,emp_code:empCode,fixed_branch:fixedBranch};
+
+  // إلغاء كاش "كل المنسقين" (نشط+غير نشط) عشان لو حد فعّل/عطّل منسق من هنا يبان فوراً
+  // في فلتر "نشط"/"غير نشط" بتاب إدارة المنسقين من غير ما يحتاج يعمل reload للصفحة
+  _allRepsCache = null;
+  if(repIdx===-1) await loadAdminUsers(); // المنسق مكانش في REPS (كان غير نشط) — لو اتفعّل دلوقتي لازم يدخل REPS
 
   closeModal('modal-edit-user');
   loadUsers();
@@ -25354,39 +25397,59 @@ async function hmLoad(){
   if(!from||!to){ alert('اختر فترة زمنية'); return; }
 
   document.getElementById('hm-container').innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner" style="margin:0 auto 10px"></div>جاري تحميل البيانات...</div>';
-  document.getElementById('hm-tbody').innerHTML = '<tr><td colspan="8" style="text-align:center;padding:20px;color:#888">—</td></tr>';
+  document.getElementById('hm-tbody').innerHTML = '<tr><td colspan="10" style="text-align:center;padding:20px;color:#888">—</td></tr>';
 
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
   const grpFilter  = grp==='all' ? '' : `&grp=eq.${grp}`;
   const dateFilter = `&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`;
 
-  const [visits, products, returns_, missing_] = await Promise.all([
-    fetch(`${SUPABASE_URL}/rest/v1/visits?select=id,grp,branch,created_at${grpFilter}${dateFilter}&limit=10000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/products?select=id,grp,branch,created_at${grpFilter}${dateFilter}&limit=10000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/returns?select=id,grp,branch,qty,created_at${grpFilter}${dateFilter}&limit=5000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/missing?select=id,grp,branch,created_at${grpFilter}${dateFilter}&limit=5000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
+  const [deliveries, returns_sales, products, missing_] = await Promise.all([
+    // الزيارات — من فواتير المناديب (sales_deliveries): الفرع اللي نزلتله فاتورة = زيارة
+    fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=id,grp,branch_name,delivery_date,total_net,total_tax${grpFilter}&delivery_date=gte.${from}&delivery_date=lte.${to}&limit=10000`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+    // قيمة المرتجع — من مرتجعات المناديب (sales_returns)
+    fetch(`${SUPABASE_URL}/rest/v1/sales_returns?select=id,grp,branch_name,return_date,total_net,total_tax${grpFilter}&return_date=gte.${from}&return_date=lte.${to}&limit=10000`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+    fetch(`${SUPABASE_URL}/rest/v1/products?select=id,grp,branch,created_at${grpFilter}${dateFilter}&limit=10000`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+    fetch(`${SUPABASE_URL}/rest/v1/missing?select=id,grp,branch,created_at${grpFilter}${dateFilter}&limit=5000`,{headers:H}).then(r=>r.json()).catch(()=>[]),
   ]);
 
-  const V = Array.isArray(visits)?visits:[];
+  const D = Array.isArray(deliveries)?deliveries:[];
+  const RS = Array.isArray(returns_sales)?returns_sales:[];
   const P = Array.isArray(products)?products:[];
-  const R = Array.isArray(returns_)?returns_:[];
   const M = Array.isArray(missing_)?missing_:[];
 
   // بناء map الفروع
   const branchMap = {};
-  const addBranch = (arr, field) => arr.forEach(x=>{
-    if(!x.branch) return;
-    const k = x.branch.trim();
-    if(!branchMap[k]) branchMap[k] = {branch:k, grp:x.grp||'', visits:0, products:0, returns:0, missing:0, lastVisit:null};
-    branchMap[k][field]++;
-    if(field==='visits'){
-      const dt = (x.created_at||'').slice(0,10);
-      if(!branchMap[k].lastVisit||dt>branchMap[k].lastVisit) branchMap[k].lastVisit=dt;
-    }
+  const ensureBranch = (name, grp) => {
+    const k = name.trim();
+    if(!branchMap[k]) branchMap[k] = {branch:k, grp:grp||'', visits:0, products:0, returns:0, missing:0, lastVisit:null, invoiceValue:0, returnValue:0, retValuePct:0};
+    return branchMap[k];
+  };
+
+  // الزيارات + قيمة الفواتير — من فواتير المناديب (كل فاتورة = زيارة للفرع)
+  D.forEach(d=>{
+    if(!d.branch_name) return;
+    const b = ensureBranch(d.branch_name, d.grp);
+    b.visits++;
+    b.invoiceValue += ((d.total_net||0)-(d.total_tax||0)); // الصافي بدون ضريبة — نفس منطق فواتير المناديب
+    const dt = d.delivery_date||'';
+    if(dt && (!b.lastVisit||dt>b.lastVisit)) b.lastVisit = dt;
   });
-  addBranch(V,'visits');
-  addBranch(P,'products');
-  addBranch(R,'returns');
-  addBranch(M,'missing');
+
+  // قيمة المرتجع — من مرتجعات المناديب
+  RS.forEach(r=>{
+    if(!r.branch_name) return;
+    const b = ensureBranch(r.branch_name, r.grp);
+    b.returnValue += ((r.total_net||0)-(r.total_tax||0));
+  });
+
+  // الأصناف والنواقص — زي ما هي (بيانات المنسقين الميدانية)
+  P.forEach(x=>{ if(!x.branch) return; ensureBranch(x.branch, x.grp).products++; });
+  M.forEach(x=>{ if(!x.branch) return; ensureBranch(x.branch, x.grp).missing++; });
+
+  // نسبة المرتجع من الصافي = قيمة المرتجع ÷ قيمة الفواتير
+  Object.values(branchMap).forEach(b=>{
+    b.retValuePct = b.invoiceValue>0 ? (b.returnValue/b.invoiceValue*100) : 0;
+  });
 
   _hmRawData = Object.values(branchMap);
   hmRender(_hmRawData, metric);
@@ -25399,7 +25462,9 @@ function hmRender(data, metric){
     return;
   }
 
-  const metricLabels = {visits:'الزيارات',products:'الأصناف',returns:'المرتجعات',missing:'النواقص'};
+  const metricLabels = {visits:'الزيارات (فواتير)',invoiceValue:'قيمة الفواتير',returnValue:'قيمة المرتجع',products:'الأصناف',returns:'المرتجعات',missing:'النواقص'};
+  const moneyMetrics  = {invoiceValue:1, returnValue:1};
+  const fmtVal = (v) => moneyMetrics[metric] ? (v||0).toFixed(2)+' ج' : (v||0);
   const vals = data.map(b=>b[metric]||0);
   const maxVal = Math.max(...vals, 1);
 
@@ -25429,7 +25494,7 @@ function hmRender(data, metric){
     return pct>0.3 ? '#fff' : '#1A1A2E';
   };
 
-  let html = `<div style="font-size:12px;font-weight:700;color:#003049;margin-bottom:12px">المقياس: ${metricLabels[metric]||metric} — أعلى قيمة: ${maxVal}</div>`;
+  let html = `<div style="font-size:12px;font-weight:700;color:#003049;margin-bottom:12px">المقياس: ${metricLabels[metric]||metric} — أعلى قيمة: ${fmtVal(maxVal)}</div>`;
 
   Object.entries(groups).forEach(([grp, branches])=>{
     const grpColor = HM_GRP_COLORS[grp]||'#003049';
@@ -25440,7 +25505,7 @@ function hmRender(data, metric){
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
         <div style="width:12px;height:12px;border-radius:3px;background:${grpColor}"></div>
         <span style="font-size:12px;font-weight:700;color:${grpColor}">${grpLabel}</span>
-        <span style="font-size:11px;color:#888;margin-right:auto">الإجمالي: ${totalGrp}</span>
+        <span style="font-size:11px;color:#888;margin-right:auto">الإجمالي: ${fmtVal(totalGrp)}</span>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:6px">`;
 
@@ -25451,14 +25516,14 @@ function hmRender(data, metric){
       // حجم الخلية يتناسب مع القيمة
       const size = Math.max(60, Math.min(160, 60 + Math.round((val/maxVal)*100)));
       const fontSize = Math.max(10, Math.min(14, 10 + Math.round((val/maxVal)*4)));
-      const retRate = b.visits>0 ? Math.round((b.returns/b.visits)*100) : 0;
+      const retRate = b.retValuePct ? Math.round(b.retValuePct) : 0;
 
-      html += `<div title="${b.branch}\n${metricLabels[metric]}: ${val}\nزيارات: ${b.visits} | مرتجعات: ${b.returns} | نواقص: ${b.missing}"
+      html += `<div title="${b.branch}\n${metricLabels[metric]}: ${fmtVal(val)}\nزيارات: ${b.visits} | قيمة الفواتير: ${(b.invoiceValue||0).toFixed(2)} ج | قيمة المرتجع: ${(b.returnValue||0).toFixed(2)} ج | نسبة المرتجع: ${retRate}%"
         onclick="hmHighlightBranch('${b.branch.replace(/'/g,"\\'")}');this.style.transform='scale(1.05)';setTimeout(()=>this.style.transform='',200)"
         style="background:${bg};color:${tc};border-radius:8px;padding:8px 6px;text-align:center;
           min-width:${size}px;flex-shrink:0;cursor:pointer;border:2px solid rgba(0,0,0,.08);
           transition:all .2s;box-shadow:0 2px 6px rgba(0,0,0,.1)">
-        <div style="font-size:${fontSize+4}px;font-weight:900;line-height:1">${val}</div>
+        <div style="font-size:${fontSize+4}px;font-weight:900;line-height:1">${fmtVal(val)}</div>
         <div style="font-size:${Math.max(9,fontSize-2)}px;margin-top:3px;opacity:.9;word-break:break-word;max-width:100px">${b.branch}</div>
         ${retRate>0?`<div style="font-size:9px;opacity:.75;margin-top:2px">${retRate}% ↩</div>`:''}
       </div>`;
@@ -25486,22 +25551,24 @@ function hmHighlightBranch(branch){
 
 function hmFillTable(data){
   if(!data||!data.length){
-    document.getElementById('hm-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;padding:20px;color:#888">—</td></tr>';
+    document.getElementById('hm-tbody').innerHTML='<tr><td colspan="10" style="text-align:center;padding:20px;color:#888">—</td></tr>';
     return;
   }
   const sorted = [...data].sort((a,b)=>(b.visits||0)-(a.visits||0));
   document.getElementById('hm-tbody').innerHTML = sorted.map((b,i)=>{
-    const retRate = b.visits>0 ? Math.round((b.returns/b.visits)*100)+'%' : '—';
+    const retPct = (b.retValuePct||0).toFixed(1)+'%';
     const last = b.lastVisit ? new Date(b.lastVisit).toLocaleDateString('en-US',{day:'numeric',month:'long'}) : '—';
     const grpColor = HM_GRP_COLORS[b.grp]||'#888';
     return `<tr style="background:${i%2===0?'#fff':'#f8f9fa'}">
       <td style="padding:9px 12px;font-weight:700">${b.branch}</td>
       <td style="padding:9px 8px;text-align:center"><span style="background:${grpColor}22;color:${grpColor};border-radius:4px;padding:2px 8px;font-size:10px;font-weight:700">${WR_GRP_LABELS[b.grp]||b.grp||'—'}</span></td>
       <td style="padding:9px 8px;text-align:center;font-weight:700;color:#15803D">${b.visits}</td>
+      <td style="padding:9px 8px;text-align:center;font-weight:700;color:#1A7A4A">${(b.invoiceValue||0).toFixed(2)} ج</td>
+      <td style="padding:9px 8px;text-align:center;font-weight:700;color:#C05621">${(b.returnValue||0).toFixed(2)} ج</td>
+      <td style="padding:9px 8px;text-align:center;font-weight:700;color:${(b.retValuePct||0)>20?'#B91C1C':'#1A7A4A'}">${retPct}</td>
       <td style="padding:9px 8px;text-align:center;color:#7E22CE">${b.products}</td>
       <td style="padding:9px 8px;text-align:center;color:#B91C1C;font-weight:700">${b.returns}</td>
       <td style="padding:9px 8px;text-align:center;color:#EA580C">${b.missing}</td>
-      <td style="padding:9px 8px;text-align:center">${retRate}</td>
       <td style="padding:9px 8px;text-align:center;font-size:11px;color:#888">${last}</td>
     </tr>`;
   }).join('');
@@ -25525,23 +25592,26 @@ function hmExport(){
   const sorted = [..._hmRawData].sort((a,b)=>(b.visits||0)-(a.visits||0));
 
   const aoa = [
-    ['خريطة حرارة الفروع — الطحان جولدن داتس','','','','','','',''],
-    [`الفترة: ${from} إلى ${to}`,'','','','','','',''],
+    ['خريطة حرارة الفروع — الطحان جولدن داتس','','','','','','','','',''],
+    [`الفترة: ${from} إلى ${to}`,'','','','','','','','',''],
     [''],
-    ['الفرع','المجموعة','الزيارات','الأصناف','المرتجعات','النواقص','معدل المرتجعات','آخر زيارة'],
+    ['الفرع','المجموعة','الزيارات (فواتير)','قيمة الفواتير','قيمة المرتجع','نسبة المرتجع من الصافي','الأصناف','المرتجعات','النواقص','آخر فاتورة'],
     ...sorted.map(b=>[
       b.branch,
       WR_GRP_LABELS[b.grp]||b.grp||'—',
-      b.visits, b.products, b.returns, b.missing,
-      b.visits>0?Math.round((b.returns/b.visits)*100)+'%':'—',
+      b.visits,
+      (b.invoiceValue||0).toFixed(2),
+      (b.returnValue||0).toFixed(2),
+      (b.retValuePct||0).toFixed(1)+'%',
+      b.products, b.returns, b.missing,
       b.lastVisit||'—'
     ])
   ];
 
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{wch:28},{wch:14},{wch:10},{wch:10},{wch:10},{wch:10},{wch:14},{wch:16}];
-  ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:7}}];
+  ws['!cols'] = [{wch:28},{wch:14},{wch:14},{wch:14},{wch:14},{wch:16},{wch:10},{wch:10},{wch:10},{wch:16}];
+  ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:9}}];
   const hStyle = {fill:{fgColor:{rgb:'003049'}},font:{bold:true,color:{rgb:'FFFFFF'},sz:12,name:'Cairo'},alignment:{horizontal:'center',readingOrder:2}};
   const c = ws['A1']; if(c) c.s = hStyle;
   XLSX.utils.book_append_sheet(wb, ws, 'خريطة الحرارة');
