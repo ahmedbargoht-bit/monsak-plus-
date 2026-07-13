@@ -5351,7 +5351,9 @@ function openOQDB(){
 }
 
 // حفظ عملية في الـ Queue — مع منع التكرار
-async function saveToOQ(action, table, data){
+// tempId: مُستخدم بس لعمليات insertGetId (حفظ الزيارة) — رقم سالب مؤقت لحد ما يترفع ويرجع الـ id الحقيقي
+// onConflict: مُستخدم بس لعمليات upsert
+async function saveToOQ(action, table, data, tempId=null, onConflict=null){
   const db    = await openOQDB();
   const tx    = db.transaction(OQ_STORE,'readwrite');
   const store = tx.objectStore(OQ_STORE);
@@ -5371,12 +5373,14 @@ async function saveToOQ(action, table, data){
   });
 
   if(!isDuplicate){
-    store.add({action, table, data, savedAt: now});
+    store.add({action, table, data, tempId, onConflict, savedAt: now});
     updateQueueBadge();
   }
 }
 
-// رفع كل العمليات المحفوظة
+// رفع كل العمليات المحفوظة — بترتيب وقت الحفظ عشان الزيارة (insertGetId) تترفع قبل
+// الأصناف/النواقص المرتبطة بيها، وبعد رفع كل زيارة بنستبدل الـ id المؤقت بالحقيقي
+// في أي عنصر تاني في نفس الدفعة لسه بيشاور على الـ id المؤقت ده (visit_id)
 async function flushOQ(){
   if(!navigator.onLine) return;
   const db    = await openOQDB();
@@ -5385,13 +5389,26 @@ async function flushOQ(){
   const items = await new Promise((res,rej)=>{const r=store.getAll();r.onsuccess=e=>res(e.target.result||[]);r.onerror=e=>rej(e)});
 
   if(!items.length) return;
+  items.sort((a,b)=>a.savedAt-b.savedAt);
   let done = 0;
+  const idMap = {}; // tempId المؤقت (سالب) → الـ id الحقيقي بعد الرفع
   for(const item of items){
     try{
+      if(item.data && item.data.visit_id!=null && idMap[item.data.visit_id]!==undefined){
+        item.data.visit_id = idMap[item.data.visit_id];
+      }
       let ok = false;
-      if(item.action === 'insert') ok = await sbInsert(item.table, item.data);
-      if(item.action === 'upsert') ok = await sbUpsert(item.table, item.data, 'name');
-      if(item.action === 'update') ok = await sbUpdate(item.table, item.data.match, item.data.values);
+      if(item.action === 'insert'){
+        ok = await _origSbInsert(item.table, item.data);
+      } else if(item.action === 'insertGetId'){
+        const realId = await _origSbInsertGetId(item.table, item.data);
+        ok = !!realId;
+        if(ok && item.tempId!=null) idMap[item.tempId] = realId;
+      } else if(item.action === 'upsert'){
+        ok = await _origSbUpsert(item.table, item.data, item.onConflict||'name');
+      } else if(item.action === 'update'){
+        ok = await _origSbUpdate(item.table, item.data.match, item.data.values);
+      }
       if(ok !== false){ store.delete(item.id); done++; }
     }catch(e){}
   }
@@ -5415,23 +5432,81 @@ async function updateQueueBadge(){
 }
 
 // ══════════════════════════════════════════════════════════════
-// OFFLINE WRAPPER — يلف sbInsert لو مفيش نت
+// OFFLINE WRAPPER — يلف sbInsert/sbInsertGetId/sbUpdate/sbUpsert لو مفيش نت أو الطلب فشل
 // ══════════════════════════════════════════════════════════════
-const _origSbInsert = sbInsert;
+// ملحوظة مهمة: sbInsert/sbUpdate/sbUpsert/sbInsertGetId الأصليين بيمسكوا الأخطاء جوه نفسهم
+// (try/catch داخلي) وبيرجّعوا false/null بدل ما يعملوا throw — يعني لو استنينا exception هنا
+// عشان نعرف إن الطلب فشل، مستحيل نمسكها، وده كان السبب الحقيقي إن التقارير كانت بتفشل بصمت
+// حتى مع وجود شبكة (نت ضعيف/متقطع بيوصل الطلب لكن يفشل، مش بالضرورة offline كامل).
+// الحل: نفحص الـ return value نفسه (false/null) مش الـ exception، ونحفظ في IndexedDB Queue.
+const _origSbInsert      = sbInsert;
+const _origSbInsertGetId = sbInsertGetId;
+const _origSbUpdate      = sbUpdate;
+const _origSbUpsert      = sbUpsert;
+
 sbInsert = async function(table, data){
   if(!navigator.onLine){
     await saveToOQ('insert', table, data);
     showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
-    return {offline: true};
+    return true;
   }
-  try{
-    const res = await _origSbInsert(table, data);
-    return res;
-  }catch(e){
+  const res = await _origSbInsert(table, data);
+  if(res === false){
     await saveToOQ('insert', table, data);
     showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
-    return {offline: true};
+    return true;
   }
+  return res;
+};
+
+// حفظ زيارة (visits) — لازم id فوري عشان نربط بيه الأصناف/النواقص التالية.
+// لو مفيش نت أو الحفظ فشل: نولّد id مؤقت (سالب) ونحفظ العملية في الـ Queue،
+// ولما تترفع فعلياً في flushOQ هيتم استبدال الـ id المؤقت بالحقيقي في كل حاجة مرتبطة بيها.
+sbInsertGetId = async function(table, data){
+  if(!navigator.onLine){
+    const tempId = -Date.now();
+    await saveToOQ('insertGetId', table, data, tempId);
+    showToastPWA('📦 حُفظت الزيارة محلياً — ستُرفع لما يرجع النت');
+    return tempId;
+  }
+  const res = await _origSbInsertGetId(table, data);
+  if(!res){
+    const tempId = -Date.now();
+    await saveToOQ('insertGetId', table, data, tempId);
+    showToastPWA('📦 حُفظت الزيارة محلياً — ستُرفع لما يرجع النت');
+    return tempId;
+  }
+  return res;
+};
+
+sbUpdate = async function(table, match, data){
+  if(!navigator.onLine){
+    await saveToOQ('update', table, {match, values: data});
+    showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
+    return true;
+  }
+  const res = await _origSbUpdate(table, match, data);
+  if(res === false){
+    await saveToOQ('update', table, {match, values: data});
+    showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
+    return true;
+  }
+  return res;
+};
+
+sbUpsert = async function(table, data, onConflict='name'){
+  if(!navigator.onLine){
+    await saveToOQ('upsert', table, data, null, onConflict);
+    showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
+    return true;
+  }
+  const res = await _origSbUpsert(table, data, onConflict);
+  if(res === false){
+    await saveToOQ('upsert', table, data, null, onConflict);
+    showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
+    return true;
+  }
+  return res;
 };
 
 // ══════════════════════════════════════════════════════════════
@@ -5456,6 +5531,11 @@ function showOfflineBanner(show){
   const b = document.getElementById('offline-banner');
   if(b) b.style.display = show ? 'flex' : 'none';
 }
+
+// محاولة رفع دورية كل 45 ثانية — مهمة لحالة "النت متصل لكن ضعيف/متقطع"
+// اللي فيها navigator.onLine بيفضل true طول الوقت فحدث 'online' مبيطلقش تاني،
+// فمن غيرها أي عملية اتحفظت في الـ Queue بسبب فشل مؤقت ممكن تفضل واقفة لحد ما التطبيق يتقفل ويتفتح
+setInterval(()=>{ if(navigator.onLine) flushOQ(); }, 45000);
 
 function showToast(msg){ showToastPWA(msg); }
 function showToastPWA(msg){
