@@ -1426,6 +1426,9 @@ tr:hover td{background:rgba(197,91,72,.04)}
           <div id="sinv-tab-yawm" onclick="sinvSwitchTab('yawm')" style="padding:9px 22px;font-size:13px;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;color:var(--text2)">
             <i class="ti ti-notebook"></i> يومية المندوب
           </div>
+          <div id="sinv-tab-settings" onclick="sinvSwitchTab('settings')" style="padding:9px 22px;font-size:13px;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;color:var(--text2)">
+            <i class="ti ti-settings"></i> إعدادات تاريخ الفاتورة
+          </div>
         </div>
 
         <!-- ══ تاب التسليم ══ -->
@@ -1545,6 +1548,42 @@ tr:hover td{background:rgba(197,91,72,.04)}
                 </thead>
                 <tbody id="sinvsum-tbody">
                   <tr><td colspan="5" style="text-align:center;padding:40px;color:#aaa">اختر الفلاتر واضغط عرض</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- ══ تاب إعدادات تاريخ الفاتورة ══ -->
+        <div id="sinv-section-settings" style="display:none">
+          <div class="card" style="margin-bottom:16px">
+            <div class="card-title"><i class="ti ti-calendar-due" style="color:#731E2E"></i> اختيار تاريخ فاتورة سابق (نفس الشهر)</div>
+            <p style="font-size:12px;color:var(--text2);margin:0 0 12px">
+              لما تفعّل الميزة دي، هيظهر للمندوب دروب داون في شاشة مراجعة فاتورة التسليم والمرتجع
+              يسمح له يختار أي يوم من الشهر الحالي (بدل تاريخ النهارده التلقائي) — عشان يقدر يسجل فاتورة كان نسي يدخّلها.
+            </p>
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;background:#F9F6F1;border:1.5px solid var(--border);border-radius:10px;padding:12px 16px;width:fit-content">
+              <input type="checkbox" id="sinv-backdate-global-toggle" onchange="sinvBackdateToggleGlobal(this.checked)" style="width:20px;height:20px;cursor:pointer;accent-color:#731E2E"/>
+              <span style="font-size:13px;font-weight:700;color:#5C3D2E">تفعيل اختيار تاريخ سابق لكل المناديب (الإعداد العام)</span>
+            </label>
+          </div>
+
+          <div class="card">
+            <div class="card-title"><i class="ti ti-users" style="color:#731E2E"></i> تحكم فردي لكل مندوب</div>
+            <p style="font-size:11px;color:var(--text2);margin:0 0 10px">
+              "افتراضي" يعني المندوب بيتبع الإعداد العام فوق. تقدر تستثني مندوب بعينه وتفعّلها أو تعطّلها له بغض النظر عن الإعداد العام.
+            </p>
+            <input type="text" id="sinv-backdate-search" placeholder="🔍 بحث باسم المندوب..." oninput="sinvBackdateRenderReps()" style="width:100%;margin-bottom:10px;padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"/>
+            <div class="table-wrap">
+              <table style="width:100%;border-collapse:collapse;font-size:12px">
+                <thead>
+                  <tr style="background:#4B3C1A;color:#EDE5D8">
+                    <th style="padding:9px 14px;text-align:right">المندوب</th>
+                    <th style="padding:9px 10px;text-align:center">الحالة</th>
+                  </tr>
+                </thead>
+                <tbody id="sinv-backdate-tbody">
+                  <tr><td colspan="2" style="text-align:center;padding:20px;color:#888">جاري التحميل...</td></tr>
                 </tbody>
               </table>
             </div>
@@ -9564,7 +9603,7 @@ let _sinvActiveTab='del';
 
 function sinvSwitchTab(tab){
   _sinvActiveTab=tab;
-  ['del','ret','sum','yawm'].forEach(t=>{
+  ['del','ret','sum','yawm','settings'].forEach(t=>{
     const sec=document.getElementById('sinv-section-'+t);
     const tb=document.getElementById('sinv-tab-'+t);
     if(sec) sec.style.display=t===tab?'':'none';
@@ -9582,9 +9621,88 @@ function sinvSwitchTab(tab){
   });
   // زرار الحذف — يظهر فقط في تاب التسليم والمرتجع
   const delBtn=document.querySelector('[onclick="sinvDeleteSelectedAll()"]');
-  if(delBtn) delBtn.style.display=(tab==='sum'||tab==='yawm')?'none':'';
+  if(delBtn) delBtn.style.display=(tab==='sum'||tab==='yawm'||tab==='settings')?'none':'';
   // تحميل اليومية عند التبديل إليها
   if(tab==='yawm') sinvYawmLoad();
+  // تحميل إعدادات تاريخ الفاتورة أول مرة بس
+  if(tab==='settings' && !_sinvBackdateLoaded){ _sinvBackdateLoaded=true; sinvBackdateLoad(); }
+}
+
+// ══ إعدادات تاريخ الفاتورة (اختيار تاريخ سابق للمندوب) ══
+let _sinvBackdateLoaded = false;
+let _sinvBackdateGlobal = false;
+let _sinvBackdateReps   = [];
+
+async function sinvBackdateLoad(){
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const tbody = document.getElementById('sinv-backdate-tbody');
+  if(tbody) tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;padding:20px;color:#888">جاري التحميل...</td></tr>';
+  try{
+    const [gRes, repsRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.sinv_backdate_enabled&select=value&limit=1`,{headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&select=id,name,allow_backdate_invoice&order=name.asc&limit=1000`,{headers:H}),
+    ]);
+    const gData = gRes.ok ? await gRes.json() : [];
+    _sinvBackdateGlobal = gData[0]?.value === 'true';
+    _sinvBackdateReps   = repsRes.ok ? await repsRes.json() : [];
+
+    const toggle = document.getElementById('sinv-backdate-global-toggle');
+    if(toggle) toggle.checked = _sinvBackdateGlobal;
+    sinvBackdateRenderReps();
+  }catch(e){
+    if(tbody) tbody.innerHTML = `<tr><td colspan="2" style="text-align:center;padding:20px;color:#B71C1C">خطأ: ${e.message}</td></tr>`;
+  }
+}
+
+async function sinvBackdateToggleGlobal(checked){
+  _sinvBackdateGlobal = checked;
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  try{
+    const check = await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.sinv_backdate_enabled&select=id`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const rows = check.ok ? await check.json() : [];
+    if(rows.length){
+      await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.sinv_backdate_enabled`,{method:'PATCH',headers:H,body:JSON.stringify({value:String(checked)})});
+    } else {
+      await fetch(`${SUPABASE_URL}/rest/v1/products_db`,{method:'POST',headers:H,body:JSON.stringify({key:'sinv_backdate_enabled',value:String(checked)})});
+    }
+    showToast(checked?'✅ تم تفعيل اختيار تاريخ سابق لكل المناديب':'⏸ تم إيقافه لكل المناديب');
+    sinvBackdateRenderReps();
+  }catch(e){
+    showToast('❌ خطأ في الحفظ');
+  }
+}
+
+function sinvBackdateRenderReps(){
+  const tbody  = document.getElementById('sinv-backdate-tbody');
+  const search = (document.getElementById('sinv-backdate-search')?.value||'').trim().toLowerCase();
+  if(!tbody) return;
+  const list = _sinvBackdateReps.filter(r=>!search || (r.name||'').toLowerCase().includes(search));
+  tbody.innerHTML = list.map(r=>{
+    const val = r.allow_backdate_invoice===true ? 'true' : r.allow_backdate_invoice===false ? 'false' : 'default';
+    return `<tr>
+      <td style="padding:8px 14px;font-weight:700">${r.name}</td>
+      <td style="padding:8px 10px;text-align:center">
+        <select onchange="sinvBackdateSetRep(${r.id}, this.value)" style="padding:5px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
+          <option value="default" ${val==='default'?'selected':''}>افتراضي (${_sinvBackdateGlobal?'✅ مفعّل حالياً':'⛔ معطّل حالياً'})</option>
+          <option value="true" ${val==='true'?'selected':''}>✅ مفعّل دايماً لهذا المندوب</option>
+          <option value="false" ${val==='false'?'selected':''}>⛔ معطّل دايماً لهذا المندوب</option>
+        </select>
+      </td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="2" style="text-align:center;padding:20px;color:#888">لا يوجد مناديب</td></tr>`;
+}
+
+async function sinvBackdateSetRep(id, val){
+  const value = val==='default' ? null : (val==='true');
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  try{
+    await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({allow_backdate_invoice:value})});
+    const rep = _sinvBackdateReps.find(r=>r.id===id);
+    if(rep) rep.allow_backdate_invoice = value;
+    showToast('✅ تم الحفظ');
+  }catch(e){
+    showToast('❌ خطأ في الحفظ');
+  }
 }
 
 async function sinvRefreshAll(){
