@@ -24425,10 +24425,13 @@ async function sinvRetDeleteOne(id,invNo){
 }
 
 // ══ popup تفاصيل الفاتورة ══
+let _sinvDetailCurrent = null; // {id, tab} — آخر فاتورة/مرتجع مفتوح في مودال التفاصيل (يُستخدم لزرار التعديل)
+
 function sinvShowInvoice(id, tab){
   const src = tab==='ret' ? _sinvRetData : _sinvData;
   const r = src.find(x=>x.id===id);
   if(!r){ showToast('⚠️ لم يتم تحميل بيانات الفاتورة — اضغط عرض أولاً'); return; }
+  _sinvDetailCurrent = {id, tab};
   const items = Array.isArray(r.items)?r.items:[];
   const typeMap={no_tax:'بدون ضريبة',tax_14:'ضريبة 14%',tax_5:'ضريبة 5%'};
   const taxPct={no_tax:0,tax_14:14,tax_5:5}[r.invoice_type]||0;
@@ -24491,6 +24494,107 @@ function sinvShowInvoice(id, tab){
     ${retSection}`;
   const ov=document.getElementById('sinv-detail-modal');
   ov.style.display='flex';
+}
+
+// ══ تعديل فاتورة/مرتجع مندوب (تصحيح كمية/سعر صنف، خصم، ضريبة) ══
+let _sinvEditItems = []; // نسخة قابلة للتعديل من أصناف الفاتورة الحالية
+
+function sinvOpenEdit(){
+  if(!_sinvDetailCurrent){ showToast('⚠️ افتح تفاصيل الفاتورة أولاً'); return; }
+  const {id, tab} = _sinvDetailCurrent;
+  const src = tab==='ret' ? _sinvRetData : _sinvData;
+  const r = src.find(x=>x.id===id);
+  if(!r){ showToast('⚠️ لم يتم تحميل بيانات الفاتورة'); return; }
+  const isRet = tab==='ret';
+
+  _sinvEditItems = (Array.isArray(r.items)?r.items:[]).map(it=>({name:it.name||'', qty:Number(it.qty)||0, price:Number(it.price)||0}));
+
+  document.getElementById('sinv-edit-title').textContent = (isRet?'تعديل مرتجع: ':'تعديل فاتورة: ')+(r.invoice_number||'—');
+  document.getElementById('sinv-edit-meta').innerHTML = `
+    <div><span style="color:var(--text2)">المندوب: </span><b>${r.rep_name||'—'}</b></div>
+    <div><span style="color:var(--text2)">الفرع: </span><b>${r.branch_name||'—'}</b></div>
+    <div><span style="color:var(--text2)">العميل: </span><b>${r.client_name||'—'}</b></div>
+    <div><span style="color:var(--text2)">التاريخ: </span><b>${r.delivery_date||r.return_date||''}</b></div>`;
+  document.getElementById('sinv-edit-type').value = r.invoice_type||'no_tax';
+  document.getElementById('sinv-edit-disc').value = r.discount_pct||0;
+
+  sinvEditRenderItems();
+  sinvEditRecalc();
+
+  document.getElementById('sinv-detail-modal').style.display='none';
+  document.getElementById('sinv-edit-modal').style.display='flex';
+}
+
+function sinvCloseEdit(){
+  document.getElementById('sinv-edit-modal').style.display='none';
+}
+
+function sinvEditRenderItems(){
+  const tbody = document.getElementById('sinv-edit-items');
+  tbody.innerHTML = _sinvEditItems.map((it,i)=>`
+    <tr style="${i%2?'background:#FFF8F4':''}">
+      <td style="padding:6px 10px;font-size:12px;font-weight:600">${it.name||'—'}</td>
+      <td style="padding:6px 8px;text-align:center"><input type="number" step="1" min="0" value="${it.qty}" oninput="sinvEditItemChange(${i},'qty',this.value)" style="width:100%;padding:5px 6px;border:1.5px solid var(--border);border-radius:6px;text-align:center;font-family:Cairo,sans-serif;font-size:12px"/></td>
+      <td style="padding:6px 8px;text-align:center"><input type="number" step="0.01" min="0" value="${it.price}" oninput="sinvEditItemChange(${i},'price',this.value)" style="width:100%;padding:5px 6px;border:1.5px solid var(--border);border-radius:6px;text-align:center;font-family:Cairo,sans-serif;font-size:12px"/></td>
+      <td style="padding:6px 8px;text-align:center;font-weight:700;font-size:12px" id="sinv-edit-item-total-${i}">${(it.qty*it.price).toFixed(2)} ج</td>
+    </tr>`).join('') || `<tr><td colspan="4" style="text-align:center;padding:20px;color:#aaa">لا توجد أصناف</td></tr>`;
+}
+
+function sinvEditItemChange(idx, field, val){
+  const num = parseFloat(val)||0;
+  _sinvEditItems[idx][field] = num;
+  const it = _sinvEditItems[idx];
+  const totalEl = document.getElementById('sinv-edit-item-total-'+idx);
+  if(totalEl) totalEl.textContent = (it.qty*it.price).toFixed(2)+' ج';
+  sinvEditRecalc();
+}
+
+function sinvEditRecalc(){
+  const taxPct = {no_tax:0,tax_14:14,tax_5:5}[document.getElementById('sinv-edit-type').value] || 0;
+  const disc = parseFloat(document.getElementById('sinv-edit-disc').value)||0;
+  const sub = _sinvEditItems.reduce((s,it)=>s+(it.qty*it.price),0);
+  const dA = sub*disc/100;
+  const after = sub-dA;
+  const taxA = after*taxPct/100;
+  const net = after+taxA;
+  document.getElementById('sinv-edit-totals').innerHTML = `
+    <div style="display:flex;justify-content:space-between;opacity:.85;margin-bottom:3px"><span>الإجمالي قبل الخصم</span><span>${sub.toFixed(2)} ج</span></div>
+    <div style="display:flex;justify-content:space-between;opacity:.85;margin-bottom:3px"><span>خصم ${disc}%</span><span>− ${dA.toFixed(2)} ج</span></div>
+    <div style="display:flex;justify-content:space-between;font-weight:800;margin-bottom:3px;font-size:13px"><span>✅ الصافي (بدون ضريبة)</span><span>${after.toFixed(2)} ج</span></div>
+    ${taxPct>0?`<div style="display:flex;justify-content:space-between;opacity:.8;margin-bottom:3px"><span>ضريبة ${taxPct}%</span><span>+ ${taxA.toFixed(2)} ج</span></div>`:''}
+    <div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;border-top:1px solid rgba(255,255,255,.3);padding-top:8px;margin-top:6px;opacity:.9"><span>الإجمالي</span><span>${net.toFixed(2)} ج</span></div>`;
+  return {sub, dA, after, taxA, net, taxPct, disc};
+}
+
+async function sinvEditSave(){
+  if(!_sinvDetailCurrent) return;
+  const {id, tab} = _sinvDetailCurrent;
+  const isRet = tab==='ret';
+  const table = isRet ? 'sales_returns' : 'sales_deliveries';
+  const {sub, after, taxA, net, disc} = sinvEditRecalc();
+  const invoiceType = document.getElementById('sinv-edit-type').value;
+  const payload = {
+    items: _sinvEditItems.map(it=>({name:it.name, qty:it.qty, price:it.price, total:parseFloat((it.qty*it.price).toFixed(2))})),
+    invoice_type: invoiceType,
+    discount_pct: disc,
+    total_before_discount: parseFloat(sub.toFixed(2)),
+    total_after_discount: parseFloat(after.toFixed(2)),
+    total_tax: parseFloat(taxA.toFixed(2)),
+    total_net: parseFloat(net.toFixed(2)),
+  };
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify(payload)});
+    if(!res.ok) throw new Error(await res.text());
+    showToast('✅ تم حفظ التعديلات');
+    sinvCloseEdit();
+    // إعادة تحميل كل التابات المرتبطة عشان القيم الجديدة تنعكس في كل مكان
+    await Promise.all([sinvLoad(), sinvRetLoad()]);
+    sinvSummaryLoad();
+    if(_sinvActiveTab==='yawm') sinvYawmLoad();
+  }catch(e){
+    showToast('❌ خطأ في الحفظ: '+e.message);
+  }
 }
 
 // ══ popup عملاء الفرع ══
@@ -24924,9 +25028,51 @@ function sinvPDF(idx){
   <div style="background:var(--surface-2,#fff);border-radius:14px;width:100%;max-width:640px;box-shadow:0 8px 40px rgba(0,0,0,.35);font-family:Cairo,sans-serif;direction:rtl;overflow:hidden">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:#731E2E;color:#fff">
       <div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:800"><i class="ti ti-file-invoice"></i> <span id="sinv-detail-title">تفاصيل الفاتورة</span></div>
-      <button onclick="document.getElementById('sinv-detail-modal').style.display='none'" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center">✕</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="sinvOpenEdit()" style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.35);color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif;display:flex;align-items:center;gap:5px;font-weight:700"><i class="ti ti-edit"></i> تعديل</button>
+        <button onclick="document.getElementById('sinv-detail-modal').style.display='none'" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center">✕</button>
+      </div>
     </div>
     <div id="sinv-detail-body" style="padding:16px 18px;max-height:80vh;overflow-y:auto"></div>
+  </div>
+</div>
+
+<!-- ══ modal: تعديل فاتورة/مرتجع مندوب ══ -->
+<div id="sinv-edit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);z-index:10000;align-items:flex-start;justify-content:center;padding:24px 12px;overflow-y:auto" onclick="if(event.target===this)sinvCloseEdit()">
+  <div style="background:var(--surface-2,#fff);border-radius:14px;width:100%;max-width:640px;box-shadow:0 8px 40px rgba(0,0,0,.35);font-family:Cairo,sans-serif;direction:rtl;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:#4B3C1A;color:#fff">
+      <div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:800"><i class="ti ti-edit"></i> <span id="sinv-edit-title">تعديل الفاتورة</span></div>
+      <button onclick="sinvCloseEdit()" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center">✕</button>
+    </div>
+    <div style="padding:16px 18px;max-height:75vh;overflow-y:auto">
+      <div style="display:flex;gap:12px;flex-wrap:wrap;background:#FFF8F4;border:1px solid #EDE5D8;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:11px" id="sinv-edit-meta"></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+        <div class="fld" style="margin:0">
+          <label class="lbl">نوع الضريبة</label>
+          <select id="sinv-edit-type" onchange="sinvEditRecalc()">
+            <option value="no_tax">بدون ضريبة</option>
+            <option value="tax_14">ضريبة 14%</option>
+            <option value="tax_5">ضريبة 5%</option>
+          </select>
+        </div>
+        <div class="fld" style="margin:0">
+          <label class="lbl">نسبة الخصم %</label>
+          <input type="number" id="sinv-edit-disc" step="0.01" min="0" oninput="sinvEditRecalc()"/>
+        </div>
+      </div>
+
+      <table style="width:100%;border-collapse:collapse;margin-bottom:14px">
+        <thead><tr style="background:#4B3C1A;color:#EDE5D8"><th style="padding:8px 10px;text-align:right;font-size:11px">الصنف</th><th style="padding:8px 10px;text-align:center;font-size:11px;width:90px">العدد</th><th style="padding:8px 10px;text-align:center;font-size:11px;width:110px">سعر القطعة</th><th style="padding:8px 10px;text-align:center;font-size:11px;width:100px">الإجمالي</th></tr></thead>
+        <tbody id="sinv-edit-items"></tbody>
+      </table>
+
+      <div style="background:#C55B48;border-radius:10px;padding:12px 16px;color:white;font-size:12px" id="sinv-edit-totals"></div>
+    </div>
+    <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:flex-end">
+      <button onclick="sinvCloseEdit()" class="btn btn-ghost btn-sm">إلغاء</button>
+      <button onclick="sinvEditSave()" class="btn btn-sm" style="background:#4B3C1A;color:#fff;border:none"><i class="ti ti-device-floppy"></i> حفظ التعديلات</button>
+    </div>
   </div>
 </div>
 
