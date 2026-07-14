@@ -5402,39 +5402,66 @@ async function saveToOQ(action, table, data, tempId=null, onConflict=null){
 // رفع كل العمليات المحفوظة — بترتيب وقت الحفظ عشان الزيارة (insertGetId) تترفع قبل
 // الأصناف/النواقص المرتبطة بيها، وبعد رفع كل زيارة بنستبدل الـ id المؤقت بالحقيقي
 // في أي عنصر تاني في نفس الدفعة لسه بيشاور على الـ id المؤقت ده (visit_id)
-async function flushOQ(){
-  if(!navigator.onLine) return;
+// حذف عنصر واحد من الـ Queue — بمعاملة (transaction) جديدة ومنفصلة في كل مرة.
+// ملحوظة مهمة جداً: ممنوع نستخدم نفس الـ transaction اللي عملنا بيه getAll() عشان نحذف بيه
+// بعد ما نعدي على await لطلب شبكة (fetch)، لأن IndexedDB بتقفل (auto-commit) أي transaction
+// تلقائياً لما الكود يرجع للـ event loop من غير طلبات معلّقة عليه — وطلب الشبكة بياخد وقت
+// أطول بكتير من "تيك" واحد. فكان store.delete() بيتنفذ على transaction خلصت فعلاً، فبيرمي
+// خطأ (InvalidStateError) بيتبلع بصمت جوه catch، والعنصر فضل في الـ Queue للأبد بدون ما يتحذف
+// — ونفس العناصر دي كانت بترجع تترفع تاني كل 45 ثانية (الـ setInterval) وتتكرر في السيرفر
+// آلاف المرات (السبب الحقيقي وراء عشرات آلاف صفوف "products" المكررة لبعض المنسقين).
+async function deleteFromOQ(id){
   const db    = await openOQDB();
   const tx    = db.transaction(OQ_STORE,'readwrite');
   const store = tx.objectStore(OQ_STORE);
-  const items = await new Promise((res,rej)=>{const r=store.getAll();r.onsuccess=e=>res(e.target.result||[]);r.onerror=e=>rej(e)});
+  return new Promise((res)=>{
+    const r = store.delete(id);
+    r.onsuccess = ()=>res(true);
+    r.onerror   = ()=>res(false);
+  });
+}
 
-  if(!items.length) return;
-  items.sort((a,b)=>a.savedAt-b.savedAt);
-  let done = 0;
-  const idMap = {}; // tempId المؤقت (سالب) → الـ id الحقيقي بعد الرفع
-  for(const item of items){
-    try{
-      if(item.data && item.data.visit_id!=null && idMap[item.data.visit_id]!==undefined){
-        item.data.visit_id = idMap[item.data.visit_id];
-      }
-      let ok = false;
-      if(item.action === 'insert'){
-        ok = await _origSbInsert(item.table, item.data);
-      } else if(item.action === 'insertGetId'){
-        const realId = await _origSbInsertGetId(item.table, item.data);
-        ok = !!realId;
-        if(ok && item.tempId!=null) idMap[item.tempId] = realId;
-      } else if(item.action === 'upsert'){
-        ok = await _origSbUpsert(item.table, item.data, item.onConflict||'name');
-      } else if(item.action === 'update'){
-        ok = await _origSbUpdate(item.table, item.data.match, item.data.values);
-      }
-      if(ok !== false){ store.delete(item.id); done++; }
-    }catch(e){}
+let _oqFlushing = false; // قفل يمنع تشغيل flushOQ أكتر من مرة في نفس الوقت (interval + حدث online مع بعض)
+
+async function flushOQ(){
+  if(!navigator.onLine) return;
+  if(_oqFlushing) return; // فيه رفع شغال بالفعل — متبدأش رفع تاني فوقه
+  _oqFlushing = true;
+  try{
+    const db    = await openOQDB();
+    const tx    = db.transaction(OQ_STORE,'readonly');
+    const store = tx.objectStore(OQ_STORE);
+    const items = await new Promise((res,rej)=>{const r=store.getAll();r.onsuccess=e=>res(e.target.result||[]);r.onerror=e=>rej(e)});
+
+    if(!items.length) return;
+    items.sort((a,b)=>a.savedAt-b.savedAt);
+    let done = 0;
+    const idMap = {}; // tempId المؤقت (سالب) → الـ id الحقيقي بعد الرفع
+    for(const item of items){
+      try{
+        if(item.data && item.data.visit_id!=null && idMap[item.data.visit_id]!==undefined){
+          item.data.visit_id = idMap[item.data.visit_id];
+        }
+        let ok = false;
+        if(item.action === 'insert'){
+          ok = await _origSbInsert(item.table, item.data);
+        } else if(item.action === 'insertGetId'){
+          const realId = await _origSbInsertGetId(item.table, item.data);
+          ok = !!realId;
+          if(ok && item.tempId!=null) idMap[item.tempId] = realId;
+        } else if(item.action === 'upsert'){
+          ok = await _origSbUpsert(item.table, item.data, item.onConflict||'name');
+        } else if(item.action === 'update'){
+          ok = await _origSbUpdate(item.table, item.data.match, item.data.values);
+        }
+        if(ok !== false){ await deleteFromOQ(item.id); done++; }
+      }catch(e){}
+    }
+    updateQueueBadge();
+    if(done > 0) showToastPWA(`✅ تم رفع ${done} عملية كانت محفوظة offline`);
+  } finally {
+    _oqFlushing = false;
   }
-  updateQueueBadge();
-  if(done > 0) showToastPWA(`✅ تم رفع ${done} عملية كانت محفوظة offline`);
 }
 
 // عداد الـ Queue
