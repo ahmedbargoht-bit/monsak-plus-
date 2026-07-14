@@ -1,90 +1,52 @@
-// sw-mansek.js — Service Worker
-// النسخة بتتغير كل رفع عشان يتحدث فوراً
-const CACHE_VERSION = 'mansek-v' + Date.now();
-const STATIC_CACHE = 'mansek-static-v3';
+// منسق بلس (mansek-app) — Service Worker
+// v2 — 2026-07-12: نسخة جديدة بالكامل. الهدف: تصفير أي كاش قديم عالق على الأجهزة (خصوصاً أوبو/ColorOS)
+// وضمان إن أي تحديث جديد للتطبيق ينزل فوراً بدل ما يفضل يفتح نسخة قديمة متجمدة.
 
-// الملفات اللي بتتحفظ في cache (الـ HTML والـ CSS بس)
-const STATIC_FILES = [
-  './mansek-app.html',
-];
+const CACHE_VERSION = 'mansek-v3-2026-07-12';
+const ASSETS = ['./mansek-app.html', './logo-login.png'];
 
-// ══ Install ══════════════════════════════════════════════════
+// ── التثبيت: كاش أساسي بس + تفعيل فوري بدون انتظار إغلاق كل التابات ──
+// ملحوظة: بنكاش كل أصل لوحده مع catch بدل addAll الجماعي، عشان لو ملف واحد ناقص
+// أو 404 (زي نسيان رفعه) التثبيت كله ميفشلش ويسبب حلقة تحميل/تحديث متكررة على الصفحة.
 self.addEventListener('install', e => {
-  // تثبيت فوري بدون انتظار
-  self.skipWaiting();
   e.waitUntil(
-    caches.open(STATIC_CACHE).then(cache => cache.addAll(STATIC_FILES))
+    caches.open(CACHE_VERSION).then(c =>
+      Promise.all(ASSETS.map(url => c.add(url).catch(err => console.warn('SW: تعذر كاش', url, err))))
+    )
   );
+  self.skipWaiting();
 });
 
-// ══ Activate ═════════════════════════════════════════════════
+// ── التفعيل: امسح أي كاش قديم من نسخ سابقة + خد التحكم فوراً في كل الصفحات المفتوحة ──
 self.addEventListener('activate', e => {
   e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(
-        keys
-          .filter(k => k !== STATIC_CACHE)
-          .map(k => caches.delete(k))
-      )
-    ).then(() => self.clients.claim())
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE_VERSION).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
   );
 });
 
-// ══ Fetch ════════════════════════════════════════════════════
+// ── الجلب: Network-first دايماً — لو النت شغال ياخد آخر نسخة، ولو النت واقع يرجع للكاش كحل أخير ──
+// ده عكس "cache-first" المتعمد اللي بيسبب مشكلة "بيفتح نسخة قديمة متجمدة"
 self.addEventListener('fetch', e => {
-  const url = e.request.url;
+  if (e.request.method !== 'GET') return;
+  if (e.request.url.includes('supabase.co')) return;
+  if (e.request.url.includes('googleapis.com')) return;
+  if (e.request.url.includes('cdnjs.cloudflare.com')) return;
+  if (e.request.url.includes('jsdelivr.net')) return;
 
-  // Supabase — دايماً من الشبكة، مش من الـ cache
-  if (url.includes('supabase.co')) {
-    e.respondWith(fetch(e.request));
-    return;
-  }
-
-  // Google Fonts و CDN — من الشبكة
-  if (url.includes('fonts.googleapis') || url.includes('cdn.jsdelivr') || url.includes('cdnjs')) {
-    e.respondWith(
-      fetch(e.request).catch(() => caches.match(e.request))
-    );
-    return;
-  }
-
-  // الملفات الثابتة — Network First (شبكة أولاً، cache احتياطي)
   e.respondWith(
-    fetch(e.request)
-      .then(response => {
-        // حدّث الـ cache بالنسخة الجديدة
-        if (response.ok) {
-          const clone = response.clone();
-          caches.open(STATIC_CACHE).then(cache => cache.put(e.request, clone));
-        }
-        return response;
+    fetch(e.request, {cache: 'no-store'})
+      .then(res => {
+        const clone = res.clone();
+        caches.open(CACHE_VERSION).then(c => c.put(e.request, clone));
+        return res;
       })
       .catch(() => caches.match(e.request))
   );
 });
 
-// ══ Background Sync — رفع البيانات المحفوظة أوفلاين ═══════════
-self.addEventListener('sync', e => {
-  if (e.tag === 'flush-offline-queue') {
-    e.waitUntil(flushQueue());
-  }
-});
-
-async function flushQueue() {
-  const clients = await self.clients.matchAll();
-  clients.forEach(client => client.postMessage({ type: 'FLUSH_QUEUE' }));
-}
-
-// ══ Push Notifications ═══════════════════════════════════════
-self.addEventListener('push', e => {
-  const data = e.data ? e.data.json() : {};
-  e.waitUntil(
-    self.registration.showNotification(data.title || 'منسق بلس', {
-      body: data.body || 'إشعار جديد',
-      icon: './icons/icon-192.png',
-      badge: './icons/icon-96.png',
-      dir: 'rtl',
-      lang: 'ar'
-    })
-  );
+// ── استقبال أمر تخطي الانتظار (لو الصفحة طلبت تحديث فوري) ──
+self.addEventListener('message', e => {
+  if (e.data === 'SKIP_WAITING') self.skipWaiting();
 });

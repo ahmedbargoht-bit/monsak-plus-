@@ -1,73 +1,58 @@
-// sw-supervisor.js — Service Worker للمشرف بلس
-const CACHE_NAME = 'supervisor-plus-v1';
-const STATIC_ASSETS = [
+// المشرف بلس (mansek-supervisor) — Service Worker
+// v1 — 2026-07-12: الملف ده كان ناقص تماماً (تسجيله كان بيفشل بصمت 404) وده سبب رئيسي
+// في تجمّد بعض الأجهزة (خصوصاً أوبو/فيفو) على نسخة قديمة من التطبيق.
+
+const CACHE_VERSION = 'supervisor-v1-2026-07-12';
+const ASSETS = [
   './mansek-supervisor.html',
-  'https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap',
-  'https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css',
+  './icon-supervisor-192.png',
+  './icon-supervisor-512.png',
+  './welcome-logo-supervisor.png',
+  './startup-supervisor.png',
+  './login-logo-supervisor.png'
 ];
 
-// تثبيت الـ Service Worker
-self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(STATIC_ASSETS).catch(err => {
-        console.log('Cache addAll error (non-critical):', err);
-      });
-    })
+// ── التثبيت: كاش أساسي بس + تفعيل فوري بدون انتظار إغلاق كل التابات ──
+// ملحوظة: بنكاش كل أصل لوحده مع catch بدل addAll الجماعي، عشان لو ملف واحد ناقص
+// أو 404 (زي نسيان رفعه) التثبيت كله ميفشلش ويسبب حلقة تحميل/تحديث متكررة على الصفحة.
+self.addEventListener('install', e => {
+  e.waitUntil(
+    caches.open(CACHE_VERSION).then(c =>
+      Promise.all(ASSETS.map(url => c.add(url).catch(err => console.warn('SW: تعذر كاش', url, err))))
+    )
   );
   self.skipWaiting();
 });
 
-// تفعيل الـ Service Worker
-self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(
-        keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))
-      )
-    )
+// ── التفعيل: امسح أي كاش قديم من نسخ سابقة + خد التحكم فوراً في كل الصفحات المفتوحة ──
+self.addEventListener('activate', e => {
+  e.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE_VERSION).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
-// استراتيجية Network First لـ Supabase، Cache First للباقي
-self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
+// ── الجلب: Network-first دايماً — لو النت شغال ياخد آخر نسخة، ولو النت واقع يرجع للكاش كحل أخير ──
+self.addEventListener('fetch', e => {
+  if (e.request.method !== 'GET') return;
+  if (e.request.url.includes('supabase.co')) return;
+  if (e.request.url.includes('googleapis.com')) return;
+  if (e.request.url.includes('cdnjs.cloudflare.com')) return;
+  if (e.request.url.includes('jsdelivr.net')) return;
 
-  // Supabase — دايماً من الشبكة
-  if(url.hostname.includes('supabase.co')) {
-    event.respondWith(
-      fetch(event.request).catch(() => {
-        return new Response(JSON.stringify([]), {
-          headers: { 'Content-Type': 'application/json' }
-        });
+  e.respondWith(
+    fetch(e.request, {cache: 'no-store'})
+      .then(res => {
+        const clone = res.clone();
+        caches.open(CACHE_VERSION).then(c => c.put(e.request, clone));
+        return res;
       })
-    );
-    return;
-  }
-
-  // الملف الرئيسي — Network First
-  if(url.pathname.includes('mansek-supervisor.html')) {
-    event.respondWith(
-      fetch(event.request)
-        .then(response => {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
-          return response;
-        })
-        .catch(() => caches.match(event.request))
-    );
-    return;
-  }
-
-  // باقي الموارد — Cache First
-  event.respondWith(
-    caches.match(event.request).then(cached => {
-      return cached || fetch(event.request).then(response => {
-        const clone = response.clone();
-        caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
-        return response;
-      });
-    })
+      .catch(() => caches.match(e.request))
   );
+});
+
+// ── استقبال أمر تخطي الانتظار (لو الصفحة طلبت تحديث فوري) ──
+self.addEventListener('message', e => {
+  if (e.data === 'SKIP_WAITING') self.skipWaiting();
 });
