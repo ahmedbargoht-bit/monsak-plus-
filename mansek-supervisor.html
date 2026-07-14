@@ -1720,6 +1720,52 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     </div>
     <!-- ══ END: شاشة المنافس ══ -->
 
+    <!-- ══ خطط الفريق (للمدير/GM) ══════════════════════════════ -->
+    <div class="screen" id="screen-team-plans">
+      <div class="card">
+        <div class="card-title"><i class="ti ti-users-group" style="color:#4B3C1A"></i> خطط الفريق الأسبوعية</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">متابعة واعتماد خطط مشرفي التنسيق — عرض أسبوعي تفصيلي</div>
+
+        <!-- فلاتر -->
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <select id="tp-sup-status" onchange="teamPlansLoadSup()" class="filter-select" style="flex:1;min-width:130px">
+            <option value="all">كل الحالات</option>
+            <option value="draft">⏳ مسودة</option>
+            <option value="submitted">📤 بانتظار الاعتماد</option>
+            <option value="approved">✅ معتمدة</option>
+            <option value="gm_approved">🏆 معتمدة GM</option>
+            <option value="rejected">❌ مرفوضة</option>
+          </select>
+          <select id="tp-sup-week" onchange="teamPlansLoadSup()" class="filter-select" style="flex:1;min-width:130px">
+            <option value="prev">الأسبوع السابق</option>
+            <option value="current" selected>الأسبوع الحالي</option>
+            <option value="next">الأسبوع القادم</option>
+          </select>
+          <button onclick="teamPlansLoadSup()" style="padding:8px 12px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
+            <i class="ti ti-refresh"></i>
+          </button>
+        </div>
+
+        <!-- KPI -->
+        <div id="tp-sup-kpi" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px"></div>
+
+        <!-- تصدير -->
+        <div class="export-bar" id="tp-sup-export-bar">
+          <div class="export-bar-title"><i class="ti ti-download"></i> تصدير خطط الفريق</div>
+          <button class="btn-export-xl" onclick="exportTeamPlansExcel()">
+            <i class="ti ti-file-spreadsheet"></i> Excel
+          </button>
+          <button class="btn-export-pdf" onclick="exportTeamPlansPDF()">
+            <i class="ti ti-file-type-pdf"></i> PDF
+          </button>
+        </div>
+
+        <!-- قائمة الخطط -->
+        <div id="tp-sup-list"><div class="empty">جاري التحميل...</div></div>
+      </div>
+    </div>
+    <!-- ══ END: خطط الفريق ══ -->
+
   </div><!-- end content -->
 
 <!-- ══ Modal: تعديل/حذف نقاط ══════════════════════════════════ -->
@@ -8354,14 +8400,15 @@ function rptOnBranchChange(){
   if(area) area.style.display='none';
 }
 
-// لما المنسق يتغير
+// لما المنسق يتغير — الفروع بتتحدد من قائمة "الفرع" (rpt-branch-sel) العادية اللي
+// اتملت بالفعل في rptOnRouteChange، هنا بس بنحدّث رسالة المعاينة (لو موجودة في الواجهة)
 async function rptOnRepChange(){
   const rep = document.getElementById('sup-rpt-rep')?.value.trim()||'';
   const info = document.getElementById('rpt-link-info');
   const infoTxt = document.getElementById('rpt-link-text');
-  if(!rep){ if(info) info.style.display='none'; rptLoadBranches(); return; }
+  if(!info || !infoTxt) return; // العنصرين دول مش موجودين في الواجهة الحالية
+  if(!rep){ info.style.display='none'; return; }
 
-  // اعرض فروع المنسق من جدول الزيارات
   const from = document.getElementById('sup-rpt-from')?.value||'';
   const to   = document.getElementById('sup-rpt-to')?.value||'';
   try{
@@ -8371,17 +8418,10 @@ async function rptOnRepChange(){
     const res  = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     const rows = await res.json().catch(()=>[]);
     const visitedBranches = [...new Set(Array.isArray(rows)?rows.map(r=>r.branch).filter(Boolean):[])];
-
-    if(info && infoTxt){
-      info.style.display = visitedBranches.length ? 'block' : 'none';
-      infoTxt.textContent = `${rep} زار ${visitedBranches.length} فرع في هذه الفترة — الفروع مُحددة تلقائياً`;
-    }
-
-    // حمّل الفروع وحدد الفروع المزارة تلقائياً
-    await rptLoadBranchesForRep(visitedBranches);
+    info.style.display = visitedBranches.length ? 'block' : 'none';
+    infoTxt.textContent = `${rep} زار ${visitedBranches.length} فرع في هذه الفترة`;
   } catch(e){
-    if(info) info.style.display='none';
-    rptLoadBranches();
+    info.style.display='none';
   }
 }
 
@@ -8536,6 +8576,26 @@ function rptGetSelectedGrps(){
   return sel.length ? sel : (cu?.groups||[]);
 }
 
+// جلب كل الصفحات من Supabase بدون سقف ثابت — عشان لو المشرف عنده بيانات كتير
+// (فترة طويلة/مجموعة كبيرة) التقرير يجيب كل السجلات بدل ما يتقطع عند أول 3000 سجل
+async function rptFetchAllPages(baseUrl, H, pageSize=1000, hardCap=20000){
+  let all = [];
+  let offset = 0;
+  while(offset < hardCap){
+    const pageUrl = `${baseUrl}&order=id.asc&limit=${pageSize}&offset=${offset}`;
+    let page;
+    try{
+      const res = await fetch(pageUrl, H);
+      page = res.ok ? await res.json() : [];
+    }catch(e){ page = []; }
+    if(!Array.isArray(page) || !page.length) break;
+    all = all.concat(page);
+    if(page.length < pageSize) break; // آخر صفحة
+    offset += pageSize;
+  }
+  return all;
+}
+
 async function rptFetchData(){
   // ✅ الفلاتر الجديدة: route + branch + rep
   const route  = document.getElementById('rpt-route')?.value||'';
@@ -8547,24 +8607,27 @@ async function rptFetchData(){
 
   const H = {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}};
 
-  // ✅ products — فلتر بالفرع والمنسق والتاريخ
-  let prodUrl = `${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&select=*&order=snf.asc&limit=3000`;
+  // ✅ products — فلتر بالخط والفرع والمنسق والتاريخ (كان خط السير مش متفلتر هنا، فكان بيرجع
+  // أصناف من كل خطوط المجموعة مش بس الخط المختار — ده كان سبب ظهور بيانات غلط/زيادة)
+  let prodUrl = `${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&select=*`;
+  if(route)  prodUrl += `&route=eq.${encodeURIComponent(route)}`;
   if(branch) prodUrl += `&branch=eq.${encodeURIComponent(branch)}`;
   if(rep)    prodUrl += `&name=eq.${encodeURIComponent(rep)}`;
   if(from)   prodUrl += `&created_at=gte.${from}T00:00:00`;
   if(to)     prodUrl += `&created_at=lte.${to}T23:59:59`;
 
   // ✅ visits — لكشف الفروع بدون تقارير
-  let visitUrl = `${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&select=name,branch,route,created_at&limit=3000`;
+  let visitUrl = `${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&select=name,branch,route,created_at`;
   if(route)  visitUrl += `&route=eq.${encodeURIComponent(route)}`;
   if(branch) visitUrl += `&branch=eq.${encodeURIComponent(branch)}`;
   if(rep)    visitUrl += `&name=eq.${encodeURIComponent(rep)}`;
   if(from)   visitUrl += `&created_at=gte.${from}T00:00:00`;
   if(to)     visitUrl += `&created_at=lte.${to}T23:59:59`;
 
+  // جلب كل الصفحات بدل جلبة واحدة بحد أقصى ثابت — عشان التقرير يجيب كامل مهما كبر حجم البيانات
   const [prodRows, visitRows] = await Promise.all([
-    fetch(prodUrl, H).then(r=>r.ok?r.json():[]).catch(()=>[]),
-    fetch(visitUrl, H).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    rptFetchAllPages(prodUrl, H),
+    rptFetchAllPages(visitUrl, H),
   ]);
 
   let rows = Array.isArray(prodRows) ? prodRows : [];
