@@ -1058,6 +1058,9 @@ document.addEventListener('DOMContentLoaded', ()=>{ setTimeout(rFillS1,200); set
 
 // ── State ──────────────────────────────────────────────────────
 let cu=null,selectedReason=null,visits=[],products=[],missing=[],orders=[],messages=[],confirmed=new Set(),attIn=null,attOut=null,locInterval=null,sessionProducts=[];
+// عدد النواقص اللي فعلاً اترسلت بنجاح للفرع الحالي (من submitMissing) — مستقل عن مصفوفة missing
+// القديمة (اللي بقت غير مستخدمة فعلياً في الواجهة الحالية) عشان missing_count في الزيارة يبقى صحيح
+let missingSentCount = 0;
 
 // الأسماء مدمجة في HTML مباشرة
 
@@ -1254,10 +1257,11 @@ async function sendFinalData(){
   btn.innerHTML = '<i class="ti ti-loader spin"></i> جاري الإرسال...';
   const statusEl = document.getElementById('send-status');
 
+  let anyFailed = false;
   try{
     // إرسال بيانات الحضور والانصراف
     if(attIn){
-      await apiPost({
+      const attOk = await apiPost({
         action:'saveAttendance',
         name:cu.name, route:cu.route, group:cu.group,
         type:'full',
@@ -1265,6 +1269,7 @@ async function sendFinalData(){
         lat: attIn.lat, lng: attIn.lng,
         latOut: attOut?.lat||'', lngOut: attOut?.lng||''
       });
+      if(attOk===false) anyFailed = true; // فشل حقيقي من السيرفر (مش مشكلة نت — دي بترجع true وتتخزن أوفلاين)
     }
 
     // إرسال كل الزيارات المحفوظة (لو فيه زيارات لم ترسل)
@@ -1282,9 +1287,21 @@ async function sendFinalData(){
           const existing = chk.ok ? await chk.json() : [];
           if(Array.isArray(existing) && existing.length > 0){ v._sent = true; continue; }
         }catch(e){}
-        await apiPost({...v, action:'saveVisit'});
-        v._sent = true;
+        // مهم: ما نعلّمش v._sent=true إلا لو فعلاً نجح الحفظ (أو اتخزن أوفلاين وهيترفع لاحقاً —
+        // الحالتين بيرجعوا true من apiPost). لو رجع false فده فشل حقيقي من السيرفر ولازم يتحاول تاني.
+        const visitOk = await apiPost({...v, action:'saveVisit'});
+        if(visitOk===false){ anyFailed = true; } else { v._sent = true; }
       }
+    }
+
+    if(anyFailed){
+      statusEl.textContent = '⚠️ اترسل جزء من البيانات بس — جزء فشل، اضغط "إرسال جميع البيانات" تاني';
+      statusEl.style.color = '#B45309';
+      btn.disabled = false;
+      btn.innerHTML = '<i class="ti ti-send"></i> إرسال جميع البيانات الآن';
+      updateDash();
+      if(typeof loadVisitTab==='function') loadVisitTab();
+      return;
     }
 
     // مسح بيانات الشيفت من localStorage + وقف العداد
@@ -1461,10 +1478,14 @@ async function doLogin(){
   loadBranchesMapFromCloud().then(()=>{ popBranches(freshRep.route); });
   updateOnlineStatus(true);
   // حفظ بيانات الجلسة عشان تفضل بعد الـ refresh
+  // ملحوظة: بقت localStorage بدل sessionStorage — sessionStorage بتتصفر لو التطبيق (PWA)
+  // اتقفل بالكامل من الخلفية (مش بس refresh)، فكان المنسق بيرجع لشاشة الدخول من الأول
+  // وحالة الحضور المحلية بتضيع لحد ما يفتح تاب "لوحتي" يدوياً.
   try{
-    sessionStorage.setItem('cu_session', JSON.stringify({
+    localStorage.setItem('cu_session', JSON.stringify({
       name, route:freshRep.route, group:freshRep.group, coordType:repType, fixedBranch:freshRep.fixedBranch||''
     }));
+    sessionStorage.removeItem('cu_session'); // تنظيف أي نسخة قديمة من قبل الإصلاح
   }catch(e){}
 }
 
@@ -1648,6 +1669,16 @@ async function logout(){
     }catch(e){ console.warn('logout summary fetch error:', e); }
   }
 
+  // فحص لو فيه عمليات لسه متخزنة أوفلاين (IndexedDB) وماترفعتش للسيرفر بعد —
+  // عشان نحذّر المنسق قبل ما يقفل التطبيق تماماً ويفقدها لو مسح بيانات المتصفح
+  let oqCount = 0;
+  try{
+    const db = await openOQDB();
+    const tx = db.transaction(OQ_STORE,'readonly');
+    const store = tx.objectStore(OQ_STORE);
+    oqCount = await new Promise(res=>{ const r=store.count(); r.onsuccess=e=>res(e.target.result||0); r.onerror=()=>res(0); });
+  }catch(e){}
+
   if(summary){
     summary.innerHTML = `
       <div>📍 <b>الفرع:</b> ${branch||'لم يُحدَّد'}</div>
@@ -1655,6 +1686,7 @@ async function logout(){
       <div>⚠️ <b>النواقص:</b> ${missCount}</div>
       <div>↩️ <b>المرتجعات:</b> ${retCount}</div>
       <div>🕐 <b>وقت الخروج:</b> ${new Date().toLocaleTimeString('ar',{hour:'2-digit',minute:'2-digit'})}</div>
+      ${oqCount>0?`<div style="margin-top:8px;background:#FFF3E0;color:#B45309;border:1px solid #FFC72C;border-radius:8px;padding:8px 10px;font-size:12px">⚠️ في ${oqCount} عملية لسه متخزنة على الجهاز وماوصلتش السيرفر (النت كان ضعيف). متقفلش التطبيق نهائي دلوقتي — سيبه شغال شوية لحد ما ترفع، أو ارجع افتحه تاني قبل ما تقفل الموبايل.</div>`:''}
     `;
   }
 }
@@ -1664,7 +1696,7 @@ function confirmLogout(){
   if(locInterval) clearInterval(locInterval);
   if(window._notifInterval) clearInterval(window._notifInterval);
   if(shiftTimerInterval) clearInterval(shiftTimerInterval);
-  try{ sessionStorage.removeItem('cu_session'); }catch(e){}
+  try{ localStorage.removeItem('cu_session'); sessionStorage.removeItem('cu_session'); }catch(e){}
   // جهّز التطبيق لاستقبال فرع وزيارة جديدة في المرة الجاية —
   // هنا فقط (الخروج الكامل من التطبيق) تُمسح كل بيانات الزيارة الحالية
   resetVisitState();
@@ -2246,6 +2278,8 @@ async function submitReturns(){
 
   let success=0, failed=0, duplicates=0;
   const today = localDateStr();
+  // العناصر اللي فشلت فعلياً بنحتفظ بيها — زي sendAllProducts بالظبط، عشان متضيعش لو مسحناها كلها
+  const stillPending=[];
   for(const r of retItems){
     const payload = {
       rep_name:    repName,
@@ -2270,7 +2304,7 @@ async function submitReturns(){
       const exists = chk.ok ? await chk.json() : [];
       if(Array.isArray(exists) && exists.length > 0){
         duplicates++;
-        continue; // تجاوز هذا الصنف
+        continue; // تجاوز هذا الصنف — مسجل بالفعل على السيرفر
       }
 
       console.log('Sending return payload:', JSON.stringify(payload));
@@ -2283,25 +2317,33 @@ async function submitReturns(){
         success++;
       } else {
         failed++;
+        stillPending.push(r);
         console.error('Return insert FAILED:', res.status, resText);
         showToastPWA('❌ خطأ: ' + res.status + ' — ' + resText.slice(0,60));
       }
-    }catch(e){ failed++; console.error('Return fetch error:', e.message); }
+    }catch(e){ failed++; stillPending.push(r); console.error('Return fetch error:', e.message); }
   }
 
-  if(success>0){
-    retItems=[];
+  // امسح بس العناصر اللي خلصت (نجحت أو كانت مكررة) — سيب الفاشلة فعلياً في retItems عشان متضيعش
+  // (كانت الكود بيمسح المصفوفة كاملة بمجرد نجاح صنف واحد بس، فأي صنف فشل معاه كان بيضيع بصمت)
+  retItems = stillPending;
+  if(success>0 || duplicates>0){
     const badge=document.getElementById('ret-badge');
-    if(badge) badge.style.display='none';
+    if(badge) badge.style.display = retItems.length ? '' : 'none';
     const cnt=document.getElementById('r-list-count');
     if(cnt) cnt.textContent='';
     renderRetSaved();
     renderRetList();
+  }
+  if(success>0){
     const okEl = document.getElementById('r-report-ok');
     if(okEl){
-      okEl.textContent = `✅ تم إرسال تقرير المرتجعات بنجاح — ${success} صنف`;
+      okEl.textContent = failed>0
+        ? `⚠️ اترسل ${success} صنف — وفشل ${failed} لسه محفوظ، اضغط "إرسال كل المرتجعات" تاني`
+        : `✅ تم إرسال تقرير المرتجعات بنجاح — ${success} صنف`;
       okEl.style.display='block';
-      okEl.style.background='#E8F5E9'; okEl.style.color='#1B5E20'; okEl.style.border='1px solid #4CAF50';
+      if(failed>0){ okEl.style.background='#FFEBEE'; okEl.style.color='#B71C1C'; okEl.style.border='1px solid #EF9A9A'; }
+      else { okEl.style.background='#E8F5E9'; okEl.style.color='#1B5E20'; okEl.style.border='1px solid #4CAF50'; }
       setTimeout(()=>{ okEl.style.display='none'; },4000);
     }
     showToastPWA(`✅ تم إرسال ${success} مرتجع بنجاح`);
@@ -2606,7 +2648,9 @@ function recordAtt(type){
         if(coCard) coCard.style.display = 'block';
       }
     }
-    apiPost({action:'saveAttendance',name:cu.name,route:cu.route,group:cu.group,type,time:t,lat,lng});
+    apiPost({action:'saveAttendance',name:cu.name,route:cu.route,group:cu.group,type,time:t,lat,lng})
+      .then(ok=>{ if(ok===false) showToastPWA('⚠️ فشل حفظ '+(type==='in'?'الحضور':'الانصراف')+' على السيرفر — تأكد من الاتصال وحاول تسجّل تاني'); })
+      .catch(()=>{});
     // بعت اللوكيشن مرة واحدة عند الحضور أو الانصراف بس
     sendLocation();
     saveVisitStateToSession();
@@ -2730,6 +2774,16 @@ function pHasPendingInput(){
   return false;
 }
 
+// نفس فحص pHasPendingInput لكن لتاب "النواقص" (missItems — المدخلة عبر جدول m-snf-list ولسه ماتبعتش)
+function mHasPendingInput(){
+  return typeof missItems!=='undefined' && Array.isArray(missItems) && missItems.length>0;
+}
+
+// نفس الفكرة لتاب "المرتجعات" (retItems — المسجلة عبر saveReturn ولسه ماتبعتش عن طريق submitReturns)
+function rHasPendingInput(){
+  return typeof retItems!=='undefined' && Array.isArray(retItems) && retItems.length>0;
+}
+
 async function saveVisit(){
   if(_savingVisit) return; // منع الضغط المتكرر
   const branch=document.getElementById('f-branch').value;
@@ -2739,6 +2793,18 @@ async function saveVisit(){
   if(pHasPendingInput()){
     alert('⚠️ في كميات أصناف كتبتها في تاب "الأصناف" ولسه ماتبعتهاش!\n\nروح تاب "الأصناف" واضغط "إرسال كل التقرير" الأول، وبعدين ارجع احفظ الزيارة — عشان الكميات متضيعش.');
     showTab('products');
+    return;
+  }
+  // ── لو فيه نواقص متسجلة في تاب "النواقص" ولسه ماتبعتش ──
+  if(mHasPendingInput()){
+    alert('⚠️ في نواقص سجلتها في تاب "النواقص" ولسه ماتبعتهاش!\n\nروح تاب "النواقص" واضغط "إرسال كل النواقص" الأول، وبعدين ارجع احفظ الزيارة.');
+    showTab('missing');
+    return;
+  }
+  // ── لو فيه مرتجعات متسجلة في تاب "المرتجعات" ولسه ماتبعتش ──
+  if(rHasPendingInput()){
+    alert('⚠️ في مرتجعات سجلتها في تاب "المرتجعات" ولسه ماتبعتهاش!\n\nروح تاب "المرتجعات" وابعتها الأول، وبعدين ارجع احفظ الزيارة.');
+    showTab('returns');
     return;
   }
 
@@ -2791,7 +2857,7 @@ async function saveVisit(){
     shelfTaken:document.getElementById('f-shelf-taken')?.value||0,
     spaceTotal: 0,
     spaceUsed:  0,
-    missing:missing.length,
+    missing:missing.length+missingSentCount,
     coordType:cu.coordType||'متحرك',
     kpi_tasks: isFixedRep(cu?.coordType) ? getKpiTasks() : '',
     kpi_pts:   isFixedRep(cu?.coordType) ? getKpiPoints() : 0,
@@ -2882,18 +2948,42 @@ function resetVisitData(){
   renderProdList();
   // إعادة تعيين النواقص
   missing=[];
+  missingSentCount=0;
   updateMissBadge();
   renderMissing();
   // إعادة تعيين صفحة الأصناف
   document.getElementById('p-s1').value='';
   ['p-f2','p-f3','p-f4','p-entry-area'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none';});
   const pSaveBtn=document.getElementById('p-save-btn');if(pSaveBtn)pSaveBtn.style.display='none';
-  // إعادة تعيين صفحة النواقص
+  const pS1=document.getElementById('p-s1');if(pS1)pS1.value='';
+  const pS2=document.getElementById('p-s2');if(pS2){pS2.innerHTML='<option value="">اختر</option>';pS2.disabled=true;}
+  const pS3=document.getElementById('p-s3');if(pS3){pS3.innerHTML='<option value="">اختر</option>';pS3.disabled=true;}
+  const pTableWrap=document.getElementById('p-table-wrap');if(pTableWrap)pTableWrap.style.display='none';
+  const pSendAllBtn=document.getElementById('p-send-all-btn');if(pSendAllBtn)pSendAllBtn.style.display='none';
+  window._pCurrentList=[]; window._pCurrentMonths=[];
+  // إعادة تعيين صفحة النواقص (الطريقة القديمة — غير مستخدمة فعلياً بس بنصفرها للأمان)
   const mS1=document.getElementById('m-s1');if(mS1)mS1.value='';
   ['m-f2','m-f3','m-f4'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none';});
   const mNote=document.getElementById('m-note');if(mNote)mNote.value='';
   selectedReason=null;
   [1,2,3,4].forEach(i=>{const el=document.getElementById('rb-'+i);if(el)el.className='reason-btn';});
+  // ── إعادة تعيين النواقص (الطريقة الفعلية الحالية — تاب "النواقص" الجدولي) ──
+  // مهم جداً: من غير الجزء ده، أي نقص كتبه المنسق للفرع اللي خلص منه ونسي يبعته
+  // كان بيفضل قاعد في الذاكرة ويترسل غلط منسوب للفرع الجديد اللي هيبدأ فيه.
+  missItems=[]; missProducts=[];
+  const mS1b=document.getElementById('m-s1');if(mS1b)mS1b.value='';
+  const mS2=document.getElementById('m-s2');if(mS2){mS2.innerHTML='<option value="">اختر</option>';mS2.disabled=true;}
+  const mS3=document.getElementById('m-s3');if(mS3){mS3.innerHTML='<option value="">اختر</option>';mS3.disabled=true;}
+  const mTableWrap=document.getElementById('m-table-wrap');if(mTableWrap)mTableWrap.style.display='none';
+  const missListCard=document.getElementById('miss-list-card');if(missListCard)missListCard.style.display='none';
+  // ── إعادة تعيين المرتجعات — نفس السبب بالظبط: منع تسريب مرتجعات فرع قديم لفرع جديد ──
+  retItems=[]; retProducts=[]; retSelected=null; retReason=0;
+  const rS1=document.getElementById('r-s1');if(rS1)rS1.value='';
+  const rS2=document.getElementById('r-s2');if(rS2){rS2.innerHTML='<option value="">اختر</option>';rS2.disabled=true;}
+  const rS3=document.getElementById('r-s3');if(rS3){rS3.innerHTML='<option value="">اختر</option>';rS3.disabled=true;}
+  const rTableWrap=document.getElementById('r-table-wrap');if(rTableWrap)rTableWrap.style.display='none';
+  if(typeof renderRetSaved==='function') renderRetSaved();
+  if(typeof renderRetList==='function') renderRetList();
 }
 
 // ── Products ───────────────────────────────────────────────────
@@ -3599,25 +3689,31 @@ async function submitMissing(){
   const branch=document.getElementById('f-branch')?.value||'';
   let success=0,dup=0,failed=0;
 
+  // العناصر اللي هتفشل فعلياً بنحتفظ بيها هنا — عشان محتفظش نمسحها زي باقي الملف كله (نفس أسلوب
+  // sendAllProducts اللي بيمسح بس الصنف الناجح ويسيب الفاشل عشان المنسق يقدر يعيد المحاولة)
+  const stillPending=[];
   for(const m of missItems){
     // تحقق من التكرار في نفس الفرع في نفس اليوم
     const today=localDateStr();
+    let isDup=false;
     try{
       const chk=await fetch(
         `${SUPABASE_URL}/rest/v1/missing?branch=eq.${encodeURIComponent(branch)}&snf=eq.${encodeURIComponent(m.snf)}&name=eq.${encodeURIComponent(cu.name)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id&limit=1`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
       );
       const exists=chk.ok?await chk.json():[];
-      if(Array.isArray(exists)&&exists.length>0){dup++;continue;}
+      if(Array.isArray(exists)&&exists.length>0){ isDup=true; }
     }catch(e){}
+    if(isDup){ dup++; continue; } // مسجل بالفعل على السيرفر — مفيش داعي نحتفظ بيه محلياً
     const res=await apiPost({action:'saveMissing',name:cu.name,route:cu.route,fea:m.fea,grp:m.grp,snf:m.snf,reasonText:m.reason,note:m.note||'',branch});
-    if(res) success++; else failed++;
+    if(res){ success++; missingSentCount++; } else { failed++; stillPending.push(m); }
   }
 
-  // مسح بعد الإرسال
-  missItems=[];
+  // امسح بس العناصر اللي خلصت (نجحت أو كانت مكررة) — سيب الفاشلة فعلياً عشان متضيعش
+  missItems = stillPending;
   updateMissBadge();
-  missProducts.forEach((_,i)=>{
+  missProducts.forEach((snf,i)=>{
+    if(missItems.some(x=>x.snf===snf)) return; // لسه فاشل — سيب خانته زي ما هي عشان يعيد المحاولة
     const rs=document.getElementById('mreason-'+i);
     const nt=document.getElementById('mnote-'+i);
     if(rs){rs.value='';rs.style.borderColor='#E8D5B0';rs.style.background='#fff';rs.style.color='#3D2B1F';}
@@ -3625,7 +3721,10 @@ async function submitMissing(){
   });
 
   const okEl=document.getElementById('miss-ok');
-  if(dup>0&&success===0){
+  if(failed>0){
+    okEl.textContent=`⚠️ اتبعت ${success} ناقص${dup?' · '+dup+' مكرر':''} · فشل ${failed} — لسه في خانته، اضغط "إرسال كل النواقص" تاني`;
+    okEl.style.cssText='display:block;background:#FFEBEE;color:#B71C1C;border:1px solid #EF9A9A;border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:8px';
+  } else if(dup>0&&success===0){
     okEl.textContent=`⚠️ ${dup} صنف تم تسجيله مسبقاً اليوم في نفس الفرع`;
     okEl.style.cssText='display:block;background:#FEF3C7;color:#B45309;border:1px solid #FFC72C;border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:8px';
   } else if(success>0){
@@ -3794,29 +3893,36 @@ async function loadRepOrders(){
 }
 
 async function repOrderReceive(id){
-  await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body:JSON.stringify({status:'rep_received'})
-  });
+  }).catch(()=>null);
+  if(!res || !res.ok){ showToast('❌ فشل تأكيد الاستلام — تأكد من الاتصال وحاول تاني'); return; }
   showToast('📥 تم تأكيد استلام الطلبية');
   loadRepOrders();
 }
 
 async function repOrderDelivered(id){
-  await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body:JSON.stringify({status:'done'})
-  });
+  }).catch(()=>null);
+  if(!res || !res.ok){ showToast('❌ فشل تأكيد التسليم — تأكد من الاتصال وحاول تاني'); return; }
   showToast('🏪 تم تأكيد تسليم الفرع');
   loadRepOrders();
 }
 
-function confirmOrder(id){
-  confirmed.add(id);
-  apiPost({action:'markOrderDone',id});
+async function confirmOrder(id){
+  confirmed.add(id); // تحديث تفاؤلي فوري للواجهة
   renderOrders();
+  const ok = await apiPost({action:'markOrderDone',id});
+  if(ok===false){
+    confirmed.delete(id); // فشل حقيقي — رجّع الحالة القديمة وبلّغ
+    renderOrders();
+    showToastPWA('❌ فشل تأكيد الطلبية — حاول تاني');
+  }
 }
 
 // ── Messages Render ────────────────────────────────────────────
@@ -3824,10 +3930,16 @@ function confirmOrder(id){
 async function clearMyMessages(){
   if(!messages.length) return;
   if(!confirm('مسح كل الرسائل؟')) return;
-  // مسح من Supabase
+  // تحديث (مش إدراج) — كان الكود بيعمل INSERT جديد بنفس الـ id فبيتعارض مع الصف الأصلي
+  // (409) ويتكرر السجل بدل ما يتحدث، وبسبب الأوفلاين كيو الفشل ده كان بيتخبى.
+  let failed=0;
   try{
-    await Promise.all(messages.map(m=>sbInsert('messages',{...m,read_by:'__deleted__'})));
-  }catch(e){}
+    const results = await Promise.all(messages.map(m=>sbUpdate('messages',{id:m.id},{read_by:'__deleted__'})));
+    failed = results.filter(r=>r===false).length;
+  }catch(e){ failed = messages.length; }
+  if(failed>0){
+    showToast(`⚠️ اتمسح جزء بس — ${failed} رسالة فشل مسحها، حاول تاني`);
+  }
   messages=[];
   renderMessages();
   const b=document.getElementById('msg-badge');
@@ -3940,14 +4052,14 @@ async function confirmVisitResultMsg(msgId, fromName){
   if(btn){ btn.disabled=true; btn.textContent='⏳ جارٍ...'; }
 
   // حدّث الرسالة كـ مقروءة ومؤكدة
-  await fetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${msgId}`,{
+  const res1 = await fetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${msgId}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body:JSON.stringify({is_read:true, read_at:new Date().toISOString()})
-  }).catch(()=>{});
+  }).catch(()=>null);
 
   // ابعت رسالة تأكيد للمشرف
-  await fetch(`${SUPABASE_URL}/rest/v1/messages`,{
+  const res2 = await fetch(`${SUPABASE_URL}/rest/v1/messages`,{
     method:'POST',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body:JSON.stringify({
@@ -3960,9 +4072,14 @@ async function confirmVisitResultMsg(msgId, fromName){
       is_read    : false,
       created_at : new Date().toISOString()
     })
-  }).catch(()=>{});
+  }).catch(()=>null);
 
-  showToast('✅ تم تأكيد الاستلام وإشعار المشرف');
+  if((!res1||!res1.ok) || (!res2||!res2.ok)){
+    showToast('⚠️ تم التأكيد جزئياً بس — تأكد من الاتصال، وحاول تاني لو مش ظاهر عند المشرف');
+    if(btn){ btn.disabled=false; btn.textContent='✅ تأكيد الاستلام'; }
+  } else {
+    showToast('✅ تم تأكيد الاستلام وإشعار المشرف');
+  }
   fetchMessages();
 }
 
@@ -3993,14 +4110,16 @@ function unlockBranchSelect(){
   if(hint) hint.style.display = 'none';
 }
 
-// ── حفظ حالة الزيارة الحالية (الفرع + الحضور/الانصراف) — تفضل بعد refresh أو قفل من الخلفية ──
+// ── حفظ حالة الزيارة الحالية (الفرع + الحضور/الانصراف) — localStorage بدل sessionStorage
+// عشان تفضل موجودة حتى لو التطبيق (PWA) اتقفل بالكامل من الخلفية مش refresh بس ──
 function saveVisitStateToSession(){
   try{
-    sessionStorage.setItem('visit_state', JSON.stringify({
+    localStorage.setItem('visit_state', JSON.stringify({
       branch: document.getElementById('f-branch')?.value || '',
       ctype:  document.getElementById('f-ctype')?.value  || '',
       attIn, attOut
     }));
+    sessionStorage.removeItem('visit_state'); // تنظيف أي نسخة قديمة من قبل الإصلاح
   }catch(e){}
 }
 
@@ -4037,9 +4156,27 @@ function resetVisitState(){
   });
   const mTableWrap = document.getElementById('m-table-wrap');
   if(mTableWrap) mTableWrap.style.display = 'none';
+  const missListCard = document.getElementById('miss-list-card');
+  if(missListCard) missListCard.style.display = 'none';
   missing = [];
+  missingSentCount = 0;
   if(typeof missItems!=='undefined') missItems = [];
+  if(typeof missProducts!=='undefined') missProducts = [];
   updateMissBadge();
+
+  // 3.5 تاب "المرتجعات" — نفس السبب: منع تسريب مرتجعات منسق/فرع سابق لجلسة تالية على نفس الجهاز
+  ['r-s1','r-s2','r-s3'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el){ el.value=''; el.disabled = id!=='r-s1'; }
+  });
+  const rTableWrap = document.getElementById('r-table-wrap');
+  if(rTableWrap) rTableWrap.style.display = 'none';
+  if(typeof retItems!=='undefined') retItems = [];
+  if(typeof retProducts!=='undefined') retProducts = [];
+  if(typeof retSelected!=='undefined') retSelected = null;
+  if(typeof retReason!=='undefined') retReason = 0;
+  if(typeof renderRetSaved==='function') renderRetSaved();
+  if(typeof renderRetList==='function') renderRetList();
 
   // 4. تاب "الزيارة" — هيتحدث تلقائي من Supabase (مفيهوش حالة محلية لازم تتصفر)
 
@@ -4050,7 +4187,7 @@ function resetVisitState(){
   if(dashCard) dashCard.style.display = 'none';
 
   // 6. امسح الحالة المحفوظة في الجلسة
-  try{ sessionStorage.removeItem('visit_state'); }catch(e){}
+  try{ localStorage.removeItem('visit_state'); sessionStorage.removeItem('visit_state'); }catch(e){}
 
   // 7. امسح آخر فرع محفوظ للمنسق الثابت — عشان ميترشحش تلقائياً في الزيارة الجديدة
   try{
@@ -4196,19 +4333,29 @@ function _doRecordAttFromDash(){
     if(elTime) elTime.textContent=t;
 
     try{
+      let anyFailed = false;
       // 1. إرسال الانصراف
-      await apiPost({
+      const attOk = await apiPost({
         action:'saveAttendance',
         name:cu.name, route:cu.route, group:cu.group,
         type:'out', time:t, lat, lng
       });
+      if(attOk===false) anyFailed = true;
 
-      // 2. إرسال أي زيارات لم تُرسل بعد
+      // 2. إرسال أي زيارات لم تُرسل بعد — نعلّمها "اترسلت" بس لو فعلاً نجحت
       for(const v of visits){
         if(!v._sent){
-          await apiPost({...v, action:'saveVisit'});
-          v._sent = true;
+          const visitOk = await apiPost({...v, action:'saveVisit'});
+          if(visitOk===false){ anyFailed = true; } else { v._sent = true; }
         }
+      }
+
+      if(anyFailed){
+        btn.disabled=false;
+        btn.innerHTML='<i class="ti ti-logout"></i> تسجيل الانصراف الآن';
+        alert('⚠️ اترسل جزء من البيانات بس وجزء فشل — اضغط الزرار تاني عشان تكمل الإرسال');
+        updateDash();
+        return;
       }
 
       // 3. مسح بيانات الشيفت من localStorage
@@ -4861,16 +5008,17 @@ async function fetchAssignments(){
 
 async function confirmAssignment(id, btn){
   try{
-    await fetch(`${SUPABASE_URL}/rest/v1/assignments?id=eq.${id}`,{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/assignments?id=eq.${id}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
       body: JSON.stringify({status:'confirmed', confirmed_at:new Date().toISOString()})
     });
+    if(!res.ok){ showToast('❌ فشل التأكيد — حاول تاني'); return; }
     if(btn) btn.closest('div[style]').style.background='#f8f9fd';
     if(btn) btn.remove();
     showToast('✅ تم تأكيد استلام التوجيه');
     fetchAssignments();
-  }catch(e){ showToast('❌ فشل التأكيد'); }
+  }catch(e){ showToast('❌ فشل التأكيد — تأكد من الاتصال'); }
 }
 
 // تنبيه منبثق + اهتزاز عند وصول توجيه جديد
@@ -5199,13 +5347,26 @@ async function submitSupplyReq(){
   const btn=document.querySelector('#sr-cart-card .btn-blue');
   if(btn){btn.disabled=true;btn.textContent='جاري الإرسال...';}
   try{
-    await Promise.all(srCart.map(item=>sbInsert('supply_requests',{name:cu.name,route:cu.route,fea:item.fea,cat:item.cat,grp:cu.group||item.grp,snf:item.snf,qty:item.qty,date,note,status:'pending_supervisor',deal_source:'rep'})));
+    // فحص نتيجة كل عنصر فعلياً — بدل ما نفترض إن الكل نجح ونمسح السلة كاملة بأي حال
+    const results = await Promise.all(srCart.map(item=>
+      sbInsert('supply_requests',{name:cu.name,route:cu.route,fea:item.fea,cat:item.cat,grp:cu.group||item.grp,snf:item.snf,qty:item.qty,date,note,status:'pending_supervisor',deal_source:'rep'})
+    ));
+    const failedItems = srCart.filter((_,i)=>results[i]===false);
+    const okCount = srCart.length - failedItems.length;
     const ok=document.getElementById('sr-ok');
-    ok.textContent=`✓ تم إرسال ${srCart.length} صنف | ميعاد: ${date}`;
-    ok.style.display='block';
-    srCart=[];srRenderCart();
-    document.getElementById('sr-delivery-date').value='';
-    document.getElementById('sr-general-note').value='';
+    if(failedItems.length){
+      ok.textContent=`⚠️ اترسل ${okCount} صنف — وفشل ${failedItems.length} لسه في السلة، اضغط "إرسال الطلب" تاني`;
+      ok.style.cssText='display:block;background:#FFEBEE;color:#B71C1C;border:1px solid #EF9A9A';
+    } else {
+      ok.textContent=`✓ تم إرسال ${srCart.length} صنف | ميعاد: ${date}`;
+      ok.style.cssText='display:block';
+    }
+    srCart = failedItems; // سيب بس اللي فشل — امسح الناجح فقط
+    srRenderCart();
+    if(!failedItems.length){
+      document.getElementById('sr-delivery-date').value='';
+      document.getElementById('sr-general-note').value='';
+    }
     setTimeout(()=>ok.style.display='none',5000);
     renderSentSupplyReqs();updateSupplyBadge();
   }catch(e){alert('خطأ في الإرسال، حاول مرة أخرى');}
@@ -5487,6 +5648,20 @@ async function updateQueueBadge(){
 // عشان نعرف إن الطلب فشل، مستحيل نمسكها، وده كان السبب الحقيقي إن التقارير كانت بتفشل بصمت
 // حتى مع وجود شبكة (نت ضعيف/متقطع بيوصل الطلب لكن يفشل، مش بالضرورة offline كامل).
 // الحل: نفحص الـ return value نفسه (false/null) مش الـ exception، ونحفظ في IndexedDB Queue.
+//
+// تنبيه مهم جداً (تم اكتشافه واصلاحه لاحقاً): مكنش فيه أي تفريق بين نوعين مختلفين تماماً من الفشل:
+//  1) فشل شبكة/اتصال حقيقي (النت مقطوع، انقطع النت أثناء الطلب، timeout) — ده المفروض
+//     يتخزن في الطابور ويترفع لما النت يرجع، وده صح.
+//  2) فشل دائم من السيرفر نفسه (403 صلاحيات RLS، 400 بيانات ناقصة، 409 تعارض...) — الطلب فعلاً
+//     وصل السيرفر واترفض، وإعادة المحاولة كل 45 ثانية للأبد مستحيل تنجح. الكود القديم كان بيحط
+//     الحالة دي في الطابور برضه ويقول للمنسق "✓ تم الحفظ" — يعني فقدان بيانات دائم ومقنّع.
+// دلوقتي بنفرّق بينهم عن طريق window._lastSbError اللي بيتحط جوه sbInsert/sbUpdate/sbUpsert
+// الأصليين: لو بادئتها "خطأ اتصال:" فده فشل شبكة حقيقي (fetch نفسه رمى استثناء) → نطبّر.
+// لو بادئتها "HTTP " فده رد فعلي من السيرفر برفض الطلب → نرجّع الفشل الحقيقي بدل ما نخبيه.
+function _isConnectionError(){
+  return (window._lastSbError||'').startsWith('خطأ اتصال:');
+}
+
 const _origSbInsert      = sbInsert;
 const _origSbInsertGetId = sbInsertGetId;
 const _origSbUpdate      = sbUpdate;
@@ -5500,16 +5675,21 @@ sbInsert = async function(table, data){
   }
   const res = await _origSbInsert(table, data);
   if(res === false){
-    await saveToOQ('insert', table, data);
-    showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
-    return true;
+    if(_isConnectionError()){
+      await saveToOQ('insert', table, data);
+      showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
+      return true;
+    }
+    // فشل حقيقي من السيرفر (مش مشكلة نت) — نرجّعه زي ما هو عشان يبان للمنسق بدل ما نخبيه في الطابور
+    return false;
   }
   return res;
 };
 
 // حفظ زيارة (visits) — لازم id فوري عشان نربط بيه الأصناف/النواقص التالية.
-// لو مفيش نت أو الحفظ فشل: نولّد id مؤقت (سالب) ونحفظ العملية في الـ Queue،
+// لو مفيش نت أو الحفظ فشل بسبب اتصال: نولّد id مؤقت (سالب) ونحفظ العملية في الـ Queue،
 // ولما تترفع فعلياً في flushOQ هيتم استبدال الـ id المؤقت بالحقيقي في كل حاجة مرتبطة بيها.
+// لو الفشل حقيقي من السيرفر (مش اتصال): نرجّع null عشان الكود اللي بينادي الدالة يعرف إن الحفظ فشل فعلاً.
 sbInsertGetId = async function(table, data){
   if(!navigator.onLine){
     const tempId = -Date.now();
@@ -5519,10 +5699,13 @@ sbInsertGetId = async function(table, data){
   }
   const res = await _origSbInsertGetId(table, data);
   if(!res){
-    const tempId = -Date.now();
-    await saveToOQ('insertGetId', table, data, tempId);
-    showToastPWA('📦 حُفظت الزيارة محلياً — ستُرفع لما يرجع النت');
-    return tempId;
+    if(_isConnectionError()){
+      const tempId = -Date.now();
+      await saveToOQ('insertGetId', table, data, tempId);
+      showToastPWA('📦 حُفظت الزيارة محلياً — ستُرفع لما يرجع النت');
+      return tempId;
+    }
+    return null;
   }
   return res;
 };
@@ -5535,9 +5718,12 @@ sbUpdate = async function(table, match, data){
   }
   const res = await _origSbUpdate(table, match, data);
   if(res === false){
-    await saveToOQ('update', table, {match, values: data});
-    showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
-    return true;
+    if(_isConnectionError()){
+      await saveToOQ('update', table, {match, values: data});
+      showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
+      return true;
+    }
+    return false;
   }
   return res;
 };
@@ -5550,9 +5736,12 @@ sbUpsert = async function(table, data, onConflict='name'){
   }
   const res = await _origSbUpsert(table, data, onConflict);
   if(res === false){
-    await saveToOQ('upsert', table, data, null, onConflict);
-    showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
-    return true;
+    if(_isConnectionError()){
+      await saveToOQ('upsert', table, data, null, onConflict);
+      showToastPWA('📦 حُفظ محلياً — سيُرفع لما يرجع النت');
+      return true;
+    }
+    return false;
   }
   return res;
 };
@@ -5607,7 +5796,7 @@ function showExceptionCard(){
   const card = document.getElementById('exception-checkout-card');
   if(card) card.style.display = 'block';
   // لو في طلب معلّق من قبل، تابعه
-  const savedId = sessionStorage.getItem('exc_id_'+cu?.name);
+  const savedId = localStorage.getItem('exc_id_'+cu?.name) || sessionStorage.getItem('exc_id_'+cu?.name);
   if(savedId){ _excId = savedId; checkExceptionStatus(); startExcPoll(); }
 }
 
@@ -5653,7 +5842,8 @@ async function sendCheckoutException(){
     const data = await res.json();
     if(data && data[0]){
       _excId = data[0].id;
-      sessionStorage.setItem('exc_id_'+cu.name, _excId);
+      localStorage.setItem('exc_id_'+cu.name, _excId);
+      sessionStorage.removeItem('exc_id_'+cu.name); // تنظيف أي نسخة قديمة من قبل الإصلاح
       // إظهار حالة الانتظار
       document.getElementById('exception-form').style.display = 'none';
       document.getElementById('exception-pending-msg').style.display = 'block';
@@ -5693,12 +5883,12 @@ async function checkExceptionStatus(){
 
     if(rec.status === 'approved'){
       clearInterval(_excPollInterval);
-      sessionStorage.removeItem('exc_id_'+cu?.name);
+      localStorage.removeItem('exc_id_'+cu?.name); sessionStorage.removeItem('exc_id_'+cu?.name);
       // تنفيذ الانصراف تلقائياً
       await applyApprovedCheckout(rec);
     } else if(rec.status === 'rejected'){
       clearInterval(_excPollInterval);
-      sessionStorage.removeItem('exc_id_'+cu?.name);
+      localStorage.removeItem('exc_id_'+cu?.name); sessionStorage.removeItem('exc_id_'+cu?.name);
       document.getElementById('exception-pending-msg').style.display = 'none';
       document.getElementById('exception-rejected-msg').style.display = 'block';
       const noteEl = document.getElementById('exc-rejected-note');
@@ -5724,11 +5914,16 @@ async function applyApprovedCheckout(rec){
   localStorage.removeItem('shift_date_'+cu?.name);
 
   // إرسال الانصراف لـ Supabase
-  await apiPost({
+  const attOk = await apiPost({
     action:'saveAttendance',
     name:cu.name, route:cu.route, group:cu.group,
     type:'out', time:t, lat:rec.lat||'', lng:rec.lng||''
   });
+  if(attOk===false){
+    // فشل حقيقي من السيرفر (مش مشكلة نت — دي بترجع true وتتخزن أوفلاين) — بلّغ المنسق
+    // إن الموافقة اتسجلت لكن وقت الانصراف نفسه لسه مايتحفظش، عشان مايفتكرش إن كل حاجة تمام
+    showToastPWA('⚠️ الموافقة وصلت لكن فشل حفظ وقت الانصراف — حاول تفتح التطبيق تاني كمان شوية');
+  }
 
   // تحديث الـ UI
   document.getElementById('exception-pending-msg').style.display = 'none';
@@ -5754,7 +5949,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // عن باقي خطوات استعادة الجلسة، عشان أي خطأ في سطر تاني ميوقفهاش
   function restoreVisitStateIndependently(){
     try{
-      const savedVisit = sessionStorage.getItem('visit_state');
+      const savedVisit = localStorage.getItem('visit_state') || sessionStorage.getItem('visit_state');
       if(!savedVisit) return;
       const vs = JSON.parse(savedVisit);
       attIn  = vs.attIn  || null;
@@ -5781,9 +5976,10 @@ window.addEventListener('DOMContentLoaded', () => {
     }catch(e){ console.warn('restoreVisitStateIndependently error:', e); }
   }
 
-  // استعادة الجلسة لو الصفحة اتفتحت من جديد (refresh)
+  // استعادة الجلسة لو الصفحة اتفتحت من جديد (refresh أو فتح التطبيق تاني) — localStorage
+  // بيفضل موجود حتى لو التطبيق اتقفل بالكامل، على عكس sessionStorage القديمة
   try{
-    const saved = sessionStorage.getItem('cu_session');
+    const saved = localStorage.getItem('cu_session') || sessionStorage.getItem('cu_session');
     if(saved){
       const s = JSON.parse(saved);
       cu = {name:s.name, route:s.route, group:s.group, coordType:s.coordType, fixedBranch:s.fixedBranch||'', score:0};
