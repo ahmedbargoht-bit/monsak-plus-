@@ -5647,8 +5647,21 @@ function srOnGrpChange(){
   srInitForm();
   if(!grp) return;
 
-  const routes = SALES_ROUTES_DATA.filter(r => r.grp === grp);
-  if(!routes.length) return;
+  // تطبيع المجموعة (قد تأتي من قاعدة البيانات بقيم مختلفة)
+  let normalizedGrp = grp;
+  if(grp==='private_chains_cairo') normalizedGrp = 'private_cairo';
+  if(grp==='private_chains_alex') normalizedGrp = 'private_alex';
+  if(grp==='markets') normalizedGrp = null; // لا نفلتر إذا كانت القيمة 'markets'
+
+  const routes = normalizedGrp
+    ? SALES_ROUTES_DATA.filter(r => r.grp === normalizedGrp)
+    : [];
+
+  if(!routes.length){
+    const chips = document.getElementById('sr-route-chips');
+    if(chips) chips.innerHTML = '<div style="color:#aaa;font-size:12px">لا توجد خطوط للمجموعات</div>';
+    return;
+  }
 
   const chips = document.getElementById('sr-route-chips');
   chips.innerHTML = '';
@@ -6685,8 +6698,16 @@ function rtInit(){
   const sel = document.getElementById('rt-grp-filter');
   sel.innerHTML = '<option value="all">كل المناطق</option>';
   const _rg = cu.level==='gm' ? Object.keys(RT_GRP_LABELS) : (cu.groups||[]);
-  const myGrps = _rg.flatMap(g=>g==='markets'?['private_cairo','private_alex']:[g]);
-  myGrps.forEach(g=>{
+  // تطبيع القيم المختلفة (markets→private_cairo+private_alex, private_chains_cairo→private_cairo)
+  const myGrps = _rg.flatMap(g=>{
+    if(g==='markets') return ['private_cairo','private_alex'];
+    if(g==='private_chains_cairo') return ['private_cairo'];
+    if(g==='private_chains_alex') return ['private_alex'];
+    return [g];
+  });
+  // إزالة التكرارات
+  const uniqueGrps = [...new Set(myGrps)];
+  uniqueGrps.forEach(g=>{
     if(RT_GRP_LABELS[g]){
       const o = document.createElement('option');
       o.value=g; o.textContent=RT_GRP_LABELS[g];
@@ -6701,8 +6722,14 @@ function rtFilter(){
   const grpFilter = document.getElementById('rt-grp-filter').value;
   const search    = (document.getElementById('rt-search').value||'').trim().toLowerCase();
   const _rawGrps  = cu.level==='gm' ? null : (cu.groups||[]);
-  // توسيع 'markets' القديم → private_cairo + private_alex
-  const myGrps    = _rawGrps ? _rawGrps.flatMap(g=>g==='markets'?['private_cairo','private_alex']:g==='markets_alex'?['private_alex']:[g]) : null;
+  // تطبيع القيم القديمة/الجديدة من staff
+  const myGrps    = _rawGrps ? _rawGrps.flatMap(g=>{
+    if(g==='markets') return ['private_cairo','private_alex'];
+    if(g==='markets_alex') return ['private_alex'];
+    if(g==='private_chains_cairo') return ['private_cairo'];
+    if(g==='private_chains_alex') return ['private_alex'];
+    return [g];
+  }) : null;
 
   // فلتر الخطوط
   let routes = SALES_ROUTES_DATA.filter(r=>{
@@ -6859,33 +6886,34 @@ async function loadFieldPanel(){
 
   listEl.innerHTML='<div style="text-align:center;padding:2rem"><div class="spinner" style="margin:0 auto"></div></div>';
 
-  // جلب المناديب
-  let repsUrl = `${SUPABASE_URL}/rest/v1/users?role=eq.rep&select=id,name,grp,route,status&order=name.asc`;
-  if(grp!=='all') repsUrl+=`&grp=eq.${grp}`;
-  const repsRes = await fetch(repsUrl,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-  let reps = await repsRes.json();
-  if(!Array.isArray(reps)) reps=[];
+  // جلب المناديب من جدول staff بناء على reports_to
+  // هذا هو مصدر الحقيقة للمناديب تحت إشراف المشرف الحالي — يمنع ظهور مناديب غير موكولة له
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const staffRes = await fetch(`${SUPABASE_URL}/rest/v1/staff?reports_to=eq.${encodeURIComponent(cu.name)}&active=eq.true&select=name,grp&order=name.asc&limit=200`,{headers:H});
+  const staffData = await staffRes.json();
+  const staffReps = Array.isArray(staffData) ? staffData : [];
+
+  // دمج مع بيانات users للحصول على معلومات إضافية (id, route, status)
+  const repsUrl = `${SUPABASE_URL}/rest/v1/users?role=eq.rep&select=id,name,grp,route,status&order=name.asc`;
+  const repsRes = await fetch(repsUrl,{headers:H});
+  const allReps = await repsRes.json();
+
+  // فلتر: فقط المناديب اللي موجودين في قائمة staff (تحت إشراف المشرف الحالي)
+  const reps = Array.isArray(allReps) ? allReps.filter(r=>staffReps.some(s=>s.name===r.name)) : [];
 
   // جلب بيانات اليوم للمناديب
-  const myGrps = cu?.groups||[];
   const [prods,rets,miss] = await Promise.all([
-    fetch(`${SUPABASE_URL}/rest/v1/products?select=name,branch,created_at&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59&limit=2000`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/returns?select=name,branch,qty,created_at&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59&limit=1000`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/missing?select=name,branch,status,created_at&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59&limit=1000`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]),
+    fetch(`${SUPABASE_URL}/rest/v1/products?select=name,branch,created_at&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59&limit=2000`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+    fetch(`${SUPABASE_URL}/rest/v1/returns?select=name,branch,qty,created_at&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59&limit=1000`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+    fetch(`${SUPABASE_URL}/rest/v1/missing?select=name,branch,status,created_at&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59&limit=1000`,{headers:H}).then(r=>r.json()).catch(()=>[]),
   ]);
 
   const pa=Array.isArray(prods)?prods:[];
   const ra=Array.isArray(rets)?rets:[];
   const ma=Array.isArray(miss)?miss:[];
 
-  // فلترة حسب مناطق المشرف
-  const filteredReps = grp!=='all' ? reps : reps.filter(r=>{
-    if(!myGrps.length) return true;
-    return myGrps.includes(r.grp||r.groups||'');
-  });
+  // فلترة إضافية حسب المجموعة المختارة (grp) إن وجدت
+  const filteredReps = grp!=='all' ? reps.filter(r=>r.grp===grp) : reps;
 
   // إحصاء
   const active = filteredReps.filter(r=>r.status!=='inactive');
