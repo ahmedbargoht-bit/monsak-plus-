@@ -32566,9 +32566,9 @@ function showToastAdmin(msg){
 //  العروض الشهرية — promosInit / promosGenerate / promosExportPDF
 // ══════════════════════════════════════════════════════════════════
 let _promosAllClients  = [];   // كل أسماء العملاء
-let _promosAllProds    = [];   // كل الأصناف [{name, price}]
+let _promosAllProds    = [];   // كل الأصناف [{name, price, fea, cat}]
 let _promosProdRows    = [];   // صفوف جدول العروض [{name, base, type, val}]
-let _promosSelProdName = null; // الصنف المختار من الـ dropdown
+let _promosSelProdNames = new Set(); // أسماء الأصناف المحددة بمربعات الاختيار في الـ dropdown
 
 async function promosInit(){
   if(_promosAllClients.length && _promosAllProds.length) return;
@@ -32590,12 +32590,13 @@ async function promosInit(){
     ).then(r=>r.json());
     const pdb = JSON.parse(pdbRow[0]?.value||'{}');
     const allProds = [];
-    Object.values(pdb).forEach(cats=>{
-      Object.values(cats).forEach(grps=>{
+    // بنية products_db: pdb[الفئة][التصنيف][المجموعة] = [أصناف]
+    Object.entries(pdb).forEach(([fea,cats])=>{
+      Object.entries(cats).forEach(([cat,grps])=>{
         Object.values(grps).forEach(items=>{
           if(Array.isArray(items)) items.forEach(it=>{
             if(it.name && !allProds.find(p=>p.name===it.name)){
-              allProds.push({name:it.name, price:parseFloat(it.price||it.unitPrice||0)||0});
+              allProds.push({name:it.name, price:parseFloat(it.price||it.unitPrice||0)||0, fea, cat});
             }
           });
         });
@@ -32638,12 +32639,22 @@ function promosRenderProdDropdown(list){
   const q = (document.getElementById('promo-prod-search')?.value||'').trim().toLowerCase();
   const filtered = q ? list.filter(p=>p.name.toLowerCase().includes(q)||p.name.includes(q)) : list;
   if(!filtered.length){ container.innerHTML='<div style="color:var(--text-secondary);font-size:11px;padding:8px">لا توجد أصناف</div>'; return; }
-  container.innerHTML = filtered.map(p=>`
-    <div onclick="promosSelectProd('${p.name.replace(/'/g,"\'")}',${p.price})"
-      style="padding:5px 8px;cursor:pointer;font-size:11px;border-radius:5px;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;${_promosProdRows.find(r=>r.name===p.name)?'background:#FEF3C7;color:#92400E;':''}">
-      <span>${_promosProdRows.find(r=>r.name===p.name)?'✅ ':''} ${p.name}</span>
-      ${p.price>0?`<span style="font-size:10px;color:var(--text-secondary)">${p.price.toFixed(2)} ج</span>`:''}
-    </div>`).join('');
+  container.innerHTML = filtered.map(p=>{
+    const added = _promosProdRows.find(r=>r.name===p.name);
+    const checked = _promosSelProdNames.has(p.name);
+    return `
+    <label style="padding:5px 8px;cursor:${added?'not-allowed':'pointer'};font-size:11px;border-radius:5px;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;gap:8px;${added?'background:#FEF3C7;color:#92400E;':checked?'background:#FFF7ED;':''}">
+      <span style="display:flex;align-items:center;gap:6px;flex:1;min-width:0">
+        <input type="checkbox" class="promo-prod-cb" value="${p.name.replace(/"/g,'&quot;')}" ${checked?'checked':''} ${added?'disabled':''}
+          onchange="promosToggleProd('${p.name.replace(/'/g,"\\'")}',this.checked)" style="accent-color:#D97706;flex-shrink:0"/>
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${added?'✅ ':''}${p.name}</span>
+      </span>
+      <span style="display:flex;flex-direction:column;align-items:flex-end;gap:1px;flex-shrink:0">
+        ${(p.fea||p.cat)?`<span style="font-size:9px;color:var(--text-secondary);white-space:nowrap">${p.fea||''}${p.fea&&p.cat?' · ':''}${p.cat||''}</span>`:''}
+        ${p.price>0?`<span style="font-size:10px;color:var(--text-secondary)">${p.price.toFixed(2)} ج</span>`:''}
+      </span>
+    </label>`;
+  }).join('');
 }
 
 function promosFilterProds(){
@@ -32652,19 +32663,22 @@ function promosFilterProds(){
   promosRenderProdDropdown(filtered);
 }
 
-function promosSelectProd(name, price){
-  _promosSelProdName = {name, price};
-  document.getElementById('promo-prod-search').value = name;
+function promosToggleProd(name, checked){
+  if(checked) _promosSelProdNames.add(name);
+  else _promosSelProdNames.delete(name);
 }
 
 function promosAddSelectedProd(){
-  if(!_promosSelProdName){ alert('اختر صنفاً من القائمة أولاً'); return; }
-  const {name, price} = _promosSelProdName;
-  if(_promosProdRows.find(r=>r.name===name)){
-    _promosSelProdName=null; document.getElementById('promo-prod-search').value=''; return;
-  }
-  _promosProdRows.push({name, base:price, type:'pct', val:0});
-  _promosSelProdName=null;
+  if(!_promosSelProdNames.size){ alert('اختر صنف واحد أو أكتر من القائمة أولاً (مربع الاختيار)'); return; }
+  let addedCount=0;
+  _promosSelProdNames.forEach(name=>{
+    if(_promosProdRows.find(r=>r.name===name)) return;
+    const p = _promosAllProds.find(x=>x.name===name);
+    if(!p) return;
+    _promosProdRows.push({name, base:p.price, type:'pct', val:0});
+    addedCount++;
+  });
+  _promosSelProdNames.clear();
   document.getElementById('promo-prod-search').value='';
   promosRenderProdTable();
   promosRenderProdDropdown(_promosAllProds);
