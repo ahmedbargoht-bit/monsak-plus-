@@ -2195,7 +2195,14 @@ async function sendInvoice(mode){
     const validBackdateDays = _backdateEnabled ? buildBackdateOptions().map(o=>o.iso) : [];
     const invoiceDate = (_backdateEnabled && validBackdateDays.includes(selDateRaw)) ? selDateRaw : today();
 
+    // تتبّع أقسام الضريبة اللي اترسلت بنجاح فعلاً — عشان لو فاتورة فيها أكتر من قسم ضريبة
+    // (بدون ضريبة + 14% + 5%) وقسم منهم نجح والتاني فشل، لو المندوب ضغط "إرسال" تاني
+    // مانعيدش نبعت القسم اللي خلص فعلاً (كان بيتكرر على السيرفر). الـ Set ده بيفضل مرتبط
+    // بـ invoiceState اللي مش بيترجع فاضي إلا بعد نجاح الفاتورة بالكامل.
+    invoiceState._sentTax = invoiceState._sentTax || new Set();
+
     for(const g of groups.filter(g=>g.items.length)){
+      if(invoiceState._sentTax.has(g.tax)) continue; // القسم ده اترسل خلاص في محاولة سابقة
       // خصم لكل قسم: مرتجع → getRetDiscount، بيع → getDiscount بأول صنف في القسم
       const disc=isReturn?getRetDiscount(g.items[0]?.name||''):getDiscount(g.items[0]?.name||'');
       // فقط القطعي (isPromo) مستثنى من الخصم — الأسعار الخاصة (isClientPL) تخضع للخصم عادي
@@ -2222,6 +2229,7 @@ async function sendInvoice(mode){
       };
       const res=await fetch(SUPABASE_URL+'/rest/v1/'+table,{method:'POST',headers:H,body:JSON.stringify(payload)});
       if(!res.ok&&res.status!==201){const e=await res.text();throw new Error(e);}
+      invoiceState._sentTax.add(g.tax); // اتسجل فعلاً على السيرفر — منعيدوش تاني حتى لو باقي الأقسام فشلت
     }
 
     showToast(isReturn?'✅ تم إرسال المرتجع':'✅ تم إرسال الفاتورة');
