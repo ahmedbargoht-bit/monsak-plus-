@@ -5582,6 +5582,37 @@ async function deleteFromOQ(id){
   });
 }
 
+// فحص وجود صف مطابق فعلاً على السيرفر قبل رفع عنصر "insert" من طابور الأوفلاين —
+// بيغطي جدولي products وmissing (نفس منطق فحص التكرار الموجود في saveProduct/saveMissing)
+async function _oqIsDuplicate(table, d){
+  if(!d) return false;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const today = localDateStr();
+  try{
+    let url = null;
+    if(table === 'products'){
+      url = `${SUPABASE_URL}/rest/v1/products?name=eq.${encodeURIComponent(d.name||'')}`+
+        `&branch=eq.${encodeURIComponent(d.branch||'')}`+
+        `&snf=eq.${encodeURIComponent(d.snf||'')}`+
+        `&date_shelf=eq.${encodeURIComponent(d.date_shelf||'')}`+
+        `&date_stock=eq.${encodeURIComponent(d.date_stock||'')}`+
+        `&shelf_qty=eq.${d.shelf_qty||0}`+
+        `&stock_qty=eq.${d.stock_qty||0}`+
+        `&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id&limit=1`;
+    } else if(table === 'missing'){
+      url = `${SUPABASE_URL}/rest/v1/missing?branch=eq.${encodeURIComponent(d.branch||'')}`+
+        `&snf=eq.${encodeURIComponent(d.snf||'')}&name=eq.${encodeURIComponent(d.name||'')}`+
+        `&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id&limit=1`;
+    } else {
+      return false; // جداول تانية مفيش لها فحص تكرار حالياً
+    }
+    const res = await fetch(url, {headers:H});
+    if(!res.ok) return false;
+    const rows = await res.json();
+    return Array.isArray(rows) && rows.length > 0;
+  }catch(e){ return false; }
+}
+
 let _oqFlushing = false; // قفل يمنع تشغيل flushOQ أكتر من مرة في نفس الوقت (interval + حدث online مع بعض)
 
 async function flushOQ(){
@@ -5605,7 +5636,15 @@ async function flushOQ(){
         }
         let ok = false;
         if(item.action === 'insert'){
-          ok = await _origSbInsert(item.table, item.data);
+          // فحص تكرار قبل الرفع الفعلي من الطابور — لو نفس العنصر اتحفظ في IndexedDB أكتر من مرة
+          // (مثلاً المنسق ضغط "إرسال" كذا مرة وهو أوفلاين لأنه مشافش تأكيد)، ما نكررش الصف على السيرفر.
+          // ده فحص إضافي منفصل عن فحص التكرار اللي بيحصل وقت أول محاولة إرسال، لأن العناصر المحفوظة
+          // أوفلاين بترفع هنا مباشرة (_origSbInsert) من غير ما تعدي على فحص saveProduct/saveMissing تاني.
+          if(await _oqIsDuplicate(item.table, item.data)){
+            ok = true; // موجود بالفعل على السيرفر — نعتبره "اترفع" ونمسحه من الطابور من غير ما نكرره
+          } else {
+            ok = await _origSbInsert(item.table, item.data);
+          }
         } else if(item.action === 'insertGetId'){
           const realId = await _origSbInsertGetId(item.table, item.data);
           ok = !!realId;
