@@ -2169,7 +2169,12 @@ function saveEditItem(idx){
 }
 function deleteInvoiceItem(idx){invoiceState.items.splice(idx,1);invoiceState.editIdx=null;renderInvoice();}
 
-function getInvoiceNumber(prefix){ return prefix+(100+Math.floor(Math.random()*900)); }
+// كان بيولّد رقم عشوائي من 100 لـ 999 بس (900 احتمال) — مع عدد الفواتير اللي بيزيد كل يوم
+// ده كان يخلي رقمين مختلفين تمامًا (مندوبين مختلفين، عملاء مختلفين) ياخدوا نفس رقم الفاتورة
+// بالصدفة (حصل فعليًا لـ 13 فاتورة حقيقية). النطاق الأوسع هنا (100 مليون احتمال) بيقلل
+// الاحتمال جدًا، والحارس الحقيقي هو uq_sales_deliveries/returns_invoice_number في القاعدة
+// + إعادة المحاولة في sendInvoice() لو حصل تعارض نادر.
+function getInvoiceNumber(prefix){ return prefix+(Date.now()%100000000)+Math.floor(10+Math.random()*90); }
 
 async function sendInvoice(mode){
   const items=invoiceState.items;
@@ -2210,25 +2215,41 @@ async function sendInvoice(mode){
       const plSub=g.items.filter(i=>i.isPromo).reduce((s,i)=>s+i.total,0);
       const sub=normalSub+plSub;
       const dA=normalSub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
-      const payload={
-        rep_name:currentRep.name,
-        branch_name:invoiceState.branch,
-        client_name:invoiceState.client||'',
-        grp:currentRep.grp||'',
-        route:invoiceState.route||'',
-        items:g.items.map(i=>{return {name:i.name,qty:i.qty,price:i.price,total:i.total}}),
-        invoice_type:g.tax===0?'no_tax':g.tax===14?'tax_14':'tax_5',
-        invoice_number:getInvoiceNumber(prefixBase+g.prefix),
-        total_before_discount:parseFloat(sub.toFixed(2)),
-        total_after_discount:parseFloat(after.toFixed(2)),
-        total_tax:parseFloat(taxA.toFixed(2)),
-        total_net:parseFloat(net.toFixed(2)),
-        discount_pct:parseFloat(disc),
-        status:'sent',
-        [dateField]:invoiceDate
-      };
-      const res=await fetch(SUPABASE_URL+'/rest/v1/'+table,{method:'POST',headers:H,body:JSON.stringify(payload)});
-      if(!res.ok&&res.status!==201){const e=await res.text();throw new Error(e);}
+
+      // حماية إضافية: لو رقم الفاتورة العشوائي اتصادف نفس رقم فاتورة تانية (نادر جداً بعد توسيع
+      // النطاق في getInvoiceNumber، لكن مش مستحيل)، قاعدة البيانات هترفض الإدخال بسبب
+      // uq_sales_deliveries/returns_invoice_number (فهرس فريد). بدل ما الفاتورة تفشل وتظهر
+      // خطأ للمندوب، نعيد توليد رقم جديد ونحاول تاني لحد 5 مرات — الفاتورة نفسها (الأصناف
+      // والقيم) متتغيرش، بس رقمها بس.
+      let lastErr=null, attempts=0, sent=false;
+      while(attempts<5 && !sent){
+        attempts++;
+        const payload={
+          rep_name:currentRep.name,
+          branch_name:invoiceState.branch,
+          client_name:invoiceState.client||'',
+          grp:currentRep.grp||'',
+          route:invoiceState.route||'',
+          items:g.items.map(i=>{return {name:i.name,qty:i.qty,price:i.price,total:i.total}}),
+          invoice_type:g.tax===0?'no_tax':g.tax===14?'tax_14':'tax_5',
+          invoice_number:getInvoiceNumber(prefixBase+g.prefix),
+          total_before_discount:parseFloat(sub.toFixed(2)),
+          total_after_discount:parseFloat(after.toFixed(2)),
+          total_tax:parseFloat(taxA.toFixed(2)),
+          total_net:parseFloat(net.toFixed(2)),
+          discount_pct:parseFloat(disc),
+          status:'sent',
+          [dateField]:invoiceDate
+        };
+        const res=await fetch(SUPABASE_URL+'/rest/v1/'+table,{method:'POST',headers:H,body:JSON.stringify(payload)});
+        if(res.ok||res.status===201){ sent=true; break; }
+        const eTxt=await res.text();
+        // 409 أو رسالة duplicate key = تعارض في رقم الفاتورة تحديداً → أعد المحاولة برقم جديد
+        const isDupConflict = res.status===409 || /duplicate key|unique constraint|23505/i.test(eTxt);
+        if(!isDupConflict){ throw new Error(eTxt); } // أي خطأ تاني (شبكة، صلاحيات...) يوقف فوراً زي ما كان
+        lastErr=eTxt;
+      }
+      if(!sent){ throw new Error('تعذر إرسال الفاتورة بعد عدة محاولات (تعارض في رقم الفاتورة): '+(lastErr||'')); }
       invoiceState._sentTax.add(g.tax); // اتسجل فعلاً على السيرفر — منعيدوش تاني حتى لو باقي الأقسام فشلت
     }
 
