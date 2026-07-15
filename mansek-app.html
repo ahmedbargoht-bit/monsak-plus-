@@ -346,6 +346,13 @@ input[type=number] { -moz-appearance:textfield; }
   <div class="topbar">
     <div class="topbar-title">منسق بلس</div>
     <span class="loc-live" id="loc-live-badge" style="display:none"><span class="loc-dot"></span>مباشر</span>
+    <!-- بادچ عمليات معلّقة — ظاهرة طول الوقت لما يكون فيه عمليات لسه ماوصلتش السيرفر، مش بس
+         وقت انقطاع النت الكامل (offline-banner بيظهر بس لو navigator.onLine=false، لكن في حالة
+         "النت ضعيف/متقطع" ده بيفضل true وده كان بيخلي المنسق مايشوفش أي تنبيه غير وقت الخروج) —
+         قابلة للضغط عشان المنسق يجبر محاولة رفع فورية بدل ما يستنى الدورة كل 45 ثانية -->
+    <span class="loc-live" id="oq-pending-badge" style="display:none;cursor:pointer;background:#FFF3E0;color:#B45309" onclick="manualFlushOQ()">
+      <i class="ti ti-cloud-upload"></i> <span id="oq-pending-count">0</span> معلّقة — اضغط للرفع
+    </span>
     <div class="topbar-user" id="top-user"></div>
     <button class="topbar-btn" onclick="logout()"><i class="ti ti-logout"></i></button>
   </div>
@@ -1689,6 +1696,16 @@ async function logout(){
       ${oqCount>0?`<div style="margin-top:8px;background:#FFF3E0;color:#B45309;border:1px solid #FFC72C;border-radius:8px;padding:8px 10px;font-size:12px">⚠️ في ${oqCount} عملية لسه متخزنة على الجهاز وماوصلتش السيرفر (النت كان ضعيف). متقفلش التطبيق نهائي دلوقتي — سيبه شغال شوية لحد ما ترفع، أو ارجع افتحه تاني قبل ما تقفل الموبايل.</div>`:''}
     `;
   }
+
+  // رسالة التأكيد لازم تعكس الحقيقة: لو لسه فيه عمليات متعلقة، متقولش "تم الإرسال بنجاح"
+  // (كانت الرسالة دي ثابتة وبتظهر دايماً حتى لو التحذير فوقها بيقول العكس بالظبط)
+  const confirmLine = document.getElementById('logout-confirm-line');
+  if(confirmLine){
+    confirmLine.innerHTML = oqCount>0
+      ? `⚠️ لسه في ${oqCount} عملية ماوصلتش السيرفر — هل تريد الخروج برضو؟`
+      : `✅ كل البيانات وصلت السيرفر — هل تريد الخروج؟`;
+    confirmLine.style.color = oqCount>0 ? '#B45309' : '#1B5E20';
+  }
 }
 
 function confirmLogout(){
@@ -2269,15 +2286,7 @@ async function submitReturns(){
     localStorage.getItem('last_branch_'+(cu?.name||'')) ||
     '';
 
-  const H = {
-    'Content-Type':'application/json',
-    'apikey':SUPABASE_KEY,
-    'Authorization':`Bearer ${SUPABASE_KEY}`,
-    'Prefer':'return=minimal'
-  };
-
-  let success=0, failed=0, duplicates=0;
-  const today = localDateStr();
+  let success=0, failed=0, duplicates=0, queued=0;
   // العناصر اللي فشلت فعلياً بنحتفظ بيها — زي sendAllProducts بالظبط، عشان متضيعش لو مسحناها كلها
   const stillPending=[];
   for(const r of retItems){
@@ -2295,39 +2304,27 @@ async function submitReturns(){
       note:        r.note || null,
       visit_id:    window._currentVisitId || null
     };
-    try{
-      // تحقق من التكرار
-      const chk = await fetch(
-        `${SUPABASE_URL}/rest/v1/returns?branch=eq.${encodeURIComponent(branch)}&snf=eq.${encodeURIComponent(r.snf)}&name=eq.${encodeURIComponent(repName)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id&limit=1`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
-      );
-      const exists = chk.ok ? await chk.json() : [];
-      if(Array.isArray(exists) && exists.length > 0){
-        duplicates++;
-        continue; // تجاوز هذا الصنف — مسجل بالفعل على السيرفر
-      }
-
-      console.log('Sending return payload:', JSON.stringify(payload));
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/returns`,{
-        method:'POST', headers:H, body:JSON.stringify(payload)
-      });
-      const resText = await res.text();
-      console.log('Return response:', res.status, resText);
-      if(res.ok||res.status===201){
-        success++;
-      } else {
-        failed++;
-        stillPending.push(r);
-        console.error('Return insert FAILED:', res.status, resText);
-        showToastPWA('❌ خطأ: ' + res.status + ' — ' + resText.slice(0,60));
-      }
-    }catch(e){ failed++; stillPending.push(r); console.error('Return fetch error:', e.message); }
+    // بنستخدم sbInsert نفسها (نفس اللي بتستخدمها الأصناف/النواقص) بدل fetch يدوي مباشر —
+    // كده المرتجعات بقت محمية بنفس ضمانات الأصناف بالظبط: لو النت مقطوع أو ضعيف، الصنف
+    // بيتخزن في طابور الأوفلاين على الجهاز (IndexedDB) وبيترفع تلقائي لما النت يرجع، حتى
+    // لو المنسق قفل التطبيق تماماً — بدل ما يفضل بس في متغير مؤقت في الذاكرة بيضيع لو
+    // اتقفل التطبيق قبل النجاح. وقاعدة البيانات نفسها فيها unique constraint بترفض أي
+    // تكرار فعلي لنفس الصنف/الفرع/المندوب في نفس اليوم، فمفيش خطر تكرار حتى لو حصل باج.
+    const ok = await sbInsert('returns', payload);
+    if(ok === false){
+      failed++;
+      stillPending.push(r);
+    } else if(!navigator.onLine){
+      queued++;
+    } else {
+      success++;
+    }
   }
 
   // امسح بس العناصر اللي خلصت (نجحت أو كانت مكررة) — سيب الفاشلة فعلياً في retItems عشان متضيعش
   // (كانت الكود بيمسح المصفوفة كاملة بمجرد نجاح صنف واحد بس، فأي صنف فشل معاه كان بيضيع بصمت)
   retItems = stillPending;
-  if(success>0 || duplicates>0){
+  if(success>0 || duplicates>0 || queued>0){
     const badge=document.getElementById('ret-badge');
     if(badge) badge.style.display = retItems.length ? '' : 'none';
     const cnt=document.getElementById('r-list-count');
@@ -2347,6 +2344,15 @@ async function submitReturns(){
       setTimeout(()=>{ okEl.style.display='none'; },4000);
     }
     showToastPWA(`✅ تم إرسال ${success} مرتجع بنجاح`);
+  }
+  if(queued>0){
+    const okEl = document.getElementById('r-report-ok');
+    if(okEl){
+      okEl.textContent = `📦 ${queued} صنف اتحفظ محلياً — هيترفع أول ما النت يرجع`;
+      okEl.style.background='#FFF3E0'; okEl.style.color='#B45309'; okEl.style.border='1px solid #FFC72C';
+      okEl.style.display='block';
+      setTimeout(()=>{ okEl.style.display='none'; },4000);
+    }
   }
   if(duplicates>0){
     const okEl = document.getElementById('r-report-ok');
@@ -2459,6 +2465,9 @@ function checkStep1Done(){
     document.getElementById('step3-card').style.display = 'none';
     document.getElementById('save-visit-btn').style.display = 'none';
   }
+  // عشان تلميح "لسه ناقص..." في checkEntryReady يتحدّث فوراً لما نوع العميل يتغيّر
+  // (مش بس لما يتغيّر نوع العرض) — قبل كده كان بيتأخر لحد أول تفاعل تاني
+  checkEntryReady();
 }
 
 function checkEntryReady(){
@@ -2491,7 +2500,27 @@ function checkEntryReady(){
     step3.style.display = 'block';
   }
   const btn = document.getElementById('save-visit-btn');
-  btn.style.display = (branch && ctype && hasAtt && hasDisplay) ? 'flex' : 'none';
+  const ready = branch && ctype && hasAtt && hasDisplay;
+  btn.style.display = ready ? 'flex' : 'none';
+
+  // كان الزرار بيختفي بصمت من غير أي تفسير لو ناقص "نوع العميل" أو "نوع العرض" — ده كان
+  // بيخلي المنسق يدخل أصناف/نواقص ويبعتها بنجاح لكن ينسى يحفظ الزيارة نفسها وينتقل لفرع
+  // تاني من غير ما ياخد بالُه إن في خطوة ناقصة، فيفضل الفرع من غير سجل "زيارة" نهائي.
+  // دلوقتي نوضّحله بالظبط إيه الناقص عشان يكملها فوراً قبل ما يمشي.
+  const ok = document.getElementById('entry-ok');
+  if(branch && hasAtt && !ready){
+    const missing = [];
+    if(!ctype) missing.push('نوع العميل');
+    if(!hasDisplay) missing.push('نوع عرض واحد على الأقل (استاند/بوديوم/تلاجة/رف)');
+    if(missing.length){
+      ok.textContent = '⚠️ لسه ناقص عشان تقدر تحفظ الزيارة: ' + missing.join(' و ');
+      ok.style.background='#FFF3E0'; ok.style.color='#B45309';
+      ok.style.display='block';
+    }
+  } else if(branch && hasAtt && ready && ok.textContent.startsWith('⚠️ لسه ناقص')){
+    // اختفى النقص — امسح التلميح القديم (من غير ما نلمس رسائل النجاح/الفشل التانية)
+    ok.style.display='none';
+  }
 }
 
 async function popBranches(route){
@@ -2807,6 +2836,21 @@ async function saveVisit(){
     showTab('returns');
     return;
   }
+  // ── الفحوصات اللي فوق كلها بتتأكد إن مفيش بيانات لسه في الفورم ماضغطش عليها "إرسال" أصلاً.
+  //    لكن ده مختلف عن: "اترسلت فعلاً لكن لسه معلّقة في طابور الأوفلاين وماوصلتش تأكيد من السيرفر"
+  //    (ممكن يحصل لو النت كان ضعيف وقت الإرسال). نحذّر المنسق قبل ما يسيب الفرع ده ويروح
+  //    لفرع تاني، مع سيبله الاختيار إنه يكمل برضو لو مضطر — البيانات مش هتضيع في الحالتين
+  //    (هتفضل محفوظة في الطابور وتترفع تلقائي)، لكن الأفضل يتأكد قبل ما يمشي.
+  try{
+    const db    = await openOQDB();
+    const tx    = db.transaction(OQ_STORE,'readonly');
+    const store = tx.objectStore(OQ_STORE);
+    const oqCount = await new Promise(res=>{const r=store.count();r.onsuccess=e=>res(e.target.result||0);r.onerror=()=>res(0);});
+    if(oqCount > 0){
+      const proceed = confirm(`⚠️ لسه في ${oqCount} عملية من الفرع ده (أو فرع سابق) ماوصلتش السيرفر لسه — النت شكله ضعيف.\n\nالبيانات محفوظة وهتترفع تلقائي، لكن الأفضل تستنى شوية أو تضغط على البادچ في أعلى الشاشة عشان تجبرها ترفع دلوقتي.\n\nتحب تكمل حفظ الزيارة برضو؟`);
+      if(!proceed) return;
+    }
+  }catch(e){}
 
   // ── تحقق من عدم وجود زيارة مسجلة بالفعل لنفس الفرع في نفس اليوم ──
   const today = localDateStr();
@@ -4665,6 +4709,20 @@ async function sbInsertGetId(table, data){
       body: JSON.stringify(data)
     });
     if(!res.ok){
+      // 409 = قاعدة البيانات رفضت الإدراج لأنه تكرار (unique constraint) — الصف المطلوب أصلاً
+      // موجود على السيرفر. بدل ما نرجّع فشل (اللي كان هيكسر ربط الأصناف/النواقص التالية بالزيارة
+      // دي)، نجيب الـ id الحقيقي للصف الموجود ونرجّعه بدل ما نعتبرها فشلت.
+      if(res.status === 409 && table === 'visits'){
+        try{
+          const q = `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(data.name||'')}`+
+            `&branch=eq.${encodeURIComponent(data.branch||'')}&date=eq.${encodeURIComponent(data.date||'')}&select=id&limit=1`;
+          const r2 = await fetch(q, {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+          if(r2.ok){
+            const rows2 = await r2.json();
+            if(Array.isArray(rows2) && rows2[0]) return rows2[0].id;
+          }
+        }catch(e3){}
+      }
       let reason = 'HTTP '+res.status;
       try{ const t = await res.text(); if(t) reason += ' — '+t.slice(0,150); }catch(e2){}
       window._lastSbError = reason;
@@ -5683,7 +5741,49 @@ async function updateQueueBadge(){
       badge.textContent = count > 0 ? `${count} عملية offline` : '';
       badge.style.display = count > 0 ? 'block' : 'none';
     }
+    // البادچ الدائمة في الشريط العلوي — ظاهرة طول الوقت (مش بس وقت انقطاع النت الكامل)
+    // عشان المنسق يبقى شايف بوضوح لو فيه حاجة لسه ماوصلتش، حتى والنت "شغال" ظاهرياً
+    const topBadge = document.getElementById('oq-pending-badge');
+    const topCount = document.getElementById('oq-pending-count');
+    if(topBadge && topCount){
+      topCount.textContent = count;
+      topBadge.style.display = count > 0 ? 'inline-flex' : 'none';
+    }
   }catch(e){}
+}
+
+// رفع يدوي بضغطة المنسق — بيدّيله تأكيد فوري وواضح بدل ما يستنى الدورة التلقائية
+let _manualFlushing = false;
+async function manualFlushOQ(){
+  if(_manualFlushing) return;
+  _manualFlushing = true;
+  const topBadge = document.getElementById('oq-pending-badge');
+  const orig = topBadge ? topBadge.innerHTML : '';
+  if(topBadge) topBadge.innerHTML = '<i class="ti ti-loader spin"></i> جاري الرفع...';
+  try{
+    if(!navigator.onLine){
+      showToastPWA('⚠️ مفيش نت دلوقتي — هيحاول يرفع تلقائي أول ما النت يرجع');
+      return;
+    }
+    await flushOQ();
+    // اتأكد من العدد الحقيقي بعد المحاولة
+    const db    = await openOQDB();
+    const tx    = db.transaction(OQ_STORE,'readonly');
+    const store = tx.objectStore(OQ_STORE);
+    const count = await new Promise(res=>{const r=store.count();r.onsuccess=e=>res(e.target.result);});
+    if(count === 0){
+      showToastPWA('✅ كل البيانات وصلت السيرفر');
+    } else {
+      showToastPWA(`⚠️ لسه في ${count} عملية معلّقة — هيحاول تاني`);
+    }
+  }catch(e){}
+  finally{
+    _manualFlushing = false;
+    // رجّع الشكل الأصلي للبادچ (فيه <span id="oq-pending-count">) قبل ما updateQueueBadge
+    // تحاول تحدّثها — لأنها كانت اتمسحت فوق لما حطينا "جاري الرفع..." بدالها بالـ innerHTML
+    if(topBadge) topBadge.innerHTML = orig;
+    updateQueueBadge();
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -6004,7 +6104,19 @@ window.addEventListener('DOMContentLoaded', () => {
       const fCtype  = document.getElementById('f-ctype');
       if(fBranch && vs.branch){ fBranch.value = vs.branch; }
       if(fCtype  && vs.ctype){  fCtype.value  = vs.ctype;  }
-      if(vs.branch){
+      // لو الفرع المحفوظ من قبل مبقاش موجود في قائمة الفروع الحالية (مثلاً الأدمن غيّر
+      // تخصيص الفروع أثناء اليوم)، fBranch.value = vs.branch بتفشل بصمت والحقل يفضل فاضي
+      // من غير أي تفسير — المنسق يفضل شايف شاشة فاضية ومش فاهم ليه. بدل الصمت، نوضحله.
+      const branchRestoreFailed = fBranch && vs.branch && fBranch.value !== vs.branch;
+      if(branchRestoreFailed){
+        const ok = document.getElementById('entry-ok');
+        if(ok){
+          ok.textContent = '⚠️ فرعك اتغيّر من لوحة التحكم — اختر فرعك الصحيح من القائمة تاني عشان تكمل';
+          ok.style.background='#FFF3E0'; ok.style.color='#B45309';
+          ok.style.display='block';
+        }
+      }
+      if(vs.branch && !branchRestoreFailed){
         window._lastVisitedBranch = vs.branch; // عشان sendLocation() تبعت الفرع الصح
         if(typeof onBranchChange==='function') onBranchChange();
       }
@@ -6401,7 +6513,7 @@ function checkWeeklyMotivationalPopup(){
     </div>
     <div style="padding:16px">
       <div id="logout-summary" style="background:#F8F9FA;border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.8"></div>
-      <div style="font-size:13px;font-weight:700;color:#4B3C1A;text-align:center;margin-bottom:14px">✅ تم إرسال بيانات الزيارة بنجاح — هل تريد الخروج؟</div>
+      <div id="logout-confirm-line" style="font-size:13px;font-weight:700;color:#4B3C1A;text-align:center;margin-bottom:14px">هل تريد الخروج؟</div>
       <div style="display:flex;gap:10px">
         <button onclick="confirmLogout()" style="flex:1;background:#7C2D12;color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
           <i class="ti ti-logout"></i> نعم، خروج
