@@ -2746,6 +2746,51 @@ h2,h3{color:#2C1F0A}
 
         <!-- ══ بانيل: خطط الفريق ══ -->
 
+        <!-- ══ Modal: تفاصيل خطة + نتائج الزيارات (مشترك بين خطط التنسيق وخطط المبيعات) ══ -->
+        <div class="modal-overlay" id="modal-plan-v2">
+          <div class="modal" style="max-width:960px">
+            <div class="modal-title">
+              <div>
+                <div id="mpv2-title" style="font-size:15px;font-weight:900;color:var(--navy)"></div>
+                <div id="mpv2-sub" style="font-size:11px;color:var(--text2);font-weight:600;margin-top:3px"></div>
+              </div>
+              <button class="modal-close" onclick="document.getElementById('modal-plan-v2').style.display='none'">✕</button>
+            </div>
+
+            <div id="mpv2-body"></div>
+
+            <!-- شريط الاعتماد الهرمي -->
+            <div style="background:var(--navy);border-radius:12px;padding:14px;margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <div>
+                <button id="mpv2-btn-coord-approve" style="width:100%;justify-content:center;background:rgba(107,122,59,.25);border:1.5px solid var(--olive);color:#C8D8A0;border-radius:10px;padding:8px 12px;font-family:Cairo,sans-serif;font-size:12px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:6px" onclick="planV2Approve('coord_manager')"><i class="ti ti-check"></i> اعتماد مدير التنسيق</button>
+                <div id="mpv2-sig-coord" class="mpv2-sig" style="display:none;margin-top:6px;justify-content:center"></div>
+              </div>
+              <div>
+                <button id="mpv2-btn-cairo-approve" style="width:100%;justify-content:center;background:rgba(197,91,72,.25);border:1.5px solid var(--caramel);color:#F5C5B0;border-radius:10px;padding:8px 12px;font-family:Cairo,sans-serif;font-size:12px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:6px" onclick="planV2Approve('area_manager')"><i class="ti ti-check"></i> اعتماد مدير منطقة القاهرة</button>
+                <div id="mpv2-sig-cairo" class="mpv2-sig" style="display:none;margin-top:6px;justify-content:center"></div>
+              </div>
+            </div>
+
+            <div class="modal-footer">
+              <button class="btn btn-sm" style="background:#731E2E;color:#EDE5D8" onclick="planV2ExportPDF()"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
+              <button class="btn btn-ghost btn-sm" onclick="document.getElementById('modal-plan-v2').style.display='none'">إغلاق</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ══ Modal: عرض نتيجة زيارة فرع بالتفصيل ══ -->
+        <div class="modal-overlay" id="modal-visit-result-view">
+          <div class="modal" style="max-width:460px">
+            <div class="modal-title">
+              <span>📋 نتيجة الزيارة</span>
+              <button class="modal-close" onclick="document.getElementById('modal-visit-result-view').style.display='none'">✕</button>
+            </div>
+            <div id="mvrv-body"></div>
+            <div class="modal-footer">
+              <button class="btn btn-ghost btn-sm" onclick="document.getElementById('modal-visit-result-view').style.display='none'">إغلاق</button>
+            </div>
+          </div>
+        </div>
 
         <!-- ══ PANEL: خطط مبيعات بلس ══════════════════════════════ -->
         <div id="panel-sales-plans-plus" class="panel">
@@ -29777,8 +29822,10 @@ function plansGeoHtml(geoStatus) {
     padding:2px 7px;border-radius:20px">${g.label}</span>`;
 }
 
-function plansBranchRow(branch) {
+function plansBranchRow(branch, showResult) {
   const geo = GEO_CFG[branch.geo_status] || GEO_CFG.unknown;
+  const result = showResult ? (window._planResultsMap || {})[branch.id] : null;
+  const scoreClr = result ? (result.score>=70?'#C8D8A0':result.score>=40?'#F5D8A0':'#F5A0A0') : '';
   return `<tr style="background:${geo.bg};border-bottom:1px solid rgba(237,229,216,.08)">
     <td style="padding:8px 10px;font-weight:700;color:#EDE5D8">${branch.branch_name || '—'}</td>
     <td style="padding:8px;text-align:center">
@@ -29799,6 +29846,12 @@ function plansBranchRow(branch) {
         ${branch.visit_status==='done'?'✅ منجزة':'⏳ مجدولة'}
       </span>
     </td>
+    ${showResult ? `<td style="padding:8px;text-align:center">
+      ${result
+        ? `<div style="font-weight:900;font-size:14px;color:${scoreClr}">${result.score||0}</div>
+           <button onclick="planV2ShowResult(${branch.id})" style="margin-top:3px;background:rgba(237,229,216,.12);border:1px solid rgba(237,229,216,.25);color:#EDE5D8;border-radius:6px;padding:2px 9px;font-size:10px;cursor:pointer;font-family:Cairo,sans-serif">👁 التفاصيل</button>`
+        : `<span style="font-size:10px;color:rgba(237,229,216,.35)">— لا توجد نتيجة —</span>`}
+    </td>` : ''}
   </tr>`;
 }
 
@@ -30030,6 +30083,20 @@ async function plansOpenDetail(planId, mode) {
   const isAreaApproved  = !!areaApproval  || plan.area_approved;
   const isApproved      = plan.status === 'approved';
 
+  // ── نتائج زيارات المشرفين (visit_results) — متاحة فقط لخطط التنسيق الجديدة ──
+  window._planResultsMap = {};
+  if (mode === 'coord' && !plan._legacy && branches.length) {
+    const bIds = branches.map(b => b.id).join(',');
+    const rUrl = `${SUPABASE_URL}/rest/v1/visit_results?plan_item_id=in.(${bIds})&select=*`;
+    const results = await fetch(rUrl, { headers: PLANS_H() }).then(r => r.ok ? r.json() : []).catch(() => []);
+    (Array.isArray(results) ? results : []).forEach(r => { window._planResultsMap[r.plan_item_id] = r; });
+  }
+  const resultsCount = Object.keys(window._planResultsMap).length;
+  const resultsAvg   = resultsCount
+    ? Math.round(Object.values(window._planResultsMap).reduce((s, r) => s + (r.score || 0), 0) / resultsCount)
+    : 0;
+  const resultsGood  = Object.values(window._planResultsMap).filter(r => (r.score || 0) >= 70).length;
+
   const totSales = branches.reduce((s, b) => s + (+b.target_sales || 0), 0);
   const totCoord = branches.reduce((s, b) => s + (+b.target_coord || 0), 0);
   const done     = branches.filter(b => b.visit_status === 'done').length;
@@ -30073,6 +30140,26 @@ async function plansOpenDetail(planId, mode) {
       <div class="stat-card yellow"><div class="stat-n">${pct}%</div><div class="stat-l">نسبة الإنجاز</div></div>
       <div class="stat-card purple"><div class="stat-n">${geoEff !== null ? geoEff + '%' : '—'}</div><div class="stat-l">🗺️ كفاءة Geo</div></div>
     </div>
+
+    <!-- نتائج التنفيذ الميداني (visit_results) -->
+    ${mode === 'coord' && !plan._legacy ? `
+    <div style="background:#F8F5F0;border:1px solid #E8D9C0;border-radius:12px;padding:12px;margin-bottom:14px">
+      <div style="font-size:11px;font-weight:700;color:#8B6F47;margin-bottom:8px">📊 نتائج تنفيذ الزيارات (اجتماعات الفرع)</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+        <div style="background:#EEF4FF;border-radius:8px;padding:10px;text-align:center">
+          <div style="font-size:18px;font-weight:900;color:#1565C0">${resultsCount}/${branches.length}</div>
+          <div style="font-size:10px;color:#888">نتائج مسجلة</div>
+        </div>
+        <div style="background:${resultsAvg>=70?'#E8F5E9':resultsAvg>=40?'#FFF3E0':'#FFEBEE'};border-radius:8px;padding:10px;text-align:center">
+          <div style="font-size:18px;font-weight:900;color:${resultsAvg>=70?'#2E7D32':resultsAvg>=40?'#E65100':'#731E2E'}">${resultsAvg}</div>
+          <div style="font-size:10px;color:#888">متوسط الدرجة (من 100)</div>
+        </div>
+        <div style="background:#E8F5E9;border-radius:8px;padding:10px;text-align:center">
+          <div style="font-size:18px;font-weight:900;color:#2E7D32">${resultsGood}</div>
+          <div style="font-size:10px;color:#888">زيارات ممتازة (70+)</div>
+        </div>
+      </div>
+    </div>` : ''}
 
     <!-- المستهدفات -->
     ${(totSales > 0 || totCoord > 0) ? `
@@ -30123,20 +30210,154 @@ async function plansOpenDetail(planId, mode) {
           <th style="padding:8px;text-align:center">🔴 بيعي</th>
           <th style="padding:8px;text-align:center">Geo</th>
           <th style="padding:8px;text-align:center">الحالة</th>
+          ${mode === 'coord' && !plan._legacy ? '<th style="padding:8px;text-align:center">📊 نتيجة الزيارة</th>' : ''}
         </tr></thead>
-        <tbody>${branches.map(plansBranchRow).join('')}</tbody>
+        <tbody>${branches.map(b => plansBranchRow(b, mode === 'coord' && !plan._legacy)).join('')}</tbody>
         <tfoot><tr style="background:#F5F0E8;font-weight:700">
           <td style="padding:8px 10px">الإجمالي</td>
           <td style="padding:8px;text-align:center;color:#1565C0">${totCoord > 0 ? totCoord + '%' : '—'}</td>
           <td style="padding:8px;text-align:center;color:#731E2E">${totSales > 0 ? totSales.toLocaleString() : '—'}</td>
           <td style="padding:8px;text-align:center;color:#6B7A3B">${geoEff !== null ? geoEff + '%' : '—'}</td>
           <td style="padding:8px;text-align:center">${done}/${branches.length}</td>
+          ${mode === 'coord' && !plan._legacy ? `<td style="padding:8px;text-align:center;color:#1565C0">${resultsCount}/${branches.length}</td>` : ''}
         </tfoot>
       </table>
     </div>` : '<div style="text-align:center;padding:24px;color:#aaa">لا توجد فروع في هذه الخطة بعد</div>'}
   `;
 
   document.getElementById('modal-plan-v2').style.display = 'block';
+}
+
+// ── عرض تفاصيل نتيجة زيارة فرع (من visit_results) ──────────────────
+function planV2ShowResult(branchId) {
+  const r = (window._planResultsMap || {})[branchId];
+  if (!r) { showToast('لا توجد نتيجة مسجلة لهذا الفرع بعد', 'err'); return; }
+
+  const d = r.execution_details || {};
+  const scoreClr = r.score >= 70 ? '#2E7D32' : r.score >= 40 ? '#E65100' : '#731E2E';
+  const badges = [
+    d.promo_talker    ? 'Talker ✓'        : null,
+    d.promo_display   ? 'عرض ترويجي ✓'    : null,
+    d.promo_siwi      ? 'سيوي ✓'          : null,
+    d.promo_tamrati   ? 'تمراتي ✓'        : null,
+    ...((d.display_types || []).map(t => ({fridge:'فريدج',pallet:'بالتة',gondola:'جوندولا'}[t] || t)))
+  ].filter(Boolean);
+
+  document.getElementById('mvrv-body').innerHTML = `
+    <div style="text-align:center;margin-bottom:14px">
+      <div style="font-size:34px;font-weight:900;color:${scoreClr}">${r.score || 0}</div>
+      <div style="font-size:11px;color:#8B6F47">من 100 نقطة</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+      <div style="background:#F8F5F0;border-radius:8px;padding:8px;text-align:center">
+        <div style="font-size:10px;color:#8B6F47">العرض الثانوي</div>
+        <div style="font-weight:700;font-size:12px">${d.secondary_display || '—'}</div>
+      </div>
+      <div style="background:#F8F5F0;border-radius:8px;padding:8px;text-align:center">
+        <div style="font-size:10px;color:#8B6F47">حصة الرف</div>
+        <div style="font-weight:700;font-size:12px">${d.shelf_share || '—'}</div>
+      </div>
+      <div style="background:#F8F5F0;border-radius:8px;padding:8px;text-align:center">
+        <div style="font-size:10px;color:#8B6F47">FIFO / نظافة</div>
+        <div style="font-weight:700;font-size:12px">${d.fifo_status || '—'}</div>
+      </div>
+      <div style="background:#F8F5F0;border-radius:8px;padding:8px;text-align:center">
+        <div style="font-size:10px;color:#8B6F47">جودة الصور</div>
+        <div style="font-weight:700;font-size:12px">${d.photo_quality || '—'}</div>
+      </div>
+    </div>
+    ${badges.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+      ${badges.map(b => `<span class="badge b-green">${b}</span>`).join('')}
+    </div>` : ''}
+    ${r.meeting_summary ? `<div style="background:#FFF8F0;border-radius:8px;padding:10px;font-size:12px;color:#444">💬 ${r.meeting_summary}</div>` : ''}
+    <div style="font-size:10px;color:#aaa;margin-top:10px;text-align:center">${r.rep_name || ''} · ${r.branch_name || ''} · ${r.visit_date || ''}</div>
+  `;
+  document.getElementById('modal-visit-result-view').style.display = 'flex';
+}
+
+// ── تصدير خطة + نتائج الزيارات PDF (بألوان الطحان) ─────────────────
+function planV2ExportPDF() {
+  const modal  = document.getElementById('modal-plan-v2');
+  const planId = modal?.dataset.planId;
+  const mode   = modal?.dataset.mode || 'coord';
+  const plans  = window[`_plans_${mode}`] || [];
+  const plan   = plans.find(p => String(p.id) === String(planId));
+  const branches = (window[`_branches_${mode}`] || []).filter(b => String(b.plan_id) === String(planId));
+  const resultsMap = window._planResultsMap || {};
+  const hasResults = mode === 'coord' && !plan?._legacy;
+
+  if (!plan) { showToast('لا توجد بيانات للتصدير', 'err'); return; }
+
+  const stLabel  = {draft:'مسودة',submitted:'مرفوعة للاعتماد',approved:'معتمدة',gm_approved:'معتمدة GM',rejected:'مرفوضة'}[plan.status] || plan.status;
+  const done       = branches.filter(b => b.visit_status === 'done').length;
+  const withResult = hasResults ? branches.filter(b => resultsMap[b.id]).length : 0;
+  const avgScore   = withResult ? Math.round(branches.reduce((s, b) => s + (resultsMap[b.id]?.score || 0), 0) / withResult) : 0;
+
+  let html = `<!DOCTYPE html><html dir="rtl" lang="ar">
+  <head><meta charset="UTF-8"><title>تقرير خطة — ${plan.supervisor_name || ''}</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap');
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Cairo',Arial,sans-serif;background:#fff;color:#2C1F0A;font-size:11px}
+    .hdr-co{background:#4B3C1A;color:#EDE5D8;text-align:center;padding:12px;font-size:16px;font-weight:900;border-radius:8px 8px 0 0}
+    .hdr-title{background:#C55B48;color:#fff;text-align:center;padding:8px;font-size:13px;font-weight:700}
+    .hdr-info{background:#F5F0E8;color:#4B3C1A;text-align:center;padding:6px;font-size:10px;font-style:italic;border-bottom:2px solid #4B3C1A}
+    .kpi-bar{display:flex;gap:6px;padding:10px;background:#EDE5D8}
+    .kpi{flex:1;border-radius:8px;padding:8px;text-align:center;font-weight:700;font-size:12px}
+    table{width:100%;border-collapse:collapse}
+    th{background:#4B3C1A;color:#EDE5D8;padding:8px 6px;font-size:10px;font-weight:700;text-align:center;border:1px solid #2C1F0A}
+    td{padding:7px 6px;font-size:10px;border:1px solid #E0D8CC;vertical-align:top;text-align:center}
+    .branch-name{font-weight:700;text-align:right}
+    .st-done{background:#E8F5E9;color:#2E7D32;font-weight:700}
+    .st-pend{background:#FFF3E0;color:#E65100;font-weight:700}
+    .score-good{color:#2E7D32;font-weight:900;font-size:13px}
+    .score-mid{color:#E65100;font-weight:900;font-size:13px}
+    .score-bad{color:#731E2E;font-weight:900;font-size:13px}
+    .summary{font-size:9px;color:#555;text-align:right;max-width:170px}
+    .footer{background:#4B3C1A;color:#EDE5D8;text-align:center;padding:6px;font-size:9px;font-style:italic;margin-top:6px;border-radius:0 0 8px 8px}
+    @media print{body{font-size:10px}}
+  </style></head><body>
+  <div class="hdr-co">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
+  <div class="hdr-title">تقرير خطة${hasResults ? ' ونتائج زيارات' : ''} — ${plan.supervisor_name || '—'}</div>
+  <div class="hdr-info">الفترة: ${plan.week_start || ''} ← ${plan.week_end || ''} &nbsp;|&nbsp; الحالة: ${stLabel} &nbsp;|&nbsp; تاريخ الطباعة: ${new Date().toLocaleDateString('en-GB')}</div>
+  <div class="kpi-bar">
+    <div class="kpi" style="background:#EEF4FF;color:#1565C0">إجمالي الفروع: ${branches.length}</div>
+    <div class="kpi" style="background:#E8F5E9;color:#2E7D32">زيارات منجزة: ${done}</div>
+    ${hasResults ? `<div class="kpi" style="background:#FFF3E0;color:#E65100">نتائج مسجلة: ${withResult}</div>
+    <div class="kpi" style="background:${avgScore>=70?'#E8F5E9':avgScore>=40?'#FFF3E0':'#FFEBEE'};color:${avgScore>=70?'#2E7D32':avgScore>=40?'#E65100':'#731E2E'}">متوسط الدرجة: ${avgScore}</div>` : ''}
+  </div>
+  <table>
+    <thead><tr>
+      <th style="min-width:110px">الفرع</th>
+      <th>حالة الزيارة</th>
+      ${hasResults ? `<th>الدرجة</th><th>العرض الثانوي</th><th>FIFO/نظافة</th><th>الصور</th><th style="min-width:150px">ملخص الاجتماع</th>` : ''}
+    </tr></thead>
+    <tbody>
+      ${branches.map(b => {
+        const r = hasResults ? resultsMap[b.id] : null;
+        const d = r?.execution_details || {};
+        const scoreCls = !r ? '' : (r.score>=70?'score-good':r.score>=40?'score-mid':'score-bad');
+        return `<tr>
+          <td class="branch-name">${b.branch_name || '—'}</td>
+          <td class="${b.visit_status==='done'?'st-done':'st-pend'}">${b.visit_status==='done'?'✅ منجزة':'⏳ مجدولة'}</td>
+          ${hasResults ? `
+          <td class="${scoreCls}">${r ? r.score : '—'}</td>
+          <td>${r ? (d.secondary_display || '—') : '—'}</td>
+          <td>${r ? (d.fifo_status || '—') : '—'}</td>
+          <td>${r ? (d.photo_quality || '—') : '—'}</td>
+          <td class="summary">${r?.meeting_summary || ''}</td>` : ''}
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>
+  <div class="footer">Al Tahhan Golden Dates © 2026 — نظام إدارة التنسيق الميداني</div>
+  </body></html>`;
+
+  const win = window.open('', '_blank', 'width=1000,height=700');
+  win.document.write(html);
+  win.document.close();
+  setTimeout(() => { win.focus(); win.print(); }, 800);
+  showToast('📄 جاري فتح نافذة PDF...');
 }
 
 // ── اعتماد خطة (مزدوج — merch + area) ──────────────────────────────
