@@ -1390,7 +1390,9 @@ async function doLogin(){
         // حدّث REPS cache
         const idx=REPS.findIndex(r=>r.name===name);
         if(idx!==-1) REPS[idx]=freshRep; else REPS.push(freshRep);
-        // احفظ في localStorage للـ offline
+        // مسح localStorage بعد الدخول الناجح عشان متحملش بيانات قديمة
+        try{ localStorage.removeItem('rep_data_'+name); }catch(e){}
+        // احفظ في localStorage للـ offline (نسخة جديدة)
         try{ localStorage.setItem('rep_data_'+name, JSON.stringify(freshRep)); }catch(e){}
       } else {
         err.textContent='هذا الاسم غير مسجل في النظام';
@@ -1678,12 +1680,18 @@ async function logout(){
 
   // فحص لو فيه عمليات لسه متخزنة أوفلاين (IndexedDB) وماترفعتش للسيرفر بعد —
   // عشان نحذّر المنسق قبل ما يقفل التطبيق تماماً ويفقدها لو مسح بيانات المتصفح
+  // ملحوظة: الجهاز ممكن يكون مشترك بين أكتر من منسق (شيفتات) — فبنعرض التحذير الشخصي
+  // ده بس لصاحب العملية الفعلي (savedBy)، مش لأي حد بيسجل دخول على نفس الموبايل بعده.
   let oqCount = 0;
   try{
     const db = await openOQDB();
     const tx = db.transaction(OQ_STORE,'readonly');
     const store = tx.objectStore(OQ_STORE);
-    oqCount = await new Promise(res=>{ const r=store.count(); r.onsuccess=e=>res(e.target.result||0); r.onerror=()=>res(0); });
+    const allOQ = await new Promise(res=>{ const r=store.getAll(); r.onsuccess=e=>res(e.target.result||[]); r.onerror=()=>res([]); });
+    // عمليات قديمة اتسجلت قبل إضافة savedBy (من غير منسق معروف) بنسيبها للطابور العام
+    // (البادچ العلوي + الرفع التلقائي) من غير ما نعرضها كتحذير شخصي لأي حد — عشان منسق
+    // تاني ميتحمّلش مسؤولية عملية مش بتاعته لمجرد إنه بيستخدم نفس الموبايل.
+    oqCount = allOQ.filter(item=> item.savedBy && item.savedBy===cu?.name ).length;
   }catch(e){}
 
   if(summary){
@@ -2845,7 +2853,10 @@ async function saveVisit(){
     const db    = await openOQDB();
     const tx    = db.transaction(OQ_STORE,'readonly');
     const store = tx.objectStore(OQ_STORE);
-    const oqCount = await new Promise(res=>{const r=store.count();r.onsuccess=e=>res(e.target.result||0);r.onerror=()=>res(0);});
+    const allOQ = await new Promise(res=>{const r=store.getAll();r.onsuccess=e=>res(e.target.result||[]);r.onerror=()=>res([]);});
+    // نفس منطق تحذير الخروج: بنعرض التحذير الشخصي بس على عمليات المنسق الحالي، مش عمليات
+    // منسق تاني اتسجلت على نفس الموبايل المشترك.
+    const oqCount = allOQ.filter(item=> item.savedBy && item.savedBy===cu?.name ).length;
     if(oqCount > 0){
       const proceed = confirm(`⚠️ لسه في ${oqCount} عملية من الفرع ده (أو فرع سابق) ماوصلتش السيرفر لسه — النت شكله ضعيف.\n\nالبيانات محفوظة وهتترفع تلقائي، لكن الأفضل تستنى شوية أو تضغط على البادچ في أعلى الشاشة عشان تجبرها ترفع دلوقتي.\n\nتحب تكمل حفظ الزيارة برضو؟`);
       if(!proceed) return;
@@ -2976,6 +2987,11 @@ async function saveVisit(){
 function resetVisitData(){
   // مسح visit_id الحالي — جاهز للزيارة الجديدة
   window._currentVisitId = null;
+  // فك قفل اختيار الفرع — الدالة دي مبتتنفذش إلا بعد "حفظ الزيارة" بنجاح فعلاً
+  // (يعني نوع العرض والخطوات كلها اتسجلت)، فمينفعش المنسق ينط لفرع جديد من غير
+  // ما يخلّص زيارة الفرع الحالي أولاً. قبل كده كانت القائمة تفضل مقفولة لحد ما
+  // يعمل خروج كامل من التطبيق — ده كان بيمنع المنسق المتحرك من الانتقال لفرع تاني.
+  unlockBranchSelect();
   // للمتحرك — نمسح بس الأصناف والنواقص ونوع العرض ونفضل الفرع والحضور
   // فرع ونوع العميل — نفضلهم ظاهرين
   // إخفاء خطوة العرض والحفظ بس
@@ -4250,10 +4266,10 @@ function resetVisitState(){
 
 
 // ── checklist الانصراف ──────────────────────────────────────
-const _chkState = {prods:false, rets:false, miss:false};
+const _chkState = {visit:false, prods:false, rets:false, miss:false};
 
 function renderChkRow(type, done, text){
-  const icons = {prods:'📦', rets:'↩️', miss:'⚠️'};
+  const icons = {visit:'🧾', prods:'📦', rets:'↩️', miss:'⚠️'};
   const icon  = document.getElementById('chk-icon-'+type);
   const label = document.getElementById('chk-label-'+type);
   const btn   = document.getElementById('chk-btn-'+type+'-none');
@@ -4269,6 +4285,11 @@ async function openCheckoutModal(){
   const branch = document.getElementById('f-branch')?.value || '';
   const lbl = document.getElementById('chk-branch-label');
   if(lbl) lbl.textContent = branch ? 'فرع: '+branch : '';
+
+  // ── الزيارة نفسها (خطوة نوع العرض + "حفظ الزيارة") — لازم تتحفظ فعلياً قبل الانصراف،
+  // عشان منسمحش بانتقال لفرع جديد من غير ما يتسجل أي زيارة حقيقية للفرع الحالي ──
+  _chkState.visit = !!window._currentVisitId;
+  renderChkRow('visit', _chkState.visit, _chkState.visit ? 'تم حفظ الزيارة ✓' : 'لسه ماحفظتش الزيارة (خطوة نوع العرض)');
 
   // ── فحص فوري من الذاكرة المحلية (زي ما كان) — عشان الشاشة تفتح فوراً بدون انتظار ──
   const prodCount = products?.length || 0;
@@ -4298,11 +4319,16 @@ async function openCheckoutModal(){
     const encBranch = encodeURIComponent(branch);
     const range = `created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59`;
 
-    const [prodRes, retRes, missRes] = await Promise.all([
+    const [visitRes, prodRes, retRes, missRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/visits?name=eq.${enc}&branch=eq.${encBranch}&date=eq.${today}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
       fetch(`${SUPABASE_URL}/rest/v1/products?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
       fetch(`${SUPABASE_URL}/rest/v1/returns?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
       fetch(`${SUPABASE_URL}/rest/v1/missing?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     ]);
+
+    if(_chkState.visit){ /* اتأكد أصلاً محلياً */ }
+    else if(visitRes.length){ _chkState.visit=true; renderChkRow('visit', true, 'تم حفظ الزيارة ✓'); }
+    else renderChkRow('visit', false, 'لسه ماحفظتش الزيارة (خطوة نوع العرض)');
 
     if(_chkState.prods){ /* اتأكد أصلاً محلياً */ }
     else if(prodRes.length){ _chkState.prods=true; renderChkRow('prods', true, 'مسجّل بالفعل ✓'); }
@@ -4331,7 +4357,7 @@ function chkConfirmNone(type){
 }
 
 function updateCheckoutConfirmBtn(){
-  const allDone = _chkState.prods && _chkState.rets && _chkState.miss;
+  const allDone = _chkState.visit && _chkState.prods && _chkState.rets && _chkState.miss;
   const btn = document.getElementById('chk-confirm-btn');
   if(btn){
     btn.disabled = !allDone;
@@ -5620,7 +5646,9 @@ async function saveToOQ(action, table, data, tempId=null, onConflict=null){
   });
 
   if(!isDuplicate){
-    store.add({action, table, data, tempId, onConflict, savedAt: now});
+    // savedBy: اسم المنسق اللي سجّل العملية — عشان لو الجهاز مشترك بين أكتر من منسق، تحذير
+    // "عندك عمليات معلّقة" يبان بس للمنسق صاحب العملية الفعلي، مش لكل حد بيسجل دخول على نفس الموبايل.
+    store.add({action, table, data, tempId, onConflict, savedAt: now, savedBy: (typeof cu!=='undefined' && cu?.name) || null});
     updateQueueBadge();
   }
 }
@@ -6450,6 +6478,19 @@ function checkWeeklyMotivationalPopup(){
       <div id="chk-branch-label" style="font-size:11px;opacity:.8;margin-top:4px"></div>
     </div>
     <div style="padding:16px;display:flex;flex-direction:column;gap:10px">
+
+      <!-- الزيارة نفسها (نوع العرض + حفظ الزيارة) — إجباري، مفيش زرار "لا يوجد" هنا -->
+      <div style="display:flex;align-items:center;gap:12px;background:#F5F0E8;border-radius:10px;padding:12px">
+        <span id="chk-icon-visit" style="font-size:22px">🧾</span>
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:700;color:#2C1F0A">الزيارة</div>
+          <div id="chk-label-visit" style="font-size:11px;color:#888">جاري التحقق...</div>
+        </div>
+        <button onclick="closeCheckoutModal()"
+          style="font-size:11px;padding:5px 10px;border-radius:8px;border:1.5px solid #1A7A4A;background:#F0FFF4;color:#1A7A4A;cursor:pointer;font-family:Cairo,sans-serif">
+          أكمل الزيارة
+        </button>
+      </div>
 
       <!-- أصناف -->
       <div style="display:flex;align-items:center;gap:12px;background:#F5F0E8;border-radius:10px;padding:12px">
