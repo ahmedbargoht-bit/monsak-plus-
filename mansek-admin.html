@@ -1465,7 +1465,7 @@ h2,h3{color:#2C1F0A}
             </div>
             <div class="table-wrap">
               <table id="visits-main-table">
-                <thead><tr><th>#</th><th>المنسق</th><th>المجموعة</th><th>التاريخ</th><th>أول حضور</th><th>آخر انصراف</th><th>سجل أصناف</th><th>سجل نواقص</th><th>مساحة</th><th>النقاط</th><th>إجراء</th></tr></thead>
+                <thead><tr><th>#</th><th>المنسق</th><th>المجموعة</th><th>التاريخ</th><th>الفروع التي تمت زيارتها</th><th>أول حضور</th><th>آخر انصراف</th><th>إجراء</th></tr></thead>
                 <tbody id="visits-table"></tbody>
               </table>
             </div>
@@ -14242,15 +14242,8 @@ function loadVisits(){
     const att     = attMap[r.name+'||'+r.date] || {};
     const timeIn  = att.timeIn  || '—';
     const timeOut = att.timeOut || '—';
-    const spUtil  = r.spaceTotal>0 ? Math.round(r.spaceUsed/r.spaceTotal*100)+'%' : '—';
     const gc      = GROUPS[r.grp]?.color||'#ccc';
-    const skuBadge    = r.skuOn>0
-      ? `<span class="badge b-blue">${r.skuOn} صنف</span>`
-      : `<span style="color:#bbb;font-size:11px">—</span>`;
-    const missBadge   = r.missingCount>0
-      ? `<span class="badge b-red">${r.missingCount} ناقص</span>`
-      : `<span class="badge b-green">لا يوجد</span>`;
-    const ptsBadge    = `<span class="badge b-purple">${r.points}</span>`;
+    const branchesList = [...r.branches].join('، ') || '—';
     const inBadge     = timeIn!=='—'
       ? `<span style="font-size:11px;background:#E8F5E9;color:#1B5E20;padding:2px 8px;border-radius:6px;font-weight:600">${timeIn}</span>`
       : `<span style="color:#bbb;font-size:11px">—</span>`;
@@ -14259,29 +14252,53 @@ function loadVisits(){
       : `<span style="color:#bbb;font-size:11px">—</span>`;
     return`<tr>
       <td>${i+1}</td>
-      <td><b>${r.name}</b><div style="font-size:10px;color:#aaa;margin-top:2px">${r.branches.size} فرع</div></td>
+      <td><b>${r.name}</b></td>
       <td><span class="badge" style="background:${gc}22;color:${gc}">${GROUPS[r.grp]?.label||r.grp}</span></td>
       <td>${fmtDate(r.date)||r.date||'—'}</td>
+      <td style="font-size:11px;max-width:260px">${branchesList}</td>
       <td>${inBadge}</td>
       <td>${outBadge}</td>
-      <td>${skuBadge}</td>
-      <td>${missBadge}</td>
-      <td>${spUtil}</td>
-      <td>${ptsBadge}</td>
-      <td><button onclick="deleteVisitDay(${JSON.stringify(r.ids)})" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px" title="حذف كل زيارات هذا اليوم">🗑</button></td>
+      <td><button onclick="deleteVisitDayFull('${r.name.replace(/'/g,"\\'")}','${r.date}',${JSON.stringify(r.ids)})" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px" title="حذف كامل لكل بيانات هذا المنسق في هذا اليوم من جميع النظام">🗑</button></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="11" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد زيارات</td></tr>';
+  }).join('') || '<tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد زيارات</td></tr>';
 }
 
-function deleteVisitDay(ids){
-  if(!ids||!ids.length) return;
-  if(!confirm(`هل تريد حذف ${ids.length} زيارة لهذا اليوم؟`)) return;
-  Promise.all(ids.map(id=>
-    fetch(`${SUPABASE_URL}/rest/v1/visits?id=eq.${id}`,{
-      method:'DELETE',
-      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
-    })
-  )).then(()=>{ refreshData(); setTimeout(loadVisits,1000); });
+// حذف كامل لكل بيانات منسق معيّن في يوم معيّن من كل النظام — مش بس جدول الزيارات.
+// بيمسح من 6 جداول مع بعض: visits, attendance, products, missing, returns, checkout_exceptions
+// (كلها بتتسجل بالاسم + التاريخ/created_at من تطبيق المنسق). عملية نهائية ومفيهاش تراجع.
+async function deleteVisitDayFull(name, isoDate, visitIds){
+  if(!name || !isoDate) return;
+  const confirmMsg = `⚠️ حذف نهائي شامل\n\nهيتم حذف كل بيانات "${name}" ليوم ${isoDate} من كل النظام:\n`+
+    `الزيارات، الحضور والانصراف، سجل الأصناف، النواقص، المرتجع، طلبات استثناء الانصراف.\n\n`+
+    `العملية دي نهائية ومفيهاش تراجع. متأكد؟`;
+  if(!confirm(confirmMsg)) return;
+
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const encName = encodeURIComponent(name);
+  const dayStart = `${isoDate}T00:00:00`;
+  const dayEnd   = `${isoDate}T23:59:59`;
+
+  try{
+    const results = await Promise.all([
+      // visits — بالـ id المحدد سلفاً (أدق من فلتر تاريخ عام)
+      ...(visitIds||[]).map(id=>fetch(`${SUPABASE_URL}/rest/v1/visits?id=eq.${id}`,{method:'DELETE',headers:H})),
+      // attendance — بالاسم + التاريخ (حقل date مباشر)
+      fetch(`${SUPABASE_URL}/rest/v1/attendance?name=eq.${encName}&date=eq.${isoDate}`,{method:'DELETE',headers:H}),
+      // products / missing / returns — بالاسم + مدى created_at لنفس اليوم
+      fetch(`${SUPABASE_URL}/rest/v1/products?name=eq.${encName}&created_at=gte.${dayStart}&created_at=lte.${dayEnd}`,{method:'DELETE',headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/missing?name=eq.${encName}&created_at=gte.${dayStart}&created_at=lte.${dayEnd}`,{method:'DELETE',headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/returns?name=eq.${encName}&created_at=gte.${dayStart}&created_at=lte.${dayEnd}`,{method:'DELETE',headers:H}),
+      // checkout_exceptions — بالاسم (rep_name) + مدى created_at لنفس اليوم
+      fetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions?rep_name=eq.${encName}&created_at=gte.${dayStart}&created_at=lte.${dayEnd}`,{method:'DELETE',headers:H}),
+    ]);
+    const failed = results.filter(r=>!r.ok);
+    if(failed.length){ showToast(`⚠️ تم الحذف جزئياً — ${failed.length} جدول فشل`); }
+    else{ showToast('✅ تم الحذف الكامل لبيانات هذا اليوم'); }
+  }catch(e){
+    showToast('❌ خطأ أثناء الحذف: '+e.message);
+  }
+  refreshData();
+  setTimeout(loadVisits,1000);
 }
 
 function exportVisitsPDF(){
@@ -14316,7 +14333,7 @@ function exportVisitsPDF(){
   <h2>📋 سجل الزيارات — الطحان جولدن دايتس</h2>
   <div class="info">الفترة: ${from} إلى ${to} | المجموعة: ${grpLbl} | المنسق: ${repLbl}</div>
   <table>
-    <thead><tr><th>#</th><th>المنسق</th><th>المجموعة</th><th>التاريخ</th><th>أول حضور</th><th>آخر انصراف</th><th>سجل أصناف</th><th>سجل نواقص</th><th>مساحة</th><th>النقاط</th><th>إجراء</th></tr></thead>
+    <thead><tr><th>#</th><th>المنسق</th><th>المجموعة</th><th>التاريخ</th><th>الفروع التي تمت زيارتها</th><th>أول حضور</th><th>آخر انصراف</th><th>إجراء</th></tr></thead>
     <tbody>${tRows}</tbody>
   </table>
   <${'script'}>window.onload=()=>window.print();</${'script'}>
@@ -14331,8 +14348,8 @@ function exportVisitsPDF(){
 
 function exportVisits(){
   const rows=document.querySelectorAll('#visits-table tr');
-  let csv='#,المنسق,المجموعة,التاريخ,أول حضور,آخر انصراف,سجل أصناف,سجل نواقص,مساحة,النقاط\n';
-  rows.forEach(r=>{csv+=Array.from(r.cells).slice(0,10).map(c=>'"'+c.innerText.trim()+'"').join(',')+'\n';});
+  let csv='#,المنسق,المجموعة,التاريخ,الفروع التي تمت زيارتها,أول حضور,آخر انصراف\n';
+  rows.forEach(r=>{csv+=Array.from(r.cells).slice(0,7).map(c=>'"'+c.innerText.trim()+'"').join(',')+'\n';});
   const a=document.createElement('a');a.href='data:text/csv;charset=utf-8,\uFEFF'+csv;a.download='visits.csv';a.click();
 }
 
