@@ -24578,8 +24578,22 @@ async function sinvRetDeleteOne(id,invNo){
 
 // ══ popup تفاصيل الفاتورة ══
 let _sinvDetailCurrent = null; // {id, tab} — آخر فاتورة/مرتجع مفتوح في مودال التفاصيل (يُستخدم لزرار التعديل)
+let _sinvPromoCache = {}; // client_name → [{snf_name,date_from,date_to}] — كاش العروض (الأسعار القطعية) لكل عميل
 
-function sinvShowInvoice(id, tab){
+// يجيب عروض/أسعار قطعية العميل من sales_promotions (نفس الجدول اللي بيستخدمه تطبيق المندوب
+// لاستثناء الأصناف القطعية من الخصم) — بنكاش النتيجة لكل عميل عشان منكررش النداء كل ما المودال يتفتح
+async function sinvLoadPromosForClient(clientName){
+  if(!clientName) return [];
+  if(_sinvPromoCache[clientName]) return _sinvPromoCache[clientName];
+  try{
+    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const rows=await fetch(`${SUPABASE_URL}/rest/v1/sales_promotions?client_name=eq.${encodeURIComponent(clientName)}&deleted_at=is.null&select=snf_name,date_from,date_to`,{headers:H}).then(r=>r.json()).catch(()=>[]);
+    _sinvPromoCache[clientName]=Array.isArray(rows)?rows:[];
+  }catch(e){ _sinvPromoCache[clientName]=[]; }
+  return _sinvPromoCache[clientName];
+}
+
+async function sinvShowInvoice(id, tab){
   const src = tab==='ret' ? _sinvRetData : _sinvData;
   const r = src.find(x=>x.id===id);
   if(!r){ showToast('⚠️ لم يتم تحميل بيانات الفاتورة — اضغط عرض أولاً'); return; }
@@ -24587,13 +24601,23 @@ function sinvShowInvoice(id, tab){
   const items = Array.isArray(r.items)?r.items:[];
   const typeMap={no_tax:'بدون ضريبة',tax_14:'ضريبة 14%',tax_5:'ضريبة 5%'};
   const taxPct={no_tax:0,tax_14:14,tax_5:5}[r.invoice_type]||0;
-  const discAmt=((r.total_before_discount||0)*(r.discount_pct||0)/100);
   const isRet=tab==='ret';
+  const invDate = r.delivery_date||r.return_date||'';
+  // الأصناف القطعية (عروض) بتُستثنى من الخصم — بنحدّدها بمطابقة اسم الصنف مع عروض نفس
+  // العميل الفعّالة في تاريخ الفاتورة دي بالذات (نفس منطق تطبيق المندوب)
+  const promos = await sinvLoadPromosForClient(r.client_name||'');
+  const isPromoItem = (name)=> promos.some(p=>p.snf_name===name && (!invDate || (p.date_from<=invDate && p.date_to>=invDate)));
+  // المبلغ المخصوم الحقيقي = الفرق بين الإجمالي قبل وبعد الخصم (القيم المخزّنة فعلياً) —
+  // مش إعادة حساب discount_pct% × الإجمالي، عشان لو الفاتورة كلها أصناف قطعية (مستثناة من
+  // الخصم) يظهر المبلغ المخصوم صفر فعلاً بدل ما يظهر خصم وهمي محسوب على نسبة العميل العامة
+  const totalAfter = r.total_after_discount!=null ? r.total_after_discount : ((r.total_net||0)-(r.total_tax||0));
+  const discAmt = Math.max(0, (r.total_before_discount||0) - totalAfter);
+  const discPctDisplay = discAmt>0 ? (r.discount_pct||0) : 0;
   // أصناف الفاتورة
   const itemRows=items.length?items.map((it,i)=>`
     <tr style="${i%2?'background:#FFF8F4':''}">
       <td style="padding:7px 10px;font-size:11px;color:var(--text2)">${i+1}</td>
-      <td style="padding:7px 10px;font-size:12px;font-weight:600">${it.name||'—'}</td>
+      <td style="padding:7px 10px;font-size:12px;font-weight:600">${it.name||'—'}${isPromoItem(it.name)?`<div style="font-size:9px;color:#E65100;font-weight:700;margin-top:2px">🔖 سعر قطعي — لا يخضع لأي خصومات</div>`:''}</td>
       <td style="padding:7px 10px;text-align:center;font-size:11px">${it.qty||0}</td>
       <td style="padding:7px 10px;text-align:center;font-size:11px">${(it.price||0).toFixed(2)} ج</td>
       <td style="padding:7px 10px;text-align:center;font-weight:700;font-size:11px">${(it.total||0).toFixed(2)} ج</td>
@@ -24607,7 +24631,7 @@ function sinvShowInvoice(id, tab){
         <div style="font-size:12px;font-weight:700;color:#B91C1C;margin-bottom:8px">↩️ المرتجعات لنفس العميل والفرع (${rels.length})</div>
         ${rels.map(x=>{
           const xItems=Array.isArray(x.items)?x.items:[];
-          const xItemsHtml=xItems.length?xItems.map((it,i)=>`<tr style="${i%2?'background:#FFF0F0':''}"><td style="padding:5px 8px;font-size:10px;color:var(--text2)">${i+1}</td><td style="padding:5px 8px;font-size:11px">${it.name||'—'}</td><td style="padding:5px 8px;text-align:center;font-size:10px">${it.qty||0}</td><td style="padding:5px 8px;text-align:center;font-size:10px">${(it.price||0).toFixed(2)} ج</td><td style="padding:5px 8px;text-align:center;font-size:10px;font-weight:700">${(it.total||0).toFixed(2)} ج</td></tr>`).join(''):`<tr><td colspan="5" style="text-align:center;padding:10px;color:#aaa;font-size:10px">لا توجد أصناف</td></tr>`;
+          const xItemsHtml=xItems.length?xItems.map((it,i)=>`<tr style="${i%2?'background:#FFF0F0':''}"><td style="padding:5px 8px;font-size:10px;color:var(--text2)">${i+1}</td><td style="padding:5px 8px;font-size:11px">${it.name||'—'}${isPromoItem(it.name)?`<div style="font-size:8px;color:#E65100;font-weight:700">🔖 سعر قطعي</div>`:''}</td><td style="padding:5px 8px;text-align:center;font-size:10px">${it.qty||0}</td><td style="padding:5px 8px;text-align:center;font-size:10px">${(it.price||0).toFixed(2)} ج</td><td style="padding:5px 8px;text-align:center;font-size:10px;font-weight:700">${(it.total||0).toFixed(2)} ج</td></tr>`).join(''):`<tr><td colspan="5" style="text-align:center;padding:10px;color:#aaa;font-size:10px">لا توجد أصناف</td></tr>`;
           return `<div style="background:#FFF5F5;border:1px solid #FECACA;border-radius:8px;padding:10px 12px;margin-bottom:8px">
             <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px;font-size:11px">
               <span><b>رقم:</b> ${x.invoice_number||'—'}</span>
@@ -24638,7 +24662,7 @@ function sinvShowInvoice(id, tab){
     </table>
     <div style="background:${isRet?'#B91C1C':'#C55B48'};border-radius:10px;padding:12px 16px;color:white;font-size:12px">
       <div style="display:flex;justify-content:space-between;opacity:.85;margin-bottom:3px"><span>الإجمالي قبل الخصم</span><span>${(r.total_before_discount||0).toLocaleString('en-US')} ج</span></div>
-      <div style="display:flex;justify-content:space-between;opacity:.85;margin-bottom:3px"><span>خصم ${r.discount_pct||0}%</span><span>− ${discAmt.toFixed(2)} ج</span></div>
+      <div style="display:flex;justify-content:space-between;opacity:.85;margin-bottom:3px"><span>خصم ${discPctDisplay}%</span><span>− ${discAmt.toFixed(2)} ج</span></div>
       <div style="display:flex;justify-content:space-between;font-weight:800;margin-bottom:3px;font-size:13px"><span>✅ الصافي (بدون ضريبة)</span><span>${((r.total_net||0)-(r.total_tax||0)).toFixed(2)} ج</span></div>
       ${taxPct>0?`<div style="display:flex;justify-content:space-between;opacity:.8;margin-bottom:3px"><span>ضريبة ${taxPct}% (للحكومة)</span><span>+ ${(r.total_tax||0).toFixed(2)} ج</span></div>`:''}
       <div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;border-top:1px solid rgba(255,255,255,.3);padding-top:8px;margin-top:6px;opacity:.9"><span>${isRet?'إجمالي المرتجع':'إجمالي الفاتورة (شامل الضريبة)'}</span><span>${(r.total_net||0).toFixed(2)} ج</span></div>
