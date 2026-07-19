@@ -4820,38 +4820,55 @@ async function sbUpdate(table, match, data){
 async function apiPost(data){
   const d = data;
   switch(d.action){
-    case 'saveAttendance':
-      const existing = await sbSelect('attendance', {name: d.name});
+    case 'saveAttendance':{
+      const existing = await sbSelect('attendance', {name: d.name}); // مرتّبة created_at تنازلي بالفعل (الأحدث أولاً)
       // استخدم التوقيت المحلي (مصر UTC+2/+3) مش UTC لتجنب خطأ تسجيل التاريخ الغلط
       const _now = new Date();
       const todayStr = _now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0')+'-'+String(_now.getDate()).padStart(2,'0');
-      const todayRec = existing.find(r => r.date === todayStr);
+      let todayRec = existing.find(r => r.date === todayStr);
 
-      if(todayRec){
-        // سجل اليوم موجود بالفعل
-        if(d.type === 'out'){
-          // حدّث الانصراف فقط
+      if(d.type === 'out'){
+        if(!todayRec){
+          // مفيش سجل حضور بتاريخ النهارده — يمكن الشيفت عدّى نص الليل (حضور بالأمس + انصراف
+          // بعد الساعة 12 بشوية). قبل كده كان بيتعمل سجل جديد "يتيم" فيه انصراف بس من غير
+          // حضور. دلوقتي بندور على آخر شيفت لسه "مفتوح" (فيه وقت حضور وملوش وقت انصراف)
+          // لنفس المنسق، وبنسكّره هو بدل ما نفتح سجل يتيم جديد — بشرط يكون اتفتح إمبارح
+          // أو النهارده بالظبط (يوم واحد فرق كحد أقصى) عشان منقفلش غلط شيفت قديم متنسي.
+          const openRec = existing.find(r => r.time_in && r.time_in!=='--' && (!r.time_out || r.time_out==='--'));
+          if(openRec){
+            const openDate  = new Date(openRec.date+'T00:00:00');
+            const daysDiff  = Math.round((_now - openDate) / 86400000);
+            if(daysDiff <= 1) todayRec = openRec;
+          }
+        }
+        if(todayRec){
+          // حدّث الانصراف على نفس سجل الحضور (سواء بتاريخ النهارده أو شيفت الأمس المفتوح)
           return sbUpdate('attendance', {id: todayRec.id}, {
             time_out: d.time, lat_out: d.lat||'', lng_out: d.lng||'',
             hours: calcHours(todayRec.time_in, d.time)
           });
-        } else {
-          // حضور مكرر — تجاهل بدون إدراج جديد
-          return {skipped: true, reason: 'duplicate'};
         }
+        // مفيش سجل نهارده ولا شيفت مفتوح قريب نقفله — حالة نادرة، نسجل انصراف يتيم
+        // بدل ما نضيّع البيانات خالص
+        return sbInsert('attendance', {
+          name: d.name, route: d.route, grp: d.group||'',
+          date: todayStr, time_in: '', time_out: d.time,
+          lat_in: '', lng_in: '', lat_out: d.lat||'', lng_out: d.lng||'',
+        });
       }
 
+      // d.type === 'in'
+      if(todayRec){
+        // حضور مكرر — تجاهل بدون إدراج جديد
+        return {skipped: true, reason: 'duplicate'};
+      }
       // أول تسجيل لهذا اليوم
       return sbInsert('attendance', {
         name: d.name, route: d.route, grp: d.group||'',
-        date: todayStr,
-        time_in:  d.type==='in'  ? d.time  : '',
-        time_out: d.type==='out' ? d.time  : '',
-        lat_in:   d.type==='in'  ? d.lat||'' : '',
-        lng_in:   d.type==='in'  ? d.lng||'' : '',
-        lat_out:  d.type==='out' ? d.lat||'' : '',
-        lng_out:  d.type==='out' ? d.lng||'' : '',
+        date: todayStr, time_in: d.time, time_out: '',
+        lat_in: d.lat||'', lng_in: d.lng||'', lat_out: '', lng_out: '',
       });
+    }
 
     case 'saveVisit':{
       const visitId = await sbInsertGetId('visits', {
