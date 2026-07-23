@@ -5627,6 +5627,17 @@ h2,h3{color:#2C1F0A}
             </div>
           </div>
 
+          <!-- مساحة قاعدة البيانات على Supabase -->
+          <div class="card" style="margin-bottom:14px">
+            <div class="card-title"><i class="ti ti-database"></i> مساحة قاعدة البيانات (Supabase)</div>
+            <div id="db-storage-box">
+              <div style="font-size:11px;color:#888">جاري الحساب...</div>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="loadDbStorageUsage()" style="margin-top:10px">
+              <i class="ti ti-refresh"></i> تحديث المساحة
+            </button>
+          </div>
+
           <!-- إحصائيات البيانات الحالية -->
           <div class="card" style="margin-bottom:14px">
             <div class="card-title"><i class="ti ti-chart-bar"></i> البيانات الحالية في النظام</div>
@@ -5638,6 +5649,22 @@ h2,h3{color:#2C1F0A}
             <button class="btn btn-ghost btn-sm" onclick="loadResetStats()" style="margin-top:10px">
               <i class="ti ti-refresh"></i> تحديث الإحصائيات
             </button>
+          </div>
+
+          <!-- الفترة الزمنية للحذف — إجباري -->
+          <div class="card" style="margin-bottom:14px;border:2px solid #E65100">
+            <div class="card-title" style="color:#E65100"><i class="ti ti-calendar-due"></i> الفترة المراد حذفها (إجباري)</div>
+            <div style="font-size:11px;color:#888;margin-bottom:10px">هيتم حذف السجلات اللي وقعت في الفترة دي بس من الجداول المحددة تحت — مش هيتمسح الجدول كله. لازم تحدد "من" و"إلى" قبل التنفيذ.</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <div class="fld" style="margin:0">
+                <label class="lbl">من تاريخ *</label>
+                <input type="date" id="reset-from" class="modal-inp"/>
+              </div>
+              <div class="fld" style="margin:0">
+                <label class="lbl">إلى تاريخ *</label>
+                <input type="date" id="reset-to" class="modal-inp"/>
+              </div>
+            </div>
           </div>
 
           <!-- اختيار البيانات -->
@@ -10688,6 +10715,61 @@ function stopExcBadgePolling(){
 startExcBadgePolling();
 
 // ══════════════════════════════════════════════════════════════
+// DB STORAGE — مساحة قاعدة البيانات على Supabase
+// ══════════════════════════════════════════════════════════════
+// باقة Supabase الحالية للمشروع: Pro — بيتضمن 8 GB مساحة قاعدة بيانات مجانية،
+// وبعدها بيتحاسب $0.125 لكل GB إضافي. بنجيب الحجم الفعلي عبر RPC (get_db_size_bytes)
+// اللي بيرجع pg_database_size() ونقارنه بالـ 8 GB دول.
+const DB_STORAGE_QUOTA_BYTES = 8 * 1024 * 1024 * 1024; // 8 GB — حد باقة Pro المجاني
+
+function _fmtBytes(bytes){
+  if(bytes >= 1024*1024*1024) return (bytes/1024/1024/1024).toFixed(2)+' GB';
+  if(bytes >= 1024*1024) return (bytes/1024/1024).toFixed(1)+' MB';
+  if(bytes >= 1024) return (bytes/1024).toFixed(1)+' KB';
+  return bytes+' B';
+}
+
+async function loadDbStorageUsage(){
+  const box = document.getElementById('db-storage-box');
+  if(!box) return;
+  box.innerHTML = '<div style="font-size:11px;color:#888">جاري الحساب...</div>';
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_db_size_bytes`,{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'apikey':SUPABASE_KEY,
+        'Authorization':`Bearer ${SUPABASE_KEY}`
+      },
+      body: JSON.stringify({})
+    });
+    if(!res.ok) throw new Error('تعذر جلب حجم القاعدة');
+    const used = await res.json(); // bigint bytes
+    const usedBytes = +used || 0;
+    const pct = Math.min(100, (usedBytes / DB_STORAGE_QUOTA_BYTES) * 100);
+    const freeBytes = Math.max(0, DB_STORAGE_QUOTA_BYTES - usedBytes);
+    const barColor = pct >= 90 ? '#C0392B' : pct >= 70 ? '#E65100' : '#1A7A4A';
+
+    box.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+        <div style="font-size:13px;font-weight:700;color:${barColor}">${_fmtBytes(usedBytes)} مستخدمة</div>
+        <div style="font-size:11px;color:#888">من ${_fmtBytes(DB_STORAGE_QUOTA_BYTES)} (باقة Pro)</div>
+      </div>
+      <div style="background:#eee;border-radius:999px;height:14px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:${barColor};transition:width .4s;border-radius:999px"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:6px">
+        <div style="font-size:11px;color:#888">${pct.toFixed(1)}% مستخدم</div>
+        <div style="font-size:11px;color:#1A7A4A;font-weight:600">متبقي ${_fmtBytes(freeBytes)}</div>
+      </div>
+      ${pct>=90?`<div style="margin-top:8px;background:#FFEBEE;color:#C0392B;border:1px solid #FFCDD2;border-radius:8px;padding:6px 10px;font-size:11px">⚠️ المساحة قربت تخلص — فكّر تحذف بيانات قديمة من "ريستارت النظام" تحت أو تزود الباقة</div>`:''}
+    `;
+  }catch(e){
+    box.innerHTML = `<div style="color:#C0392B;font-size:11px">تعذر حساب المساحة: ${e.message}</div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
 // RESET — ريستارت النظام
 // ══════════════════════════════════════════════════════════════
 
@@ -10753,11 +10835,23 @@ function resetSelectOperational(){
 async function executeReset(){
   const pass        = document.getElementById('reset-pass').value;
   const confirmText = document.getElementById('reset-confirm-text').value.trim();
+  const fromDate     = document.getElementById('reset-from')?.value||'';
+  const toDate       = document.getElementById('reset-to')?.value||'';
   const btn         = document.getElementById('reset-btn');
   const msg         = document.getElementById('reset-msg');
   const progress    = document.getElementById('reset-progress');
   const progressBar = document.getElementById('reset-progress-bar');
   const progressLbl = document.getElementById('reset-progress-label');
+
+  // ✅ الفترة الزمنية بقت إجبارية — بنمنع أي حذف كامل بالغلط لجدول من غير تحديد فترة
+  if(!fromDate || !toDate){
+    msg.style.display='block'; msg.style.color='#C0392B';
+    msg.textContent='❌ حدد "من تاريخ" و"إلى تاريخ" قبل التنفيذ — الحذف بقى مربوط بفترة إجبارياً'; return;
+  }
+  if(fromDate > toDate){
+    msg.style.display='block'; msg.style.color='#C0392B';
+    msg.textContent='❌ "من تاريخ" لازم يكون قبل أو يساوي "إلى تاريخ"'; return;
+  }
 
   // تحقق من الباسورد بنفس منطق doAdminLogin
   let adminPass = localStorage.getItem('admin_pass_override') || ADMIN_PASS;
@@ -10780,22 +10874,23 @@ async function executeReset(){
     msg.style.display='block'; msg.style.color='#C0392B';
     msg.textContent='❌ اختر جدولاً واحداً على الأقل'; return;
   }
-  if(!confirm(`سيتم حذف بيانات ${selected.length} جدول نهائياً. هل أنت متأكد؟`)) return;
+  if(!confirm(`سيتم حذف بيانات ${selected.length} جدول من ${fromDate} إلى ${toDate} نهائياً. هل أنت متأكد؟`)) return;
 
   btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري الحذف...';
   progress.style.display='block'; msg.style.display='none';
   progressBar.style.width='30%'; progressLbl.textContent='جاري الاتصال بالخادم...';
 
   try{
-    // استدعاء دالة reset_tables عبر Supabase RPC
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/reset_tables`,{
+    // استدعاء دالة reset_tables_by_date عبر Supabase RPC — بتحذف بس السجلات في الفترة
+    // المحددة (created_at أو updated_at حسب الجدول)، مش الجدول كله
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/reset_tables_by_date`,{
       method:'POST',
       headers:{
         'Content-Type':'application/json',
         'apikey':SUPABASE_KEY,
         'Authorization':`Bearer ${SUPABASE_KEY}`
       },
-      body: JSON.stringify({table_names: selected})
+      body: JSON.stringify({table_names: selected, from_date: fromDate, to_date: toDate})
     });
 
     progressBar.style.width='80%'; progressLbl.textContent='جاري المعالجة...';
@@ -10808,7 +10903,7 @@ async function executeReset(){
       const counts = result.deleted||{};
       const total  = Object.values(counts).reduce((s,v)=>s+(+v||0),0);
       msg.style.color='#1A7A4A';
-      msg.textContent=`✅ تم حذف ${total.toLocaleString('en-US')} سجل من ${selected.length} جدول`;
+      msg.textContent=`✅ تم حذف ${total.toLocaleString('en-US')} سجل من ${selected.length} جدول (${fromDate} → ${toDate})`;
       document.getElementById('reset-pass').value='';
       document.getElementById('reset-confirm-text').value='';
       setTimeout(loadResetStats, 1500);
@@ -11671,7 +11766,7 @@ function renderCurrentPanel(){
     case 'ai-analysis': initAIAnalysisPanel(); break;
     case 'rep-report': rrInit(); break;
     case 'checkout-exceptions': adminLoadExceptions(); break;
-    case 'reset': loadResetStats(); break;
+    case 'reset': loadResetStats(); loadDbStorageUsage(); break;
     case 'sup-monitor': cpLoad(); break;
     case 'field-monitor': loadFieldMonitor(); break;
     case 'field-support-report': loadFieldSupportReport(); break;
