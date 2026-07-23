@@ -8523,17 +8523,21 @@ async function rptLoadRoutes(){
   if(!grps.length) return;
 
   let allBranches = [];
+  let allAssignments = [];
   for(const grp of grps){
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/branches?select=route,branch_name,rep_name,rep_name2,rep_name3&grp=eq.${encodeURIComponent(grp)}&limit=2000`,
-      {headers:H}
-    );
+    const [res, resAssign] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/branches?select=route,branch_name,rep_name,rep_name2,rep_name3&grp=eq.${encodeURIComponent(grp)}&limit=2000`,{headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name,rep_name&grp=eq.${encodeURIComponent(grp)}&limit=2000`,{headers:H}),
+    ]);
     const data = res.ok ? await res.json() : [];
     if(Array.isArray(data)) allBranches.push(...data);
+    const dataAssign = resAssign.ok ? await resAssign.json() : [];
+    if(Array.isArray(dataAssign)) allAssignments.push(...dataAssign);
   }
 
-  // خزّن الفروع للاستخدام لاحقاً
+  // خزّن الفروع والتعيينات للاستخدام لاحقاً
   window._rptAllBranches = allBranches;
+  window._rptAllAssignments = allAssignments;
   const routes = [...new Set(allBranches.map(b=>(b.route||'').replace(/\s+/g,' ').trim()).filter(Boolean))].sort();
   routes.forEach(r=>{
     const o = document.createElement('option');
@@ -8572,15 +8576,25 @@ async function rptOnRouteChange(){
   });
   branchWrap.style.display='';
 
-  // منسقو الخط — بنجيبهم من تعيينات الفروع نفسها (branches.rep_name/rep_name2/rep_name3)
-  // مش من عمود users.route، لأن عمود route في users بيتسجل يدوياً وممكن يفضل فاضي أو
-  // قديم لمنسق حتى لو هو فعلياً مسؤول عن الفرع حسب جدول الفروع (المصدر الموثوق للتعيين
-  // الفعلي). ده كان بيسبب ظهور منسق تاني بالغلط ("سيف ياسر") واختفاء المنسق الحقيقي
-  // ("حمزه محمود عبد الفتاح") من قايمة الفرع اللي هو ماسكها فعلاً.
+  // منسقو الخط — المصدر الصح هو جدول coord_route_assignments (نفس الجدول اللي بتتسجل
+  // فيه تعيينات "فرع المنسق الثابت" من شاشة المنسقين في لوحة التحكم، وبيتحدث لحظياً كل
+  // ما الأدمن يغيّر تعيين فرع). عمود branches.rep_name/rep_name2/rep_name3 قديم ومش
+  // بيتزامن مع أي تعديل بعدين — ده كان سبب ظهور منسق غلط (سيف ياسر) بدل المنسق الحقيقي
+  // (حمزة) لفرع أوسكار التجمع الخامس بعد ما اتنقل التعيين له لاحقاً.
+  // بنستخدم branches.rep_name كـ fallback بس لو مفيش أي تعيين مسجل لنفس الفرع في
+  // coord_route_assignments (يعني الفرع لسه مايتسجلش فيها أصلاً).
+  const assignments = window._rptAllAssignments||[];
   const branchesOnRoute = (window._rptAllBranches||[]).filter(b=>b.route===route);
-  const repNames = [...new Set(
-    branchesOnRoute.flatMap(b=>[b.rep_name,b.rep_name2,b.rep_name3]).filter(Boolean)
-  )].sort();
+  const repNamesSet = new Set();
+  branchesOnRoute.forEach(b=>{
+    const branchAssigns = assignments.filter(a=>a.branch_name===b.branch_name).map(a=>a.rep_name).filter(Boolean);
+    if(branchAssigns.length){
+      branchAssigns.forEach(n=>repNamesSet.add(n));
+    } else {
+      [b.rep_name,b.rep_name2,b.rep_name3].filter(Boolean).forEach(n=>repNamesSet.add(n));
+    }
+  });
+  const repNames = [...repNamesSet].sort();
   repNames.forEach(name=>{
     const o=document.createElement('option');
     o.value=name; o.textContent=name;
