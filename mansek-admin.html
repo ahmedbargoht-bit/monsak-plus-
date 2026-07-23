@@ -5638,9 +5638,26 @@ h2,h3{color:#2C1F0A}
             </button>
           </div>
 
+          <!-- الفترة الزمنية للحذف — إجباري -->
+          <div class="card" style="margin-bottom:14px;border:2px solid #E65100">
+            <div class="card-title" style="color:#E65100"><i class="ti ti-calendar-due"></i> الفترة المراد حذفها (إجباري)</div>
+            <div style="font-size:11px;color:#888;margin-bottom:10px">هيتم حذف السجلات اللي وقعت في الفترة دي بس من الجداول المحددة تحت — مش هيتمسح الجدول كله. لازم تحدد "من" و"إلى" قبل التنفيذ.</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <div class="fld" style="margin:0">
+                <label class="lbl">من تاريخ *</label>
+                <input type="date" id="reset-from" class="modal-inp" onchange="loadResetStats()"/>
+              </div>
+              <div class="fld" style="margin:0">
+                <label class="lbl">إلى تاريخ *</label>
+                <input type="date" id="reset-to" class="modal-inp" onchange="loadResetStats()"/>
+              </div>
+            </div>
+          </div>
+
           <!-- إحصائيات البيانات الحالية -->
           <div class="card" style="margin-bottom:14px">
             <div class="card-title"><i class="ti ti-chart-bar"></i> البيانات الحالية في النظام</div>
+            <div id="reset-stats-label" style="font-size:11px;color:#888;margin-bottom:8px">حدد "من/إلى" فوق عشان تشوف عدد الفترة اللي هتتحذف</div>
             <div id="reset-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
               <div style="text-align:center;padding:8px;background:#f5f6fa;border-radius:8px">
                 <div style="font-size:11px;color:#888">جاري الحساب...</div>
@@ -5649,22 +5666,6 @@ h2,h3{color:#2C1F0A}
             <button class="btn btn-ghost btn-sm" onclick="loadResetStats()" style="margin-top:10px">
               <i class="ti ti-refresh"></i> تحديث الإحصائيات
             </button>
-          </div>
-
-          <!-- الفترة الزمنية للحذف — إجباري -->
-          <div class="card" style="margin-bottom:14px;border:2px solid #E65100">
-            <div class="card-title" style="color:#E65100"><i class="ti ti-calendar-due"></i> الفترة المراد حذفها (إجباري)</div>
-            <div style="font-size:11px;color:#888;margin-bottom:10px">هيتم حذف السجلات اللي وقعت في الفترة دي بس من الجداول المحددة تحت — مش هيتمسح الجدول كله. لازم تحدد "من" و"إلى" قبل التنفيذ.</div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-              <div class="fld" style="margin:0">
-                <label class="lbl">من تاريخ *</label>
-                <input type="date" id="reset-from" class="modal-inp"/>
-              </div>
-              <div class="fld" style="margin:0">
-                <label class="lbl">إلى تاريخ *</label>
-                <input type="date" id="reset-to" class="modal-inp"/>
-              </div>
-            </div>
           </div>
 
           <!-- اختيار البيانات -->
@@ -10871,9 +10872,22 @@ const RESET_TABLES = [
   'point_logs','field_support_logs','messages','assignments'
 ];
 
+// نفس تعيين عمود التاريخ المستخدم فعلياً في reset_tables_by_date على السيرفر —
+// لازم يفضلوا متطابقين، وإلا العداد اللي شايفه المستخدم هنا هيبقى مختلف عن اللي هيتحذف فعلاً
+const RESET_DATE_COL = { location:'updated_at', supervisor_execution:'updated_at' };
+
 async function loadResetStats(){
   const wrap = document.getElementById('reset-stats');
   if(!wrap) return;
+
+  const fromDate = document.getElementById('reset-from')?.value||'';
+  const toDate   = document.getElementById('reset-to')?.value||'';
+  const hasRange = !!(fromDate && toDate);
+  const label = document.getElementById('reset-stats-label');
+  if(label) label.textContent = hasRange
+    ? `أعداد السجلات اللي هتتحذف فعلياً من ${fromDate} إلى ${toDate}`
+    : `الإجمالي الكلي للجدول (حدد "من/إلى" فوق عشان تشوف عدد الفترة اللي هتتحذف)`;
+
   wrap.innerHTML = RESET_TABLES.map(t=>`
     <div style="text-align:center;padding:8px;background:#f5f6fa;border-radius:8px">
       <div class="stat-n" id="cnt-stat-${t}" style="font-size:16px">...</div>
@@ -10882,9 +10896,16 @@ async function loadResetStats(){
 
   await Promise.all(RESET_TABLES.map(async t=>{
     try{
+      let url = `${SUPABASE_URL}/rest/v1/${t}?select=*`;
+      if(hasRange){
+        const col = RESET_DATE_COL[t] || 'created_at';
+        // نفس منطق reset_tables_by_date: from_date >= ... AND < to_date + يوم (يشمل يوم "إلى" كامل)
+        const toNext = new Date(toDate+'T00:00:00'); toNext.setDate(toNext.getDate()+1);
+        const toNextStr = toNext.toISOString().slice(0,10);
+        url += `&${col}=gte.${fromDate}&${col}=lt.${toNextStr}`;
+      }
       // نستخدم HEAD مع Prefer: count=exact — الأصح لـ Supabase
-      const r = await fetch(
-        `${SUPABASE_URL}/rest/v1/${t}?select=*`,
+      const r = await fetch(url,
         {method:'HEAD', headers:{
           'apikey':SUPABASE_KEY,
           'Authorization':`Bearer ${SUPABASE_KEY}`,
