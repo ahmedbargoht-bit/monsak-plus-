@@ -10729,26 +10729,75 @@ function _fmtBytes(bytes){
   return bytes+' B';
 }
 
+// أسماء مفهومة للجداول الأكبر (لو الجدول مش موجود هنا بنعرض اسمه زي ما هو)
+const DB_TABLE_LABELS = {
+  products:'الأصناف المرفوعة (رف/مخزون)',
+  product_snapshots:'نسخ تاريخية للأصناف (Snapshots)',
+  tamr_sales_items:'بنود فواتير التمر',
+  tamr_sales_invoices:'فواتير التمر',
+  tamr_sales_returns:'مرتجعات فواتير التمر',
+  missing:'النواقص',
+  market_expiry:'صلاحيات السوق',
+  visits:'الزيارات',
+  attendance:'الحضور والانصراف',
+  returns:'المرتجعات',
+  branches:'الفروع',
+  messages:'الرسائل',
+  location:'الموقع الحالي',
+  coord_route_assignments:'تعيينات فروع المنسقين',
+  route_assignments:'تعيينات خطوط السير',
+  sales_route_assignments:'تعيينات خطوط سير المبيعات',
+  plan_branches:'فروع الخطط',
+  sales_deliveries:'توصيلات المبيعات',
+  invoice_audit_log:'سجل تدقيق الفواتير',
+};
+
+let _dbAllTableSizes = [];
+
 async function loadDbStorageUsage(){
   const box = document.getElementById('db-storage-box');
   if(!box) return;
   box.innerHTML = '<div style="font-size:11px;color:#888">جاري الحساب...</div>';
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_db_size_bytes`,{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'apikey':SUPABASE_KEY,
-        'Authorization':`Bearer ${SUPABASE_KEY}`
-      },
-      body: JSON.stringify({})
-    });
-    if(!res.ok) throw new Error('تعذر جلب حجم القاعدة');
-    const used = await res.json(); // bigint bytes
+    const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const [resTotal, resTables] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/rpc/get_db_size_bytes`,{method:'POST',headers:H,body:JSON.stringify({})}),
+      fetch(`${SUPABASE_URL}/rest/v1/rpc/get_table_sizes`,{method:'POST',headers:H,body:JSON.stringify({})}),
+    ]);
+    if(!resTotal.ok) throw new Error('تعذر جلب حجم القاعدة');
+    const used = await resTotal.json(); // bigint bytes
     const usedBytes = +used || 0;
+    const tableSizes = resTables.ok ? await resTables.json() : [];
+    _dbAllTableSizes = Array.isArray(tableSizes) ? tableSizes : [];
+
     const pct = Math.min(100, (usedBytes / DB_STORAGE_QUOTA_BYTES) * 100);
     const freeBytes = Math.max(0, DB_STORAGE_QUOTA_BYTES - usedBytes);
     const barColor = pct >= 90 ? '#C0392B' : pct >= 70 ? '#E65100' : '#1A7A4A';
+
+    // ── تقسيم البيانات (Breakdown) — أكبر 10 جداول + الباقي مجمّع ──
+    const sorted = [..._dbAllTableSizes].sort((a,b)=>b.size_bytes-a.size_bytes);
+    const top = sorted.slice(0,10);
+    const restBytes = sorted.slice(10).reduce((s,t)=>s+(+t.size_bytes||0),0);
+    const barMax = usedBytes || 1;
+    const rowsHtml = top.map(t=>{
+      const bytes = +t.size_bytes||0;
+      const w = Math.max(1,(bytes/barMax)*100);
+      const isBackup = /_backup_\d{8}$/.test(t.table_name);
+      const label = DB_TABLE_LABELS[t.table_name] || t.table_name;
+      return `<div style="margin-bottom:7px">
+        <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px">
+          <span style="color:${isBackup?'#C0392B':'#333'}">${isBackup?'⚠️ ':''}${label} <span style="color:#aaa;font-size:10px">(${t.table_name})</span></span>
+          <span style="font-weight:700;color:${isBackup?'#C0392B':'#555'}">${_fmtBytes(bytes)}</span>
+        </div>
+        <div style="background:#f0f0f0;border-radius:999px;height:7px;overflow:hidden">
+          <div style="height:100%;width:${w}%;background:${isBackup?'#C0392B':'#B97837'};border-radius:999px"></div>
+        </div>
+      </div>`;
+    }).join('');
+
+    // ── جداول النسخ الاحتياطية القديمة (candidate للحذف الآمن) ──
+    const backupTables = sorted.filter(t=>/_backup_\d{8}$/.test(t.table_name));
+    const backupBytes = backupTables.reduce((s,t)=>s+(+t.size_bytes||0),0);
 
     box.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
@@ -10763,9 +10812,49 @@ async function loadDbStorageUsage(){
         <div style="font-size:11px;color:#1A7A4A;font-weight:600">متبقي ${_fmtBytes(freeBytes)}</div>
       </div>
       ${pct>=90?`<div style="margin-top:8px;background:#FFEBEE;color:#C0392B;border:1px solid #FFCDD2;border-radius:8px;padding:6px 10px;font-size:11px">⚠️ المساحة قربت تخلص — فكّر تحذف بيانات قديمة من "ريستارت النظام" تحت أو تزود الباقة</div>`:''}
+
+      <div style="margin-top:16px;padding-top:14px;border-top:1px dashed #ddd">
+        <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:10px">📊 أكبر الجداول استهلاكاً للمساحة</div>
+        ${rowsHtml || '<div style="font-size:11px;color:#888">لا توجد بيانات</div>'}
+        ${restBytes>0?`<div style="font-size:10px;color:#aaa;margin-top:4px">+ باقي الجداول (${sorted.length-top.length} جدول) ≈ ${_fmtBytes(restBytes)}</div>`:''}
+      </div>
+
+      ${backupTables.length?`
+      <div style="margin-top:14px;background:#FFF3E0;border:1px solid #FFCC80;border-radius:10px;padding:10px 12px">
+        <div style="font-size:12px;font-weight:700;color:#E65100;margin-bottom:4px">🗑️ نسخ احتياطية قديمة غير مستخدمة (${backupTables.length})</div>
+        <div style="font-size:11px;color:#8B5A2B;margin-bottom:8px">
+          ${backupTables.map(t=>`${t.table_name} (${_fmtBytes(+t.size_bytes||0)})`).join(' · ')}
+          — إجمالي ${_fmtBytes(backupBytes)}. اتأكدت إنها مش متصلة بأي شاشة أو تقرير في النظام.
+        </div>
+        <button onclick="deleteBackupTables()" style="padding:6px 14px;background:#C0392B;color:#fff;border:none;border-radius:20px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
+          <i class="ti ti-trash"></i> حذف النسخ الاحتياطية دي نهائياً (${_fmtBytes(backupBytes)})
+        </button>
+      </div>`:''}
     `;
   }catch(e){
     box.innerHTML = `<div style="color:#C0392B;font-size:11px">تعذر حساب المساحة: ${e.message}</div>`;
+  }
+}
+
+async function deleteBackupTables(){
+  const backupTables = (_dbAllTableSizes||[]).filter(t=>/_backup_\d{8}$/.test(t.table_name)).map(t=>t.table_name);
+  if(!backupTables.length) return;
+  if(!confirm(`سيتم حذف ${backupTables.length} جدول نسخة احتياطية نهائياً:\n${backupTables.join('\n')}\n\nهل أنت متأكد؟`)) return;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/drop_backup_tables`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`},
+      body: JSON.stringify({table_names: backupTables})
+    });
+    const result = await res.json();
+    if(res.ok && result?.success){
+      showToast(`✅ تم حذف ${(result.dropped||[]).length} جدول نسخة احتياطية`);
+      loadDbStorageUsage();
+    } else {
+      alert('❌ '+(result?.message||'حدث خطأ أثناء الحذف'));
+    }
+  }catch(e){
+    alert('❌ تعذر الاتصال: '+e.message);
   }
 }
 
