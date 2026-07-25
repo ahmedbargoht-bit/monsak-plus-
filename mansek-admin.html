@@ -21340,6 +21340,8 @@ function sprodExportPDF(){
 // ══════════════════════════════════════════════════════════════
 // SALES RETURNS — مرتجعات المبيعات
 // ══════════════════════════════════════════════════════════════
+let _sretLastData = []; // آخر بيانات محمّلة (بعد الفلترة والـ dedup) — بيستخدمها التصدير PDF/Excel
+
 async function sretInitFilters(){
   await loadAdminRoutesData();
   const grpSel = document.getElementById('sret-grp');
@@ -21419,6 +21421,7 @@ async function sretLoad(){
     }
   });
   const dedupData = Object.values(dedupMap);
+  _sretLastData = dedupData; // نخزنها عشان تصدير PDF/Excel يبني منها ملخص دقيق بدل قراءة الجدول
 
   const pending  = dedupData.filter(r=>!r.pulled);
   const done     = dedupData.filter(r=>r.pulled);
@@ -21525,22 +21528,73 @@ function sretExportExcel(){
 }
 
 function sretExportPDF(){
-  const tbody = document.getElementById('sret-tbody');
-  if(!tbody||!tbody.rows.length) return;
+  const data = _sretLastData||[];
+  if(!data.length) return;
   const from = document.getElementById('sret-from')?.value||'';
   const to   = document.getElementById('sret-to')?.value||'';
-  const rows = [...tbody.rows].map(r=>`<tr style="${r.style.background?'background:'+r.style.background:''}">${[...r.cells].map(c=>`<td>${c.innerText.trim()}</td>`).join('')}</tr>`).join('');
-  const pending = [...tbody.rows].filter(r=>r.innerText.includes('لم يُسحب')).length;
+
+  // ── ملخص أعلى الـ PDF: المجموعة/المناديب/عدد خطوط السير/التأكيدات/كام صنف اتسحب ──
+  const grpLabels  = [...new Set(data.map(r=>GROUPS[r.grp]?.label||r.grp).filter(Boolean))];
+  const repNames   = [...new Set(data.map(r=>r.rep_name||r.name).filter(Boolean))];
+  const routeNames = [...new Set(data.map(r=>{
+    const rdRow = ADMIN_ROUTES_DATA.find(x=>x.branch_name===r.branch);
+    return rdRow?.route || r.route || null;
+  }).filter(Boolean))];
+  const confirmedCount = data.filter(r=>r.confirmed).length;
+  const pulledCount    = data.filter(r=>r.pulled).length;
+  const pulledQty      = data.filter(r=>r.pulled).reduce((s,r)=>s+(+r.qty||0),0);
+  const pendingCount   = data.length - pulledCount;
+
+  const grpText  = grpLabels.length===1 ? grpLabels[0] : (grpLabels.length ? `${grpLabels.length} مجموعات (${grpLabels.join(' · ')})` : '—');
+  const repText  = repNames.length===1 ? repNames[0] : (repNames.length ? `${repNames.length} مندوب (${repNames.join(' · ')})` : '—');
+
+  const summaryHtml = `
+    <div class="summary">
+      <div class="sitem"><div class="slbl">المجموعة</div><div class="sval">${grpText}</div></div>
+      <div class="sitem"><div class="slbl">المندوب</div><div class="sval">${repText}</div></div>
+      <div class="sitem"><div class="slbl">عدد خطوط السير</div><div class="sval">${routeNames.length}</div></div>
+      <div class="sitem"><div class="slbl">تأكيدات الاستلام</div><div class="sval">${confirmedCount}</div></div>
+      <div class="sitem"><div class="slbl">أصناف تم سحبها</div><div class="sval">${pulledCount} (${pulledQty} وحدة)</div></div>
+      <div class="sitem"><div class="slbl">لم يُسحب بعد</div><div class="sval" style="color:#B91C1C">${pendingCount}</div></div>
+    </div>`;
+
+  const rows = data.map((r,i)=>{
+    const rdRow  = ADMIN_ROUTES_DATA.find(x=>x.branch_name===r.branch);
+    const routeN = rdRow?.route || r.route || '—';
+    const isLate = !r.pulled && ((Date.now()-new Date(r.created_at).getTime())/864e5)>=3;
+    const status = r.pulled ? '✅ تم السحب' : `⚠️ لم يُسحب${isLate?' (متأخر)':''}`;
+    const confirm = r.confirmed ? `✅ ${r.confirmed_by||'—'}` : (r.pulled ? '⏳ في انتظار التأكيد' : '—');
+    const dt = r.created_at ? fmtDate(r.created_at) : '—';
+    return `<tr style="${isLate?'background:#FFF0F0':''}">
+      <td>${i+1}</td>
+      <td>${GROUPS[r.grp]?.label||r.grp||'—'}</td>
+      <td>${r.rep_name||r.name||'—'}</td>
+      <td>${routeN}</td>
+      <td>${r.branch||'—'}</td>
+      <td>${r.snf||'—'}</td>
+      <td style="text-align:center">${r.qty||0}</td>
+      <td>${r.reason||'—'}</td>
+      <td>${status}</td>
+      <td>${dt}</td>
+      <td>${confirm}</td>
+    </tr>`;
+  }).join('');
+
   const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><style>
     body{font-family:Cairo,Arial,sans-serif;font-size:11px;padding:16px}
     .hdr{background:#731E2E;color:#fff;padding:12px;border-radius:8px;margin-bottom:10px}
     .warn{background:#FFEBEE;color:#B71C1C;padding:7px 12px;border-radius:6px;margin-bottom:10px;font-weight:700}
-    table{width:100%;border-collapse:collapse}th{background:#731E2E;color:#fff;padding:6px 8px;text-align:right}
-    td{padding:5px 8px;border-bottom:1px solid #eee}
+    .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+    .sitem{background:#F5E6D0;border:1px solid #E8C99A;border-radius:8px;padding:8px 10px}
+    .slbl{font-size:10px;color:#8B5A2B;margin-bottom:3px}
+    .sval{font-size:12px;font-weight:700;color:#3D2000}
+    table{width:100%;border-collapse:collapse}th{background:#731E2E;color:#fff;padding:6px 8px;text-align:right;font-size:10px}
+    td{padding:5px 8px;border-bottom:1px solid #eee;font-size:10px}
   </style></head><body>
   <div class="hdr"><h2 style="margin:0">↩️ مرتجعات المبيعات — ${from} إلى ${to}</h2></div>
-  ${pending>0?`<div class="warn">⚠️ ${pending} مرتجع لم يُسحب بعد</div>`:''}
-  <table><thead><tr><th>#</th><th>المجموعة</th><th>الفرع</th><th>الصنف</th><th>الكمية</th><th>السبب</th><th>الحالة</th><th>التاريخ</th></tr></thead>
+  ${summaryHtml}
+  ${pendingCount>0?`<div class="warn">⚠️ ${pendingCount} مرتجع لم يُسحب بعد</div>`:''}
+  <table><thead><tr><th>#</th><th>المجموعة</th><th>المندوب</th><th>خط السير</th><th>الفرع</th><th>الصنف</th><th>الكمية</th><th>السبب</th><th>الحالة</th><th>التاريخ</th><th>تأكيد الاستلام</th></tr></thead>
   <tbody>${rows}</tbody></table></body></html>`;
   const w=window.open('','_blank','width=1100,height=700');
   w.document.write(html); w.document.close(); setTimeout(()=>{w.focus();w.print();},600);
