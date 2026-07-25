@@ -4967,14 +4967,30 @@ function retOnRouteChange(){
   loadReturns();
 }
 
+// ✅ ده استخدام احتياطي بس — لما المشرف يحتاج يسجل "الرفع" بنفسه (مثلاً المندوب معملش
+// الخطوة دي من تطبيقه). بيكتب على pulled/pulled_by بس، ومبيلمسش confirmed خالص.
 async function confirmReturnPull(id, branchName){
-  if(!confirm(`تأكيد سحب المرتجع من:\n${branchName}؟`)) return;
+  if(!confirm(`تسجيل رفع المرتجع من:\n${branchName}؟\n(استخدم الزرار ده بس لو المندوب معملش الخطوة دي من تطبيقه)`)) return;
   await fetch(`${SUPABASE_URL}/rest/v1/returns?id=eq.${id}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body:JSON.stringify({pulled:true, pulled_at:new Date().toISOString(), pulled_by:cu?.name||'مشرف'})
   });
-  showToast('✅ تم تأكيد سحب المرتجع');
+  showToast('✅ تم تسجيل رفع المرتجع');
+  loadReturns();
+}
+
+// ✅ الخطوة الجديدة: تأكيد المشرف على إن المرتجع اللي سجّله المندوب (pulled=true) اترفع
+// فعلاً — بيكتب على confirmed/confirmed_by بس، من غير ما يلمس pulled/pulled_by، عشان
+// اسم المندوب الأصلي اللي رفع المرتجع يفضل محفوظ زي ما هو.
+async function confirmReturnBySupervisor(id, branchName){
+  if(!confirm(`تأكيد إنك استلمت/تحققت من المرتجع من:\n${branchName}؟`)) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/returns?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({confirmed:true, confirmed_at:new Date().toISOString(), confirmed_by:cu?.name||'مشرف'})
+  });
+  showToast('☑️ تم تأكيد المرتجع باسمك');
   loadReturns();
 }
 
@@ -5021,11 +5037,14 @@ async function loadReturns(){
   }
 
   const totalQty=data.reduce((s,r)=>s+(+r.qty||0),0);
-  document.getElementById('ret-stats').innerHTML=`
+  const statsEl = document.getElementById('ret-stats');
+  statsEl.style.gridTemplateColumns='repeat(5,1fr)';
+  statsEl.innerHTML=`
     <div class="stat-c red"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي</div></div>
     <div class="stat-c red"><div class="stat-n">${totalQty}</div><div class="stat-l">وحدات</div></div>
     <div class="stat-c"><div class="stat-n">${pending.length}</div><div class="stat-l">⏳ لم يُسحب</div></div>
-    <div class="stat-c"><div class="stat-n">${data.filter(r=>r.pulled).length}</div><div class="stat-l">✅ تم السحب</div></div>`;
+    <div class="stat-c"><div class="stat-n">${data.filter(r=>r.pulled).length}</div><div class="stat-l">✅ تم السحب</div></div>
+    <div class="stat-c"><div class="stat-n">${data.filter(r=>r.confirmed).length}</div><div class="stat-l">☑️ مؤكد من المشرف</div></div>`;
 
   const daysSince = d => {
     const diff = Date.now() - new Date(d).getTime();
@@ -5033,22 +5052,32 @@ async function loadReturns(){
   };
 
   document.getElementById('ret-tbody').innerHTML=data.map((r,i)=>{
-    const isPulled  = r.pulled;
+    const isPulled    = r.pulled;
+    const isConfirmed = r.confirmed;
     const days      = daysSince(r.created_at);
     const rowBg     = !isPulled && days>=3 ? 'background:#FFF0F0' : '';
     const reminder  = !isPulled && days>=3 ?
       `<div style="color:#B71C1C;font-size:9px;margin-top:2px">⚠️ منذ ${days} يوم</div>` : '';
 
-    const pullBtn = !isPulled
-      ? `<button onclick="confirmReturnPull(${r.id},'${(r.branch||'').replace(/'/g,"\\'")}' )"
-          style="background:#1A7A4A;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:Cairo,sans-serif;white-space:nowrap">
-          ✅ تأكيد السحب
-        </button>`
-      : `<div style="color:#1A7A4A;font-size:10px;font-weight:700">✅ تم<br><span style="color:#aaa;font-size:9px">${r.pulled_by||'—'}</span></div>`;
+    // ✅ 3 حالات: (1) لسه المندوب ماسحبش (2) المندوب سحب ومحتاج تأكيد المشرف (3) اتأكد
+    const actionCell = isConfirmed
+      ? `<div style="color:#1565C0;font-size:10px;font-weight:700">☑️ تم التأكيد<br><span style="color:#aaa;font-size:9px">${r.confirmed_by||'—'}</span></div>`
+      : isPulled
+        ? `<button onclick="confirmReturnBySupervisor(${r.id},'${(r.branch||'').replace(/'/g,"\\'")}' )"
+            style="background:#1565C0;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:Cairo,sans-serif;white-space:nowrap">
+            ☑️ تأكيد الاستلام
+          </button>`
+        : `<button onclick="confirmReturnPull(${r.id},'${(r.branch||'').replace(/'/g,"\\'")}' )"
+            style="background:#1A7A4A;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:Cairo,sans-serif;white-space:nowrap">
+            ✅ تسجيل الرفع
+          </button>`;
 
-    const statusBadge = isPulled
-      ? `<span style="background:#E8F5E9;color:#1A7A4A;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">✅ تم السحب</span>`
-      : `<span style="background:#FFEBEE;color:#B71C1C;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">⏳ لم يُسحب</span>`;
+    const statusBadge = isConfirmed
+      ? `<span style="background:#E3F2FD;color:#1565C0;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">☑️ مؤكد</span>`
+      : isPulled
+        ? `<span style="background:#E8F5E9;color:#1A7A4A;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">✅ تم السحب</span>
+           <div style="font-size:9px;color:#888;margin-top:2px">${r.pulled_by||'—'}</div>`
+        : `<span style="background:#FFEBEE;color:#B71C1C;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">⏳ لم يُسحب</span>`;
 
     return `<tr style="${rowBg}">
       <td>${i+1}</td>
@@ -5058,7 +5087,7 @@ async function loadReturns(){
       <td style="text-align:center"><b style="color:var(--red)">${r.qty||0}</b></td>
       <td style="font-size:10px">${r.reason||'—'}</td>
       <td>${statusBadge}</td>
-      <td>${pullBtn}</td>
+      <td>${actionCell}</td>
       <td style="font-size:10px">${r.created_at?new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'}):'—'}</td>
     </tr>`;
   }).join('')||'<tr><td colspan="9" style="text-align:center;padding:1rem;color:#aaa">لا توجد مرتجعات</td></tr>';
