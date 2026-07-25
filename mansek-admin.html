@@ -12456,21 +12456,43 @@ function caExtractJSON(text){
 
 const CA_SECTION_LABELS = {summary:'ملخص التحقيق', fixed:'خصم ثابت', fees:'رسوم', openings:'افتتاحات', percentage:'نسبة خصم', tier:'شريحة', credit:'ائتمان'};
 
-async function caRunAIExtraction(){
-  const file = document.getElementById('ca-ai-pdf-file').files[0];
-  if(!file){ showToast('❌ اختار ملف PDF الأول'); return; }
-  const statusEl = document.getElementById('ca-ai-status');
-  const btn = document.getElementById('ca-ai-extract-btn');
-  btn.disabled = true;
-  statusEl.textContent = '⏳ جاري قراءة الملف...';
-  try{
-    const text = await caExtractPDFText(file);
-    if(!text || text.length < 20){ throw new Error('مقدرتش أقرا نص من الملف — لو الملف صورة ممسوحة (سكانر) الاستخراج التلقائي مش هيشتغل حاليًا'); }
-    statusEl.textContent = '⏳ جاري تحليل العقد بالذكاء الاصطناعي...';
-    await aiEnsureGroqKey();
-    const sys = `أنت محلل عقود تجاري متخصص في عقود التوريد لسلاسل السوبر ماركت والهايبر ماركت في مصر.
-هيتم إعطاؤك نص عقد مستخرج من ملف PDF. مطلوب منك تستخرج كل البنود المالية والنسب المذكورة في العقد وترجعها فقط كـ JSON array بدون أي نص إضافي أو markdown، بالشكل ده بالظبط:
+// ── نظام الاستخراج بالـ Vision (بيقرأ صورة الصفحة زي ما هي بعينها) ──
+// السبب: pdf.js بيسحب النص بترتيب رسمه جوه ملف الـ PDF مش بترتيب القراءة البصرية،
+// وده بيبوّظ خالص أي عقد فيه جداول مركبة (زي جدول "البند التاسع - الشروط التجارية" في
+// عقود سبينيس) — الأرقام والمسميات بتتقطع عن بعض ومترتبش صح، فالـ AI كان بيخمّن/يخترع
+// ربط غلط بين الاسم والرقم. الحل: نحوّل كل صفحة لصورة ونديها لموديل يقرأ صور (Gemini/Claude)
+// عشان يشوف الجدول زي ما هو مرسوم بالظبط، بدل ما يعتمد على نص متقطّع.
+async function caRenderPDFPagesToImages(file, maxPages){
+  if(typeof pdfjsLib === 'undefined') throw new Error('مكتبة قراءة PDF لم يتم تحميلها — حدّث الصفحة وجرب تاني');
+  if(!pdfjsLib.GlobalWorkerOptions.workerSrc){
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data:buf}).promise;
+  const images = [];
+  const total = Math.min(pdf.numPages, maxPages||12);
+  for(let i=1;i<=total;i++){
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({scale:2}); // دقة عالية كفاية لقراءة الجداول الصغيرة والنسب
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width; canvas.height = viewport.height;
+    const ctx = canvas.getContext('2d');
+    await page.render({canvasContext:ctx, viewport}).promise;
+    images.push(canvas.toDataURL('image/png').split(',')[1]); // base64 بس من غير الـ prefix
+  }
+  return images;
+}
+
+function caBuildExtractionSysPrompt(){
+  return `أنت محلل عقود تجاري متخصص في عقود التوريد لسلاسل السوبر ماركت والهايبر ماركت في مصر.
+هتشوف صور صفحات عقد فعلي (ممكن يكون فيها جداول مركّبة بأعمدة وصفوف). مطلوب منك تستخرج كل البنود المالية والنسب المذكورة في العقد وترجعها فقط كـ JSON array بدون أي نص إضافي أو markdown، بالشكل ده بالظبط:
 [{"section":"fixed","item_name":"اسم البند","value":"الرقم","notes":"أي ملاحظة أو تارجت"}]
+
+مهم جدًا — دقة الربط بين الاسم والرقم:
+- item_name لازم يكون النص الحرفي المكتوب فعليًا في الجدول/العقد بالظبط (زي "نسبة خصم الفاتورة" أو "Monthly Fixed Rebate" أو "مهرجان رمضان")، من غير ما تلخصه أو تعيد صياغته أو تستبدله بمسمى عام.
+- الأمثلة المذكورة تحت في قواعد التصنيف هي بس لمساعدتك تفهم نوع كل قسم — مش أسماء بنود جاهزة تستخدمها بدل الاسم الحقيقي في الصورة.
+- في الجداول اللي فيها أكتر من عمود (زي جدول الشرائح Progressive Rebate، أو جدول المشاركة في الأنشطة التسويقية بأسماء مناسبات مختلفة كل واحدة بنسبتها)، اتأكد إنك بتربط كل رقم بالعمود/الصف الصح بتاعه بالظبط زي ما هو مرسوم في الصورة — لو مش متأكد من الربط اتركه من غير ما تخمّن.
+- لو نفس النوع (زي "خصم مقابل عدم قبول المرتجع") اتكرر لأكتر من صنف مرتجع مختلف (تالفة/منتهية الصلاحية/اقتربت من الانتهاء/زيادة عن المبيعات)، سجّل كل واحد ببند منفصل باسم واضح يوضح نوع المرتجع اللي بيتكلم عنه.
 
 قواعد التصنيف لحقل section:
 - "summary": بنود التحقيق الكلي مثل "محقق بدون الخصم" أو "محقق بعد الخصم" لو مذكورة كأرقام فعلية
@@ -12481,9 +12503,90 @@ async function caRunAIExtraction(){
 - "tier": خصومات شرائح حسب حجم المبيعات (خصم شريحة 1، خصم شريحة 2...) — value نسبة عشرية، notes فيها رقم التارجت/المستهدف
 - "credit": فترة الائتمان — item_name="فترة الائتمان"، value فاضي، notes النص الكامل (مثلاً "45 يوم")
 
-لو بند مش موجود صراحة في النص متضيفوش، ولو مش متأكد من رقم سيبه فاضي بدل ما تخترعه. رجّع الـ JSON بس من غير أي شرح أو تعليق.`;
-    const userMsg = `نص العقد المستخرج من PDF:\n\n${text.slice(0,15000)}`;
-    const resp = await groqChat([{role:'system',content:sys},{role:'user',content:userMsg}], 4000);
+لو بند مش موجود صراحة في العقد متضيفوش، ولو مش متأكد من رقم أو ربط سيبه فاضي بدل ما تخترعه. رجّع الـ JSON بس من غير أي شرح أو تعليق.`;
+}
+
+async function caVisionExtractGemini(base64Images, sys, userText){
+  await aiEnsureGeminiKey();
+  if(!_GEMINI_KEY) throw new Error('مفتاح Gemini غير متاح');
+  const parts = [{text:userText}, ...base64Images.map(b64=>({inline_data:{mime_type:'image/png', data:b64}}))];
+  const body = {
+    contents: [{role:'user', parts}],
+    systemInstruction: {parts:[{text:sys}]},
+    generationConfig: { maxOutputTokens: 4000, temperature: 0.2 }
+  };
+  const res = await fetch(GEMINI_URL+'?key='+_GEMINI_KEY, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+  });
+  if(!res.ok){ const er = await res.json().catch(()=>({})); throw new Error('[Gemini Vision] '+(er?.error?.message||'HTTP '+res.status)); }
+  const data = await res.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text||'';
+  if(!text) throw new Error('[Gemini Vision] رد فارغ');
+  console.log('[Gemini Vision] ✅ تم');
+  return text;
+}
+
+async function caVisionExtractClaude(base64Images, sys, userText){
+  await aiEnsureClaudeKey();
+  if(!_CLAUDE_KEY) throw new Error('مفتاح Claude غير متاح');
+  const content = [
+    ...base64Images.map(b64=>({type:'image', source:{type:'base64', media_type:'image/png', data:b64}})),
+    {type:'text', text:userText}
+  ];
+  const body = { model: CLAUDE_MODEL, max_tokens: 4000, system: sys, messages:[{role:'user', content}] };
+  const res = await fetch(CLAUDE_URL, {
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':_CLAUDE_KEY,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body: JSON.stringify(body)
+  });
+  if(!res.ok){ const er = await res.json().catch(()=>({})); throw new Error('[Claude Vision] '+(er?.error?.message||'HTTP '+res.status)); }
+  const data = await res.json();
+  const text = data?.content?.[0]?.text||'';
+  if(!text) throw new Error('[Claude Vision] رد فارغ');
+  console.log('[Claude Vision] ✅ تم');
+  return text;
+}
+
+async function caRunAIExtraction(){
+  const file = document.getElementById('ca-ai-pdf-file').files[0];
+  if(!file){ showToast('❌ اختار ملف PDF الأول'); return; }
+  const statusEl = document.getElementById('ca-ai-status');
+  const btn = document.getElementById('ca-ai-extract-btn');
+  btn.disabled = true;
+  const sys = caBuildExtractionSysPrompt();
+  let resp = null, usedVision = false;
+
+  // ── المحاولة الأولى (الأدق): قراءة صور صفحات الملف مباشرة بموديل يفهم صور ──
+  try{
+    statusEl.textContent = '⏳ جاري تحويل صفحات الملف لصور...';
+    const images = await caRenderPDFPagesToImages(file, 10);
+    if(!images.length) throw new Error('مفيش صفحات اتقرت من الملف');
+    const userText = 'دي صور صفحات عقد توريد فعلي — اقرأ كل الجداول والبنود المالية بدقة زي ما هي مرسومة، واستخرجها حسب التعليمات.';
+    statusEl.textContent = '⏳ جاري تحليل العقد بالذكاء الاصطناعي (قراءة بصرية للجداول)...';
+    try{
+      resp = await caVisionExtractGemini(images, sys, userText);
+      usedVision = true;
+    }catch(e1){
+      console.warn('[CA] Gemini Vision فشل:', e1.message, '— جاري تجربة Claude Vision...');
+      resp = await caVisionExtractClaude(images, sys, userText);
+      usedVision = true;
+    }
+  }catch(visionErr){
+    console.warn('[CA] الاستخراج البصري فشل بالكامل:', visionErr.message, '— هنرجع لاستخراج النص كحل بديل (دقة أقل في الجداول المركبة)');
+  }
+
+  try{
+    // ── لو الاستخراج البصري فشل بالكامل (مفيش مفاتيح Gemini/Claude مثلاً) — نرجع للطريقة القديمة بالنص ──
+    if(!resp){
+      statusEl.textContent = '⏳ جاري قراءة نص الملف (طريقة احتياطية)...';
+      const text = await caExtractPDFText(file);
+      if(!text || text.length < 20){ throw new Error('مقدرتش أقرا نص من الملف — لو الملف صورة ممسوحة (سكانر) الاستخراج التلقائي مش هيشتغل حاليًا'); }
+      statusEl.textContent = '⏳ جاري تحليل العقد بالذكاء الاصطناعي...';
+      await aiEnsureGroqKey();
+      const userMsg = `نص العقد المستخرج من PDF (ملحوظة: النص ده ممكن يكون ترتيبه مش دقيق 100% في الجداول المركبة):\n\n${text.slice(0,15000)}`;
+      resp = await groqChat([{role:'system',content:sys},{role:'user',content:userMsg}], 4000);
+    }
+
     const jsonStr = caExtractJSON(resp);
     const items = JSON.parse(jsonStr);
     if(!Array.isArray(items) || !items.length) throw new Error('الذكاء الاصطناعي مقدرش يستخرج بنود واضحة من الملف');
@@ -12495,6 +12598,9 @@ async function caRunAIExtraction(){
     })).filter(it=>it.item_name);
     if(!_caAIPreviewItems.length) throw new Error('الذكاء الاصطناعي رجّع بنود فاضية');
     caRenderAIPreview();
+    statusEl.textContent = usedVision
+      ? '✅ تم الاستخراج بالقراءة البصرية للجداول — راجع البنود تحت قبل الاستيراد'
+      : '⚠️ تم الاستخراج بقراءة النص فقط (الطريقة الأدق فشلت) — راجع البنود بعناية خصوصًا الجداول المركبة';
     document.getElementById('ca-ai-step1').style.display = 'none';
     document.getElementById('ca-ai-step2').style.display = '';
   }catch(e){
