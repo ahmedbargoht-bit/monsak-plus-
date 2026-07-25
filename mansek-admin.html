@@ -5433,6 +5433,20 @@ h2,h3{color:#2C1F0A}
               <div id="ca-ai-reco-result" style="display:none;margin-top:10px;padding:12px;background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;font-size:13px;line-height:1.9;white-space:pre-wrap"></div>
             </div>
 
+            <div class="card" style="margin-bottom:14px">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                <h3 style="font-size:14px;font-weight:800;color:var(--text-primary)">🎯 أرقام التحقيق الفعلي (لحساب نسبة الخصم الفعلية)</h3>
+                <button class="btn btn-xs" style="background:#E3F2FD;color:#1565C0" onclick="caSaveSummaryValues()"><i class="ti ti-device-floppy"></i> حفظ</button>
+              </div>
+              <div style="font-size:11px;color:var(--text2);margin-bottom:10px">اكتب هنا إجمالي مبيعات العميل الفعلية (بدون خصم / بعد الخصم) لكل سنة — النظام هيحسب نسبة الخصم الفعلية تلقائيًا فوق.</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <div class="fld" style="margin:0"><label class="lbl">محقق 2025 قبل الخصم (بدون خصم)</label><input type="text" id="ca-sum-before25" class="modal-inp" placeholder="0"/></div>
+                <div class="fld" style="margin:0"><label class="lbl">محقق 2025 بعد الخصم</label><input type="text" id="ca-sum-after25" class="modal-inp" placeholder="0"/></div>
+                <div class="fld" style="margin:0"><label class="lbl">محقق 2026 قبل الخصم (بدون خصم)</label><input type="text" id="ca-sum-before26" class="modal-inp" placeholder="0"/></div>
+                <div class="fld" style="margin:0"><label class="lbl">محقق 2026 بعد الخصم</label><input type="text" id="ca-sum-after26" class="modal-inp" placeholder="0"/></div>
+              </div>
+            </div>
+
             <div id="ca-summary" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px"></div>
 
             <div class="card" style="margin-bottom:14px">
@@ -12003,6 +12017,15 @@ function caRenderAll(){
   const afterIt  = summary.find(it=>(it.item_name||'').includes('بعد'));
   const pct2025 = caDiscountPct(beforeIt?.value_2025, afterIt?.value_2025);
   const pct2026 = caDiscountPct(beforeIt?.value_2026, afterIt?.value_2026);
+
+  // ملى حقول إدخال أرقام التحقيق الفعلي بآخر قيم محفوظة (لو موجودة)
+  const _b25=document.getElementById('ca-sum-before25'), _a25=document.getElementById('ca-sum-after25');
+  const _b26=document.getElementById('ca-sum-before26'), _a26=document.getElementById('ca-sum-after26');
+  if(_b25) _b25.value = beforeIt?.value_2025||'';
+  if(_a25) _a25.value = afterIt?.value_2025||'';
+  if(_b26) _b26.value = beforeIt?.value_2026||'';
+  if(_a26) _a26.value = afterIt?.value_2026||'';
+
   document.getElementById('ca-summary').innerHTML = `
     <div class="stat-card blue"><div class="stat-n">${beforeIt&&caIsNum(beforeIt.value_2025)?parseFloat(beforeIt.value_2025).toLocaleString('en-US'):'—'}</div><div class="stat-l">محقق 2025 قبل الخصم</div></div>
     <div class="stat-card green"><div class="stat-n">${afterIt&&caIsNum(afterIt.value_2025)?parseFloat(afterIt.value_2025).toLocaleString('en-US'):'—'}</div><div class="stat-l">محقق 2025 بعد الخصم</div></div>
@@ -12158,6 +12181,43 @@ async function caSaveModal(){
     if(!r.ok){ showToast('❌ فشل الحفظ'); return; }
     caCloseModal();
     showToast('✅ تم الحفظ');
+    caSelectClient(_caCurrentClientId);
+  }catch(e){ showToast('❌ خطأ في الاتصال'); }
+}
+
+// حفظ أرقام "محقق قبل/بعد الخصم" لسنة 2025 و2026 — بتتسجل كبندين في contract_items
+// بقسم section='summary'، بنفس أسماء البنود اللي منطق caRenderAll بيدوّر عليها
+// (لازم "بدون" في اسم بند القبل و"بعد" في اسم بند البعد) عشان نسبة الخصم الفعلية تتحسب.
+async function caSaveSummaryValues(){
+  if(!_caCurrentClientId){ showToast('❌ اختار عميل الأول'); return; }
+  const before25 = document.getElementById('ca-sum-before25')?.value.trim()||null;
+  const after25  = document.getElementById('ca-sum-after25')?.value.trim()||null;
+  const before26 = document.getElementById('ca-sum-before26')?.value.trim()||null;
+  const after26  = document.getElementById('ca-sum-after26')?.value.trim()||null;
+
+  const summary  = _caItems.filter(it=>it.section==='summary');
+  const beforeIt = summary.find(it=>(it.item_name||'').includes('بدون'));
+  const afterIt  = summary.find(it=>(it.item_name||'').includes('بعد'));
+
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
+  try{
+    const reqs = [];
+    // بند "المحقق بدون خصم"
+    if(beforeIt){
+      reqs.push(fetch(`${SUPABASE_URL}/rest/v1/contract_items?id=eq.${beforeIt.id}`,{method:'PATCH',headers:H,body:JSON.stringify({value_2025:before25, value_2026:before26})}));
+    } else if(before25||before26){
+      reqs.push(fetch(`${SUPABASE_URL}/rest/v1/contract_items`,{method:'POST',headers:H,body:JSON.stringify({client_id:+_caCurrentClientId, section:'summary', item_name:'المحقق بدون خصم', value_2025:before25, value_2026:before26, sort_order:1})}));
+    }
+    // بند "المحقق بعد الخصم"
+    if(afterIt){
+      reqs.push(fetch(`${SUPABASE_URL}/rest/v1/contract_items?id=eq.${afterIt.id}`,{method:'PATCH',headers:H,body:JSON.stringify({value_2025:after25, value_2026:after26})}));
+    } else if(after25||after26){
+      reqs.push(fetch(`${SUPABASE_URL}/rest/v1/contract_items`,{method:'POST',headers:H,body:JSON.stringify({client_id:+_caCurrentClientId, section:'summary', item_name:'المحقق بعد الخصم', value_2025:after25, value_2026:after26, sort_order:2})}));
+    }
+    if(!reqs.length){ showToast('❌ اكتب رقم واحد على الأقل'); return; }
+    const results = await Promise.all(reqs);
+    if(results.some(r=>!r.ok)){ showToast('❌ فشل حفظ بعض الأرقام'); return; }
+    showToast('✅ تم حفظ أرقام التحقيق');
     caSelectClient(_caCurrentClientId);
   }catch(e){ showToast('❌ خطأ في الاتصال'); }
 }
