@@ -35651,10 +35651,13 @@ async function serInit(){
   const grpSel = document.getElementById('ser-grp');
   if(grpSel && grpSel.options.length <= 1){
     try{
-      const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/product_snapshots?select=grp&limit=5000`,{headers:H});
+      const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
+      // بنجيب المجموعات مباشرة من products عن طريق RPC (distinct حقيقي على الجدول كله)
+      // بدل ما كنا بنجيب أول 5000 صف بس من product_snapshots (47 ألف صف) من غير ترتيب،
+      // وده كان بيخلي أغلب المجموعات ميظهروش في القائمة خالص
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/ser_distinct_groups`,{method:'POST',headers:H,body:'{}'});
       const data = res.ok ? await res.json() : [];
-      const grps = [...new Set((Array.isArray(data)?data:[]).map(r=>r.grp).filter(Boolean))]
+      const grps = (Array.isArray(data)?data:[]).map(r=>r.grp).filter(Boolean)
         .sort((a,b)=>(GROUPS[a]?.label||a).localeCompare(GROUPS[b]?.label||b,'ar'));
       grps.forEach(g=>{ const o=document.createElement('option'); o.value=g; o.textContent=GROUPS[g]?.label||g; grpSel.appendChild(o); });
     }catch(e){}
@@ -35689,28 +35692,26 @@ async function serLoadBranches(){
   branchSel.innerHTML = '<option value="">كل الفروع</option>';
 
   try{
-    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    let url = `${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&limit=2000`;
-    if(grp)   url += `&grp=eq.${encodeURIComponent(grp)}`;
-    if(route) url += `&route=eq.${encodeURIComponent(route)}`;
-    const res = await fetch(url,{headers:H});
+    // بنجيب الفروع مباشرة من products (مصدر بيانات التقرير نفسه) عن طريق RPC
+    // بدل coord_route_assignments اللي طلع فيه فروع فعلية بيانات ناقصة منه (مش كل فرع اتضاف فيه)
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/ser_distinct_branches`,{method:'POST',headers:H,body:JSON.stringify({p_grp:grp||null,p_route:route||null})});
     const data = res.ok ? await res.json() : [];
-    const branches = [...new Set((Array.isArray(data)?data:[]).map(r=>r.branch_name).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+    const branches = (Array.isArray(data)?data:[]).map(r=>r.branch).filter(Boolean).sort((a,b)=>a.localeCompare(b,'ar'));
     branches.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=b; branchSel.appendChild(o); });
   }catch(e){}
 }
 
 async function serLoadFilters(){
   const grp = document.getElementById('ser-grp')?.value||'';
-  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
 
-  // جيب خطوط السير من coord_route_assignments (مش من products عشان كبير)
+  // جيب خطوط السير مباشرة من products (مصدر بيانات التقرير نفسه) عن طريق RPC
+  // بدل coord_route_assignments اللي طلع فيه خطوط سير فعلية وعليها بيانات مبيعات حديثة مش موجودة فيه
   try{
-    let url = `${SUPABASE_URL}/rest/v1/coord_route_assignments?select=route&limit=2000`;
-    if(grp) url += `&grp=eq.${encodeURIComponent(grp)}`;
-    const res = await fetch(url,{headers:H});
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/ser_distinct_routes`,{method:'POST',headers:H,body:JSON.stringify({p_grp:grp||null})});
     const data = res.ok ? await res.json() : [];
-    const routes = [...new Set((Array.isArray(data)?data:[]).map(r=>r.route).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+    const routes = (Array.isArray(data)?data:[]).map(r=>r.route).filter(Boolean).sort((a,b)=>a.localeCompare(b,'ar'));
     const routeSel = document.getElementById('ser-route');
     if(routeSel){
       const cur = routeSel.value;
@@ -35795,20 +35796,11 @@ async function serLoad(){
 
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
 
-    // إذا اختار المستخدم مجموعة ومش اختار خط سير، حوّل المجموعة لخطوط سير
-    let grpRoutes = [];
-    if(grp && !route){
-      try{
-        const cRes = await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=route&grp=eq.${encodeURIComponent(grp)}&limit=500`,{headers:H});
-        if(cRes.ok){
-          const cData = await cRes.json();
-          grpRoutes = [...new Set((Array.isArray(cData)?cData:[]).map(r=>r.route).filter(Boolean))];
-        }
-      }catch(e){}
-    }
-
-    let url = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,route,shelf_qty,stock_qty,date_shelf,months_shelf,date_stock,months_stock,cat,fea,created_at&order=snf.asc,branch.asc,created_at.desc&limit=5000`;
-    if(grpRoutes.length) url += `&route=in.(${grpRoutes.map(r=>encodeURIComponent(r)).join(',')})`;
+    // فلتر المجموعة بقى مباشر على عمود grp في جدول products نفسه
+    // (كان بيتحول لأول لخطوط سير عن طريق coord_route_assignments، وده جدول تعيينات ناقص —
+    // فيه خطوط سير وفروع فعلية عليها بيانات حقيقية ومش متسجلة فيه، فكانت بتختفي من النتايج غلط)
+    let url = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,route,grp,shelf_qty,stock_qty,date_shelf,months_shelf,date_stock,months_stock,cat,fea,created_at&order=snf.asc,branch.asc,created_at.desc&limit=5000`;
+    if(grp)    url += `&grp=eq.${encodeURIComponent(grp)}`;
     if(route)  url += `&route=eq.${encodeURIComponent(route)}`;
     if(branch) url += `&branch=eq.${encodeURIComponent(branch)}`;
     if(fea)    url += `&fea=eq.${encodeURIComponent(fea)}`;
