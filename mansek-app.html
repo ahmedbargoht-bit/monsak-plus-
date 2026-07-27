@@ -1178,6 +1178,12 @@ async function restoreShiftTimer(){
 function showShiftTimer(checkInTime){
   const card = document.getElementById('shift-timer-card');
   if(!card) return;
+  // اتلغى لمنسقي "ثابت" و"ثابت كبار عملاء" — عداد الشيفت بيفضل بس للمنسق المتحرك
+  if(isFixedRep(cu?.coordType)){
+    card.style.display = 'none';
+    if(shiftTimerInterval){ clearInterval(shiftTimerInterval); shiftTimerInterval=null; }
+    return;
+  }
   card.style.display = 'block';
 
   if(shiftTimerInterval) clearInterval(shiftTimerInterval);
@@ -4899,7 +4905,22 @@ async function apiPost(data){
         space_used:d.spaceUsed||0, sku_on:d.skuOn||0, sku_stock:d.skuStock||0,
         missing_count:d.missing||0, points:d.points||0, coord_type:d.coordType||'متحرك'
       });
-      if(visitId) window._currentVisitId = visitId;
+      if(visitId){
+        window._currentVisitId = visitId;
+        // ── ربط retroactive: الأصناف/النواقص/المرتجعات بتتبعت من التابات قبل ما نعرف رقم الزيارة أصلاً
+        // (المنسق بيبعتها الأول وبعدين يحفظ الزيارة) فبتوصل بـ visit_id فاضي. هنا بعد ما الزيارة
+        // اتسجلت وعرفنا رقمها، بنربط أي صف لنفس المنسق/الفرع/اليوم ده كان لسه من غير visit_id.
+        try{
+          const H2 = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+          const dayStart = `${d.date}T00:00:00`, dayEnd = `${d.date}T23:59:59`;
+          const linkTable = (table) => fetch(
+            `${SUPABASE_URL}/rest/v1/${table}?name=eq.${encodeURIComponent(d.name)}&branch=eq.${encodeURIComponent(d.branch)}`+
+            `&created_at=gte.${dayStart}&created_at=lte.${dayEnd}&visit_id=is.null`,
+            {method:'PATCH', headers:H2, body: JSON.stringify({visit_id: visitId})}
+          ).catch(err=>console.warn('link '+table+' to visit failed:', err));
+          await Promise.all([linkTable('products'), linkTable('missing'), linkTable('returns')]);
+        }catch(linkErr){ console.warn('visit_id backfill error:', linkErr); }
+      }
       return !!visitId;
     }
 
