@@ -4642,11 +4642,10 @@ h2,h3{color:#2C1F0A}
                 <select id="ser-month" onchange="serOnMonthChange()" style="width:100%;padding:7px 10px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
                 </select>
               </div>
-              <div>
-                <label style="font-size:11px;font-weight:700;color:#7B5C2A;display:block;margin-bottom:4px">المجموعة</label>
-                <select id="ser-grp" onchange="serLoadFilters()" style="width:100%;padding:7px 10px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
-                  <option value="">كل المجموعات</option>
-                </select>
+              <div style="grid-column:span 2">
+                <label style="font-size:11px;font-weight:700;color:#7B5C2A;display:block;margin-bottom:4px">المجموعة (تقدر تختار أكتر من وحدة)</label>
+                <div id="ser-grp-checks" style="display:flex;flex-wrap:wrap;gap:6px;min-height:32px"></div>
+                <div id="ser-snf-total" style="margin-top:6px;font-size:12px;font-weight:700;color:#731E2E;display:none"></div>
               </div>
               <div>
                 <label style="font-size:11px;font-weight:700;color:#7B5C2A;display:block;margin-bottom:4px">خط السير</label>
@@ -35595,6 +35594,8 @@ async function serFetchOptions(p_grp, p_fea, p_cat){
   try{
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
     let url = `${SUPABASE_URL}/rest/v1/products?select=fea,cat,snf&limit=5000`;
+    if(Array.isArray(p_grp) && p_grp.length) url += `&grp=in.(${p_grp.map(g=>encodeURIComponent(g)).join(',')})`;
+    else if(p_grp && !Array.isArray(p_grp)) url += `&grp=eq.${encodeURIComponent(p_grp)}`;
     if(p_fea) url += `&fea=eq.${encodeURIComponent(p_fea)}`;
     if(p_cat) url += `&cat=eq.${encodeURIComponent(p_cat)}`;
     const res = await fetch(url,{headers:H});
@@ -35648,8 +35649,8 @@ async function serInit(){
     }
   }
 
-  const grpSel = document.getElementById('ser-grp');
-  if(grpSel && grpSel.options.length <= 1){
+  const grpChecksBox = document.getElementById('ser-grp-checks');
+  if(grpChecksBox && !grpChecksBox.dataset.loaded){
     try{
       const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
       // بنجيب المجموعات مباشرة من products عن طريق RPC (distinct حقيقي على الجدول كله)
@@ -35659,7 +35660,11 @@ async function serInit(){
       const data = res.ok ? await res.json() : [];
       const grps = (Array.isArray(data)?data:[]).map(r=>r.grp).filter(Boolean)
         .sort((a,b)=>(GROUPS[a]?.label||a).localeCompare(GROUPS[b]?.label||b,'ar'));
-      grps.forEach(g=>{ const o=document.createElement('option'); o.value=g; o.textContent=GROUPS[g]?.label||g; grpSel.appendChild(o); });
+      grpChecksBox.innerHTML = grps.map(g=>`
+        <label class="rep-cb-label" data-grp="${g}">
+          <input type="checkbox" class="ser-grp-cb" value="${g}" onchange="serGrpCbChange(this)"/> ${GROUPS[g]?.label||g}
+        </label>`).join('');
+      grpChecksBox.dataset.loaded = '1';
     }catch(e){}
   }
 
@@ -35684,8 +35689,18 @@ function serOnMonthChange(){
   // مش محتاج نعمل حاجة — الشهر بيتستخدم في serLoad
 }
 
+// يرجع مصفوفة بكل المجموعات المحددة من مربعات الاختيار (فاضية = كل المجموعات)
+function serSelectedGrps(){
+  return [...document.querySelectorAll('.ser-grp-cb:checked')].map(cb=>cb.value);
+}
+
+function serGrpCbChange(el){
+  el.closest('.rep-cb-label')?.classList.toggle('active', el.checked);
+  serLoadFilters();
+}
+
 async function serLoadBranches(){
-  const grp   = document.getElementById('ser-grp')?.value||'';
+  const grps  = serSelectedGrps();
   const route = document.getElementById('ser-route')?.value||'';
   const branchSel = document.getElementById('ser-branch');
   if(!branchSel) return;
@@ -35695,7 +35710,7 @@ async function serLoadBranches(){
     // بنجيب الفروع مباشرة من products (مصدر بيانات التقرير نفسه) عن طريق RPC
     // بدل coord_route_assignments اللي طلع فيه فروع فعلية بيانات ناقصة منه (مش كل فرع اتضاف فيه)
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/ser_distinct_branches`,{method:'POST',headers:H,body:JSON.stringify({p_grp:grp||null,p_route:route||null})});
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/ser_distinct_branches`,{method:'POST',headers:H,body:JSON.stringify({p_grp:grps.length?grps:null,p_route:route||null})});
     const data = res.ok ? await res.json() : [];
     const branches = (Array.isArray(data)?data:[]).map(r=>r.branch).filter(Boolean).sort((a,b)=>a.localeCompare(b,'ar'));
     branches.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=b; branchSel.appendChild(o); });
@@ -35703,13 +35718,13 @@ async function serLoadBranches(){
 }
 
 async function serLoadFilters(){
-  const grp = document.getElementById('ser-grp')?.value||'';
+  const grps = serSelectedGrps();
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
 
   // جيب خطوط السير مباشرة من products (مصدر بيانات التقرير نفسه) عن طريق RPC
   // بدل coord_route_assignments اللي طلع فيه خطوط سير فعلية وعليها بيانات مبيعات حديثة مش موجودة فيه
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/ser_distinct_routes`,{method:'POST',headers:H,body:JSON.stringify({p_grp:grp||null})});
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/ser_distinct_routes`,{method:'POST',headers:H,body:JSON.stringify({p_grp:grps.length?grps:null})});
     const data = res.ok ? await res.json() : [];
     const routes = (Array.isArray(data)?data:[]).map(r=>r.route).filter(Boolean).sort((a,b)=>a.localeCompare(b,'ar'));
     const routeSel = document.getElementById('ser-route');
@@ -35729,12 +35744,12 @@ async function serOnFeaChange(){
 }
 
 async function serLoadCat(){
-  const grp = document.getElementById('ser-grp')?.value||'';
+  const grps = serSelectedGrps();
   const fea = document.getElementById('ser-fea')?.value||'';
 
   let data = _serFilterOptions;
-  if(fea){
-    data = await serFetchOptions(grp||null, fea, null);
+  if(fea || grps.length){
+    data = await serFetchOptions(grps.length?grps:null, fea||null, null);
   }
 
   const cats = [...new Set(data.map(r=>r.cat).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
@@ -35754,13 +35769,13 @@ async function serFilterCat(){
 }
 
 async function serLoadSnf(){
-  const grp = document.getElementById('ser-grp')?.value||'';
+  const grps = serSelectedGrps();
   const fea = document.getElementById('ser-fea')?.value||'';
   const cat = document.getElementById('ser-cat')?.value||'';
 
   let data;
-  if(fea || cat){
-    data = await serFetchOptions(grp||null, fea||null, cat||null);
+  if(fea || cat || grps.length){
+    data = await serFetchOptions(grps.length?grps:null, fea||null, cat||null);
   } else {
     data = _serFilterOptions;
   }
@@ -35780,7 +35795,7 @@ async function serLoad(){
   tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:40px;color:#aaa"><i class="ti ti-loader-2" style="font-size:24px;display:block;margin:0 auto 8px;animation:spin 1s linear infinite"></i>جاري التحميل...</td></tr>`;
 
   const month  = document.getElementById('ser-month')?.value||'';
-  const grp    = document.getElementById('ser-grp')?.value||'';
+  const grps   = serSelectedGrps();
   const route  = document.getElementById('ser-route')?.value||'';
   const branch = document.getElementById('ser-branch')?.value||'';
   const fea    = document.getElementById('ser-fea')?.value||'';
@@ -35789,18 +35804,18 @@ async function serLoad(){
 
   try{
     // لازم يكون فيه فلتر على الأقل
-    if(!month && !grp && !route && !branch){
+    if(!month && !grps.length && !route && !branch){
       tbody.innerHTML=`<tr><td colspan="11" style="text-align:center;padding:30px;color:#E65100">⚠️ اختر شهراً أو مجموعة أو خط سير على الأقل</td></tr>`;
       return;
     }
 
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
 
-    // فلتر المجموعة بقى مباشر على عمود grp في جدول products نفسه
+    // فلتر المجموعة بقى مباشر على عمود grp في جدول products نفسه (ويدعم اختيار أكتر من مجموعة)
     // (كان بيتحول لأول لخطوط سير عن طريق coord_route_assignments، وده جدول تعيينات ناقص —
     // فيه خطوط سير وفروع فعلية عليها بيانات حقيقية ومش متسجلة فيه، فكانت بتختفي من النتايج غلط)
     let url = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,route,grp,shelf_qty,stock_qty,date_shelf,months_shelf,date_stock,months_stock,cat,fea,created_at&order=snf.asc,branch.asc,created_at.desc&limit=5000`;
-    if(grp)    url += `&grp=eq.${encodeURIComponent(grp)}`;
+    if(grps.length) url += `&grp=in.(${grps.map(g=>encodeURIComponent(g)).join(',')})`;
     if(route)  url += `&route=eq.${encodeURIComponent(route)}`;
     if(branch) url += `&branch=eq.${encodeURIComponent(branch)}`;
     if(fea)    url += `&fea=eq.${encodeURIComponent(fea)}`;
@@ -35825,6 +35840,8 @@ async function serLoad(){
     if(!data.length){
       tbody.innerHTML=`<tr><td colspan="11" style="text-align:center;padding:40px;color:#aaa">لا توجد بيانات</td></tr>`;
       if(sumEl) sumEl.style.display='none';
+      const snfTotalBoxEmpty = document.getElementById('ser-snf-total');
+      if(snfTotalBoxEmpty){ snfTotalBoxEmpty.style.display='none'; snfTotalBoxEmpty.innerHTML=''; }
       return;
     }
 
@@ -35834,6 +35851,19 @@ async function serLoad(){
     if(sumEl){
       sumEl.style.display='block';
       sumEl.innerHTML = `📊 إجمالي السجلات: <b>${data.length}</b> &nbsp;|&nbsp; إجمالي الرف: <b>${Math.round(totalShelf).toLocaleString('en-US')}</b> &nbsp;|&nbsp; إجمالي المخزن: <b>${Math.round(totalStock).toLocaleString('en-US')}</b>`;
+    }
+
+    // لو المستخدم اختار صنف معين، اعرض إجمالي عدد الصنف ده (رف + مخزن) تحت مربعات المجموعات
+    const snfTotalBox = document.getElementById('ser-snf-total');
+    if(snfTotalBox){
+      if(snf){
+        const snfTotal = data.reduce((s,r)=>s+(parseFloat(r.shelf_qty)||0)+(parseFloat(r.stock_qty)||0),0);
+        snfTotalBox.style.display = 'block';
+        snfTotalBox.innerHTML = `📦 إجمالي عدد الصنف «${snf}»: <b>${Math.round(snfTotal).toLocaleString('en-US')}</b>`;
+      } else {
+        snfTotalBox.style.display = 'none';
+        snfTotalBox.innerHTML = '';
+      }
     }
 
     const now = new Date();
@@ -35948,7 +35978,8 @@ function serExportPDF(){
   const totalStock = _serData.reduce((s,r)=>s+(parseFloat(r.stock_qty)||0),0);
   const monthSel  = document.getElementById('ser-month');
   const monthLbl  = monthSel?.options[monthSel.selectedIndex]?.textContent || 'كل الشهور';
-  const grpLbl    = GROUPS[document.getElementById('ser-grp')?.value]?.label || 'كل المجموعات';
+  const grpsExp   = serSelectedGrps();
+  const grpLbl    = grpsExp.length ? grpsExp.map(g=>GROUPS[g]?.label||g).join('، ') : 'كل المجموعات';
   const routeLbl  = document.getElementById('ser-route')?.value || 'كل الخطوط';
   const branchLbl = document.getElementById('ser-branch')?.value || 'كل الفروع';
   const today = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
