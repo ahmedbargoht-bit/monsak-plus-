@@ -21896,19 +21896,38 @@ async function smissLoad(){
   // badge
   setBadgeEl('nav-smiss-badge', pending.length);
 
+  const STAGE_LABELS = {
+    new:         {label:'🆕 جديد',                 color:'#888'},
+    seen:        {label:'👀 اطّلع عليه المشرف',      color:'#1D4ED8'},
+    transferred: {label:'📤 محوّل لمشرف البيع',       color:'#7C3AED'}
+  };
+
   tbody.innerHTML = data.map((m,i)=>{
     const isDelivered = !!m.delivered;
+    const isConfirmed = !!m.confirmed;
     const days = Math.floor((Date.now()-new Date(m.created_at).getTime())/864e5);
     const isLate = !isDelivered && days>=3;
     const grpInfo = GROUPS[m.grp]||{label:m.grp,color:'#888'};
-    const routeN  = m.route || '—';
-    const statusBadge = isDelivered
-      ? `<span style="background:#D1FAE5;color:#065F46;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">✅ تم التوريد</span>`
+    const rdRow  = ADMIN_ROUTES_DATA.find(x=>x.branch_name===m.branch);
+    const routeN = rdRow?.route || m.route || '—';
+
+    // مراحل الحركة: جديد → اطّلع عليه المشرف → محوّل لمشرف البيع (status) ثم رفع المندوب (delivered) ثم تأكيد الإدارة (confirmed)
+    const stageInfo = STAGE_LABELS[m.status] || STAGE_LABELS.new;
+    const stageBadge = `<div style="font-size:9px;color:${stageInfo.color};font-weight:700;margin-bottom:2px">${stageInfo.label}</div>`;
+    const deliveredBadge = isDelivered
+      ? `<div style="font-size:10px;color:#065F46;font-weight:700">✅ تم التوريد</div><div style="font-size:9px;color:#888">${m.delivered_by||'—'}</div>`
       : `<span style="background:#FEF3C7;color:#B45309;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">⏳ لم يُوَرَّد${isLate?` (${days}ي)`:''}</span>`;
-    const actionBtn = isDelivered
-      ? `<span style="font-size:11px;color:#065F46">✅ ${m.delivered_by||'—'}</span>`
-      : `<button onclick="smissConfirmDelivery(${m.id},'${(m.branch||'').replace(/'/g,"\\'")}','${(m.snf||'').replace(/'/g,"\\'")}' )"
-          style="background:#7C2D12;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif;font-weight:700">✅ تأكيد التوريد</button>`;
+    const statusBadge = stageBadge + deliveredBadge;
+
+    // تأكيد الإدارة — نفس منطق تأكيد استلام المرتجعات بالظبط
+    const confirmCell = isConfirmed
+      ? `<div style="font-size:10px;color:#065F46;font-weight:700">✅ تم التأكيد من خلال المشرف ${m.confirmed_by||'—'}</div>
+         <div style="font-size:9px;color:#888">${m.confirmed_at?new Date(m.confirmed_at).toLocaleDateString('en-GB',{day:'numeric',month:'short'}):'—'}</div>`
+      : isDelivered
+        ? `<button onclick="smissConfirmDelivery(${m.id},'${(m.branch||'').replace(/'/g,"\\'")}','${(m.snf||'').replace(/'/g,"\\'")}' )"
+            style="background:#7C2D12;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif;font-weight:700">✅ تأكيد التوريد</button>`
+        : `<span style="color:#ccc;font-size:11px">—</span>`;
+
     const dt = m.created_at ? fmtDate(m.created_at) : '—';
     return `<tr style="${isLate?'background:#FFF8E1':''}">
       <td>${i+1}</td>
@@ -21918,7 +21937,7 @@ async function smissLoad(){
       <td style="font-size:11px">${m.snf||'—'}</td>
       <td style="font-size:11px;color:#888">${m.reason||'—'}</td>
       <td>${statusBadge}</td>
-      <td>${actionBtn}</td>
+      <td>${confirmCell}</td>
       <td style="font-size:11px;color:#888">${dt}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="9" style="text-align:center;padding:20px;color:#888">لا توجد نواقص</td></tr>';
@@ -21930,7 +21949,7 @@ async function smissConfirmDelivery(id, branch, snf){
     await fetch(`${SUPABASE_URL}/rest/v1/missing?id=eq.${id}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body:JSON.stringify({delivered:true,delivered_at:new Date().toISOString(),delivered_by:CU?.name||'admin'})
+      body:JSON.stringify({confirmed:true,confirmed_at:new Date().toISOString(),confirmed_by:CU?.name||'admin'})
     });
     showToast('✅ تم تأكيد التوريد'); smissLoad();
   }catch(e){ showToast('❌ خطأ في التأكيد'); }
@@ -21968,7 +21987,7 @@ function smissExportPDF(){
   </style></head><body>
   <div class="hdr"><h2 style="margin:0">⚠️ نواقص المبيعات — ${from} إلى ${to}</h2></div>
   ${pending>0?`<div class="warn">⚠️ ${pending} ناقص لم يُوَرَّد بعد</div>`:''}
-  <table><thead><tr><th>#</th><th>المجموعة</th><th>الفرع</th><th>الصنف</th><th>السبب</th><th>الحالة</th><th>التاريخ</th></tr></thead>
+  <table><thead><tr><th>#</th><th>المجموعة</th><th>خط السير</th><th>الفرع</th><th>الصنف</th><th>السبب</th><th>الحالة</th><th>تأكيد التوريد</th><th>التاريخ</th></tr></thead>
   <tbody>${rows}</tbody></table></body></html>`;
   const w=window.open('','_blank','width=1100,height=700');
   w.document.write(html); w.document.close(); setTimeout(()=>{w.focus();w.print();},600);
