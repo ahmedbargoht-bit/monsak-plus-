@@ -4937,6 +4937,18 @@ h2,h3{color:#2C1F0A}
                 </select>
               </div>
               <div>
+                <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">العميل</label>
+                <select id="sinv-client" onchange="sinvOnClientChange()" style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
+                  <option value="">كل العملاء</option>
+                </select>
+              </div>
+              <div>
+                <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">فرع العميل</label>
+                <select id="sinv-branch" style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
+                  <option value="">كل الفروع</option>
+                </select>
+              </div>
+              <div>
                 <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">من تاريخ</label>
                 <input type="date" id="sinv-from" style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"/>
               </div>
@@ -24931,7 +24943,47 @@ async function sinvBackdateSetRep(id, val){
   }
 }
 
+// ══ فلتر العميل / فرع العميل — نفس ربط sales_clients + branch_client_map المستخدم في باقي اللوحة ══
+let _sinvClientBranches = {}; // {client_name: Set(branch_name)}
+async function sinvLoadClientFilter(){
+  const sel = document.getElementById('sinv-client');
+  if(!sel || sel.dataset.loaded) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  try{
+    const [clientsRes, mapRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/sales_clients?select=id,name&order=name.asc`, {headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?select=client_name,branch_name&limit=5000`, {headers:H}),
+    ]);
+    const clients = clientsRes.ok ? await clientsRes.json() : [];
+    const map     = mapRes.ok ? await mapRes.json() : [];
+    _sinvClientBranches = {};
+    (Array.isArray(map)?map:[]).forEach(m=>{
+      if(!m.client_name||!m.branch_name) return;
+      if(!_sinvClientBranches[m.client_name]) _sinvClientBranches[m.client_name] = new Set();
+      _sinvClientBranches[m.client_name].add(m.branch_name);
+    });
+    const names = (Array.isArray(clients)?clients:[]).map(c=>c.name).filter(Boolean);
+    sel.innerHTML = '<option value="">كل العملاء</option>' +
+      names.map(n=>{
+        const count = _sinvClientBranches[n] ? _sinvClientBranches[n].size : 0;
+        return `<option value="${n.replace(/"/g,'&quot;')}">${n} (${count} فرع)</option>`;
+      }).join('');
+    sel.dataset.loaded = '1';
+  }catch(e){ console.error('[sinvLoadClientFilter]', e); }
+}
+
+function sinvOnClientChange(){
+  const client = document.getElementById('sinv-client')?.value||'';
+  const branchSel = document.getElementById('sinv-branch');
+  if(branchSel){
+    const branches = client && _sinvClientBranches[client] ? [..._sinvClientBranches[client]].sort((a,b)=>a.localeCompare(b,'ar')) : [];
+    branchSel.innerHTML = '<option value="">كل الفروع</option>' + branches.map(b=>`<option value="${b.replace(/"/g,'&quot;')}">${b}</option>`).join('');
+  }
+  sinvRefreshAll();
+}
+
 async function sinvRefreshAll(){
+  await sinvLoadClientFilter();
   await Promise.all([sinvLoad(), sinvRetLoad()]);
   sinvSummaryLoad();
   if(_sinvActiveTab==='yawm') sinvYawmLoad();
@@ -24992,6 +25044,8 @@ async function sinvLoad(){
   const type = document.getElementById('sinv-type')?.value||'';
   const from = document.getElementById('sinv-from')?.value||'';
   const to   = document.getElementById('sinv-to')?.value||'';
+  const client = document.getElementById('sinv-client')?.value||'';
+  const branch = document.getElementById('sinv-branch')?.value||'';
   const tbody = document.getElementById('sinv-tbody');
   const statsEl = document.getElementById('sinv-stats');
   if(tbody) tbody.innerHTML='<tr><td colspan="14" style="text-align:center;padding:30px;color:#888">جاري التحميل...</td></tr>';
@@ -25009,8 +25063,16 @@ async function sinvLoad(){
   if(type) url+=`&invoice_type=eq.${type}`;
   if(from) url+=`&delivery_date=gte.${from}`;
   if(to)   url+=`&delivery_date=lte.${to}`;
+  // فرع واحد محدد → فلتر مباشر وآمن في الرابط (eq. مش زي in.() مش بتتأثر بالأقواس في اسم الفرع)
+  if(branch) url+=`&branch_name=eq.${encodeURIComponent(branch)}`;
   try{
     _sinvData=await fetchAllRows(url,H);
+    // عميل محدد من غير فرع بعينه → فلترة في الجافاسكريبت على كل فروع العميل
+    // (متعمدين مش بنبعتها كـ in.() في الرابط عشان بعض أسماء الفروع فيها أقواس بتبوّظ الفلتر)
+    if(!branch && client && _sinvClientBranches[client]){
+      const branchSet=_sinvClientBranches[client];
+      _sinvData=_sinvData.filter(r=>branchSet.has((r.branch_name||'').trim()));
+    }
     const totalNet=_sinvData.reduce((s,r)=>s+(r.total_net||0),0);
     const totalBefore=_sinvData.reduce((s,r)=>s+(r.total_before_discount||0),0);
     const totalTax=_sinvData.reduce((s,r)=>s+(r.total_tax||0),0);
@@ -25087,6 +25149,8 @@ async function sinvRetLoad(){
   const type = document.getElementById('sinv-type')?.value||'';
   const from = document.getElementById('sinv-from')?.value||'';
   const to   = document.getElementById('sinv-to')?.value||'';
+  const client = document.getElementById('sinv-client')?.value||'';
+  const branch = document.getElementById('sinv-branch')?.value||'';
   const tbody = document.getElementById('sinvret-tbody');
   const statsEl = document.getElementById('sinvret-stats');
   if(tbody) tbody.innerHTML='<tr><td colspan="14" style="text-align:center;padding:30px;color:#888">جاري التحميل...</td></tr>';
@@ -25095,8 +25159,13 @@ async function sinvRetLoad(){
   if(type) url+=`&invoice_type=eq.${type}`;
   if(from) url+=`&return_date=gte.${from}`;
   if(to)   url+=`&return_date=lte.${to}`;
+  if(branch) url+=`&branch_name=eq.${encodeURIComponent(branch)}`;
   try{
     _sinvRetData=await fetchAllRows(url,H);
+    if(!branch && client && _sinvClientBranches[client]){
+      const branchSet=_sinvClientBranches[client];
+      _sinvRetData=_sinvRetData.filter(r=>branchSet.has((r.branch_name||'').trim()));
+    }
     const totalNet=_sinvRetData.reduce((s,r)=>s+(r.total_net||0),0);
     const totalBefore=_sinvRetData.reduce((s,r)=>s+(r.total_before_discount||0),0);
     const totalTax=_sinvRetData.reduce((s,r)=>s+(r.total_tax||0),0);
