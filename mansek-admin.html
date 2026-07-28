@@ -3756,11 +3756,11 @@ h2,h3{color:#2C1F0A}
                 <div id="hm-cov-total" style="font-size:26px;font-weight:900;color:#003049">0</div>
               </div>
               <div class="card" style="text-align:center;cursor:pointer;padding:14px;border:1.5px solid #15803D" onclick="hmShowCoverageList('visited')">
-                <div style="font-size:11px;color:#15803D;font-weight:700;margin-bottom:6px">فروع تمت زيارتها</div>
+                <div style="font-size:11px;color:#15803D;font-weight:700;margin-bottom:6px">فروع تم زيارتها</div>
                 <div id="hm-cov-visited" style="font-size:26px;font-weight:900;color:#15803D">0</div>
               </div>
               <div class="card" style="text-align:center;cursor:pointer;padding:14px;border:1.5px solid #B71C1C" onclick="hmShowCoverageList('not_visited')">
-                <div style="font-size:11px;color:#B71C1C;font-weight:700;margin-bottom:6px">فروع لم تتم زيارتها</div>
+                <div style="font-size:11px;color:#B71C1C;font-weight:700;margin-bottom:6px">فروع لم يتم زيارتها</div>
                 <div id="hm-cov-not-visited" style="font-size:26px;font-weight:900;color:#B71C1C">0</div>
               </div>
             </div>
@@ -26594,13 +26594,32 @@ async function hmLoad(){
   _hmRawData = Object.values(branchMap);
   hmRender(_hmRawData, metric);
   hmFillTable(_hmRawData);
-  hmUpdateCoverage(client, branchMap);
+  hmUpdateCoverage(client, from, to);
 }
 
 // ══ تغطية العميل (فروع اتزارت / لسه متزارتش) — تظهر بس لما يتحدد عميل معين ══
 let _hmCoverage = {total:[], visited:[], notVisited:[]};
 
-function hmUpdateCoverage(client, branchMapObj){
+// بيانات "اتزار ولا لأ" لازم تتحسب بمعزل عن فلتر المجموعة المختار في الخريطة —
+// لأن بعض الفواتير بيبقى فيها الـ grp المسجل عليها مش دقيق 100%، فلو اعتمدنا على
+// نفس البيانات المفلترة بالـ grp كان بيظهر فروع "لسه متزارتش" وهي فعلاً نزلها فواتير
+async function hmFetchClientVisitedSet(client, from, to){
+  if(client==='all' || !_hmClientBranches[client]) return new Set();
+  const branches = [..._hmClientBranches[client]];
+  if(!branches.length) return new Set();
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const branchFilter = `&branch_name=in.(${branches.map(b=>encodeURIComponent(b)).join(',')})`;
+  const [delRes, retRes] = await Promise.all([
+    fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=branch_name,delivery_date${branchFilter}&delivery_date=gte.${from}&delivery_date=lte.${to}&deleted_at=is.null&limit=10000`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+    fetch(`${SUPABASE_URL}/rest/v1/sales_returns?select=branch_name,return_date${branchFilter}&return_date=gte.${from}&return_date=lte.${to}&deleted_at=is.null&limit=10000`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+  ]);
+  const visited = new Set();
+  (Array.isArray(delRes)?delRes:[]).forEach(d=>{ if(d.branch_name) visited.add(d.branch_name.trim()); });
+  (Array.isArray(retRes)?retRes:[]).forEach(r=>{ if(r.branch_name) visited.add(r.branch_name.trim()); });
+  return visited;
+}
+
+async function hmUpdateCoverage(client, from, to){
   const box = document.getElementById('hm-client-coverage');
   if(!box) return;
   if(client==='all' || !_hmClientBranches[client]){
@@ -26609,11 +26628,11 @@ function hmUpdateCoverage(client, branchMapObj){
     return;
   }
   const allBranches = Array.from(_hmClientBranches[client]).sort((a,b)=>a.localeCompare(b,'ar'));
+  const visitedSet = await hmFetchClientVisitedSet(client, from, to);
   const visited = [];
   const notVisited = [];
   allBranches.forEach(name=>{
-    const b = branchMapObj[name];
-    if(b && b.visits>0) visited.push(name); else notVisited.push(name);
+    if(visitedSet.has(name.trim())) visited.push(name); else notVisited.push(name);
   });
   _hmCoverage = {total:allBranches, visited, notVisited};
   document.getElementById('hm-cov-total').textContent = allBranches.length;
@@ -26628,8 +26647,8 @@ function hmShowCoverageList(type){
   const body  = document.getElementById('hm-coverage-body');
   if(!modal||!title||!body) return;
   let list, label;
-  if(type==='visited'){ list=_hmCoverage.visited; label='الفروع اللي تمت زيارتها'; }
-  else if(type==='not_visited'){ list=_hmCoverage.notVisited; label='الفروع اللي لسه متزارتش'; }
+  if(type==='visited'){ list=_hmCoverage.visited; label='فروع تم زيارتها'; }
+  else if(type==='not_visited'){ list=_hmCoverage.notVisited; label='فروع لم يتم زيارتها'; }
   else { list=_hmCoverage.total; label='كل فروع العميل'; }
   title.textContent = `${label} (${list.length})`;
   body.innerHTML = list.length
