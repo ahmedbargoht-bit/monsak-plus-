@@ -2249,11 +2249,19 @@ h2,h3{color:#2C1F0A}
             <input type="text" id="br-search" placeholder="🔍 ابحث عن فرع أو خط سير..." oninput="loadBranches()" style="width:100%;margin-bottom:10px"/>
 
             <!-- إحصاء + إصلاح -->
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px">
               <div id="br-stats" style="font-size:12px;color:var(--text2)"></div>
-              <button class="btn btn-sm" style="background:#FFF3E0;color:#E65100;font-size:11px" onclick="fixBadRoutes()">
-                <i class="ti ti-tools"></i> إصلاح خطوط السير الغلط
-              </button>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <button class="btn btn-sm" style="background:#E8F5E9;color:#1A7A4A;font-size:11px" onclick="brExportExcel()">
+                  <i class="ti ti-file-spreadsheet"></i> تصدير Excel
+                </button>
+                <button class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C;font-size:11px" onclick="brExportPDF()">
+                  <i class="ti ti-file-type-pdf"></i> تصدير PDF
+                </button>
+                <button class="btn btn-sm" style="background:#FFF3E0;color:#E65100;font-size:11px" onclick="fixBadRoutes()">
+                  <i class="ti ti-tools"></i> إصلاح خطوط السير الغلط
+                </button>
+              </div>
             </div>
 
             <div class="table-wrap">
@@ -17456,6 +17464,8 @@ async function deleteSup(idx){
 // ══════════════════════════════════════════════════════════════
 // BRANCHES
 // ══════════════════════════════════════════════════════════════
+let _brLastData = []; // آخر بيانات مفلترة ظاهرة في جدول "إدارة الفروع والعملاء" — يستخدمها تصدير Excel/PDF
+
 function brGrpChange(cb){
   const all=document.querySelectorAll('.br-grp-cb');
   if(cb.value==='all'){ all.forEach(c=>{ if(c.value!=='all'){c.checked=false;c.closest('.br-cb-lbl').classList.remove('active');} }); }
@@ -17500,6 +17510,9 @@ async function loadBranches(){
   if(selStatus.length) data=data.filter(b=>selStatus.includes(b.status));
   if(search)           data=data.filter(b=>(b.branch_name||'').toLowerCase().includes(search)||(b.route||'').toLowerCase().includes(search));
 
+  // نسخة من البيانات المفلترة الحالية — يستخدمها تصدير Excel/PDF عشان يطابقوا اللي ظاهر على الشاشة بالظبط
+  _brLastData = data;
+
   // إحصاء
   const statsEl=document.getElementById('br-stats');
   if(statsEl) statsEl.innerHTML=`إجمالي: <b>${data.length}</b> فرع · نشط: <b>${data.filter(b=>b.status==='active').length}</b> · متوقف: <b>${data.filter(b=>b.status==='suspended').length}</b> · مغلق: <b>${data.filter(b=>b.status==='closed').length}</b>`;
@@ -17537,6 +17550,148 @@ async function loadBranches(){
       </div>
     </td>
   </tr>`).join('')||'<tr><td colspan="6" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات — ارفع شيت البيانات أولاً</td></tr>';
+}
+
+// ══ تصدير Excel لجدول "إدارة الفروع والعملاء" — اسم الفرع / خط السير / المجموعة ══
+// بيصدّر بالظبط نفس البيانات المفلترة الظاهرة على الشاشة (_brLastData بيتحدث جوه loadBranches())
+// بألوان وهوية الطحان جولدن دايتس، بنفس نمط splExportProducts()
+function brExportExcel(){
+  if(!_brLastData.length){ alert('لا توجد بيانات للتصدير'); return; }
+  if(typeof XLSX==='undefined'){ showToast('جاري تحميل مكتبة Excel...'); return; }
+
+  const C={dark:'2C1F0A',caramel:'4B3C1A',gold:'C8A96E',cream:'EDE5D8',light:'F5F0E8',
+    maroon:'731E2E',green:'1A7A4A',greenBg:'E8F5E9',orange:'B91C1C',orangeBg:'FEE2E2',
+    white:'FFFFFF',line:'E0D8CC'};
+  const fill=c=>({patternType:'solid',fgColor:{rgb:c}});
+  const font=(bold,sz,color,italic)=>({bold:!!bold,sz:sz||11,color:{rgb:color||C.dark},italic:!!italic,name:'Cairo'});
+  const aln=(h,v,wrap)=>({horizontal:h||'right',vertical:v||'center',wrapText:!!wrap,readingOrder:2});
+  const brd=(s,c)=>{const b={style:s||'thin',color:{rgb:c||C.line}};return{left:b,right:b,top:b,bottom:b};};
+  const now = new Date().toLocaleDateString('en-GB');
+
+  const COLS = ['#','اسم الفرع','خط السير','المجموعة'];
+  const nc = COLS.length;
+  const aoa=[
+    ['الطحان جولدن دايتس — Al Tahhan Golden Dates',...Array(nc-1).fill('')],
+    ['إدارة الفروع والعملاء',...Array(nc-1).fill('')],
+    [`تاريخ التصدير: ${now}  |  إجمالي الفروع: ${_brLastData.length}`,...Array(nc-1).fill('')],
+    Array(nc).fill(''),
+    COLS,
+    ..._brLastData.map((b,i)=>[i+1, b.branch_name||'—', b.route||'—', GROUPS[b.grp]?.label||b.grp||'—'])
+  ];
+
+  const wb=XLSX.utils.book_new();
+  const ws=XLSX.utils.aoa_to_sheet(aoa,{cellStyles:true});
+  const enc=(r,c)=>XLSX.utils.encode_cell({r,c});
+  const sty=(r,c,s)=>{if(!ws[enc(r,c)])ws[enc(r,c)]={t:'z',v:''};ws[enc(r,c)].s=s;};
+
+  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:nc-1}},{s:{r:1,c:0},e:{r:1,c:nc-1}},{s:{r:2,c:0},e:{r:2,c:nc-1}},{s:{r:3,c:0},e:{r:3,c:nc-1}}];
+  sty(0,0,{font:font(1,15,C.cream),fill:fill(C.maroon),alignment:aln('center'),border:brd('medium',C.maroon)});
+  sty(1,0,{font:font(1,13,C.dark),fill:fill(C.gold),alignment:aln('center'),border:brd('medium',C.caramel)});
+  sty(2,0,{font:font(0,10,C.caramel,true),fill:fill(C.light),alignment:aln('center'),border:brd('thin',C.line)});
+  for(let c=0;c<nc;c++) sty(3,c,{fill:fill(C.dark)});
+  for(let c=0;c<nc;c++) sty(4,c,{font:font(1,11,C.cream),fill:fill(C.caramel),alignment:aln('center'),border:brd('medium',C.dark)});
+
+  const dataStart=5;
+  for(let ri=dataStart;ri<aoa.length;ri++){
+    const rowBg=(ri-dataStart)%2?'FAF7F0':C.white;
+    for(let c=0;c<nc;c++){
+      sty(ri,c,{font:font(0,10,C.dark),fill:fill(rowBg),alignment:aln(c===0?'center':'right',undefined,true),border:brd('thin',C.line)});
+    }
+  }
+
+  ws['!cols']=[{wch:6},{wch:38},{wch:30},{wch:20}];
+  ws['!rows']=[{hpt:22},{hpt:18},{hpt:15},{hpt:6},{hpt:20}];
+
+  XLSX.utils.book_append_sheet(wb,ws,'الفروع');
+  XLSX.writeFile(wb,`الفروع_والعملاء_${localISO()}.xlsx`);
+}
+
+// ══ تصدير PDF لجدول "إدارة الفروع والعملاء" — بنفس نمط serExportPDF() وألوان الطحان ══
+function brExportPDF(){
+  if(!_brLastData.length){ alert('لا توجد بيانات للتصدير'); return; }
+
+  const rows = _brLastData.map((b,i)=>{
+    const rowBg = i%2===0?'#FFFDF8':'#EDE5D8';
+    return `<tr style="background:${rowBg}">
+      <td style="text-align:center;color:#8B6F47">${i+1}</td>
+      <td style="font-weight:700;color:#2C1F0A">${b.branch_name||'—'}</td>
+      <td style="color:#4B3C1A">${b.route||'—'}</td>
+      <td style="text-align:center"><span style="background:${(GROUPS[b.grp]?.color||'#888')}22;color:${GROUPS[b.grp]?.color||'#555'};padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700">${GROUPS[b.grp]?.label||b.grp||'—'}</span></td>
+    </tr>`;
+  }).join('');
+
+  const selGrps   = [...document.querySelectorAll('.br-grp-cb:checked')].map(c=>c.value).filter(v=>v!=='all');
+  const grpLbl    = selGrps.length ? selGrps.map(g=>GROUPS[g]?.label||g).join('، ') : 'كل المجموعات';
+  const selStatus = [...document.querySelectorAll('.br-status-cb:checked')].map(c=>c.value).filter(v=>v!=='all');
+  const statusLabels={active:'نشط',suspended:'متوقف',closed:'مغلق'};
+  const statusLbl = selStatus.length ? selStatus.map(s=>statusLabels[s]||s).join('، ') : 'كل الحالات';
+  const today = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
+
+  const html=`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet"/>
+    <title>إدارة الفروع والعملاء</title>
+    <style>
+      *{margin:0;padding:0;box-sizing:border-box}
+      body{font-family:'Cairo',sans-serif;background:#FFFDF8;color:#2C1F0A;font-size:11px;padding:24px;direction:rtl}
+      .print-btn{position:fixed;top:16px;left:16px;background:#731E2E;color:#fff;border:none;
+        border-radius:8px;padding:8px 18px;font-family:'Cairo',sans-serif;font-size:13px;
+        font-weight:700;cursor:pointer;z-index:999;box-shadow:0 2px 8px rgba(115,30,46,.3)}
+      .company-header{display:flex;justify-content:space-between;align-items:center;
+        padding:16px 20px;background:linear-gradient(135deg,#731E2E,#5A1520);
+        border-radius:12px;margin-bottom:20px;color:#EDE5D8}
+      .company-name{font-size:20px;font-weight:900;color:#EDE5D8}
+      .company-sub{font-size:11px;color:#C8A870;margin-top:2px}
+      .report-date{font-size:11px;color:#EDE5D8;text-align:left}
+      .report-title{font-size:16px;font-weight:900;color:#731E2E;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+      .report-sub{font-size:11px;color:#8B6F47;margin-bottom:12px}
+      .stats{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+      .stat-box{background:#F5F0E8;border:1px solid #E8D9C0;border-radius:8px;padding:8px 14px;text-align:center;flex:1;min-width:100px}
+      .stat-num{font-size:18px;font-weight:900;color:#731E2E}
+      .stat-lbl{font-size:10px;color:#8B6F47;margin-top:2px}
+      table{width:100%;border-collapse:collapse;font-size:10px}
+      thead tr{background:linear-gradient(135deg,#731E2E,#5A1520)}
+      th{padding:8px 6px;color:#EDE5D8;font-weight:700;text-align:right;font-size:10px;white-space:nowrap}
+      td{padding:6px;border-bottom:1px solid #E8D9C0;vertical-align:middle}
+      tr:hover td{background:#F5EDD8}
+      .footer{margin-top:20px;text-align:center;font-size:10px;color:#B8A080;
+        border-top:1px solid #E8D9C0;padding-top:10px}
+      @media print{
+        .print-btn{display:none}
+        body{padding:10px}
+        table{font-size:9px}
+        thead tr{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+        .company-header{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+        td[style*="background"]{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      }
+    </style></head><body>
+    <button class="print-btn" onclick="window.print()">🖨️ طباعة / PDF</button>
+
+    <div class="company-header">
+      <div>
+        <div class="company-name">🏆 الطحان جولدن دايتس</div>
+        <div class="company-sub">Al Tahhan Golden Dates</div>
+      </div>
+      <div class="report-date">طُبع: ${today}</div>
+    </div>
+
+    <div class="report-title">🏬 إدارة الفروع والعملاء</div>
+    <div class="report-sub">${grpLbl} — الحالة: ${statusLbl}</div>
+
+    <div class="stats">
+      <div class="stat-box"><div class="stat-num">${_brLastData.length}</div><div class="stat-lbl">إجمالي الفروع</div></div>
+    </div>
+
+    <table>
+      <thead><tr>
+        <th>#</th><th>اسم الفرع</th><th>خط السير</th><th>المجموعة</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+
+    <div class="footer">الطحان جولدن دايتس © ${new Date().getFullYear()} — إدارة الفروع والعملاء</div>
+    </body></html>`;
+  const w = window.open('','_blank','width=1200,height=800');
+  if(w){ w.document.write(html); w.document.close(); setTimeout(()=>w.print(),600); }
 }
 
 // كاش خطوط السير مع grp بتاعتها
