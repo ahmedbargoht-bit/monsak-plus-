@@ -11621,6 +11621,28 @@ async function sb(table, params={}, opts={}){
     let url = `${SUPABASE_URL}/rest/v1/${table}?select=*`;
     Object.entries(params).forEach(([k,v])=>url+=`&${k}=eq.${encodeURIComponent(v)}`);
     if(opts.order) url+=`&order=${opts.order}`;
+
+    // allPages:true — يجيب كل الصفوف بدون سقف عددي ثابت (بيلف بالـ limit/offset لحد ما ترجع
+    // صفحة فاضية/ناقصة). مهم للجداول عالية الحجم (زي products) عشان أي limit ثابت (500/1000)
+    // بيقطع البيانات الأقدم بصمت وقت الزحمة — ده كان سبب اختفاء نشاط منسقين سجّلوا بدري في
+    // اليوم من عمود "النشاط" في شاشة الموقع الحالي، ومن شاشة الأصناف نفسها كمان، لأن الاتنين
+    // بيقروا من نفس الكاش العام المحدود.
+    if(opts.allPages){
+      const pageSize = opts.limit || 1000;
+      const hardCap  = opts.hardCap || 50000;
+      let all = [], offset = 0;
+      while(offset < hardCap){
+        const pageUrl = `${url}&limit=${pageSize}&offset=${offset}`;
+        const r = await fetch(pageUrl,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+        const page = r.ok ? await r.json().catch(()=>[]) : [];
+        if(!Array.isArray(page) || !page.length) break;
+        all = all.concat(page);
+        if(page.length < pageSize) break;
+        offset += pageSize;
+      }
+      return all;
+    }
+
     url+=`&limit=${opts.limit||2000}`;
     const r=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     return await r.json();
@@ -11875,7 +11897,7 @@ function getVisibleReps(){
 let _staticTimer = null;
 async function loadStaticData(){
   const [products,branches,coord_route_assignments] = await Promise.all([
-    sb('products',{},{order:'created_at.desc',limit:500}),
+    sb('products',{},{order:'created_at.asc', allPages:true, limit:1000}),
     sb('branches',{status:'active'},{limit:1000}),
     sb('coord_route_assignments',{},{limit:1000}),
   ]);
@@ -11888,9 +11910,9 @@ async function refreshAll(){
   document.querySelectorAll('.live-update-text').forEach(el=>el.textContent='جاري التحديث...');
   // البيانات اللحظية فقط — الثابتة في loadStaticData
   const [visits,missing,attendance,location,messages,orders] = await Promise.all([
-    sb('visits',{},{order:'created_at.desc',limit:1000}),
-    sb('missing',{},{order:'created_at.desc',limit:500}),
-    sb('attendance',{},{order:'date.desc,id.desc',limit:3000}),
+    sb('visits',{},{order:'created_at.asc', allPages:true, limit:1000}),
+    sb('missing',{},{order:'created_at.asc', allPages:true, limit:1000}),
+    sb('attendance',{},{order:'date.asc,id.asc', allPages:true, limit:1000}),
     sb('location'),
     sb('messages',{},{order:'created_at.desc',limit:200}),
     sb('orders',{},{order:'created_at.desc',limit:500}),
