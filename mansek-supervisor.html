@@ -2437,11 +2437,20 @@ async function checkPromoBanner(){
     const rows = await r.json();
     if(!rows.length) return;
 
+    // استبعاد البانرات اللي لسه ماجاش وقتها أو خلصت مدتها (لو الأدمن حدد تاريخ من/إلى)
+    const _todayStr = localISO();
+    const rowsInDate = rows.filter(row=>{
+      if(row.date_from && row.date_from > _todayStr) return false;
+      if(row.date_to   && row.date_to   < _todayStr) return false;
+      return true;
+    });
+    if(!rowsInDate.length) return;
+
     const seenMap = JSON.parse(localStorage.getItem('promo_banner_seen')||'{}');
     let myBranches = null; // نجيبها مرة واحدة بس لو فعلاً محتاجينها
 
     const relevant = [];
-    for(const row of rows){
+    for(const row of rowsInDate){
       if(String(seenMap[row.id]) === String(row.version)) continue;
       const clients = row.target_clients||[];
       if(clients.length){
@@ -8538,13 +8547,32 @@ async function rptLoadRoutes(){
   // خزّن الفروع والتعيينات للاستخدام لاحقاً
   window._rptAllBranches = allBranches;
   window._rptAllAssignments = allAssignments;
-  const routes = [...new Set(allBranches.map(b=>(b.route||'').replace(/\s+/g,' ').trim()).filter(Boolean))].sort();
+
+  // بناء القائمة: بنتجنب التكرار باستخدام نسخة موحّدة المسافات كمفتاح للمقارنة بس، لكن بنحتفظ
+  // بالنص الخام الأصلي (زي ما هو في جدول branches بالظبط) كـ value الحقيقي للخيار. لو استخدمنا
+  // النص الموحّد كـ value، أي مقارنة exact-match بعد كده (فلترة الفروع، أو فلتر route=eq. اللي
+  // بيتبعت لـ Supabase مباشرة في rptFetchData) هتفشل تفشل صامتة لو الاسم الحقيقي في القاعدة
+  // فيه مسافة زيادة — ده بالظبط اللي كان بيخلي فروع خط "التجمع الاول" (وعلى رأسها العثيم سما
+  // مول) تختفي من القائمة ومن التقرير مع إن بياناتها موجودة وصحيحة.
+  const routeMap = new Map(); // normalized → raw (أول نص خام شفناه لنفس الخط)
+  allBranches.forEach(b=>{
+    const raw = b.route||'';
+    const norm = raw.replace(/\s+/g,' ').trim();
+    if(norm && !routeMap.has(norm)) routeMap.set(norm, raw);
+  });
+  const routes = [...routeMap.values()].sort((a,b)=>a.localeCompare(b,'ar'));
   routes.forEach(r=>{
     const o = document.createElement('option');
     o.value = r; o.textContent = r;
     routeSel.appendChild(o);
   });
 }
+
+// توحيد المسافات الزيادة في اسم خط السير قبل أي مقارنة — عشان فرق زي مسافتين بدل مسافة
+// واحدة (زي ما حصل فعلاً مع "خط سير  التجمع الاول") ما يخليش فروع حقيقية تختفي من القائمة
+// أو من التقرير بصمت. القائمة المنسدلة (rptLoadRoutes) بتوحّد المسافات وقت بناء الخيارات،
+// فلازم أي مقارنة بعد كده تتم على قيمة موحّدة في الاتجاهين مش بس في اتجاه واحد.
+function normRoute(s){ return (s||'').replace(/\s+/g,' ').trim(); }
 
 // ✅ لما يختار خط السير — جيب الفروع والمنسقين
 async function rptOnRouteChange(){
@@ -8565,7 +8593,7 @@ async function rptOnRouteChange(){
 
   // فروع الخط
   const branches = (window._rptAllBranches||[])
-    .filter(b=>b.route===route)
+    .filter(b=>normRoute(b.route)===normRoute(route))
     .map(b=>b.branch_name)
     .filter(Boolean).sort();
 
@@ -8584,7 +8612,7 @@ async function rptOnRouteChange(){
   // بنستخدم branches.rep_name كـ fallback بس لو مفيش أي تعيين مسجل لنفس الفرع في
   // coord_route_assignments (يعني الفرع لسه مايتسجلش فيها أصلاً).
   const assignments = window._rptAllAssignments||[];
-  const branchesOnRoute = (window._rptAllBranches||[]).filter(b=>b.route===route);
+  const branchesOnRoute = (window._rptAllBranches||[]).filter(b=>normRoute(b.route)===normRoute(route));
   const repNamesSet = new Set();
   branchesOnRoute.forEach(b=>{
     const branchAssigns = assignments.filter(a=>a.branch_name===b.branch_name).map(a=>a.rep_name).filter(Boolean);
