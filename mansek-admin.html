@@ -5226,6 +5226,23 @@ h2,h3{color:#2C1F0A}
           </div>
         </div>
 
+        <!-- ══ موديال: تعديل تاريخ الفاتورة/المرتجع ══ -->
+        <div id="sinv-editdate-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;align-items:center;justify-content:center">
+          <div style="background:var(--surface-2,#fff);border-radius:14px;padding:22px 26px;width:360px;max-width:92vw;box-shadow:0 8px 40px rgba(0,0,0,.35);font-family:Cairo,sans-serif;direction:rtl">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+              <div style="font-size:15px;font-weight:800;color:#1565C0;display:flex;align-items:center;gap:8px"><i class="ti ti-calendar-cog"></i> تعديل تاريخ الفاتورة</div>
+              <button onclick="sinvCloseEditDate()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#aaa">✕</button>
+            </div>
+            <div id="sinv-editdate-invno" style="font-size:12px;color:var(--text2);margin-bottom:12px"></div>
+            <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:6px">التاريخ الجديد</label>
+            <input type="date" id="sinv-editdate-input" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:13px;box-sizing:border-box;margin-bottom:18px"/>
+            <div style="display:flex;gap:10px;justify-content:flex-end">
+              <button onclick="sinvCloseEditDate()" style="background:var(--border,#eee);color:var(--text-primary,#333);border:none;border-radius:8px;padding:9px 20px;font-size:13px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">إلغاء</button>
+              <button onclick="sinvSaveEditDate()" style="background:#1565C0;color:#fff;border:none;border-radius:8px;padding:9px 22px;font-size:13px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer"><i class="ti ti-device-floppy"></i> حفظ</button>
+            </div>
+          </div>
+        </div>
+
                 <div id="panel-sales-dashboard" class="panel">
           <div class="page-header">
             <div>
@@ -25438,6 +25455,7 @@ async function sinvLoad(){
         <td style="padding:8px;text-align:center">
           <div style="display:flex;gap:4px;justify-content:center">
             <button onclick="sinvPDF(${i})" style="background:#FEE2E2;color:#731E2E;border:1px solid #FECACA;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px"><i class="ti ti-file-type-pdf"></i></button>
+            <button onclick="sinvEditDate(${r.id},'${r.delivery_date||''}','${(r.invoice_number||'').replace(/'/g,"\\'")}')" style="background:#E3F2FD;color:#1565C0;border:1px solid #BBDEFB;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px"><i class="ti ti-calendar-cog"></i></button>
             <button onclick="sinvDeleteOne(${r.id},'${(r.invoice_number||'').replace(/'/g,"\\'")}',${i})" style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px"><i class="ti ti-trash"></i></button>
           </div>
         </td>
@@ -25474,6 +25492,46 @@ async function sinvDeleteOne(id,invNo,idx){
     if(r.ok||r.status===204){showToast('✅ تم حذف الفاتورة');sinvLoad();}
     else throw new Error(await r.text());
   }catch(e){showToast('❌ خطأ: '+e.message);}
+}
+
+// ══ تعديل تاريخ فاتورة/مرتجع موجود — بيتسجل تلقائي في invoice_audit_log عبر الـ trigger ══
+let _sinvEditDateCtx = null; // {table, field, id, invNo}
+
+function sinvEditDate(id, curDate, invNo){
+  _sinvEditDateCtx = {table:'sales_deliveries', field:'delivery_date', id, invNo};
+  document.getElementById('sinv-editdate-invno').textContent = `فاتورة رقم: ${invNo||'—'}`;
+  document.getElementById('sinv-editdate-input').value = curDate||'';
+  document.getElementById('sinv-editdate-modal').style.display='flex';
+}
+
+function sinvRetEditDate(id, curDate, invNo){
+  _sinvEditDateCtx = {table:'sales_returns', field:'return_date', id, invNo};
+  document.getElementById('sinv-editdate-invno').textContent = `مرتجع رقم: ${invNo||'—'}`;
+  document.getElementById('sinv-editdate-input').value = curDate||'';
+  document.getElementById('sinv-editdate-modal').style.display='flex';
+}
+
+function sinvCloseEditDate(){
+  document.getElementById('sinv-editdate-modal').style.display='none';
+  _sinvEditDateCtx = null;
+}
+
+async function sinvSaveEditDate(){
+  if(!_sinvEditDateCtx) return;
+  const newDate = document.getElementById('sinv-editdate-input').value;
+  if(!newDate){ showToast('⚠️ اختر تاريخ أولاً'); return; }
+  const {table, field, id, invNo} = _sinvEditDateCtx;
+  const H={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  try{
+    const r=await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({[field]:newDate})});
+    if(r.ok||r.status===204){
+      showToast(`✅ تم تعديل تاريخ ${invNo||'الفاتورة'} إلى ${newDate}`);
+      sinvCloseEditDate();
+      if(table==='sales_deliveries') sinvLoad(); else sinvRetLoad();
+    } else {
+      throw new Error(await r.text());
+    }
+  }catch(e){ showToast('❌ خطأ في حفظ التاريخ: '+e.message); }
 }
 
 // ══ تحميل فواتير المرتجع ══
@@ -25526,7 +25584,10 @@ async function sinvRetLoad(){
         <td style="padding:8px;text-align:center;font-weight:700;color:#065F46">${(r.total_after_discount!=null ? r.total_after_discount : (r.total_net||0)-(r.total_tax||0)).toFixed(2)} ج</td>
         <td style="padding:8px;text-align:center;font-size:11px;color:var(--text2)">${r.return_date||''}</td>
         <td style="padding:8px;text-align:center">
-          <button onclick="sinvRetDeleteOne(${r.id},'${(r.invoice_number||'').replace(/'/g,"\\'")}',${i})" style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px"><i class="ti ti-trash"></i></button>
+          <div style="display:flex;gap:4px;justify-content:center">
+            <button onclick="sinvRetEditDate(${r.id},'${r.return_date||''}','${(r.invoice_number||'').replace(/'/g,"\\'")}')" style="background:#E3F2FD;color:#1565C0;border:1px solid #BBDEFB;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px"><i class="ti ti-calendar-cog"></i></button>
+            <button onclick="sinvRetDeleteOne(${r.id},'${(r.invoice_number||'').replace(/'/g,"\\'")}',${i})" style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px"><i class="ti ti-trash"></i></button>
+          </div>
         </td>
       </tr>`).join('')||'<tr><td colspan="14" style="text-align:center;padding:40px;color:#aaa">لا توجد مرتجعات</td></tr>';
   }catch(e){
