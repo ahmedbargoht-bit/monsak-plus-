@@ -3193,6 +3193,25 @@ const GROUPS = {
   private_alex:   {label:'🏬 أسواق خاصة الإسكندرية',      color:'#6B3410'},
 };
 
+// ── مزامنة GROUPS الثابتة مع جدول groups الديناميكي (Supabase) — منقول حرفياً
+// من لوحة التحكم. من غيرها، أي مجموعة جديدة تتعمل من "إنشاء مجموعة" في لوحة
+// التحكم بتفضل غير معروفة هنا (شارات فاضية، ومش ظاهرة في تشيك بوكسات تعديل مشرف).
+async function syncGroupsFromDB(){
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/groups?select=key_name,name,color,emoji&order=name.asc&limit=200`,{headers:H()});
+    if(!res.ok) return;
+    const rows = await res.json();
+    // نضيف بس المفاتيح الناقصة — منلمسش لون/اسم أي مجموعة موجودة بالفعل (نفس منطق لوحة التحكم)
+    (Array.isArray(rows)?rows:[]).forEach(g=>{
+      if(!g.key_name || GROUPS[g.key_name]) return;
+      GROUPS[g.key_name] = {
+        label: `${g.emoji||''} ${g.name||g.key_name}`.trim(),
+        color: g.color || '#888'
+      };
+    });
+  }catch(e){ console.warn('syncGroupsFromDB error:', e); }
+}
+
 const ROLE_LABELS = {
   'gm':'مدير عام','merch_manager':'مدير التنسيق','sales_manager':'مدير البيع',
   'hyper_sup':'مشرف الهايبر','group_sup':'مشرف المجموعة',
@@ -5290,6 +5309,19 @@ async function saveEditStaff(){
     method:'PATCH', headers:Hh,
     body:JSON.stringify({ name, role, grp: grpArr, notes, reports_to })
   });
+
+  // ── مزامنة المجموعات مع users.groups/grp — منقول حرفياً من لوحة التحكم — ده المصدر
+  // اللي تطبيق "مشرف التنسيق" فعليًا بيتحقق منه وقت تسجيل الدخول، مش staff.grp.
+  try{
+    const usersMatch = await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(oldName)}&role=eq.supervisor&select=id`,{headers:Hh});
+    const usersRows = usersMatch.ok ? await usersMatch.json() : [];
+    if(Array.isArray(usersRows) && usersRows.length){
+      await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${usersRows[0].id}`,{
+        method:'PATCH', headers:Hh,
+        body:JSON.stringify({ groups: groups.join(','), grp: groups[0]||null })
+      });
+    }
+  }catch(e){ console.warn('sync users.groups error:', e); }
 
   if(newPass){
     const passRes = await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(oldName)}`,{
@@ -13356,6 +13388,7 @@ async function doLogin(){
   err.style.display='none';
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').style.display='flex';
+  await syncGroupsFromDB();
   buildGroupSelects();
   buildGroupChecks();
   // await loadReps(); — اتشالت مع حذف تاب المنسقين؛ رجّعها لما التاب الجديد يتضاف لو محتاجينها
