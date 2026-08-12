@@ -16028,10 +16028,13 @@ async function loadAttendance(){
   });
 
   // ── خطوة 2.5: جلسات الدعم الميداني — من جدول field_support_logs (لكل منسق: عدد الجلسات + عدد الفروع المختلفة) ──
+  // وكمان بنبني خريطة يوم-بيوم (منسق+تاريخ) عشان تفاصيل "عرض الأيام" تقدر تعرض جلسات الدعم والمأموريات لكل يوم.
   const supportByRep = {};
+  const supportByDay = {};   // key: name||date -> [{branch_name, support_type, status, supervisor_name}]
+  const assignByDay  = {};   // key: name||date -> [{branch_name, status, note, supervisor_name}]
   try{
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    let sUrl = `${SUPABASE_URL}/rest/v1/field_support_logs?select=rep_name,branch_name,visit_date&limit=5000`;
+    let sUrl = `${SUPABASE_URL}/rest/v1/field_support_logs?select=rep_name,branch_name,visit_date,support_type,status,supervisor_name&limit=5000`;
     if(from) sUrl += `&visit_date=gte.${from}`;
     if(to)   sUrl += `&visit_date=lte.${to}`;
     const sRes = await fetch(sUrl,{headers:H});
@@ -16041,6 +16044,22 @@ async function loadAttendance(){
       if(!supportByRep[n]) supportByRep[n] = {sessions:0, branches:new Set()};
       supportByRep[n].sessions++;
       if(s.branch_name) supportByRep[n].branches.add(s.branch_name);
+      const dKey = n+'||'+(s.visit_date||'');
+      if(!supportByDay[dKey]) supportByDay[dKey]=[];
+      supportByDay[dKey].push(s);
+    });
+
+    let aUrl = `${SUPABASE_URL}/rest/v1/assignments?select=rep_name,branch_name,visit_date,directed_date,status,note,supervisor_name&limit=5000`;
+    if(from) aUrl += `&visit_date=gte.${from}`;
+    if(to)   aUrl += `&visit_date=lte.${to}`;
+    const aRes = await fetch(aUrl,{headers:H});
+    const aLogs = aRes.ok ? await aRes.json().catch(()=>[]) : [];
+    (Array.isArray(aLogs)?aLogs:[]).forEach(a=>{
+      const n = a.rep_name; if(!n) return;
+      const d = a.visit_date||a.directed_date||'';
+      const dKey = n+'||'+d;
+      if(!assignByDay[dKey]) assignByDay[dKey]=[];
+      assignByDay[dKey].push(a);
     });
   }catch(e){ /* لو الجلب فشل، تفضل الأعمدة صفر بدل ما توقف باقي الجدول */ }
 
@@ -16130,6 +16149,8 @@ async function loadAttendance(){
 
   window._attRows = summaryRows;
   window._attDayMap = dayMap;
+  window._attSupportByDay = supportByDay;
+  window._attAssignByDay  = assignByDay;
 }
 
 // عرض تفاصيل أيام منسق معين
@@ -16145,6 +16166,11 @@ function attShowDetail(name, from, to){
   const dayOff = repObj?.day_off||'none';
   const dowOff = attDayNameToNum(dayOff);
 
+  const supportMap = window._attSupportByDay||{};
+  const assignMap  = window._attAssignByDay||{};
+  const supTypeLbl = t => t==='training'?'تدريب':t==='coaching'?'مرافقة':t==='review'?'مراجعة':(t||'دعم ميداني');
+  const asgStatusLbl = s => s==='confirmed'?'مؤكدة':s==='pending'?'منتظرة':s==='done'?'منفذة':(s||'—');
+
   const lines = allDays.map(d=>{
     const rec = Object.values(window._attDayMap||{}).find(r=>r.name===name&&r.date===d);
     const isPresent = present.has(d);
@@ -16153,18 +16179,28 @@ function attShowDetail(name, from, to){
     if(isPresent)      status=`<span style="color:#065F46;font-weight:700">✅ حاضر</span>`;
     else if(isOff)     status=`<span style="color:#D97706;font-weight:700">🏖️ راحة (${attDayOffLabel(dayOff)})</span>`;
     else               status=`<span style="color:#DC2626;font-weight:700">❌ غائب</span>`;
+
+    const dKey = name+'||'+d;
+    const supList = supportMap[dKey]||[];
+    const asgList = assignMap[dKey]||[];
+    const sessionBadges = [
+      ...supList.map(s=>`<span style="display:inline-block;background:#EDE9FE;color:#7C3AED;padding:1px 8px;border-radius:20px;font-size:10px;margin:1px">🛠️ ${supTypeLbl(s.support_type)} — ${s.branch_name||'—'}</span>`),
+      ...asgList.map(a=>`<span style="display:inline-block;background:#E0F2FE;color:#0369A1;padding:1px 8px;border-radius:20px;font-size:10px;margin:1px">📌 مأمورية (${asgStatusLbl(a.status)}) — ${a.branch_name||'—'}</span>`),
+    ].join('') || '<span style="color:#9CA3AF;font-size:10px">—</span>';
+
     return `<tr style="background:${isOff&&!isPresent?'#FFFBEB':'inherit'}">
       <td style="padding:6px 10px">${d}</td>
       <td style="padding:6px 10px">${status}</td>
       <td style="padding:6px 10px">${rec?.timeIn||'—'}</td>
       <td style="padding:6px 10px">${rec?.timeOut||'—'}</td>
+      <td style="padding:6px 10px">${sessionBadges}</td>
     </tr>`;
   }).join('');
 
   const modal = document.createElement('div');
   modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
   modal.innerHTML=`
-    <div style="background:var(--card-bg,#fff);border-radius:16px;padding:24px;max-width:500px;width:90%;max-height:80vh;overflow-y:auto;direction:rtl;font-family:Cairo,sans-serif">
+    <div style="background:var(--card-bg,#fff);border-radius:16px;padding:24px;max-width:680px;width:92%;max-height:80vh;overflow-y:auto;direction:rtl;font-family:Cairo,sans-serif">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <h3 style="margin:0;font-size:15px">📅 تفاصيل ${name}</h3>
         <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none;border:none;font-size:20px;cursor:pointer">✕</button>
@@ -16175,6 +16211,7 @@ function attShowDetail(name, from, to){
           <th style="padding:6px 10px;text-align:right">الحالة</th>
           <th style="padding:6px 10px;text-align:right">أول حضور</th>
           <th style="padding:6px 10px;text-align:right">آخر انصراف</th>
+          <th style="padding:6px 10px;text-align:right">جلسات دعم / مأموريات</th>
         </tr></thead>
         <tbody>${lines}</tbody>
       </table>
