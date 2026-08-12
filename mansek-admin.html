@@ -1327,7 +1327,7 @@ h2,h3{color:#2C1F0A}
           <div id="rd-tab-orders" class="rd-tab-content" style="display:none">
             <div class="table-wrap">
               <table>
-                <thead><tr><th>التاريخ</th><th>الفرع / الوجهة</th><th>الحالة</th><th>ملاحظة</th></tr></thead>
+                <thead><tr><th>النوع</th><th>التاريخ</th><th>الفرع / الوجهة</th><th>الحالة</th><th>ملاحظة</th></tr></thead>
                 <tbody id="rd-orders-body"></tbody>
               </table>
             </div>
@@ -13899,12 +13899,42 @@ async function rdLoad(){
     return iso>=from && iso<=to;
   });
 
-  const [products,missing,orders,attend]=await Promise.all([
+  const [products,missing,supplyOrders,assignments,supportLogs,attend]=await Promise.all([
     fetch(`${SUPABASE_URL}/rest/v1/products?name=eq.${enc}&select=*&order=created_at.desc${dfCA}&limit=500`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/missing?name=eq.${enc}&select=*&order=created_at.desc${dfCA}&limit=500`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/orders?to_name=eq.${enc}&select=*&order=created_at.desc${dfCA}&limit=200`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    // مأموريات: الفروع اللي المشرف وجّهها للمنسق ده (جدول assignments) — كانت مش متجابة هنا خالص
+    fetch(`${SUPABASE_URL}/rest/v1/assignments?rep_name=eq.${enc}&select=*&order=created_at.desc${dfCA}&limit=200`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    // دعم الميدان: جلسات الدعم اللي مشرف عملها مع المنسق ده (جدول field_support_logs) — نفس الحال
+    fetch(`${SUPABASE_URL}/rest/v1/field_support_logs?rep_name=eq.${enc}&select=*&order=created_at.desc${dfCA}&limit=200`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/attendance?name=eq.${enc}&select=*&order=created_at.desc${dfCA}&limit=200`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[])
   ]);
+
+  // ── دمج الثلاثة مصادر في قائمة واحدة لتاب "المأموريات والدعم" — كان التاب ده معتمد
+  // على orders (طلبيات التوريد) بس، وده مختلف تمامًا عن "مأموريات" (assignments، توجيه
+  // فرع من المشرف) و"دعم" (field_support_logs، جلسات دعم ميداني)، فكان بيفضل فاضي
+  // غالبًا حتى لو المنسق فعلاً عنده مأموريات أو زيارات دعم مسجلة.
+  const orders = [
+    ...supplyOrders.map(o=>({
+      type:'طلبية توريد', date:o.arrival_date||o.created_at, target:o.branch||o.to_route||'—',
+      status:o.status, statusLabel: o.status==='done'?'منفذ':o.status==='pending'?'منتظر':o.status||'—',
+      statusClass: o.status==='done'?'b-green':o.status==='pending'?'b-orange':'b-gray',
+      note:o.note||''
+    })),
+    ...assignments.map(a=>({
+      type:'مأمورية', date:a.visit_date||a.directed_date||a.created_at, target:a.branch_name||'—',
+      status:a.status, statusLabel: a.status==='confirmed'?'مؤكدة':a.status==='pending'?'منتظرة':a.status||'—',
+      statusClass: a.status==='confirmed'?'b-green':a.status==='pending'?'b-orange':'b-gray',
+      note:a.note||''
+    })),
+    ...supportLogs.map(s=>({
+      type:'دعم ميداني', date:s.visit_date||s.created_at, target:s.branch_name||'—',
+      status:s.status, statusLabel: s.status==='completed'?'مكتمل':s.status==='active'?'جاري':s.status||'—',
+      statusClass: s.status==='completed'?'b-green':s.status==='active'?'b-orange':'b-gray',
+      note: s.support_type ? `نوع الدعم: ${s.support_type}${s.supervisor_name?' — '+s.supervisor_name:''}` : (s.supervisor_name||'')
+    })),
+  ].sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+
   // حفظ البيانات الكاملة
   window._rdAllData={visits,products,missing,orders,attend};
   // تحديث قائمة الفروع
@@ -14163,15 +14193,16 @@ function rdRenderData(visits,products,missing,orders,attend){
       </tr>`).join('')
     : '<tr><td colspan="6" style="text-align:center;padding:1rem;color:#aaa">لا توجد نواقص</td></tr>';
 
-  // مأموريات
+  // مأموريات ودعم — دمج طلبيات التوريد + المأموريات الموجّهة + جلسات الدعم الميداني (rdLoad بتحضّرهم موحّدين)
   document.getElementById('rd-orders-body').innerHTML=orders.length
     ? orders.map(o=>`<tr>
-        <td style="font-size:11px">${fmtDate((o.arrival_date||o.created_at||'').slice(0,10))}</td>
-        <td style="font-size:11px">${o.branch||o.to_route||'—'}</td>
-        <td><span class="badge ${o.status==='done'?'b-green':o.status==='pending'?'b-orange':'b-gray'}">${o.status==='done'?'منفذ':o.status==='pending'?'منتظر':o.status||'—'}</span></td>
+        <td><span class="badge b-navy" style="font-size:10px">${o.type||'—'}</span></td>
+        <td style="font-size:11px">${fmtDate(String(o.date||'').slice(0,10))}</td>
+        <td style="font-size:11px">${o.target||'—'}</td>
+        <td><span class="badge ${o.statusClass}">${o.statusLabel}</span></td>
         <td style="font-size:11px">${o.note||'—'}</td>
       </tr>`).join('')
-    : '<tr><td colspan="4" style="text-align:center;padding:1rem;color:#aaa">لا توجد مأموريات</td></tr>';
+    : '<tr><td colspan="5" style="text-align:center;padding:1rem;color:#aaa">لا توجد مأموريات أو جلسات دعم</td></tr>';
 
   // حضور
   document.getElementById('rd-attend-body').innerHTML=attend.length
