@@ -6362,7 +6362,7 @@ h2,h3{color:#2C1F0A}
               <div style="font-size:11px;color:#A7F3D0;margin-top:3px">تحليل عميق بالذكاء الاصطناعي — مخزون · مبيعات · توصيات · خطة الكوارتر</div>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <input list="advisor-client-list" id="advisor-client-filter" oninput="advisorOnClientChange()" placeholder="📊 كل السلاسل والعملاء (اكتب للبحث)" autocomplete="off"
+              <input list="advisor-client-list" id="advisor-client-filter" oninput="advisorRebuildBranchFilter()" placeholder="📊 كل السلاسل والعملاء (اكتب للبحث)" autocomplete="off"
                 style="padding:7px 12px;border-radius:8px;border:1.5px solid #34D399;background:rgba(255,255,255,0.1);color:#fff;font-family:Cairo,sans-serif;font-size:11px;min-width:220px"/>
               <datalist id="advisor-client-list"></datalist>
               <select id="advisor-type" style="padding:7px 12px;border-radius:8px;border:1.5px solid #34D399;background:rgba(255,255,255,0.1);color:#fff;font-family:Cairo,sans-serif;font-size:11px">
@@ -6380,7 +6380,7 @@ h2,h3{color:#2C1F0A}
             </div>
           </div>
 
-          <!-- فلتر الفترة + فرع العميل — بيطبق على فواتير التوريد والمرتجع والصافي فقط -->
+          <!-- فلتر الفترة + خط السير + فرع العميل — بيطبق على فواتير التوريد والمرتجع والصافي فقط -->
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px">
             <div style="display:flex;align-items:center;gap:6px">
               <span style="font-size:11px;color:var(--text2)">من</span>
@@ -6391,13 +6391,19 @@ h2,h3{color:#2C1F0A}
               <input type="date" id="advisor-to"/>
             </div>
             <div style="display:flex;align-items:center;gap:6px">
-              <span style="font-size:11px;color:var(--text2)">فرع العميل</span>
+              <span style="font-size:11px;color:var(--text2)">خط السير</span>
+              <select id="advisor-route-filter" onchange="advisorRebuildBranchFilter()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:11px;min-width:150px">
+                <option value="">كل خطوط السير</option>
+              </select>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:11px;color:var(--text2)">الفرع</span>
               <select id="advisor-branch-filter" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:11px;min-width:150px">
                 <option value="">كل الفروع</option>
               </select>
             </div>
             <button onclick="advisorClearFilters()" style="padding:5px 12px;background:var(--surface-2);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-family:Cairo,sans-serif;font-size:11px;cursor:pointer">مسح الفلاتر</button>
-            <span style="font-size:10px;color:#9CA3AF">الفترة وفرع العميل بيطبقوا على فواتير التوريد والمرتجع والصافي فقط</span>
+            <span style="font-size:10px;color:#9CA3AF">الفترة وخط السير والفرع بيطبقوا على فواتير التوريد والمرتجع والصافي فقط — اختيار خط سير أو عميل بيحصر قائمة الفروع تلقائيًا</span>
           </div>
 
           <!-- Sections quick-info row -->
@@ -34997,20 +35003,29 @@ const ADVISOR_SYSTEM_PROMPT = `أنت مستشار تجاري ذكي متخصص 
 
 let _advisorClientBranches = {}; // client_name -> Set(branch_name) — لفلتر "فرع العميل" في المستشار الذكي
 let _advisorClientNames = []; // كل أسماء العملاء (لمطابقة البحث الجزئي — أسماء طويلة زي "شركة ماف لتجهيز وادارة الهايبر ماركت ش.م.م (كارفور)")
+let _advisorRouteBranches = {}; // route -> Set(branch_name) — لفلتر "خط السير"
+let _advisorBranchRoute = {}; // branch_name -> route (عكسي، مفيد لعرض الفرع مع خط سيره)
 
 async function advisorInit(){
   if(_advisorInited) return;
   _advisorInited = true;
   try {
     const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
-    const [cl, bmap] = await Promise.all([
+    const [cl, bmap, branchesRaw] = await Promise.all([
       fetch(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type&order=name.asc&limit=200',{headers:H}).then(r=>r.json()).catch(()=>[]),
       fetch(SUPABASE_URL+'/rest/v1/branch_client_map?select=branch_name,client_name&limit=5000',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(SUPABASE_URL+'/rest/v1/branches?select=branch_name,route&order=route.asc&limit=5000',{headers:H}).then(r=>r.json()).catch(()=>[]),
     ]);
     (Array.isArray(bmap)?bmap:[]).forEach(m=>{
       if(!m.client_name||!m.branch_name) return;
       if(!_advisorClientBranches[m.client_name]) _advisorClientBranches[m.client_name]=new Set();
       _advisorClientBranches[m.client_name].add(m.branch_name);
+    });
+    (Array.isArray(branchesRaw)?branchesRaw:[]).forEach(b=>{
+      if(!b.route||!b.branch_name) return;
+      if(!_advisorRouteBranches[b.route]) _advisorRouteBranches[b.route]=new Set();
+      _advisorRouteBranches[b.route].add(b.branch_name);
+      _advisorBranchRoute[b.branch_name]=b.route;
     });
     const dl = document.getElementById('advisor-client-list');
     if(dl && Array.isArray(cl)){
@@ -35019,6 +35034,12 @@ async function advisorInit(){
         const bCount = _advisorClientBranches[c.name] ? _advisorClientBranches[c.name].size : 0;
         return `<option value="${c.name.replace(/"/g,'&quot;')}">${c.client_type==='سلاسل'?'🏪':'👤'} ${bCount} فرع</option>`;
       }).join('');
+    }
+    const routeSel = document.getElementById('advisor-route-filter');
+    if(routeSel){
+      const routes = Object.keys(_advisorRouteBranches).sort((a,b)=>a.localeCompare(b,'ar'));
+      routeSel.innerHTML = '<option value="">كل خطوط السير</option>' +
+        routes.map(r=>`<option value="${r.replace(/"/g,'&quot;')}">${r} (${_advisorRouteBranches[r].size} فرع)</option>`).join('');
     }
   }catch(e){}
 }
@@ -35032,32 +35053,43 @@ function advisorResolveClient(typed){
   return match||'';
 }
 
-// عند الكتابة/الاختيار في حقل العميل: أعد بناء قائمة "فرع العميل" لتشمل فروع العميل المطابق فقط
-function advisorOnClientChange(){
+// إعادة بناء قائمة "الفرع" بناءً على خط السير و/أو العميل المحددين معًا (تقاطع لو الاتنين متحددين)
+function advisorRebuildBranchFilter(){
   const typed = document.getElementById('advisor-client-filter')?.value||'';
+  const route = document.getElementById('advisor-route-filter')?.value||'';
   const branchSel = document.getElementById('advisor-branch-filter');
   if(!branchSel) return;
+
   const resolved = advisorResolveClient(typed);
-  if(!typed){
-    branchSel.innerHTML = '<option value="">كل الفروع</option>';
-    branchSel.disabled = false;
-    return;
-  }
-  if(!resolved){
+  if(typed && !resolved){
     branchSel.innerHTML = '<option value="">لا يوجد عميل مطابق بهذا الاسم</option>';
     return;
   }
-  const branches = _advisorClientBranches[resolved] ? [..._advisorClientBranches[resolved]].sort((a,b)=>a.localeCompare(b,'ar')) : [];
-  branchSel.innerHTML = (branches.length ? '<option value="">كل فروع '+resolved+'</option>' : '<option value="">لا فروع مسجلة لهذا العميل</option>')
-    + branches.map(b=>`<option value="${b.replace(/"/g,'&quot;')}">${b}</option>`).join('');
+
+  let branches = null; // null = لا يوجد فلتر مصدر بعد
+  if(resolved) branches = _advisorClientBranches[resolved] ? new Set(_advisorClientBranches[resolved]) : new Set();
+  if(route){
+    const routeSet = _advisorRouteBranches[route] || new Set();
+    branches = branches ? new Set([...branches].filter(b=>routeSet.has(b))) : new Set(routeSet);
+  }
+
+  if(!branches){
+    branchSel.innerHTML = '<option value="">كل الفروع</option>';
+    return;
+  }
+  const list = [...branches].sort((a,b)=>a.localeCompare(b,'ar'));
+  const label = resolved && route ? 'فروع '+resolved+' في '+route : resolved ? 'كل فروع '+resolved : 'كل فروع '+route;
+  branchSel.innerHTML = (list.length ? `<option value="">${label}</option>` : '<option value="">لا فروع مطابقة للفلاتر المحددة</option>')
+    + list.map(b=>`<option value="${b.replace(/"/g,'&quot;')}">${b}${_advisorBranchRoute[b]&&!route?' — '+_advisorBranchRoute[b]:''}</option>`).join('');
 }
 
 // مسح كل فلاتر المستشار الذكي (الفترة/العميل/الفرع)
 function advisorClearFilters(){
   const f=document.getElementById('advisor-from'), t=document.getElementById('advisor-to');
-  const cl=document.getElementById('advisor-client-filter'), br=document.getElementById('advisor-branch-filter');
+  const cl=document.getElementById('advisor-client-filter'), br=document.getElementById('advisor-branch-filter'), rt=document.getElementById('advisor-route-filter');
   if(f) f.value=''; if(t) t.value='';
   if(cl) cl.value='';
+  if(rt) rt.value='';
   if(br) br.innerHTML='<option value="">كل الفروع</option>';
 }
 
@@ -35102,6 +35134,7 @@ async function advisorRun(){
   const fltClTyped = (document.getElementById('advisor-client-filter')||{}).value||'';
   const fltCl  = fltClTyped ? (advisorResolveClient(fltClTyped)||fltClTyped) : '';
   const fltBranch = (document.getElementById('advisor-branch-filter')||{}).value||'';
+  const fltRoute  = (document.getElementById('advisor-route-filter')||{}).value||'';
   const advFrom = document.getElementById('advisor-from')?.value||'';
   const advTo   = document.getElementById('advisor-to')?.value||'';
   const aType  = (document.getElementById('advisor-type')||{}).value||'full';
@@ -35121,15 +35154,23 @@ async function advisorRun(){
   try {
     setS('جاري جلب بيانات المخزون والمبيعات...');
 
-    // ── فواتير التوريد والمرتجع: فلترة بالفترة (delivery_date/return_date) وفرع العميل مباشرة من قاعدة البيانات ──
+    // ── فواتير التوريد والمرتجع: فلترة بالفترة (delivery_date/return_date) + خط السير/فرع العميل مباشرة من قاعدة البيانات ──
+    // لو "الفرع" محدد بالاسم: فلتر eq. مباشر. لو "خط السير" محدد بس من غير فرع بعينه: فلتر in.(كل فروع الخط).
+    let branchClause = '';
+    if(fltBranch){
+      branchClause = '&branch_name=eq.'+encodeURIComponent(fltBranch);
+    } else if(fltRoute){
+      const routeBranches = _advisorRouteBranches[fltRoute] ? [..._advisorRouteBranches[fltRoute]] : [];
+      if(routeBranches.length) branchClause = '&branch_name=in.('+routeBranches.map(b=>encodeURIComponent(b)).join(',')+')';
+    }
     let delvUrl = SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,branch_name,rep_name,delivery_date,items,total_net,total_tax,total_before_discount,discount_pct&deleted_at=is.null&order=delivery_date.desc&limit=3000';
     if(advFrom) delvUrl += '&delivery_date=gte.'+advFrom;
     if(advTo)   delvUrl += '&delivery_date=lte.'+advTo;
-    if(fltBranch) delvUrl += '&branch_name=eq.'+encodeURIComponent(fltBranch);
+    delvUrl += branchClause;
     let retUrl = SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,branch_name,rep_name,return_date,items,total_net,total_tax,total_before_discount,discount_pct&deleted_at=is.null&order=return_date.desc&limit=1000';
     if(advFrom) retUrl += '&return_date=gte.'+advFrom;
     if(advTo)   retUrl += '&return_date=lte.'+advTo;
-    if(fltBranch) retUrl += '&branch_name=eq.'+encodeURIComponent(fltBranch);
+    retUrl += branchClause;
 
     const [products, expiry, deliveries, returns_, bmap, catDiscs, promos, clients,
            staffList, branches, plans, planItems, supplyReqs] = await Promise.all([
@@ -35315,19 +35356,54 @@ async function advisorRun(){
       .map(d=>`${d.client_name||d.branch_name||'—'}: ${(d.total_net||0).toFixed(0)}ج (${d.delivery_date||''})`).join(' | ');
     const topReturnInvoices = [...(Array.isArray(returns_)?returns_:[])].sort((a,b)=>(b.total_net||0)-(a.total_net||0)).slice(0,8)
       .map(r=>`${r.client_name||r.branch_name||'—'}: ${(r.total_net||0).toFixed(0)}ج (${r.return_date||''})`).join(' | ');
-    const invoicesSummary = `الفترة: ${advPeriodTxt} | العميل: ${fltCl||'الكل'} | فرع العميل: ${fltBranch||'الكل'}
+    const invoicesSummary = `الفترة: ${advPeriodTxt} | خط السير: ${fltRoute||'الكل'} | العميل: ${fltCl||'الكل'} | الفرع: ${fltBranch||'الكل'}
 عدد فواتير التوريد: ${deliveries.length} | عدد فواتير المرتجع: ${returns_.length} | نسبة الفواتير المرتجعة: ${invReturnRate}%
 إجمالي قيمة التوريد: ${totalDeliveryVal.toFixed(0)}ج | إجمالي قيمة المرتجعات: ${totalReturnVal.toFixed(0)}ج | الصافي: ${(totalDeliveryVal-totalReturnVal).toFixed(0)}ج | متوسط قيمة الفاتورة: ${avgInvoiceVal.toFixed(0)}ج
 أعلى فواتير توريد: ${topInvoices||'لا بيانات'}
 أعلى فواتير مرتجع: ${topReturnInvoices||'لا بيانات'}`;
 
+    // ══ تحليل خط السير: مبيعات/مرتجع الخط (من فواتير المناديب) + عدد الزيارات + أصناف الخط ══
+    let routeAnalysis = 'لم يتم تحديد خط سير للتحليل — اختر خط سير من الفلتر فوق لعرض تحليل مخصص له.';
+    if(fltRoute){
+      setS('جاري تجهيز تحليل خط السير...');
+      const normR = s => (s||'').replace(/\s+/g,' ').trim();
+      let visitsUrl = SUPABASE_URL+'/rest/v1/visits?select=route,branch,name,date&limit=5000';
+      if(advFrom) visitsUrl += '&date=gte.'+advFrom;
+      if(advTo)   visitsUrl += '&date=lte.'+advTo;
+      const allVisits = await fetch(visitsUrl,{headers:H}).then(r=>r.json()).catch(()=>[]);
+      const routeVisits = (Array.isArray(allVisits)?allVisits:[]).filter(v=>normR(v.route)===normR(fltRoute));
+      const visitsCount = routeVisits.length;
+      const visitedBranches = new Set(routeVisits.map(v=>v.branch).filter(Boolean));
+      const visitCoords = new Set(routeVisits.map(v=>v.name).filter(Boolean));
+
+      const routeSalesVal = deliveries.reduce((s,d)=>s+(d.total_net||0),0);
+      const routeReturnsVal = returns_.reduce((s,r)=>s+(r.total_net||0),0);
+      const routeNetVal = routeSalesVal-routeReturnsVal;
+
+      const routeSnfSales={}, routeSnfReturns={};
+      deliveries.forEach(d=>(Array.isArray(d.items)?d.items:[]).forEach(it=>{ const n=it.name||it.snf||''; if(n) routeSnfSales[n]=(routeSnfSales[n]||0)+(it.qty||0); }));
+      returns_.forEach(r=>(Array.isArray(r.items)?r.items:[]).forEach(it=>{ const n=it.name||it.snf||''; if(n) routeSnfReturns[n]=(routeSnfReturns[n]||0)+(it.qty||0); }));
+      const routeTopSold = Object.entries(routeSnfSales).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([n,q])=>n+'('+q+')').join('، ')||'لا بيانات';
+      const routeTopReturned = Object.entries(routeSnfReturns).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([n,q])=>n+'('+q+')').join('، ')||'لا مرتجعات';
+
+      const routeBranchesTotal = (_advisorRouteBranches[fltRoute]||new Set()).size;
+      const conversionTxt = visitsCount>0 ? (deliveries.length/visitsCount*100).toFixed(0)+'%' : '—';
+
+      routeAnalysis = `خط السير: ${fltRoute} | إجمالي فروع الخط: ${routeBranchesTotal} | فروع تمت زيارتها فعليًا في الفترة: ${visitedBranches.size} | منسقون عملوا زيارات على الخط: ${[...visitCoords].join('، ')||'—'}
+عدد الزيارات المسجلة: ${visitsCount} | عدد فواتير التوريد: ${deliveries.length} | نسبة تحويل الزيارة لفاتورة توريد: ${conversionTxt}
+مبيعات (توريد) الخط: ${routeSalesVal.toFixed(0)}ج | مرتجعات الخط: ${routeReturnsVal.toFixed(0)}ج (${returns_.length} فاتورة مرتجع) | الصافي: ${routeNetVal.toFixed(0)}ج
+أكثر الأصناف مبيعًا على الخط: ${routeTopSold}
+أكثر الأصناف ارتجاعًا على الخط: ${routeTopReturned}`;
+    }
+
     // ══ Sales Dashboard (المستهدفات والتحقيق) — بيقرا نفس لوحة Sales Dashboard الحقيقية ══
     setS('جاري تجهيز ملخص Sales Dashboard...');
     const dashboardSummary = await advisorGetDashboardSummary();
 
-    const prompt='التاريخ: '+todayStr+' | Q'+quarter+'→Q'+nextQ+' | فترة فواتير التوريد/المرتجع/الصافي المحددة: '+advPeriodTxt+(fltCl?' | العميل: '+fltCl:'')+(fltBranch?' | فرع العميل: '+fltBranch:'')+'\n'+typeInstruction+
+    const prompt='التاريخ: '+todayStr+' | Q'+quarter+'→Q'+nextQ+' | فترة فواتير التوريد/المرتجع/الصافي المحددة: '+advPeriodTxt+(fltRoute?' | خط السير: '+fltRoute:'')+(fltCl?' | العميل: '+fltCl:'')+(fltBranch?' | الفرع: '+fltBranch:'')+'\n'+typeInstruction+
       '\n\n[فريق العمل والمشرفون — من قاعدة البيانات]\n'+staffSum+
       '\n\n[خطوط السير والفروع — '+branches.length+' فرع نشط]\n'+routeSum+
+      '\n\n[تحليل خط السير المحدد — مبيعات/مرتجع/زيارات/أصناف]\n'+routeAnalysis+
       '\n\n[خطط المبيعات والتنسيق]\n'+plansSum+
       '\n\n[تقارير الميدان / طلبات التوريد — '+supplyStatusSum+']\n'+supplySum+
       '\n\n[أداء المناديب/المشرفين — الفواتير]\n'+repSum+
@@ -35339,8 +35415,8 @@ async function advisorRun(){
       '\n\n[انتهاء صلاحية <90يوم]\n'+expSum+
       '\n\n[مصنعات]\n'+msnfSum+
       '\n\n[خصومات]\n'+discSum+
-      '\n\nاكتب تقريراً تجارياً يشمل:\n1. أداء المناديب والمشرفين (أرقام فعلية)\n2. تحليل خطوط السير والفروع\n3. تحليل خطط المبيعات ومدى تنفيذها\n4. أبرز ما في تقارير الميدان\n5. فواتير المبيعات (توريد ومرتجع) وتحليلها\n6. أداء المستهدفات (Sales Dashboard) لكل قطاع/مشرف\n7. أداء السلاسل والعملاء\n8. الراكد وخطة إنقاذه\n9. خطة Q'+nextQ+
-      '\n10. SWOT بالوسوم:\nSWOT_STRENGTHS_START\n•...\nSWOT_STRENGTHS_END\nSWOT_WEAKNESSES_START\n•...\nSWOT_WEAKNESSES_END\nSWOT_OPPORTUNITIES_START\n•...\nSWOT_OPPORTUNITIES_END\nSWOT_THREATS_START\n•...\nSWOT_THREATS_END\n11. 3 قرارات فورية هذا الأسبوع\nاستخدم الأرقام والأسماء الفعلية من البيانات فقط — لا تخترع أرقاماً.';
+      '\n\nاكتب تقريراً تجارياً يشمل:\n1. أداء المناديب والمشرفين (أرقام فعلية)\n2. تحليل خطوط السير والفروع\n3. تحليل خط السير المحدد إن وُجد: قارن عدد الزيارات بعدد فواتير التوريد ونسبة التحويل، واذكر الأصناف الأكثر مبيعًا وارتجاعًا عليه\n4. تحليل خطط المبيعات ومدى تنفيذها\n5. أبرز ما في تقارير الميدان\n6. فواتير المبيعات (توريد ومرتجع) وتحليلها\n7. أداء المستهدفات (Sales Dashboard) لكل قطاع/مشرف\n8. أداء السلاسل والعملاء\n9. الراكد وخطة إنقاذه\n10. خطة Q'+nextQ+
+      '\n11. SWOT بالوسوم:\nSWOT_STRENGTHS_START\n•...\nSWOT_STRENGTHS_END\nSWOT_WEAKNESSES_START\n•...\nSWOT_WEAKNESSES_END\nSWOT_OPPORTUNITIES_START\n•...\nSWOT_OPPORTUNITIES_END\nSWOT_THREATS_START\n•...\nSWOT_THREATS_END\n12. 3 قرارات فورية هذا الأسبوع\nاستخدم الأرقام والأسماء الفعلية من البيانات فقط — لا تخترع أرقاماً.';
 
     setS('الذكاء الاصطناعي يكتب التقرير... (20–40 ثانية)');
 
