@@ -6362,9 +6362,9 @@ h2,h3{color:#2C1F0A}
               <div style="font-size:11px;color:#A7F3D0;margin-top:3px">تحليل عميق بالذكاء الاصطناعي — مخزون · مبيعات · توصيات · خطة الكوارتر</div>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <select id="advisor-client-filter" onchange="advisorOnClientChange()" style="padding:7px 12px;border-radius:8px;border:1.5px solid #34D399;background:rgba(255,255,255,0.1);color:#fff;font-family:Cairo,sans-serif;font-size:11px;min-width:140px">
-                <option value="">📊 جميع السلاسل والعملاء</option>
-              </select>
+              <input list="advisor-client-list" id="advisor-client-filter" oninput="advisorOnClientChange()" placeholder="📊 كل السلاسل والعملاء (اكتب للبحث)" autocomplete="off"
+                style="padding:7px 12px;border-radius:8px;border:1.5px solid #34D399;background:rgba(255,255,255,0.1);color:#fff;font-family:Cairo,sans-serif;font-size:11px;min-width:220px"/>
+              <datalist id="advisor-client-list"></datalist>
               <select id="advisor-type" style="padding:7px 12px;border-radius:8px;border:1.5px solid #34D399;background:rgba(255,255,255,0.1);color:#fff;font-family:Cairo,sans-serif;font-size:11px">
                 <option value="full">تحليل شامل كامل</option>
                 <option value="inventory">مخزون وراكد فقط</option>
@@ -34996,6 +34996,7 @@ const ADVISOR_SYSTEM_PROMPT = `أنت مستشار تجاري ذكي متخصص 
 • تحدّث بالعربية، كن محدداً وعملياً وقابلاً للتنفيذ`;
 
 let _advisorClientBranches = {}; // client_name -> Set(branch_name) — لفلتر "فرع العميل" في المستشار الذكي
+let _advisorClientNames = []; // كل أسماء العملاء (لمطابقة البحث الجزئي — أسماء طويلة زي "شركة ماف لتجهيز وادارة الهايبر ماركت ش.م.م (كارفور)")
 
 async function advisorInit(){
   if(_advisorInited) return;
@@ -35011,25 +35012,44 @@ async function advisorInit(){
       if(!_advisorClientBranches[m.client_name]) _advisorClientBranches[m.client_name]=new Set();
       _advisorClientBranches[m.client_name].add(m.branch_name);
     });
-    const sel = document.getElementById('advisor-client-filter');
-    if(sel && Array.isArray(cl)){
-      cl.forEach(c=>{
-        const o=document.createElement('option');
-        o.value=c.name;
-        o.textContent=c.name+(c.client_type==='سلاسل'?' 🏪':' 👤');
-        sel.appendChild(o);
-      });
+    const dl = document.getElementById('advisor-client-list');
+    if(dl && Array.isArray(cl)){
+      _advisorClientNames = cl.map(c=>c.name).filter(Boolean);
+      dl.innerHTML = cl.map(c=>{
+        const bCount = _advisorClientBranches[c.name] ? _advisorClientBranches[c.name].size : 0;
+        return `<option value="${c.name.replace(/"/g,'&quot;')}">${c.client_type==='سلاسل'?'🏪':'👤'} ${bCount} فرع</option>`;
+      }).join('');
     }
   }catch(e){}
 }
 
-// عند تغيير العميل: أعد بناء قائمة "فرع العميل" لتشمل فروع العميل المختار فقط
+// بحث مرن باسم العميل: تطابق تام أولاً، وإلا أقرب اسم عميل يحتوي النص المكتوب (عشان الأسماء الرسمية الطويلة زي "شركة ماف...كارفور")
+function advisorResolveClient(typed){
+  if(!typed) return '';
+  const t = typed.trim();
+  if(_advisorClientBranches[t] || _advisorClientNames.includes(t)) return t;
+  const match = _advisorClientNames.find(n=>n.includes(t)) || _advisorClientNames.find(n=>t.includes(n));
+  return match||'';
+}
+
+// عند الكتابة/الاختيار في حقل العميل: أعد بناء قائمة "فرع العميل" لتشمل فروع العميل المطابق فقط
 function advisorOnClientChange(){
-  const client = document.getElementById('advisor-client-filter')?.value||'';
+  const typed = document.getElementById('advisor-client-filter')?.value||'';
   const branchSel = document.getElementById('advisor-branch-filter');
   if(!branchSel) return;
-  const branches = client && _advisorClientBranches[client] ? [..._advisorClientBranches[client]].sort((a,b)=>a.localeCompare(b,'ar')) : [];
-  branchSel.innerHTML = '<option value="">كل الفروع</option>' + branches.map(b=>`<option value="${b.replace(/"/g,'&quot;')}">${b}</option>`).join('');
+  const resolved = advisorResolveClient(typed);
+  if(!typed){
+    branchSel.innerHTML = '<option value="">كل الفروع</option>';
+    branchSel.disabled = false;
+    return;
+  }
+  if(!resolved){
+    branchSel.innerHTML = '<option value="">لا يوجد عميل مطابق بهذا الاسم</option>';
+    return;
+  }
+  const branches = _advisorClientBranches[resolved] ? [..._advisorClientBranches[resolved]].sort((a,b)=>a.localeCompare(b,'ar')) : [];
+  branchSel.innerHTML = (branches.length ? '<option value="">كل فروع '+resolved+'</option>' : '<option value="">لا فروع مسجلة لهذا العميل</option>')
+    + branches.map(b=>`<option value="${b.replace(/"/g,'&quot;')}">${b}</option>`).join('');
 }
 
 // مسح كل فلاتر المستشار الذكي (الفترة/العميل/الفرع)
@@ -35079,12 +35099,18 @@ async function advisorRun(){
 
   const area   = document.getElementById('advisor-result');
   const btn    = document.getElementById('advisor-run-btn');
-  const fltCl  = (document.getElementById('advisor-client-filter')||{}).value||'';
+  const fltClTyped = (document.getElementById('advisor-client-filter')||{}).value||'';
+  const fltCl  = fltClTyped ? (advisorResolveClient(fltClTyped)||fltClTyped) : '';
   const fltBranch = (document.getElementById('advisor-branch-filter')||{}).value||'';
   const advFrom = document.getElementById('advisor-from')?.value||'';
   const advTo   = document.getElementById('advisor-to')?.value||'';
   const aType  = (document.getElementById('advisor-type')||{}).value||'full';
   const advPeriodTxt = (advFrom||advTo) ? (advFrom||'البداية')+' إلى '+(advTo||'الآن') : 'كل البيانات المتاحة';
+
+  if(fltClTyped && !fltCl){
+    alert('لم يتم إيجاد عميل مطابق للاسم المكتوب: "'+fltClTyped+'". اختَر اسمًا من قائمة الاقتراحات أو امسح الفلتر.');
+    _advisorRunning=false; return;
+  }
 
   area.innerHTML = '<div style="text-align:center;padding:50px;color:#065F46"><div style="font-size:40px;margin-bottom:14px">🧠</div><div style="font-size:14px;font-weight:800">المستشار الذكي يحلل البيانات...</div><div id="advisor-status" style="font-size:11px;color:#6B7280;margin-top:8px">جاري جلب البيانات من قاعدة البيانات...</div></div>';
   btn.disabled = true;
