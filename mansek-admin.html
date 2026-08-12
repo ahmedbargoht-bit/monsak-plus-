@@ -16254,6 +16254,41 @@ async function loadAttendance(){
     if(a.time_out &&(!r.timeOut||a.time_out>r.timeOut)) r.timeOut=a.time_out;
   });
 
+  // ── خطوة 1.5: تطبيق تعديلات الحضور اليدوية (attendance_edits) على dayMap قبل حساب أي إحصائيات ──
+  // كده أي تعديل (حاضر/غائب/وقت) بيتحسب صح في كل مكان: الإحصائيات، تفاصيل الأيام، والتصدير.
+  const editsByDay = {};
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    let eUrl = `${SUPABASE_URL}/rest/v1/attendance_edits?select=*&limit=5000`;
+    if(from) eUrl += `&date=gte.${from}`;
+    if(to)   eUrl += `&date=lte.${to}`;
+    const eRes = await fetch(eUrl,{headers:H});
+    const edits = eRes.ok ? await eRes.json().catch(()=>[]) : [];
+    (Array.isArray(edits)?edits:[]).forEach(ed=>{
+      if(!ed.name || !ed.date) return;
+      const key = ed.name+'||'+ed.date;
+      editsByDay[key] = ed;
+      // لو فيه فلتر مجموعة مفعّل، منطبقش تغيير الحالة إلا لو الشخص فعلاً في نفس المجموعة
+      // (عشان مانخبطش إحصائيات مجموعة تانية) — الملاحظة بس بتفضل متاحة في كل الأحوال.
+      if(grp!=='all'){
+        const repObj = (typeof REPS!=='undefined'?REPS:[]).find(r=>(r.name||r.staff_name)===ed.name);
+        const repGrp = repObj?.grp||repObj?.group||'';
+        if(repGrp !== grp) return;
+      }
+      if(ed.status==='present'){
+        if(!dayMap[key]){
+          const repObj = (typeof REPS!=='undefined'?REPS:[]).find(r=>(r.name||r.staff_name)===ed.name);
+          dayMap[key] = { name:ed.name, route:repObj?.route||'—', grp:repObj?.grp||repObj?.group||'—', date:ed.date, timeIn:null, timeOut:null };
+        }
+        if(ed.time_in)  dayMap[key].timeIn  = ed.time_in;
+        if(ed.time_out) dayMap[key].timeOut = ed.time_out;
+        dayMap[key].manualEdit = true;
+      } else if(ed.status==='absent'){
+        delete dayMap[key];
+      }
+    });
+  }catch(e){ /* لو الجلب فشل، تفضل التعديلات صفر بدل ما توقف باقي الجدول */ }
+
   // ── خطوة 2: تجميع لكل منسق ──
   const coordMap = {};
   Object.values(dayMap).forEach(r=>{
@@ -16323,7 +16358,11 @@ async function loadAttendance(){
     const sup = supportByRep[c.name];
     const supportSessions = sup?.sessions||0;
     const supportBranches = sup?.branches?.size||0;
-    return { name:c.name, route:c.route, empCode, present, absent, totalDays, workDays, dayOff, dayOffCount, hrs:c.totalHrs, pct, supportSessions, supportBranches };
+    const notesText = Object.values(editsByDay)
+      .filter(e=>e.name===c.name && e.note)
+      .sort((a,b)=>(a.date||'').localeCompare(b.date||''))
+      .map(e=>`${e.date}: ${e.note}`).join(' | ');
+    return { name:c.name, route:c.route, empCode, present, absent, totalDays, workDays, dayOff, dayOffCount, hrs:c.totalHrs, pct, supportSessions, supportBranches, notes:notesText };
   }).sort((a,b)=>b.present-a.present||a.name.localeCompare(b.name));
 
   // ── إحصائيات ──
@@ -16396,6 +16435,7 @@ async function loadAttendance(){
   window._attDayMap = dayMap;
   window._attSupportByDay = supportByDay;
   window._attAssignByDay  = assignByDay;
+  window._attEditsByDay   = editsByDay;
 }
 
 // عرض تفاصيل أيام منسق معين
@@ -16413,6 +16453,7 @@ function attShowDetail(name, from, to){
 
   const supportMap = window._attSupportByDay||{};
   const assignMap  = window._attAssignByDay||{};
+  const editsMap   = window._attEditsByDay||{};
   const supTypeLbl = t => t==='training'?'تدريب':t==='coaching'?'مرافقة':t==='review'?'مراجعة':(t||'دعم ميداني');
   const asgStatusLbl = s => s==='confirmed'?'مؤكدة':s==='pending'?'منتظرة':s==='done'?'منفذة':(s||'—');
 
@@ -16420,12 +16461,14 @@ function attShowDetail(name, from, to){
     const rec = Object.values(window._attDayMap||{}).find(r=>r.name===name&&r.date===d);
     const isPresent = present.has(d);
     const isOff = dowOff>=0 && new Date(d).getDay()===dowOff;
-    let status;
-    if(isPresent)      status=`<span style="color:#065F46;font-weight:700">✅ حاضر</span>`;
-    else if(isOff)     status=`<span style="color:#D97706;font-weight:700">🏖️ راحة (${attDayOffLabel(dayOff)})</span>`;
-    else               status=`<span style="color:#DC2626;font-weight:700">❌ غائب</span>`;
-
     const dKey = name+'||'+d;
+    const edit = editsMap[dKey];
+    const manualTag = ' <span style="font-size:9px;color:#7C3AED;font-weight:700">(يدوي)</span>';
+    let status;
+    if(isPresent)      status=`<span style="color:#065F46;font-weight:700">✅ حاضر${rec?.manualEdit?manualTag:''}</span>`;
+    else if(isOff)     status=`<span style="color:#D97706;font-weight:700">🏖️ راحة (${attDayOffLabel(dayOff)})</span>`;
+    else               status=`<span style="color:#DC2626;font-weight:700">❌ غائب${edit&&edit.status==='absent'?manualTag:''}</span>`;
+
     const supList = supportMap[dKey]||[];
     const asgList = assignMap[dKey]||[];
     const sessionBadges = [
@@ -16433,22 +16476,29 @@ function attShowDetail(name, from, to){
       ...asgList.map(a=>`<span style="display:inline-block;background:#E0F2FE;color:#0369A1;padding:1px 8px;border-radius:20px;font-size:10px;margin:1px">📌 مأمورية (${asgStatusLbl(a.status)}) — ${a.branch_name||'—'}</span>`),
     ].join('') || '<span style="color:#9CA3AF;font-size:10px">—</span>';
 
+    const noteHtml = edit?.note ? `<div style="font-size:10px;color:#6B7280;margin-top:3px">📝 ${edit.note}</div>` : '';
+
     return `<tr style="background:${isOff&&!isPresent?'#FFFBEB':'inherit'}">
       <td style="padding:6px 10px">${d}</td>
-      <td style="padding:6px 10px">${status}</td>
+      <td style="padding:6px 10px">${status}${noteHtml}</td>
       <td style="padding:6px 10px">${rec?.timeIn||'—'}</td>
       <td style="padding:6px 10px">${rec?.timeOut||'—'}</td>
       <td style="padding:6px 10px">${sessionBadges}</td>
+      <td style="padding:6px 10px;text-align:center">
+        <button onclick="attOpenEditRow('${name.replace(/'/g,"\\'")}','${d}')"
+          style="background:none;border:1px solid var(--border);border-radius:6px;padding:3px 9px;cursor:pointer;font-size:11px;white-space:nowrap">✏️ تعديل</button>
+      </td>
     </tr>`;
   }).join('');
 
   const modal = document.createElement('div');
+  modal.id = 'att-detail-modal';
   modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
   modal.innerHTML=`
-    <div style="background:var(--card-bg,#fff);border-radius:16px;padding:24px;max-width:680px;width:92%;max-height:80vh;overflow-y:auto;direction:rtl;font-family:Cairo,sans-serif">
+    <div style="background:var(--card-bg,#fff);border-radius:16px;padding:24px;max-width:760px;width:92%;max-height:80vh;overflow-y:auto;direction:rtl;font-family:Cairo,sans-serif">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <h3 style="margin:0;font-size:15px">📅 تفاصيل ${name}</h3>
-        <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none;border:none;font-size:20px;cursor:pointer">✕</button>
+        <button onclick="document.getElementById('att-detail-modal')?.remove()" style="background:none;border:none;font-size:20px;cursor:pointer">✕</button>
       </div>
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead><tr style="background:var(--surface-2)">
@@ -16457,12 +16507,96 @@ function attShowDetail(name, from, to){
           <th style="padding:6px 10px;text-align:right">أول حضور</th>
           <th style="padding:6px 10px;text-align:right">آخر انصراف</th>
           <th style="padding:6px 10px;text-align:right">جلسات دعم / مأموريات</th>
+          <th style="padding:6px 10px;text-align:center">إجراء</th>
         </tr></thead>
         <tbody>${lines}</tbody>
       </table>
     </div>`;
   modal.onclick=e=>{ if(e.target===modal) modal.remove(); };
   document.body.appendChild(modal);
+}
+
+// ── تعديل يدوي لحضور يوم معين (حاضر/غائب + وقت من-إلى + ملاحظة) ──
+// بيتخزن في جدول attendance_edits وبياخد أولوية على البيانات الحقيقية وقت الحساب في loadAttendance().
+function attOpenEditRow(name, date){
+  const key = name+'||'+date;
+  const existing = (window._attEditsByDay||{})[key] || {};
+  const dm = (window._attDayMap||{})[key] || {};
+  const currentStatus = existing.status || ((dm.timeIn||dm.timeOut) ? 'present' : 'absent');
+
+  document.getElementById('att-edit-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'att-edit-modal';
+  modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:10001;display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = `
+    <div style="background:var(--card-bg,#fff);border-radius:14px;padding:22px;max-width:380px;width:92%;direction:rtl;font-family:Cairo,sans-serif">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h4 style="margin:0;font-size:14px">✏️ تعديل حضور ${name}</h4>
+        <button onclick="document.getElementById('att-edit-modal')?.remove()" style="background:none;border:none;font-size:18px;cursor:pointer">✕</button>
+      </div>
+      <p style="font-size:12px;color:var(--text2);margin:0 0 12px">التاريخ: ${date}</p>
+      <label style="font-size:12px;display:block;margin-bottom:4px">الحالة</label>
+      <select id="ae-status" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:10px;font-family:Cairo,sans-serif;font-size:12px">
+        <option value="present" ${currentStatus==='present'?'selected':''}>✅ حاضر</option>
+        <option value="absent" ${currentStatus==='absent'?'selected':''}>❌ غائب</option>
+      </select>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <div style="flex:1">
+          <label style="font-size:12px;display:block;margin-bottom:4px">من (حضور)</label>
+          <input id="ae-time-in" type="time" value="${existing.time_in||dm.timeIn||''}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"/>
+        </div>
+        <div style="flex:1">
+          <label style="font-size:12px;display:block;margin-bottom:4px">إلى (انصراف)</label>
+          <input id="ae-time-out" type="time" value="${existing.time_out||dm.timeOut||''}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"/>
+        </div>
+      </div>
+      <label style="font-size:12px;display:block;margin-bottom:4px">ملاحظات (تظهر في تصدير PDF)</label>
+      <textarea id="ae-note" rows="3" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;margin-bottom:14px">${existing.note||''}</textarea>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-blue" style="flex:1" onclick="attSaveEdit('${name.replace(/'/g,"\\'")}','${date}')"><i class="ti ti-check"></i> حفظ</button>
+        ${existing.id ? `<button class="btn" style="background:#FFEBEE;color:#B71C1C" onclick="attDeleteEdit('${name.replace(/'/g,"\\'")}','${date}',${existing.id})">حذف التعديل</button>` : ''}
+      </div>
+    </div>`;
+  modal.onclick=e=>{ if(e.target===modal) modal.remove(); };
+  document.body.appendChild(modal);
+}
+
+async function attSaveEdit(name, date){
+  const status  = document.getElementById('ae-status').value;
+  const timeIn  = document.getElementById('ae-time-in').value || null;
+  const timeOut = document.getElementById('ae-time-out').value || null;
+  const note    = document.getElementById('ae-note').value.trim() || null;
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=minimal'};
+    const body = [{
+      name, date, status,
+      time_in:  status==='present' ? timeIn  : null,
+      time_out: status==='present' ? timeOut : null,
+      note, updated_by: (typeof CU!=='undefined'?CU?.name:'')||'', updated_at: new Date().toISOString()
+    }];
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/attendance_edits?on_conflict=name,date`,{method:'POST',headers:H,body:JSON.stringify(body)});
+    if(!r.ok){ alert('حصل خطأ أثناء الحفظ'); return; }
+    document.getElementById('att-edit-modal')?.remove();
+    document.getElementById('att-detail-modal')?.remove();
+    await loadAttendance();
+    const from = document.getElementById('att-from')?.value||'';
+    const to   = document.getElementById('att-to')?.value||'';
+    attShowDetail(name, from, to);
+  }catch(e){ alert('حصل خطأ أثناء الحفظ'); }
+}
+
+async function attDeleteEdit(name, date, id){
+  if(!confirm('حذف التعديل والرجوع للبيانات الأصلية؟')) return;
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    await fetch(`${SUPABASE_URL}/rest/v1/attendance_edits?id=eq.${id}`,{method:'DELETE',headers:H});
+    document.getElementById('att-edit-modal')?.remove();
+    document.getElementById('att-detail-modal')?.remove();
+    await loadAttendance();
+    const from = document.getElementById('att-from')?.value||'';
+    const to   = document.getElementById('att-to')?.value||'';
+    attShowDetail(name, from, to);
+  }catch(e){ alert('حصل خطأ أثناء الحذف'); }
 }
 
 function exportAttendancePDF(){
@@ -16509,6 +16643,7 @@ function exportAttendancePDF(){
       <td style="text-align:center">
         <span style="display:inline-block;background:${barColor};color:#fff;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700">${pct}%</span>
       </td>
+      <td style="font-size:10px;color:#7C3AED">${r.notes||'—'}</td>
     </tr>`;
   });
 
@@ -16574,7 +16709,7 @@ function exportAttendancePDF(){
       <th style="color:#A7F3D0">أيام الحضور</th>
       <th style="color:#FECACA">أيام الغياب</th>
       <th style="color:#FCD34D">أيام الراحة</th>
-      <th>أيام العمل الفعلية</th><th>ساعات العمل</th><th style="color:#DDD6FE">جلسات دعم</th><th style="color:#DDD6FE">فروع</th><th>نسبة الحضور</th>
+      <th>أيام العمل الفعلية</th><th>ساعات العمل</th><th style="color:#DDD6FE">جلسات دعم</th><th style="color:#DDD6FE">فروع</th><th>نسبة الحضور</th><th style="color:#DDD6FE">ملاحظات</th>
     </tr></thead>
     <tbody>${tRows}</tbody>
   </table>
