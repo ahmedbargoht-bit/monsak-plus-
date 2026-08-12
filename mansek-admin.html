@@ -6362,7 +6362,7 @@ h2,h3{color:#2C1F0A}
               <div style="font-size:11px;color:#A7F3D0;margin-top:3px">تحليل عميق بالذكاء الاصطناعي — مخزون · مبيعات · توصيات · خطة الكوارتر</div>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <select id="advisor-client-filter" style="padding:7px 12px;border-radius:8px;border:1.5px solid #34D399;background:rgba(255,255,255,0.1);color:#fff;font-family:Cairo,sans-serif;font-size:11px;min-width:140px">
+              <select id="advisor-client-filter" onchange="advisorOnClientChange()" style="padding:7px 12px;border-radius:8px;border:1.5px solid #34D399;background:rgba(255,255,255,0.1);color:#fff;font-family:Cairo,sans-serif;font-size:11px;min-width:140px">
                 <option value="">📊 جميع السلاسل والعملاء</option>
               </select>
               <select id="advisor-type" style="padding:7px 12px;border-radius:8px;border:1.5px solid #34D399;background:rgba(255,255,255,0.1);color:#fff;font-family:Cairo,sans-serif;font-size:11px">
@@ -6378,6 +6378,26 @@ h2,h3{color:#2C1F0A}
                 ⚡ تشغيل التحليل
               </button>
             </div>
+          </div>
+
+          <!-- فلتر الفترة + فرع العميل — بيطبق على فواتير التوريد والمرتجع والصافي فقط -->
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:11px;color:var(--text2)">من</span>
+              <input type="date" id="advisor-from"/>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:11px;color:var(--text2)">إلى</span>
+              <input type="date" id="advisor-to"/>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:11px;color:var(--text2)">فرع العميل</span>
+              <select id="advisor-branch-filter" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:11px;min-width:150px">
+                <option value="">كل الفروع</option>
+              </select>
+            </div>
+            <button onclick="advisorClearFilters()" style="padding:5px 12px;background:var(--surface-2);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-family:Cairo,sans-serif;font-size:11px;cursor:pointer">مسح الفلاتر</button>
+            <span style="font-size:10px;color:#9CA3AF">الفترة وفرع العميل بيطبقوا على فواتير التوريد والمرتجع والصافي فقط</span>
           </div>
 
           <!-- Sections quick-info row -->
@@ -34975,12 +34995,22 @@ const ADVISOR_SYSTEM_PROMPT = `أنت مستشار تجاري ذكي متخصص 
 • اذكر أسماء العملاء والمنتجات والمشرفين بالاسم الصريح
 • تحدّث بالعربية، كن محدداً وعملياً وقابلاً للتنفيذ`;
 
+let _advisorClientBranches = {}; // client_name -> Set(branch_name) — لفلتر "فرع العميل" في المستشار الذكي
+
 async function advisorInit(){
   if(_advisorInited) return;
   _advisorInited = true;
   try {
     const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
-    const cl = await fetch(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type&order=name.asc&limit=200',{headers:H}).then(r=>r.json()).catch(()=>[]);
+    const [cl, bmap] = await Promise.all([
+      fetch(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type&order=name.asc&limit=200',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(SUPABASE_URL+'/rest/v1/branch_client_map?select=branch_name,client_name&limit=5000',{headers:H}).then(r=>r.json()).catch(()=>[]),
+    ]);
+    (Array.isArray(bmap)?bmap:[]).forEach(m=>{
+      if(!m.client_name||!m.branch_name) return;
+      if(!_advisorClientBranches[m.client_name]) _advisorClientBranches[m.client_name]=new Set();
+      _advisorClientBranches[m.client_name].add(m.branch_name);
+    });
     const sel = document.getElementById('advisor-client-filter');
     if(sel && Array.isArray(cl)){
       cl.forEach(c=>{
@@ -34991,6 +35021,24 @@ async function advisorInit(){
       });
     }
   }catch(e){}
+}
+
+// عند تغيير العميل: أعد بناء قائمة "فرع العميل" لتشمل فروع العميل المختار فقط
+function advisorOnClientChange(){
+  const client = document.getElementById('advisor-client-filter')?.value||'';
+  const branchSel = document.getElementById('advisor-branch-filter');
+  if(!branchSel) return;
+  const branches = client && _advisorClientBranches[client] ? [..._advisorClientBranches[client]].sort((a,b)=>a.localeCompare(b,'ar')) : [];
+  branchSel.innerHTML = '<option value="">كل الفروع</option>' + branches.map(b=>`<option value="${b.replace(/"/g,'&quot;')}">${b}</option>`).join('');
+}
+
+// مسح كل فلاتر المستشار الذكي (الفترة/العميل/الفرع)
+function advisorClearFilters(){
+  const f=document.getElementById('advisor-from'), t=document.getElementById('advisor-to');
+  const cl=document.getElementById('advisor-client-filter'), br=document.getElementById('advisor-branch-filter');
+  if(f) f.value=''; if(t) t.value='';
+  if(cl) cl.value='';
+  if(br) br.innerHTML='<option value="">كل الفروع</option>';
 }
 
 // ── ملخص Sales Dashboard الحقيقي (نفس تاب "Sales Dashboard") — بيشغّل sdLoad()
@@ -35032,7 +35080,11 @@ async function advisorRun(){
   const area   = document.getElementById('advisor-result');
   const btn    = document.getElementById('advisor-run-btn');
   const fltCl  = (document.getElementById('advisor-client-filter')||{}).value||'';
+  const fltBranch = (document.getElementById('advisor-branch-filter')||{}).value||'';
+  const advFrom = document.getElementById('advisor-from')?.value||'';
+  const advTo   = document.getElementById('advisor-to')?.value||'';
   const aType  = (document.getElementById('advisor-type')||{}).value||'full';
+  const advPeriodTxt = (advFrom||advTo) ? (advFrom||'البداية')+' إلى '+(advTo||'الآن') : 'كل البيانات المتاحة';
 
   area.innerHTML = '<div style="text-align:center;padding:50px;color:#065F46"><div style="font-size:40px;margin-bottom:14px">🧠</div><div style="font-size:14px;font-weight:800">المستشار الذكي يحلل البيانات...</div><div id="advisor-status" style="font-size:11px;color:#6B7280;margin-top:8px">جاري جلب البيانات من قاعدة البيانات...</div></div>';
   btn.disabled = true;
@@ -35043,12 +35095,22 @@ async function advisorRun(){
   try {
     setS('جاري جلب بيانات المخزون والمبيعات...');
 
+    // ── فواتير التوريد والمرتجع: فلترة بالفترة (delivery_date/return_date) وفرع العميل مباشرة من قاعدة البيانات ──
+    let delvUrl = SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,branch_name,rep_name,delivery_date,items,total_net,total_tax,total_before_discount,discount_pct&deleted_at=is.null&order=delivery_date.desc&limit=3000';
+    if(advFrom) delvUrl += '&delivery_date=gte.'+advFrom;
+    if(advTo)   delvUrl += '&delivery_date=lte.'+advTo;
+    if(fltBranch) delvUrl += '&branch_name=eq.'+encodeURIComponent(fltBranch);
+    let retUrl = SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,branch_name,rep_name,return_date,items,total_net,total_tax,total_before_discount,discount_pct&deleted_at=is.null&order=return_date.desc&limit=1000';
+    if(advFrom) retUrl += '&return_date=gte.'+advFrom;
+    if(advTo)   retUrl += '&return_date=lte.'+advTo;
+    if(fltBranch) retUrl += '&branch_name=eq.'+encodeURIComponent(fltBranch);
+
     const [products, expiry, deliveries, returns_, bmap, catDiscs, promos, clients,
            staffList, branches, plans, planItems, supplyReqs] = await Promise.all([
       fetch(SUPABASE_URL+'/rest/v1/products?select=snf,cat,fea,grp,branch,shelf_qty,stock_qty,date_shelf,created_at&order=created_at.desc&limit=3000',{headers:H}).then(r=>r.json()).catch(()=>[]),
       fetch(SUPABASE_URL+'/rest/v1/market_expiry?select=snf,cat,fea,branch,date_shelf,total_qty,last_visit&order=total_qty.desc&limit=500',{headers:H}).then(r=>r.json()).catch(()=>[]),
-      fetch(SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,branch_name,rep_name,delivery_date,items,total_net,total_tax,total_before_discount,discount_pct&deleted_at=is.null&order=delivery_date.desc&limit=2000',{headers:H}).then(r=>r.json()).catch(()=>[]),
-      fetch(SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,branch_name,rep_name,return_date,items,total_net,total_tax,total_before_discount,discount_pct&deleted_at=is.null&order=return_date.desc&limit=600',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(delvUrl,{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(retUrl,{headers:H}).then(r=>r.json()).catch(()=>[]),
       fetch(SUPABASE_URL+'/rest/v1/branch_client_map?select=branch_name,client_name&limit=500',{headers:H}).then(r=>r.json()).catch(()=>[]),
       fetch(SUPABASE_URL+'/rest/v1/client_category_discounts?select=client_name,cat,discount_pct&limit=300',{headers:H}).then(r=>r.json()).catch(()=>[]),
       fetch(SUPABASE_URL+'/rest/v1/sales_promotions?select=client_name,snf_name,promo_price,date_from,date_to&limit=100',{headers:H}).then(r=>r.json()).catch(()=>[]),
@@ -35138,9 +35200,10 @@ async function advisorRun(){
     const clientsSummary=Object.entries(cSales).slice(0,15).map(([cn,snfs])=>{
       const tot=cTotals[cn]||{};
       const retPct=tot.total>0?((tot.ret||0)/tot.total*100).toFixed(1):0;
+      const net=(tot.total||0)-(tot.ret||0);
       const top=Object.entries(snfs).sort((a,b)=>b[1].qty-a[1].qty).slice(0,4).map(([n,d])=>n+'('+d.qty+')').join('، ');
       const ci=Array.isArray(clients)?clients.find(c=>c.name===cn)||{}:{};
-      return cn+'['+( ci.client_type||'سلاسل')+'] مبيعات:'+(tot.total||0).toFixed(0)+'ج|'+(tot.inv||0)+' فاتورة|مرتجع:'+retPct+'% أعلى:'+top;
+      return cn+'['+( ci.client_type||'سلاسل')+'] توريد:'+(tot.total||0).toFixed(0)+'ج|'+(tot.inv||0)+' فاتورة|مرتجع:'+(tot.ret||0).toFixed(0)+'ج('+retPct+'%)|صافي:'+net.toFixed(0)+'ج|أعلى:'+top;
     }).join('\n');
 
     const slowSum=slowMovers.slice(0,10).map(s=>s+'|'+(invMap[s].cat||invMap[s].fea||'')+':رصيد '+(invMap[s].sh+invMap[s].st)+' مباع '+(snfSales[s]||0)).join('\n');
@@ -35226,8 +35289,9 @@ async function advisorRun(){
       .map(d=>`${d.client_name||d.branch_name||'—'}: ${(d.total_net||0).toFixed(0)}ج (${d.delivery_date||''})`).join(' | ');
     const topReturnInvoices = [...(Array.isArray(returns_)?returns_:[])].sort((a,b)=>(b.total_net||0)-(a.total_net||0)).slice(0,8)
       .map(r=>`${r.client_name||r.branch_name||'—'}: ${(r.total_net||0).toFixed(0)}ج (${r.return_date||''})`).join(' | ');
-    const invoicesSummary = `عدد فواتير التوريد: ${deliveries.length} | عدد فواتير المرتجع: ${returns_.length} | نسبة الفواتير المرتجعة: ${invReturnRate}%
-إجمالي قيمة التوريد: ${totalDeliveryVal.toFixed(0)}ج | إجمالي قيمة المرتجعات: ${totalReturnVal.toFixed(0)}ج | متوسط قيمة الفاتورة: ${avgInvoiceVal.toFixed(0)}ج
+    const invoicesSummary = `الفترة: ${advPeriodTxt} | العميل: ${fltCl||'الكل'} | فرع العميل: ${fltBranch||'الكل'}
+عدد فواتير التوريد: ${deliveries.length} | عدد فواتير المرتجع: ${returns_.length} | نسبة الفواتير المرتجعة: ${invReturnRate}%
+إجمالي قيمة التوريد: ${totalDeliveryVal.toFixed(0)}ج | إجمالي قيمة المرتجعات: ${totalReturnVal.toFixed(0)}ج | الصافي: ${(totalDeliveryVal-totalReturnVal).toFixed(0)}ج | متوسط قيمة الفاتورة: ${avgInvoiceVal.toFixed(0)}ج
 أعلى فواتير توريد: ${topInvoices||'لا بيانات'}
 أعلى فواتير مرتجع: ${topReturnInvoices||'لا بيانات'}`;
 
@@ -35235,7 +35299,7 @@ async function advisorRun(){
     setS('جاري تجهيز ملخص Sales Dashboard...');
     const dashboardSummary = await advisorGetDashboardSummary();
 
-    const prompt='التاريخ: '+todayStr+' | Q'+quarter+'→Q'+nextQ+'\n'+typeInstruction+
+    const prompt='التاريخ: '+todayStr+' | Q'+quarter+'→Q'+nextQ+' | فترة فواتير التوريد/المرتجع/الصافي المحددة: '+advPeriodTxt+(fltCl?' | العميل: '+fltCl:'')+(fltBranch?' | فرع العميل: '+fltBranch:'')+'\n'+typeInstruction+
       '\n\n[فريق العمل والمشرفون — من قاعدة البيانات]\n'+staffSum+
       '\n\n[خطوط السير والفروع — '+branches.length+' فرع نشط]\n'+routeSum+
       '\n\n[خطط المبيعات والتنسيق]\n'+plansSum+
