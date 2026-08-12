@@ -11753,7 +11753,13 @@ async function uploadPDBFile(input){
 async function sb(table, params={}, opts={}){
   try{
     let url = `${SUPABASE_URL}/rest/v1/${table}?select=*`;
-    Object.entries(params).forEach(([k,v])=>url+=`&${k}=eq.${encodeURIComponent(v)}`);
+    // بيدعم تمرير قيمة بصيغة "gte.2026-01-01" أو "lte.X" جاهزة (مش بس eq.) —
+    // مستخدم في loadStaticData عشان نحدد فترة زمنية لجدول products الكبير.
+    Object.entries(params).forEach(([k,v])=>{
+      const s = String(v);
+      const m = s.match(/^(eq|neq|gt|gte|lt|lte|like|ilike|is)\.(.*)$/s);
+      url += m ? `&${k}=${m[1]}.${encodeURIComponent(m[2])}` : `&${k}=eq.${encodeURIComponent(v)}`;
+    });
     if(opts.order) url+=`&order=${opts.order}`;
 
     // allPages:true — يجيب كل الصفوف بدون سقف عددي ثابت (بيلف بالـ limit/offset لحد ما ترجع
@@ -12031,8 +12037,14 @@ function getVisibleReps(){
 // تُحمَّل مرة عند الدخول وتُجدَّد كل 15 دقيقة فقط
 let _staticTimer = null;
 async function loadStaticData(){
+  // products جدول بيكبر يوميًا (كل فحص صنف في كل زيارة = صف) — تحميله كامل بترتيب تصاعدي
+  // كان بيوصل لحد أقصى 50000 صف ويوقف، وبما إن الترتيب تصاعدي كان بيقطع بالظبط أحدث الصفوف
+  // (أحدث فحوصات الأصناف) من الكاش، فتاب الأصناف/انتهاء الصلاحية/راكد كانوا بيفتقدوا بيانات
+  // حديثة بصمت. الحل: نحمّل بس آخر 90 يوم بترتيب تنازلي (الأحدث أول) — أسرع وبيضمن وصول
+  // أحدث البيانات دايمًا حتى لو الجدول كبر أكتر من الحد الأقصى.
+  const productsFrom = new Date(Date.now() - 90*24*60*60*1000).toISOString();
   const [products,branches,coord_route_assignments] = await Promise.all([
-    sb('products',{},{order:'created_at.asc', allPages:true, limit:1000}),
+    sb('products',{created_at:'gte.'+productsFrom},{order:'created_at.desc', allPages:true, limit:1000, hardCap:30000}),
     sb('branches',{status:'active'},{limit:1000}),
     sb('coord_route_assignments',{},{limit:1000}),
   ]);

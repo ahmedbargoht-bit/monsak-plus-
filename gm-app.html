@@ -3212,6 +3212,23 @@ async function syncGroupsFromDB(){
   }catch(e){ console.warn('syncGroupsFromDB error:', e); }
 }
 
+// ── تحديث كل قوائم فلتر المجموعات الثابتة في الصفحة — منقول حرفياً من لوحة التحكم ──
+function refreshAllStaticGroupSelects(){
+  const knownKeys = ['giza','cairo','south','tajmuat','hyper','alex','markets','fuel_cairo','fuel_alex','private_cairo','private_alex'];
+  document.querySelectorAll('select').forEach(sel=>{
+    const optValues = new Set([...sel.options].map(o=>o.value));
+    const matchCount = knownKeys.filter(k=>optValues.has(k)).length;
+    if(matchCount < 2) return;
+    Object.keys(GROUPS).forEach(key=>{
+      if(optValues.has(key)) return;
+      const o = document.createElement('option');
+      o.value = key;
+      o.textContent = GROUPS[key].label || key;
+      sel.appendChild(o);
+    });
+  });
+}
+
 const ROLE_LABELS = {
   'gm':'مدير عام','merch_manager':'مدير التنسيق','sales_manager':'مدير البيع',
   'hyper_sup':'مشرف الهايبر','group_sup':'مشرف المجموعة',
@@ -3250,7 +3267,13 @@ const H = () => ({'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`
 async function sbGet(table, params={}, opts={}){
   try{
     let url=`${SUPABASE_URL}/rest/v1/${table}?select=*`;
-    Object.entries(params).forEach(([k,v])=>url+=`&${k}=eq.${encodeURIComponent(v)}`);
+    // بيدعم تمرير قيمة بصيغة "gte.2026-01-01" جاهزة (مش بس eq.) — مستخدم في
+    // loadCoordStaticData عشان نحدد فترة زمنية لجدول products الكبير.
+    Object.entries(params).forEach(([k,v])=>{
+      const s = String(v);
+      const m = s.match(/^(eq|neq|gt|gte|lt|lte|like|ilike|is)\.(.*)$/s);
+      url += m ? `&${k}=${m[1]}.${encodeURIComponent(m[2])}` : `&${k}=eq.${encodeURIComponent(v)}`;
+    });
     if(opts.order) url+=`&order=${opts.order}`;
 
     // allPages:true — نفس الإضافة اللي اتحطت في sb() بلوحة التحكم — يجيب كل الصفوف بدون سقف
@@ -3332,8 +3355,11 @@ async function loadCoordUsers(){
 
 // بيانات ثابتة لتاب "الموقع الحالي" — نفس loadStaticData() في لوحة التحكم
 async function loadCoordStaticData(){
+  // نفس تعديل loadStaticData في لوحة التحكم — آخر 90 يوم بترتيب تنازلي بدل الجدول كامل
+  // تصاعدي، عشان الحد الأقصى (50000) مكانش بيوصل لأحدث البيانات في جدول products الكبير.
+  const productsFrom = new Date(Date.now() - 90*24*60*60*1000).toISOString();
   const [products,branches,coord_route_assignments] = await Promise.all([
-    sb('products',{},{order:'created_at.asc', allPages:true, limit:1000}),
+    sb('products',{created_at:'gte.'+productsFrom},{order:'created_at.desc', allPages:true, limit:1000, hardCap:30000}),
     sb('branches',{status:'active'},{limit:1000}),
     sb('coord_route_assignments',{},{limit:1000}),
   ]);
@@ -13389,6 +13415,7 @@ async function doLogin(){
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').style.display='flex';
   await syncGroupsFromDB();
+  refreshAllStaticGroupSelects(); // يضيف أي مجموعة جديدة (زي delta) لكل قوائم فلتر المجموعات الثابتة في الصفحة
   buildGroupSelects();
   buildGroupChecks();
   // await loadReps(); — اتشالت مع حذف تاب المنسقين؛ رجّعها لما التاب الجديد يتضاف لو محتاجينها
