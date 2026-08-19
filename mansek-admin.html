@@ -31,8 +31,10 @@
 <title>MT Admin</title>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -1179,6 +1181,26 @@ h2,h3{color:#2C1F0A}
               <input type="date" id="loc-custom-date" style="display:none;width:140px" onchange="filterLocations()"/>
               <span id="loc-date-label" style="font-size:11px;color:var(--blue);font-weight:600;align-self:center"></span>
             </div>
+
+            <!-- خريطة مواقع المنسقين اللايف -->
+            <div style="margin-bottom:14px">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px">
+                <span style="font-size:13px;font-weight:700;color:var(--navy);display:flex;align-items:center;gap:5px">
+                  <i class="ti ti-map-pin" style="color:#1A7A4A"></i> خريطة المواقع اللايف
+                </span>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <span id="loc-map-legend" style="font-size:11px;color:var(--text2)"></span>
+                  <button class="btn btn-xs" onclick="renderLocationMap()" style="background:#EEF6FF;color:#1D4ED8">
+                    <i class="ti ti-refresh"></i> تحديث
+                  </button>
+                </div>
+              </div>
+              <div id="loc-map-el" style="height:420px;border-radius:10px;border:1px solid var(--border)"></div>
+              <p style="font-size:10px;color:var(--text2);margin-top:6px">
+                📍 بتعرض بس المنسقين اللي بعتوا لوكيشن — استخدم فلتر المجموعة فوق لتضييق العرض
+              </p>
+            </div>
+
             <!-- جدول اللوكيشن -->
             <div class="table-wrap">
               <table>
@@ -13944,6 +13966,91 @@ async function filterLocations(){
       <td>${statusBadge}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="9" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات للفترة المحددة</td></tr>';
+
+  // خريطة المواقع اللايف — بتتحدث مع أي تغيير فلتر (مجموعة خصوصاً)، مستقلة عن فلتر التاريخ
+  // لأنها بتعرض الموقع الحالي دلوقتي مش سجل تاريخي
+  renderLocationMap();
+}
+
+// ══ خريطة مواقع المنسقين اللايف (Leaflet) — جوه بانل "الموقع الحالي" ══
+let _locMapInstance = null;
+let _locMapMarkersLayer = null;
+
+async function renderLocationMap(){
+  const mapEl = document.getElementById('loc-map-el');
+  if(!mapEl || typeof L==='undefined') return;
+
+  // تهيئة الخريطة مرة واحدة بس — أول ما البانل يتفتح
+  if(!_locMapInstance){
+    _locMapInstance = L.map('loc-map-el').setView([30.0444, 31.2357], 10);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap', maxZoom: 19
+    }).addTo(_locMapInstance);
+    _locMapMarkersLayer = L.layerGroup().addTo(_locMapInstance);
+  }
+  // البانل ممكن يكون كان display:none وقت التهيئة فتبقى مقاسات الخريطة غلط — نصلحها بعد ما يظهر
+  setTimeout(()=>{ try{ _locMapInstance.invalidateSize(); }catch(e){} }, 80);
+
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  let locs = [];
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/location?select=*`, {headers:H});
+    locs = r.ok ? await r.json() : [];
+  }catch(e){ locs = []; }
+
+  const visible   = CU.groups||[];
+  const grpFilter = document.getElementById('loc-filter-group')?.value||'all';
+  const repGroupByName = {};
+  (REPS||[]).forEach(r=>{ repGroupByName[r.name]=r.group; });
+
+  const today = localISO();
+  const branchMap = buildLocBranchMap({single: today});
+
+  const now = Date.now();
+  let rows = (locs||[]).filter(l=>l.lat && l.lng).map(l=>{
+    const grp = l.grp || repGroupByName[l.name] || '';
+    const diffMin = l.updated_at ? Math.floor((now-new Date(l.updated_at).getTime())/60000) : 99999;
+    let color='#6B7280', freshLabel='قديم جداً';
+    if(diffMin<10){ color='#1A7A4A'; freshLabel = diffMin<1?'الآن':`منذ ${diffMin} د`; }
+    else if(diffMin<60){ color='#D97706'; freshLabel=`منذ ${diffMin} د`; }
+    else if(diffMin<1440){ color='#B91C1C'; freshLabel=`منذ ${Math.floor(diffMin/60)} س`; }
+    return {
+      name: l.name, grp, lat: parseFloat(l.lat), lng: parseFloat(l.lng),
+      branch: branchMap[l.name] || l.branch || '—',
+      diffMin, color, freshLabel
+    };
+  }).filter(r=>!isNaN(r.lat) && !isNaN(r.lng));
+  rows = rows.filter(r=>!visible.length || visible.includes(r.grp));
+  if(grpFilter!=='all') rows = rows.filter(r=>r.grp===grpFilter);
+
+  _locMapMarkersLayer.clearLayers();
+  let greenN=0, amberN=0, oldN=0;
+  const bounds = [];
+  rows.forEach(r=>{
+    if(r.diffMin<10) greenN++; else if(r.diffMin<60) amberN++; else oldN++;
+    const icon = L.divIcon({
+      className:'',
+      html:`<div style="width:24px;height:24px;background:${r.color};border:2px solid #fff;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 5px rgba(0,0,0,.35)"></div>`,
+      iconSize:[24,24], iconAnchor:[12,24], popupAnchor:[0,-24]
+    });
+    const marker = L.marker([r.lat, r.lng], {icon}).addTo(_locMapMarkersLayer);
+    const gLabel = GROUPS[r.grp]?.label || r.grp || '—';
+    const safeName = (r.name||'').replace(/</g,'&lt;');
+    marker.bindPopup(`
+      <div style="font-family:Cairo,sans-serif;text-align:right;min-width:170px">
+        <div style="font-weight:700;font-size:13px;margin-bottom:4px">${safeName}</div>
+        <div style="font-size:11px;color:#555;margin-bottom:2px">📍 ${r.branch}</div>
+        <div style="font-size:11px;color:#555;margin-bottom:2px">${gLabel}</div>
+        <div style="font-size:11px;color:${r.color};font-weight:700;margin-bottom:4px">${r.freshLabel}</div>
+        <a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank" style="font-size:11px;color:#1D4ED8">فتح في Google Maps</a>
+      </div>`);
+    bounds.push([r.lat, r.lng]);
+  });
+
+  const legendEl = document.getElementById('loc-map-legend');
+  if(legendEl) legendEl.textContent = rows.length ? `🟢 ${greenN}   🟡 ${amberN}   🔴 ${oldN}` : 'مفيش منسقين بعتوا لوكيشن';
+
+  if(bounds.length) _locMapInstance.fitBounds(bounds, {padding:[30,30], maxZoom:14});
 }
 
 // بوب أب أسماء المنسقين لما تضغط على أي من كروت الإحصائيات فوق (إجمالي/حضروا/غائبون/نسبة الحضور)
