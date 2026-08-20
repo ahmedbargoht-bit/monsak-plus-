@@ -4981,6 +4981,30 @@ h2,h3{color:#2C1F0A}
           </div>
         </div>
 
+        <!-- موديال: تعديل المحقق يدوياً -->
+        <div id="sg-achieved-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;align-items:center;justify-content:center">
+          <div style="background:var(--surface-2,#fff);border-radius:14px;padding:24px 28px;width:420px;max-width:96vw;box-shadow:0 8px 40px rgba(0,0,0,.35);font-family:Cairo,sans-serif;direction:rtl">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+              <div style="font-size:15px;font-weight:800;color:#3B1F12"><i class="ti ti-edit" style="color:#C55B48;margin-left:6px"></i> تعديل المحقق يدوياً</div>
+              <button onclick="sgCloseAchievedModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
+            </div>
+            <div style="font-size:13px;font-weight:700;color:#5C3D2E;margin-bottom:4px" id="sg-ach-rep-name"></div>
+            <div style="font-size:11px;color:#9C7B6A;margin-bottom:14px">القيمة المحسوبة من الفواتير: <b id="sg-ach-raw">0</b> ج</div>
+            <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:6px">القيمة الصحيحة (ج)</label>
+            <input type="number" id="sg-ach-amount" min="0" style="width:100%;padding:9px 12px;border:1.5px solid var(--border,#ddd);border-radius:8px;font-family:Cairo,sans-serif;font-size:14px;font-weight:700;box-sizing:border-box;margin-bottom:12px"/>
+            <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:6px">سبب التعديل (اختياري)</label>
+            <input type="text" id="sg-ach-note" placeholder="مثال: فاتورة ورقية لسه متدخلتش" style="width:100%;padding:8px 12px;border:1.5px solid var(--border,#ddd);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;box-sizing:border-box;margin-bottom:16px"/>
+            <div style="font-size:10px;color:#A32D2D;background:#FCEBEB;border-radius:6px;padding:8px 10px;margin-bottom:16px">⚠️ الرقم ده هيستبدل الرقم المحسوب من الفواتير في شاشة الأهداف كلها (الكروت، الجدول، تصدير PDF) لهذا المندوب في هذا الشهر.</div>
+            <div style="display:flex;gap:8px;justify-content:space-between;align-items:center">
+              <button id="sg-ach-clear-btn" onclick="sgClearAchievedOverride()" style="background:#FCEBEB;color:#A32D2D;border:none;border-radius:8px;padding:9px 14px;font-size:11px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer;display:none;white-space:nowrap"><i class="ti ti-restore"></i> رجوع للمحسوب</button>
+              <div style="display:flex;gap:8px;margin-right:auto">
+                <button onclick="sgCloseAchievedModal()" style="background:var(--border,#eee);color:var(--text-primary,#333);border:none;border-radius:8px;padding:9px 18px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">إلغاء</button>
+                <button onclick="sgSaveAchievedOverride()" style="background:#C55B48;color:#fff;border:none;border-radius:8px;padding:9px 20px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer"><i class="ti ti-device-floppy"></i> حفظ</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div id="panel-sales-invoices" class="panel">
           <div class="page-header">
             <div>
@@ -8384,7 +8408,16 @@ async function sgLoad(){
     salesData.forEach(s=>{ salesMap[s.rep_name] = (salesMap[s.rep_name]||0) + ((s.total_net||0)-(s.total_tax||0)); });
     retsData.forEach(r=>{  salesMap[r.rep_name] = (salesMap[r.rep_name]||0) - ((r.total_net||0)-(r.total_tax||0)); });
 
-    _sgData = { supervisors: supData, reps: repData, targets: tgtMap, sales: salesMap, branchCount: branchCountMap };
+    // ── تعديل يدوي على "المحقق" (بيستبدل الرقم المحسوب من الفواتير بالكامل) ──
+    const rawSalesMap = {...salesMap};
+    let overridesMap = {};
+    try{
+      const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?select=*&month=eq.${monthStr}`,{headers:H});
+      const ovrData = ovrRes.ok ? await ovrRes.json() : [];
+      ovrData.forEach(o=>{ overridesMap[o.rep_name] = o; salesMap[o.rep_name] = +o.amount||0; });
+    }catch(e){}
+
+    _sgData = { supervisors: supData, reps: repData, targets: tgtMap, sales: salesMap, rawSales: rawSalesMap, overrides: overridesMap, month: monthStr, branchCount: branchCountMap };
     sgRender();
   }catch(e){
     details.innerHTML = `<div style="text-align:center;padding:40px;color:#C55B48">تعذر التحميل: ${e.message}</div>`;
@@ -8751,14 +8784,20 @@ function sgRenderTable(repsList, targets, sales, workDays){
                 pct>=60?'<span style="padding:2px 7px;border-radius:20px;font-size:10px;font-weight:700;background:#FAEEDA;color:#854F0B">متوسط</span>':
                 '<span style="padding:2px 7px;border-radius:20px;font-size:10px;font-weight:700;background:#FCEBEB;color:#A32D2D">ضعيف</span>';
     const routeLabel = sgRepRoute(r);
+    const _ovr = _sgData.overrides?.[r.name];
+    const _rawActual = Math.round(_sgData.rawSales?.[r.name]||0);
     rows += `<tr style="border-bottom:0.5px solid var(--border)" id="sg-row-${r.id}">
       <td style="padding:9px 12px;color:var(--text-secondary);font-size:11px">${i+1}</td>
       <td style="padding:9px 12px;font-weight:600;font-size:12px">${r.name}</td>
       <td style="padding:9px 12px;font-size:10px;color:var(--text-secondary)">${routeLabel}</td>
       <td style="padding:9px 8px"><input type="number" class="sg-goal-inp" data-name="${r.name}" data-id="${r.id}" data-tgt-id="${tgtId||''}" value="${goal}" min="0" step="1000" onchange="sgUpdateDaily(this,${workDays})" style="width:90px;padding:4px 7px;border:0.5px solid var(--border-strong);border-radius:6px;font-size:12px;font-family:Cairo,sans-serif;text-align:center;background:var(--surface-1);color:var(--text-primary)"/></td>
       <td style="padding:9px 8px;font-size:11px;font-weight:700;color:#185FA5" id="sg-daily-${r.id}">${daily>0?daily.toLocaleString('en-US')+' ج':'—'}</td>
-      <td style="padding:9px 8px;min-width:110px">
-        <div style="font-size:11px;font-weight:700;color:${clr};margin-bottom:3px">${actual>0?actual.toLocaleString('en-US')+' ج':'—'}</div>
+      <td style="padding:9px 8px;min-width:120px">
+        <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">
+          <span style="font-size:11px;font-weight:700;color:${clr}">${actual>0?actual.toLocaleString('en-US')+' ج':'—'}</span>
+          ${_ovr?`<span title="القيمة المحسوبة من الفواتير: ${_rawActual.toLocaleString('en-US')} ج${_ovr.note?(' — '+_ovr.note):''}" style="font-size:9px;background:#FDE68A;color:#92400E;padding:1px 5px;border-radius:8px;font-weight:700;cursor:help;white-space:nowrap">✏️ معدَّل</span>`:''}
+          <button title="تعديل المحقق يدوياً" onclick="sgEditAchieved('${r.id}','${encodeURIComponent(r.name)}')" style="background:none;border:none;cursor:pointer;color:#8B6F47;font-size:12px;padding:0 2px;line-height:1"><i class="ti ti-edit"></i></button>
+        </div>
         <div style="display:flex;align-items:center;gap:5px">
           <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;min-width:35px"><div style="height:100%;width:${Math.min(pct,100)}%;background:${clr};border-radius:3px"></div></div>
           <span style="font-size:11px;font-weight:700;color:${clr};min-width:28px">${pct}%</span>
@@ -8797,6 +8836,75 @@ function sgEditGoalRow(repId){
   inp.style.border = '2px solid #185FA5';
   inp.style.background = '#EAF0FB';
   setTimeout(()=>{ inp.style.border=''; inp.style.background=''; }, 2000);
+}
+
+// ── تعديل "المحقق" يدوياً (يستبدل الرقم المحسوب من الفواتير في كل شاشات النظام) ──
+let _sgAchEdit = { repId:null, repName:'' };
+
+function sgEditAchieved(repId, encodedName){
+  const name = decodeURIComponent(encodedName);
+  _sgAchEdit = { repId, repName: name };
+  const raw = Math.round(_sgData.rawSales?.[name] || 0);
+  const ovr = _sgData.overrides?.[name];
+  const nameEl = document.getElementById('sg-ach-rep-name');
+  if(nameEl) nameEl.textContent = name;
+  const rawEl = document.getElementById('sg-ach-raw');
+  if(rawEl) rawEl.textContent = raw.toLocaleString('en-US');
+  const amtEl = document.getElementById('sg-ach-amount');
+  if(amtEl) amtEl.value = ovr ? ovr.amount : raw;
+  const noteEl = document.getElementById('sg-ach-note');
+  if(noteEl) noteEl.value = ovr?.note || '';
+  const clearBtn = document.getElementById('sg-ach-clear-btn');
+  if(clearBtn) clearBtn.style.display = ovr ? 'inline-flex' : 'none';
+  const modal = document.getElementById('sg-achieved-modal');
+  if(modal) modal.style.display = 'flex';
+}
+
+function sgCloseAchievedModal(){
+  const modal = document.getElementById('sg-achieved-modal');
+  if(modal) modal.style.display = 'none';
+}
+
+async function sgSaveAchievedOverride(){
+  const { repName } = _sgAchEdit;
+  if(!repName) return;
+  const amountInp = document.getElementById('sg-ach-amount');
+  const amount = +amountInp.value;
+  if(isNaN(amount) || amount<0){ showToast('❌ رقم غير صحيح'); return; }
+  const note = (document.getElementById('sg-ach-note').value||'').trim();
+  const month = _sgData.month || document.getElementById('sg-month').value;
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'resolution=merge-duplicates,return=representation'};
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?on_conflict=rep_name,month`,{
+      method:'POST', headers:H,
+      body: JSON.stringify({ rep_name: repName, month, amount, note: note||null, updated_by: (typeof CU!=='undefined'&&CU?.name)||'admin', updated_at: new Date().toISOString() })
+    });
+    if(!res.ok){ const e = await res.text(); showToast('❌ فشل الحفظ: '+e.substring(0,100)); return; }
+    const savedArr = await res.json();
+    const saved = Array.isArray(savedArr) ? savedArr[0] : savedArr;
+    if(!_sgData.overrides) _sgData.overrides = {};
+    _sgData.overrides[repName] = saved;
+    _sgData.sales[repName] = amount;
+    sgCloseAchievedModal();
+    showToast(`✅ تم تعديل محقق ${repName}`);
+    sgRender();
+  }catch(e){ showToast('❌ '+e.message); }
+}
+
+async function sgClearAchievedOverride(){
+  const { repName } = _sgAchEdit;
+  const ovr = _sgData.overrides?.[repName];
+  if(!ovr) return;
+  if(!confirm(`إلغاء التعديل اليدوي والرجوع للرقم المحسوب من الفواتير لـ"${repName}"؟`)) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  try{
+    await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?id=eq.${ovr.id}`,{method:'DELETE',headers:H});
+    delete _sgData.overrides[repName];
+    _sgData.sales[repName] = _sgData.rawSales?.[repName] || 0;
+    sgCloseAchievedModal();
+    showToast(`↩️ رجع الرقم المحسوب لـ${repName}`);
+    sgRender();
+  }catch(e){ showToast('❌ '+e.message); }
 }
 
 async function sgDeleteGoal(encodedName, tgtId, repId){
