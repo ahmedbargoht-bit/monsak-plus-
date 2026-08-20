@@ -1628,7 +1628,16 @@ async function loadGoalTab(){
     const workDays = +(tgtData[0]?.work_days)     || 26;
     const totalSales = salesData.reduce((s,r)=>s+(r.total_net||0),0);
     const totalRet   = retData.reduce((s,r)=>s+(r.total_net||0),0);
-    const net        = totalSales - totalRet;
+    let net          = totalSales - totalRet;
+
+    // لو فيه تعديل يدوي على "المحقق" من لوحة التحكم (شاشة الأهداف)، يستبدل الرقم المحسوب هنا كمان
+    let repAchievedOverridden = false;
+    try{
+      const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?rep_name=eq.${repEnc}&month=eq.${month}&select=amount&limit=1`,{headers:SB_HEADERS});
+      const ovrData = ovrRes.ok ? await ovrRes.json() : [];
+      if(Array.isArray(ovrData) && ovrData.length){ net = +ovrData[0].amount||0; repAchievedOverridden = true; }
+    }catch(e){}
+
     const pct        = target>0 ? Math.min(100, Math.round(net/target*100)) : 0;
 
     const salesDays  = new Set(salesData.map(r=>r.delivery_date)).size || 1;
@@ -1658,7 +1667,7 @@ async function loadGoalTab(){
         </div>
         <div class="goal-amount-row">
           <div class="goal-amt"><div class="goal-amt-num">${target>0?fmt(target):'—'}</div><div class="goal-amt-lbl">الهدف</div></div>
-          <div class="goal-amt"><div class="goal-amt-num" style="color:#15803D">${fmt(net)}</div><div class="goal-amt-lbl">الصافي</div></div>
+          <div class="goal-amt"><div class="goal-amt-num" style="color:#15803D">${fmt(net)}</div><div class="goal-amt-lbl">الصافي${repAchievedOverridden?' <span title="ده رقم سيستم الشركة الرسمي" style="color:#92400E">✏️</span>':''}</div></div>
         </div>
       </div>
       <div class="goal-grid">
@@ -2889,11 +2898,21 @@ async function checkPromoBanner(){
     const rows = await r.json();
     if(!rows.length) return;
 
+    // استبعاد البانرات اللي لسه ماجاش وقتها أو خلصت مدتها (لو الأدمن حدد تاريخ من/إلى)
+    const _pbToday = new Date();
+    const _todayStr = _pbToday.getFullYear()+'-'+String(_pbToday.getMonth()+1).padStart(2,'0')+'-'+String(_pbToday.getDate()).padStart(2,'0');
+    const rowsInDate = rows.filter(row=>{
+      if(row.date_from && row.date_from > _todayStr) return false;
+      if(row.date_to   && row.date_to   < _todayStr) return false;
+      return true;
+    });
+    if(!rowsInDate.length) return;
+
     const seenMap = JSON.parse(localStorage.getItem('promo_banner_seen')||'{}');
     let myBranches = null;
 
     const relevant = [];
-    for(const row of rows){
+    for(const row of rowsInDate){
       if(String(seenMap[row.id]) === String(row.version)) continue;
       const clients = row.target_clients||[];
       if(clients.length){

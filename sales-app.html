@@ -2890,11 +2890,20 @@ async function checkPromoBanner(){
     const rows = await r.json();
     if(!rows.length) return;
 
+    // استبعاد البانرات اللي لسه ماجاش وقتها أو خلصت مدتها (لو الأدمن حدد تاريخ من/إلى)
+    const _todayStr = localDateStr(new Date());
+    const rowsInDate = rows.filter(row=>{
+      if(row.date_from && row.date_from > _todayStr) return false;
+      if(row.date_to   && row.date_to   < _todayStr) return false;
+      return true;
+    });
+    if(!rowsInDate.length) return;
+
     const seenMap = JSON.parse(localStorage.getItem('promo_banner_seen')||'{}');
     let myBranches = null;
 
     const relevant = [];
-    for(const row of rows){
+    for(const row of rowsInDate){
       if(String(seenMap[row.id]) === String(row.version)) continue;
       const clients = row.target_clients||[];
       // الـGM يشوف كل حاجة دايماً، المدير/المشرف بيتفلتروا حسب مجموعاتهم
@@ -8017,6 +8026,13 @@ async function tgtLoadData(){
       const salesByRep = {}; salesData.forEach(s=>{ salesByRep[s.rep_name]=(salesByRep[s.rep_name]||0)+((s.total_net||0)-(s.total_tax||0)); });
       const retByRep   = {}; retData.forEach(r=>{ retByRep[r.rep_name]=(retByRep[r.rep_name]||0)+((r.total_net||0)-(r.total_tax||0)); });
 
+      // تعديل يدوي على "المحقق" (من لوحة التحكم — شاشة الأهداف) — يستبدل رقم المندوب بالكامل لو موجود
+      try{
+        const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?rep_name=in.(${encReps})&month=eq.${monthStr}&select=rep_name,amount`,{headers:H});
+        const ovrData = ovrRes.ok ? await ovrRes.json() : [];
+        (ovrData||[]).forEach(o=>{ salesByRep[o.rep_name]=+o.amount||0; retByRep[o.rep_name]=0; });
+      }catch(e){}
+
       const salesDays = new Set(salesData.map(s=>s.delivery_date)).size || 1;
       const workDays  = tgtData.find(t=>t.work_days)?.work_days || 26;
       const fmt = n => Math.round(n).toLocaleString('en-US');
@@ -8137,6 +8153,14 @@ async function tgtLoadData(){
       const tgtMap   = {}; tgtData.forEach(t=>{ tgtMap[t.rep_name]=t; });
       const salesMap = {}; salesData.forEach(s=>{ salesMap[s.rep_name]=(salesMap[s.rep_name]||0)+((s.total_net||0)-(s.total_tax||0)); });
       const retMap   = {}; retData.forEach(r=>{ retMap[r.rep_name]=(retMap[r.rep_name]||0)+((r.total_net||0)-(r.total_tax||0)); });
+
+      // تعديل يدوي على "المحقق" (من لوحة التحكم — شاشة الأهداف) — يستبدل رقم المندوب بالكامل لو موجود
+      try{
+        const encRepsForOvr = repsList.map(r=>encodeURIComponent(r.name)).join(',');
+        const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?rep_name=in.(${encRepsForOvr})&month=eq.${monthStr}&select=rep_name,amount`,{headers:H});
+        const ovrData = ovrRes.ok ? await ovrRes.json() : [];
+        (ovrData||[]).forEach(o=>{ salesMap[o.rep_name]=+o.amount||0; retMap[o.rep_name]=0; });
+      }catch(e){}
 
       const workDays  = tgtData.find(t=>t.work_days)?.work_days || 26;
       const salesDays = new Set(salesData.map(s=>s.delivery_date)).size || 1;
