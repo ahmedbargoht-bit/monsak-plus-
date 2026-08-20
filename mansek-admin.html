@@ -254,6 +254,10 @@ select option{background:#FFFDF8;color:#2C1F0A}
 .btn-ghost:hover{border-color:#C55B48;color:#C55B48;background:rgba(197,91,72,.06)}
 .btn-sm{padding:6px 12px;font-size:11px}
 .btn-xs{padding:4px 8px;font-size:10px;border-radius:6px}
+.btn-action{-webkit-appearance:none;appearance:none;outline:none;padding:8px 14px;border:none;border-radius:8px;background:var(--navy);color:#EDE5D8;font-family:'Cairo',sans-serif;font-size:12px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:none;text-shadow:none;background-image:none;transition:filter .15s,opacity .15s}
+.btn-action:hover{filter:brightness(1.1)}
+.btn-action:active{filter:brightness(.92)}
+.btn-action:disabled{opacity:.5;cursor:not-allowed}
 .err{background:#FFEBEE;color:#B71C1C;border-radius:6px;padding:8px 12px;font-size:12px;margin-bottom:10px;display:none}
 .ok{background:#E8F5E9;color:#1B5E20;border-radius:6px;padding:8px 12px;font-size:12px;margin-bottom:8px;display:none}
 
@@ -2680,6 +2684,8 @@ h2,h3{color:#2C1F0A}
           <p id="sev-crit-note" style="font-size:11px;color:var(--text2);margin-bottom:10px">
             التقييم بيتحسب من 5 معايير: الالتزام بالخطط وتنفيذها، متابعة الحضور والغياب، تغطية الفريق، استخدام اللوكيشن اللايف، وتحويل الأوردرات للمنسقين.
           </p>
+          <!-- ليدربورد — كارت نسبة صغير لكل فرد -->
+          <div id="sev-leaderboard" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px"></div>
           <div id="sev-eval-list"></div>
         </div>
 
@@ -32329,6 +32335,32 @@ function sevOverallFromCrits(crits){
   return excCount>=threshold ? 'excellent' : badCount>=2 ? 'needsWork' : 'good';
 }
 
+// نسبة إجمالية مئوية — كل معيار بياخد نقاط حسب تقييمه (ممتاز 100 / جيد 65 / يحتاج متابعة 30) والمتوسط هو النسبة
+function sevPctFromCrits(crits){
+  const map = {excellent:100, good:65, needsWork:30};
+  const sum = crits.reduce((s,c)=>s+(map[c.level]||0),0);
+  return crits.length ? Math.round(sum/crits.length) : 0;
+}
+
+function sevPctColor(pct){
+  return pct>=80 ? {bg:'#D1FAE5',fg:'#065F46'} : pct>=50 ? {bg:'#FEF3C7',fg:'#92400E'} : {bg:'#FEE2E2',fg:'#991B1B'};
+}
+
+function sevRenderLeaderboard(){
+  const el = document.getElementById('sev-leaderboard');
+  if(!el) return;
+  if(!_sevResults.length){ el.innerHTML=''; return; }
+  const sorted = [..._sevResults].sort((a,b)=>b.pct-a.pct);
+  el.innerHTML = sorted.map(r=>{
+    const c = sevPctColor(r.pct);
+    return `<div onclick="sevOpenDetail('${r.name.replace(/'/g,"\\'")}')"
+      style="cursor:pointer;background:#fff;border:1.5px solid ${c.bg};border-radius:10px;padding:8px 14px;min-width:110px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.06)">
+      <div style="font-size:20px;font-weight:900;color:${c.fg}">${r.pct}%</div>
+      <div style="font-size:11px;font-weight:700;color:#4B3C1A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:130px">${r.name}</div>
+    </div>`;
+  }).join('');
+}
+
 function sevRenderCard(r){
   const ov = SUP_EVAL_CFG[r.overall];
   return `<div class="card sev-eval-card" style="margin-bottom:12px;cursor:pointer" onclick="sevOpenDetail('${r.name.replace(/'/g,"\\'")}')">
@@ -32370,6 +32402,7 @@ async function renderSupervisorEval(){
   if(!supNames.length){
     listEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text2)">لا يوجد مشرفون معرّفون في جدول ربط المجموعات بالمشرفين</div>';
     _sevResults = [];
+    sevRenderLeaderboard();
     return;
   }
 
@@ -32377,13 +32410,15 @@ async function renderSupervisorEval(){
     const groups = ctx.supGroups[sup]||[];
     const { crits } = sevComputeCriteria(groups, ctx);
     const overall = sevOverallFromCrits(crits);
+    const pct = sevPctFromCrits(crits);
     return {
       name: sup, role:'sup', roleLabel:'مشرف تنسيق',
       groups, groupLabels: groups.map(g=>GROUPS[g]?.label||g).join('، ')||'—',
-      start: ctx.start, end: ctx.end, overall, crits,
+      start: ctx.start, end: ctx.end, overall, pct, crits,
     };
   });
 
+  sevRenderLeaderboard();
   listEl.innerHTML = _sevResults.map(sevRenderCard).join('') || '<div style="text-align:center;padding:40px;color:var(--text2)">لا يوجد مشرفون مطابقون للفلتر</div>';
 }
 
@@ -32412,6 +32447,7 @@ async function renderManagerEval(){
   if(!filtered.length){
     listEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text2)">لا يوجد مديرو تنسيق معرّفون (role=merch_manager) في جدول الموظفين</div>';
     _sevResults = [];
+    sevRenderLeaderboard();
     return;
   }
 
@@ -32442,13 +32478,15 @@ async function renderManagerEval(){
 
     const allCrits = [...crits, apprCrit];
     const overall = sevOverallFromCrits(allCrits);
+    const pct = sevPctFromCrits(allCrits);
     return {
       name: mgr.name, role:'mgr', roleLabel:'مدير تنسيق',
       groups, groupLabels: groups.map(g=>GROUPS[g]?.label||g).join('، ')||'—',
-      start: ctx.start, end: ctx.end, overall, crits: allCrits,
+      start: ctx.start, end: ctx.end, overall, pct, crits: allCrits,
     };
   });
 
+  sevRenderLeaderboard();
   listEl.innerHTML = _sevResults.map(sevRenderCard).join('') || '<div style="text-align:center;padding:40px;color:var(--text2)">لا يوجد مديرون مطابقون للفلتر</div>';
 }
 
@@ -32507,7 +32545,10 @@ function sevExportPDF(){
           <div class="ename">${r.name}</div>
           <div class="esub">${r.roleLabel} — ${r.groupLabels}</div>
         </div>
-        <span class="ebadge" style="background:${ov.bg};color:${ov.fg}">${ov.dot} ${ov.label}</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="epct">${r.pct}%</span>
+          <span class="ebadge" style="background:${ov.bg};color:${ov.fg}">${ov.dot} ${ov.label}</span>
+        </div>
       </div>
       <table class="ecrit-table">
         ${r.crits.map(c=>{
@@ -32537,6 +32578,7 @@ function sevExportPDF(){
     .ename{font-size:15px;font-weight:800;color:${C.dark}}
     .esub{font-size:11px;color:${C.caramel};margin-top:2px}
     .ebadge{padding:5px 14px;border-radius:20px;font-size:11px;font-weight:800}
+    .epct{font-size:16px;font-weight:900;color:${C.caramel}}
     .ecrit-table{width:100%;border-collapse:collapse}
     .ecrit-table td{padding:6px 8px;border-bottom:0.5px solid ${C.light};vertical-align:top;font-size:11px}
     .ci{width:26px;font-size:15px;text-align:center}
