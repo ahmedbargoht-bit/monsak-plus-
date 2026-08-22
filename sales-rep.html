@@ -1630,12 +1630,21 @@ async function loadGoalTab(){
     const totalRet   = retData.reduce((s,r)=>s+(r.total_net||0),0);
     let net          = totalSales - totalRet;
 
-    // لو فيه تعديل يدوي على "المحقق" من لوحة التحكم (شاشة الأهداف)، يستبدل الرقم المحسوب هنا كمان
+    // لو فيه تعديل يدوي على "المحقق" من لوحة التحكم (شاشة الأهداف)، الرقم ده بيبقى أساس الصافي لحد range_to
+    // وأي فاتورة (توريد/مرتجع) بتاريخ بعد كده بتتضاف تلقائي فوقه
     let repAchievedOverridden = false;
     try{
-      const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?rep_name=eq.${repEnc}&month=eq.${month}&select=amount&limit=1`,{headers:SB_HEADERS});
+      const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?rep_name=eq.${repEnc}&month=eq.${month}&select=amount,range_to&limit=1`,{headers:SB_HEADERS});
       const ovrData = ovrRes.ok ? await ovrRes.json() : [];
-      if(Array.isArray(ovrData) && ovrData.length){ net = +ovrData[0].amount||0; repAchievedOverridden = true; }
+      if(Array.isArray(ovrData) && ovrData.length){
+        const ovr = ovrData[0];
+        const cutoff = ovr.range_to || (month+'-31');
+        let afterCutoff = 0;
+        salesData.forEach(r=>{ if((r.delivery_date||'')>cutoff) afterCutoff += (r.total_net||0); });
+        retData.forEach(r=>{ if((r.return_date||'')>cutoff) afterCutoff -= (r.total_net||0); });
+        net = (+ovr.amount||0) + afterCutoff;
+        repAchievedOverridden = true;
+      }
     }catch(e){}
 
     const pct        = target>0 ? Math.min(100, Math.round(net/target*100)) : 0;

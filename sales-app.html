@@ -8016,7 +8016,7 @@ async function tgtLoadData(){
       // 3) جيب المبيعات والمرتجعات
       const [salesRes, retRes] = await Promise.all([
         fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encReps})&delivery_date=gte.${monthStart}&delivery_date=lte.${dateTo}&deleted_at=is.null&select=rep_name,total_net,total_tax,delivery_date&limit=10000`,{headers:H}),
-        fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encReps})&return_date=gte.${monthStart}&return_date=lte.${dateTo}&deleted_at=is.null&select=rep_name,total_net,total_tax&limit=5000`,{headers:H}),
+        fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encReps})&return_date=gte.${monthStart}&return_date=lte.${dateTo}&deleted_at=is.null&select=rep_name,total_net,total_tax,return_date&limit=5000`,{headers:H}),
       ]);
 
       const salesData = salesRes.ok ? await salesRes.json() : [];
@@ -8026,11 +8026,21 @@ async function tgtLoadData(){
       const salesByRep = {}; salesData.forEach(s=>{ salesByRep[s.rep_name]=(salesByRep[s.rep_name]||0)+((s.total_net||0)-(s.total_tax||0)); });
       const retByRep   = {}; retData.forEach(r=>{ retByRep[r.rep_name]=(retByRep[r.rep_name]||0)+((r.total_net||0)-(r.total_tax||0)); });
 
-      // تعديل يدوي على "المحقق" (من لوحة التحكم — شاشة الأهداف) — يستبدل رقم المندوب بالكامل لو موجود
+      // تعديل يدوي على "المحقق" — المرتجع الحقيقي بيفضل زي ما هو دايماً (مش بيتصفَّر)،
+      // والرقم المعدَّل بيبقى أساس الصافي لحد range_to + أي فاتورة بعد التاريخ ده بتتضاف تلقائي
       try{
-        const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?rep_name=in.(${encReps})&month=eq.${monthStr}&select=rep_name,amount`,{headers:H});
+        const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?rep_name=in.(${encReps})&month=eq.${monthStr}&select=rep_name,amount,range_to`,{headers:H});
         const ovrData = ovrRes.ok ? await ovrRes.json() : [];
-        (ovrData||[]).forEach(o=>{ salesByRep[o.rep_name]=+o.amount||0; retByRep[o.rep_name]=0; });
+        const salesByRepList = {}; salesData.forEach(s=>{ (salesByRepList[s.rep_name] ||= []).push(s); });
+        const retByRepList   = {}; retData.forEach(r=>{ (retByRepList[r.rep_name] ||= []).push(r); });
+        (ovrData||[]).forEach(o=>{
+          const cutoff = o.range_to || dateTo;
+          let afterCutoff = 0;
+          (salesByRepList[o.rep_name]||[]).forEach(s=>{ if((s.delivery_date||'')>cutoff) afterCutoff += (s.total_net||0)-(s.total_tax||0); });
+          (retByRepList[o.rep_name]||[]).forEach(r=>{ if((r.return_date||'')>cutoff) afterCutoff -= (r.total_net||0)-(r.total_tax||0); });
+          const desiredNet = (+o.amount||0) + afterCutoff;
+          salesByRep[o.rep_name] = desiredNet + (retByRep[o.rep_name]||0); // عشان sales-ret يطلع = desiredNet بالظبط، والمرتجع الظاهر يفضل حقيقي
+        });
       }catch(e){}
 
       const salesDays = new Set(salesData.map(s=>s.delivery_date)).size || 1;
@@ -8143,7 +8153,7 @@ async function tgtLoadData(){
       const [tgtRes, salesRes, retRes] = await Promise.all([
         Promise.resolve({ok:true, _data:_tgtAll, json(){ return Promise.resolve(this._data); }}),
         fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${repsList.map(r=>encodeURIComponent(r.name)).join(',')})&delivery_date=gte.${monthStart}&delivery_date=lte.${dateTo}&deleted_at=is.null&select=rep_name,total_net,total_tax,delivery_date&limit=5000`,{headers:H}),
-        fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${repsList.map(r=>encodeURIComponent(r.name)).join(',')})&return_date=gte.${monthStart}&return_date=lte.${dateTo}&deleted_at=is.null&select=rep_name,total_net,total_tax&limit=2000`,{headers:H}),
+        fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${repsList.map(r=>encodeURIComponent(r.name)).join(',')})&return_date=gte.${monthStart}&return_date=lte.${dateTo}&deleted_at=is.null&select=rep_name,total_net,total_tax,return_date&limit=2000`,{headers:H}),
       ]);
 
       const tgtData   = tgtRes.ok   ? await tgtRes.json()   : [];
@@ -8154,12 +8164,22 @@ async function tgtLoadData(){
       const salesMap = {}; salesData.forEach(s=>{ salesMap[s.rep_name]=(salesMap[s.rep_name]||0)+((s.total_net||0)-(s.total_tax||0)); });
       const retMap   = {}; retData.forEach(r=>{ retMap[r.rep_name]=(retMap[r.rep_name]||0)+((r.total_net||0)-(r.total_tax||0)); });
 
-      // تعديل يدوي على "المحقق" (من لوحة التحكم — شاشة الأهداف) — يستبدل رقم المندوب بالكامل لو موجود
+      // تعديل يدوي على "المحقق" — المرتجع الحقيقي بيفضل زي ما هو دايماً (مش بيتصفَّر)،
+      // والرقم المعدَّل بيبقى أساس الصافي لحد range_to + أي فاتورة بعد التاريخ ده بتتضاف تلقائي
       try{
         const encRepsForOvr = repsList.map(r=>encodeURIComponent(r.name)).join(',');
-        const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?rep_name=in.(${encRepsForOvr})&month=eq.${monthStr}&select=rep_name,amount`,{headers:H});
+        const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?rep_name=in.(${encRepsForOvr})&month=eq.${monthStr}&select=rep_name,amount,range_to`,{headers:H});
         const ovrData = ovrRes.ok ? await ovrRes.json() : [];
-        (ovrData||[]).forEach(o=>{ salesMap[o.rep_name]=+o.amount||0; retMap[o.rep_name]=0; });
+        const salesMapList = {}; salesData.forEach(s=>{ (salesMapList[s.rep_name] ||= []).push(s); });
+        const retMapList   = {}; retData.forEach(r=>{ (retMapList[r.rep_name] ||= []).push(r); });
+        (ovrData||[]).forEach(o=>{
+          const cutoff = o.range_to || dateTo;
+          let afterCutoff = 0;
+          (salesMapList[o.rep_name]||[]).forEach(s=>{ if((s.delivery_date||'')>cutoff) afterCutoff += (s.total_net||0)-(s.total_tax||0); });
+          (retMapList[o.rep_name]||[]).forEach(r=>{ if((r.return_date||'')>cutoff) afterCutoff -= (r.total_net||0)-(r.total_tax||0); });
+          const desiredNet = (+o.amount||0) + afterCutoff;
+          salesMap[o.rep_name] = desiredNet + (retMap[o.rep_name]||0);
+        });
       }catch(e){}
 
       const workDays  = tgtData.find(t=>t.work_days)?.work_days || 26;
