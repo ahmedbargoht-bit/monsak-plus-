@@ -3185,11 +3185,27 @@ table.datatable details summary:hover { text-decoration: underline; }
     const monthly = lk.months.length ? computeCustLookupMonthlyGroups(lkRows) : null;
     if (monthly && !monthly.groups.length) { alert('مفيش بيانات لهذا العميل/الفرع في الفترة المحددة.'); return; }
     const byItemCust = monthly ? null : groupItemsByCategoryDesc(groupSum(lkRows, r => r.item, r => r.total).sort((a, b) => b.sum - a.sum));
-    const custQtyOf = new Map();
-    if (!monthly) lkRows.forEach(r => { custQtyOf.set(r.item, (custQtyOf.get(r.item) || 0) + (r.qtyCarton || 0) + (r.qtyPiece || 0)); });
+    // بنجمّع كمية الكراتين وكمية القطع كل واحدة لوحدها، وبعدين لو الصنف معاه "عدد قطع/كرتونة" محفوظ في
+    // الكتالوج بنحوّل كل الكميات لوحدة واحدة موحّدة (قطعة وكرتونة مع بعض) - نفس منطق العرض على الشاشة
+    // بالظبط، عشان عمود "عدد الكراتين" في التصدير يبقى مطابق لما هو ظاهر فعليًا في الجدول.
+    const custQtyCartonOf = new Map();
+    const custQtyPieceOf = new Map();
+    if (!monthly) lkRows.forEach(r => {
+      custQtyCartonOf.set(r.item, (custQtyCartonOf.get(r.item) || 0) + (r.qtyCarton || 0));
+      custQtyPieceOf.set(r.item, (custQtyPieceOf.get(r.item) || 0) + (r.qtyPiece || 0));
+    });
+    const custTotalsOf = monthly ? null : new Map(byItemCust.map(x => {
+      const cartons = custQtyCartonOf.get(x.key) || 0;
+      const pieces = custQtyPieceOf.get(x.key) || 0;
+      const ppc = resolveItemPiecesPerCarton(x.key);
+      const totalPieces = ppc ? (cartons * ppc + pieces) : pieces;
+      const totalCartons = ppc ? (cartons + pieces / ppc) : cartons;
+      return [x.key, { totalPieces, totalCartons, ppc }];
+    }));
     const lastPriceOf = monthly ? null : lastPiecePriceMap(lkRows);
     const totalSum = monthly ? monthly.grandTotal : byItemCust.reduce((s, x) => s + x.sum, 0);
-    const totalQty = monthly ? monthly.grandQty : Array.from(custQtyOf.values()).reduce((s, v) => s + v, 0);
+    const totalQty = monthly ? monthly.grandQty : Array.from(custTotalsOf.values()).reduce((s, t) => s + t.totalPieces, 0);
+    const totalCartonsQty = monthly ? null : Array.from(custTotalsOf.values()).reduce((s, t) => s + t.totalCartons, 0);
     const itemCount = monthly ? monthly.orderedItems.length : byItemCust.length;
 
     const targetLabel = lk.site ? 'الفرع' : 'العميل';
@@ -3353,7 +3369,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       ws.getColumn(currentPriceCol).width = 22;
       ws.getColumn(totalCols).width = 16;
     } else {
-      const headers = ['كود الصنف', 'الصنف', 'التصنيف', 'الكمية', 'سعر الكرتونة/العبوة (آخر توريد)', 'سعر القطعة (آخر توريد)', 'القيمة', 'نسبة من الإجمالي'];
+      const headers = ['كود الصنف', 'الصنف', 'التصنيف', 'الكمية (قطعة)', 'عدد الكراتين', 'سعر الكرتونة/العبوة (آخر توريد)', 'سعر القطعة (آخر توريد)', 'القيمة', 'نسبة من الإجمالي'];
       const headerRow = ws.addRow(headers);
       headerRow.eachCell(cell => {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: INK } };
@@ -3366,36 +3382,40 @@ table.datatable details summary:hover { text-decoration: underline; }
       byItemCust.forEach((x, idx) => {
         const pct = totalSum ? x.sum / totalSum : 0;
         const lp = lastPriceOf.get(x.key);
-        const row = ws.addRow([resolveItemCode(x.key) || '-', x.key, resolveItemCategory(x.key) || '-', custQtyOf.get(x.key) || 0, lp ? lp.priceCarton : null, lp ? lp.price : null, x.sum, pct]);
+        const t = custTotalsOf.get(x.key);
+        const row = ws.addRow([resolveItemCode(x.key) || '-', x.key, resolveItemCategory(x.key) || '-', t.totalPieces || 0, t.ppc ? t.totalCartons : null, lp ? lp.priceCarton : null, lp ? lp.price : null, x.sum, pct]);
         if (idx % 2 === 1) {
           row.eachCell(cell => { if (!cell.fill || !cell.fill.fgColor) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
         }
         row.getCell(4).numFmt = '#,##0';
         row.getCell(5).numFmt = '#,##0.00';
         row.getCell(6).numFmt = '#,##0.00';
-        row.getCell(7).numFmt = '#,##0';
-        row.getCell(8).numFmt = '0.0%';
+        row.getCell(7).numFmt = '#,##0.00';
+        row.getCell(8).numFmt = '#,##0';
+        row.getCell(9).numFmt = '0.0%';
         row.getCell(2).alignment = { horizontal: 'right' };
       });
 
-      const footerRow = ws.addRow(['-', 'الإجمالي', '-', totalQty, null, null, totalSum, 1]);
+      const footerRow = ws.addRow(['-', 'الإجمالي', '-', totalQty, totalCartonsQty, null, null, totalSum, 1]);
       footerRow.eachCell(cell => {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SAND_DARK } };
         cell.font = { bold: true, color: { argb: INK } };
         cell.border = { top: { style: 'medium', color: { argb: INK } } };
       });
       footerRow.getCell(4).numFmt = '#,##0';
-      footerRow.getCell(7).numFmt = '#,##0';
-      footerRow.getCell(8).numFmt = '0.0%';
+      footerRow.getCell(5).numFmt = '#,##0.00';
+      footerRow.getCell(8).numFmt = '#,##0';
+      footerRow.getCell(9).numFmt = '0.0%';
 
       ws.getColumn(1).width = 14;
       ws.getColumn(2).width = 42;
       ws.getColumn(3).width = 20;
       ws.getColumn(4).width = 14;
-      ws.getColumn(5).width = 22;
-      ws.getColumn(6).width = 20;
-      ws.getColumn(7).width = 16;
+      ws.getColumn(5).width = 14;
+      ws.getColumn(6).width = 22;
+      ws.getColumn(7).width = 20;
       ws.getColumn(8).width = 16;
+      ws.getColumn(9).width = 16;
     }
 
     ws.addRow([]); ws.addRow([]);
