@@ -4820,6 +4820,7 @@ h2,h3{color:#2C1F0A}
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <span id="sg-workdays-badge" style="background:#F2E4DC;color:#3B1F12;border-radius:6px;padding:5px 12px;font-size:12px;font-weight:700">📅 أيام العمل: <b id="sg-wd-val">26</b></span>
               <button onclick="sgExportPDF()" style="background:#F2E4DC;color:#3B1F12;border:none;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer;display:flex;align-items:center;gap:5px"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
+              <button onclick="sgExportExcel()" style="background:#4E5C28;color:#EDE5D8;border:none;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer;display:flex;align-items:center;gap:5px"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
               <button onclick="sgOpenWorkDays()" style="background:#185FA5;color:#fff;border:none;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer;display:flex;align-items:center;gap:5px"><i class="ti ti-calendar-check"></i> أيام العمل</button>
               <button onclick="sgOpenAddGoals()" style="background:#2E7D32;color:#fff;border:none;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer;display:flex;align-items:center;gap:5px"><i class="ti ti-plus"></i> إضافة الأهداف</button>
               <button onclick="sgSaveAll()" style="background:#C55B48;color:#fff;border:none;border-radius:6px;padding:7px 16px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer"><i class="ti ti-device-floppy"></i> حفظ الأهداف</button>
@@ -8913,6 +8914,176 @@ function sgRenderTable(repsList, targets, sales, workDays){
     </table>
   </div>`;
 }
+
+// ── تصدير Excel للأهداف والمحققات — بنفس ترتيب الشاشة بالظبط (مدير بيع → مشرفينه → مناديبهم،
+// بعدها مشرفين من غير مدير، بعدها مناديب من غير مشرف)، بألوان وهوية الطحان (نفس بالتة "خطة العمل") ──
+window.sgExportExcel = function(){
+  if(typeof XLSX==='undefined'){ alert('مكتبة تصدير الإكسل مش محمّلة - تأكد إن الجهاز متصل بالإنترنت وحاول تاني.'); return; }
+  if(!_sgData || !_sgData.supervisors){ alert('لسه البيانات مش محمّلة - استنى شوية وحاول تاني.'); return; }
+
+  const regions = sgGetSelectedRegions();
+  const workDays = sgCalcWorkDays();
+  const { supervisors, reps, targets, sales } = _sgData;
+  const filteredSups = supervisors.filter(s=>{
+    if(regions==='all') return true;
+    const sec = (s.sector||'').split(',').map(x=>x.trim());
+    return sec.some(x=>regions.includes(x));
+  });
+
+  const DR='731E2E', OL='4E5A2B', LR='F5E8E8', GR='E8F5E9', AMB='FFF3CD', DARKINK='3B1F12', SUPBG='F2E4DC', NAVY='1A3A5C', BROWN='3D2E0F';
+  const S=(bg,fc,b,sz,wrap,right)=>({
+    fill:{fgColor:{rgb:bg}},
+    font:{bold:b||false,color:{rgb:fc||'2C2C2C'},sz:sz||10,name:'Cairo'},
+    alignment:{horizontal:right?'right':'center',vertical:'center',wrapText:wrap||false,readingOrder:2},
+    border:{top:{style:'thin',color:{rgb:'CCCCCC'}},bottom:{style:'thin',color:{rgb:'CCCCCC'}},
+            left:{style:'thin',color:{rgb:'CCCCCC'}},right:{style:'thin',color:{rgb:'CCCCCC'}}}
+  });
+  const SM=(bg,fc,b,sz)=>({
+    fill:{fgColor:{rgb:bg}},
+    font:{bold:b||false,color:{rgb:fc||'2C2C2C'},sz:sz||10,name:'Cairo'},
+    alignment:{horizontal:'center',vertical:'center',wrapText:true,readingOrder:2},
+    border:{top:{style:'medium',color:{rgb:DR}},bottom:{style:'medium',color:{rgb:DR}},
+            left:{style:'medium',color:{rgb:DR}},right:{style:'medium',color:{rgb:DR}}}
+  });
+
+  const NCOLS = 9;
+  const aoa = [];
+  const styleOps = [];
+  const merges = [];
+  const pushRow = (arr) => { aoa.push(arr); return aoa.length-1; };
+  const styleFullRow = (r, style) => { for(let c=0;c<NCOLS;c++) styleOps.push({r,c,style}); };
+  const mergeFullRow = (r) => merges.push({s:{r,c:0},e:{r,c:NCOLS-1}});
+
+  const MONTHS_AR = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+  const monthStr = _sgData.month || '';
+  const [yr,mo] = monthStr.split('-');
+  const monthLabel = mo ? `${MONTHS_AR[Number(mo)-1]} ${yr}` : monthStr;
+  const regionsLabel = regions==='all' ? 'كل المناطق' : regions.map(g=>SG_GROUPS[g]||g).join('، ');
+  const now = new Date();
+
+  // العنوان
+  let r = pushRow(['الأهداف الشهرية — الطحان جولدن دايتس','','','','','','','','']);
+  mergeFullRow(r); styleFullRow(r, SM(DR,'FFFFFF',true,15));
+
+  r = pushRow([`الشهر: ${monthLabel}  |  المنطقة: ${regionsLabel}  |  أيام العمل: ${workDays}  |  تاريخ التصدير: ${now.getDate()}/${now.getMonth()+1}/${now.getFullYear()}`,'','','','','','','','']);
+  mergeFullRow(r); styleFullRow(r, S(LR,DR,true,11,false,true));
+
+  // إجمالي (نفس حساب كروت "sg-summary" في الشاشة بالظبط)
+  let totalGoal=0;
+  reps.forEach(rp=>{ const t=targets[rp.name]; if(t) totalGoal += (t.goal||0); });
+  const totalSales = Object.values(sales||{}).reduce((s,v)=>s+(v||0),0);
+  const totalPct = totalGoal>0 ? Math.round(totalSales/totalGoal*100) : 0;
+  const totalDaily = workDays>0 ? Math.round(totalGoal/workDays) : 0;
+  const totalClrPair = totalPct>=80?[GR,'1B5E20']:totalPct>=60?[AMB,'854F0B']:[LR,'A32D2D'];
+  r = pushRow([`إجمالي الأهداف: ${totalGoal.toLocaleString('en-US')} ج   |   المبيعات الفعلية: ${Math.round(totalSales).toLocaleString('en-US')} ج   |   الهدف اليومي الكلي: ${totalDaily.toLocaleString('en-US')} ج   |   نسبة التحقيق الكلية: ${totalPct}%`,'','','','','','','','']);
+  mergeFullRow(r); styleFullRow(r, S(totalClrPair[0],totalClrPair[1],true,12,false,true));
+
+  r = pushRow(['','','','','','','','','']);
+  styleFullRow(r, S('FFFFFF','FFFFFF',false,4));
+
+  const addColHeader = () => {
+    const rr = pushRow(['#','المندوب','الخط','الهدف الشهري (ج)','الهدف اليومي (ج)','المحقق (ج)','النسبة %','الحالة','ملاحظة تعديل']);
+    styleFullRow(rr, SM(OL,'FFFFFF',true,10));
+  };
+
+  const addRepRows = (repsList) => {
+    addColHeader();
+    repsList.forEach((rp,i)=>{
+      const tgt = targets[rp.name];
+      const goal = tgt?.goal||0;
+      const actual = Math.round(sales[rp.name]||0);
+      const pct = goal>0 ? Math.round(actual/goal*100) : 0;
+      const daily = goal>0&&workDays>0 ? Math.round(goal/workDays) : 0;
+      const status = goal===0 ? 'لم يُحدد' : (pct>=80?'ممتاز':pct>=60?'متوسط':'ضعيف');
+      let routeArr=[];
+      if(Array.isArray(rp.routes)&&rp.routes.length) routeArr=rp.routes;
+      else if(rp.route&&rp.route.trim()) routeArr=[rp.route.trim()];
+      else if(rp.grp&&rp.grp.trim()) routeArr=[rp.grp.trim()];
+      else if(rp.groups&&rp.groups.trim()) routeArr=[rp.groups.trim()];
+      const routeLabel = routeArr.length ? routeArr.join(' / ') : '—';
+      const ovr = _sgData.overrides?.[rp.name];
+      const ovrNote = ovr ? (()=>{ if(!ovr.range_to) return 'معدَّل يدويًا'; const [oy,om,od]=ovr.range_to.split('-'); return `معدَّل حتى ${+od}/${+om}/${oy}`; })() : '';
+      const rr = pushRow([i+1, rp.name, routeLabel, goal.toLocaleString('en-US'), daily>0?daily.toLocaleString('en-US'):'—', actual>0?actual.toLocaleString('en-US'):'—', goal>0?pct+'%':'—', status, ovrNote]);
+      const clrPair = goal===0?['FFFFFF','999999']:pct>=80?[GR,'1B5E20']:pct>=60?[AMB,'854F0B']:[LR,'A32D2D'];
+      styleOps.push({r:rr,c:0,style:S('FFFFFF','999999',false,10)});
+      styleOps.push({r:rr,c:1,style:S('FFFFFF','2C2C2C',true,10,false,true)});
+      styleOps.push({r:rr,c:2,style:S('FFFFFF','555555',false,9,true,true)});
+      styleOps.push({r:rr,c:3,style:S('FFFFFF','7A3B1E',true,10)});
+      styleOps.push({r:rr,c:4,style:S('FFFFFF','185FA5',false,10)});
+      styleOps.push({r:rr,c:5,style:S(clrPair[0],clrPair[1],true,10)});
+      styleOps.push({r:rr,c:6,style:S(clrPair[0],clrPair[1],true,10)});
+      styleOps.push({r:rr,c:7,style:S(clrPair[0],clrPair[1],true,10)});
+      styleOps.push({r:rr,c:8,style:S(ovr?'FDE68A':'FFFFFF',ovr?'92400E':'AAAAAA',!!ovr,9,true,true)});
+    });
+    const rr = pushRow(['','','','','','','','','']);
+    styleFullRow(rr, S('FFFFFF','FFFFFF',false,4));
+  };
+
+  const addSupBlock = (sup) => {
+    const _n=s=>(s||'').trim().replace(/\s+/g,' ');
+    const supReps = reps.filter(rp=>{ const a=_n(rp.supervisors),b=_n(sup.name); return a===b||a.startsWith(b)||b.startsWith(a); });
+    const sectors = (sup.sector||'').split(',').filter(Boolean).map(g=>SG_GROUPS[g]||g).join(' + ');
+    const rr = pushRow([`👤 مشرف بيع: ${sup.name} — ${sectors}`,'','','','','','','','']);
+    mergeFullRow(rr); styleFullRow(rr, S(SUPBG,'7A3B1E',true,11,false,true));
+    if(supReps.length) addRepRows(supReps);
+    else { const rr2 = pushRow(['لا يوجد مناديب مرتبطون','','','','','','','','']); mergeFullRow(rr2); styleFullRow(rr2, S('FFFFFF','AAAAAA',false,10,false,true)); }
+  };
+
+  // مجموعة المشرفين مع مدير — نفس ترتيب/منطق sgRender بالظبط
+  const dirRes = supervisors.filter(s=>s.role==='sales_manager'||s.role==='sales_gm');
+  const supsWithDir = new Set();
+  const _dsn = s=>(s||'').trim().replace(/\s+/g,' ');
+
+  dirRes.forEach(dir=>{
+    if(regions!=='all'){
+      const sec=(dir.sector||'').split(',').map(x=>x.trim());
+      if(!sec.some(x=>regions.includes(x))) return;
+    }
+    let dirSups = filteredSups.filter(s=>s.role==='sales_sup'&&_dsn(s.reports_to)===_dsn(dir.name));
+    if(!dirSups.length){
+      dirSups = filteredSups.filter(s=>s.role==='sales_sup'&&!s.reports_to&&(s.sector||'').split(',').some(g=>(dir.sector||'').split(',').includes(g.trim())));
+    }
+    if(!dirSups.length) return;
+    const dirSectors = (dir.sector||'').split(',').filter(Boolean).map(g=>SG_GROUPS[g]||g).join('، ');
+    const rr = pushRow([`👔 مدير بيع: ${dir.name} — ${dirSectors}`,'','','','','','','','']);
+    mergeFullRow(rr); styleFullRow(rr, S(DARKINK,'F2E4DC',true,12,false,true));
+    dirSups.forEach(sup=>{ supsWithDir.add(sup.id); addSupBlock(sup); });
+  });
+
+  // مشرفون بدون مدير بيع مباشر
+  const supsNoDirList = filteredSups.filter(s=>s.role==='sales_sup'&&!supsWithDir.has(s.id));
+  if(supsNoDirList.length){
+    const rr = pushRow(['🌊 مشرفون بدون مدير بيع مباشر','','','','','','','','']);
+    mergeFullRow(rr); styleFullRow(rr, S(NAVY,'C0D4E8',true,11,false,true));
+    supsNoDirList.forEach(sup=> addSupBlock(sup));
+  }
+
+  // مناديب بدون مشرف مبيعات
+  const supNames = new Set(supervisors.map(s=>s.name));
+  const _smn = s=>(s||'').trim().replace(/\s+/g,' ');
+  const _smm = (a,b)=>{ const x=_smn(a),y=_smn(b); return x===y||x.startsWith(y)||y.startsWith(x); };
+  const repsNoSup = reps.filter(rp=>{
+    if(supNames.has(rp.name)) return false;
+    if(!rp.supervisors) return true;
+    return !supervisors.some(s=>_smm(rp.supervisors, s.name));
+  }).filter(rp=> regions==='all'||regions.some(rg=>(rp.grp||rp.groups||'').includes(rg)));
+  if(repsNoSup.length){
+    const rr = pushRow(['مناديب بدون مشرف مبيعات','','','','','','','','']);
+    mergeFullRow(rr); styleFullRow(rr, S(BROWN,'EDE5D8',true,11,false,true));
+    addRepRows(repsNoSup);
+  }
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{wch:6},{wch:22},{wch:30},{wch:16},{wch:14},{wch:14},{wch:10},{wch:12},{wch:22}];
+  ws['!merges'] = merges;
+  const set=(r2,c2,s)=>{ const a=XLSX.utils.encode_cell({r:r2,c:c2}); if(!ws[a]) ws[a]={t:'z',v:''}; ws[a].s=s; };
+  styleOps.forEach(op=> set(op.r, op.c, op.style));
+  ws['!sheet-rtl'] = true;
+  XLSX.utils.book_append_sheet(wb, ws, 'الأهداف والمحققات');
+  XLSX.writeFile(wb, `الأهداف_والمحققات_${monthStr||'شهر'}.xlsx`);
+  showToast && showToast('✅ تم تصدير الأهداف والمحققات');
+};
 
 function sgEditGoalRow(repId){
   const inp = document.querySelector(`.sg-goal-inp[data-id="${repId}"]`);
