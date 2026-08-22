@@ -1461,6 +1461,38 @@ table.datatable details summary:hover { text-decoration: underline; }
     }
   }
 
+  // حفظ جماعي لكل الأصناف اللي اتكتب فيها رقم قطع/كرتونة مرة واحدة (upsert واحد بدل ما كل صنف يعمل نداء لوحده)
+  // pairs = [{itemName, ppc}, ...]
+  async function assignItemPiecesPerCartonBulk(pairs) {
+    if (!sb) { logStatus('محتاج تكون مسجل دخول بالسحابة عشان يتحفظ عدد القطع/الكرتونة ده.', 'err'); return false; }
+    if (!pairs.length) return false;
+    const now = new Date().toISOString();
+    const rows = [];
+    const invalid = [];
+    pairs.forEach(({ itemName, ppc }) => {
+      const nm = normItemName(itemName);
+      const n = Number(ppc);
+      if (!nm || !n || n <= 0) { invalid.push(itemName); return; }
+      rows.push({ item_name: nm, pieces_per_carton: n, updated_at: now });
+    });
+    if (invalid.length) { logStatus(`تجاهلت ${fmt(invalid.length)} صنف برقم غير صحيح.`, 'err'); }
+    if (!rows.length) return false;
+    try {
+      const { error } = await sb.from('tamr_sales_item_catalog').upsert(rows, { onConflict: 'item_name' });
+      if (error) throw error;
+      rows.forEach(r => {
+        const prev = state.itemCatalog.get(r.item_name);
+        state.itemCatalog.set(r.item_name, { code: prev ? prev.code : null, category: prev ? prev.category : null, piecesPerCarton: r.pieces_per_carton, name: r.item_name });
+      });
+      logStatus(`تم حفظ عدد القطع/الكرتونة لـ ${fmt(rows.length)} صنف دفعة واحدة ✓`, 'ok');
+      renderAll();
+      return true;
+    } catch (e) {
+      logStatus('تعذر الحفظ الجماعي لعدد القطع/الكرتونة: ' + (e.message || e), 'err');
+      return false;
+    }
+  }
+
   // ---------------- دمج الأصناف (اسم موحد جديد لأصناف اتكتبت بمسميات مختلفة) ----------------
   // بيرجع الاسم "الفعلي" اللي المفروض يتعرض بيه الصنف ده في كل الشاشات - لو الاسم ده (بعد التطبيع)
   // موجود في خريطة الدمج (state.itemAliases) بيرجع الاسم الموحد الجديد، وإلا بيرجع الاسم زي ما هو.
@@ -5128,7 +5160,10 @@ function renderItems() {
         const lkFooter = ['-', 'الإجمالي', '-', '-', fmt(lkTotalPieces), fmt(lkTotalCartons, 2), '-', '-', fmtMoney(lkTotalSum), fmt(lkTotalCount)];
         resultEl.innerHTML = branchFilterHtml + `
           <div class="hint" style="margin-bottom:8px;">${fmt(byItemCust.length)} صنف اشتراهم ${targetLabel} "${escapeHtml(targetName)}"${branchNote} في الفترة دي${activityNote}${companyBranchNote}${sectorNote}</div>
-          <div class="hint" style="margin-bottom:8px;">💡 اكتب "عدد القطع جوه الكرتونة" في عمود "قطع/كرتونة" لأي صنف واضغط حفظ عشان يظهر إجمالي دقيق بالقطعة وبالكراتين مع بعض.</div>
+          <div class="hint" style="margin-bottom:8px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+            <span>💡 اكتب "عدد القطع جوه الكرتونة" في عمود "قطع/كرتونة" لأي عدد أصناف عايزهم، وبعدين احفظهم كلهم مرة واحدة.</span>
+            <button type="button" id="ppc-bulk-save-btn" class="btn" style="padding:8px 16px; font-size:12.5px; display:none;">💾 حفظ الكل (<span id="ppc-bulk-count">0</span>)</button>
+          </div>
           <div class="table-wrap">${tableHTML(['كود الصنف', 'الصنف', 'التصنيف', 'قطع/كرتونة', 'الكمية (قطعة)', 'الكمية (كراتين)', 'سعر الكرتونة/العبوة (آخر توريد)', 'سعر القطعة (آخر توريد)', 'القيمة', 'عدد مرات الشراء'], lkTableRows, lkFooter)}</div>
         `;
       }
@@ -5162,6 +5197,30 @@ function renderItems() {
         await assignItemCode(itemName, code, null);
       });
     });
+    // زرار "حفظ الكل" - بيحفظ دفعة واحدة كل الأصناف اللي مكتوب فيها رقم قطع/كرتونة ولسه مفتوحة (مش مقفولة)
+    const bulkBtn = resultEl.querySelector('#ppc-bulk-save-btn');
+    const bulkCountEl = resultEl.querySelector('#ppc-bulk-count');
+    const pendingPpcInputs = () => Array.from(resultEl.querySelectorAll('.item-ppc-input'))
+      .filter(inp => !inp.disabled && inp.value.trim());
+    const updatePpcBulkUI = () => {
+      if (!bulkBtn) return;
+      const n = pendingPpcInputs().length;
+      if (bulkCountEl) bulkCountEl.textContent = fmt(n);
+      bulkBtn.style.display = n > 0 ? '' : 'none';
+    };
+    resultEl.querySelectorAll('.item-ppc-input').forEach(inp => {
+      inp.addEventListener('input', updatePpcBulkUI);
+    });
+    updatePpcBulkUI();
+    if (bulkBtn) {
+      bulkBtn.addEventListener('click', async () => {
+        const inputs = pendingPpcInputs();
+        if (!inputs.length) return;
+        const pairs = inputs.map(inp => ({ itemName: inp.closest('.item-ppc-wrap').dataset.item, ppc: inp.value.trim() }));
+        bulkBtn.disabled = true; bulkBtn.textContent = 'جاري الحفظ...';
+        await assignItemPiecesPerCartonBulk(pairs); // ده بيعمل renderAll() في الآخر فترجع كل الأصناف دي مقفولة بـ "تعديل"
+      });
+    }
     resultEl.querySelectorAll('.item-ppc-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         const wrap = btn.closest('.item-ppc-wrap');
@@ -5176,6 +5235,7 @@ function renderItems() {
           input.focus(); input.select();
           btn.dataset.mode = 'edit';
           btn.textContent = 'حفظ';
+          updatePpcBulkUI();
           return;
         }
         const val = input.value.trim();
