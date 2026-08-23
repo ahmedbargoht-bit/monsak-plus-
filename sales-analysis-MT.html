@@ -1002,7 +1002,9 @@ table.datatable details summary:hover { text-decoration: underline; }
     dueCollectionsFilter: { year: null, month: null },  // تاب "التحصيلات المستحقة خلال الشهر" - year/month فاضيين = الشهر الحالي الفعلي (تاريخ اليوم)
     itemAliases: new Map(),  // اسم الصنف القديم (منظم) -> الاسم الموحد الجديد بعد الدمج - تاب "دمج الأصناف" (tamr_sales_item_merges)
     itemMergeSelection: [],  // الأصناف المختارة حاليًا للدمج في تاب "دمج الأصناف" (مصفوفة أسماء أصناف - بيانات واجهة مؤقتة، مش محفوظة بالسحابة)
-    customerSearchFilter: ''  // مربع بحث بالاسم في جدول "كل العملاء" (تاب العملاء) - بيضيّق الجدول لعميل/عملاء معينين
+    customerSearchFilter: '',  // مربع بحث بالاسم في جدول "كل العملاء" (تاب العملاء) - بيضيّق الجدول لعميل/عملاء معينين
+    coordBranches: null,  // مصفوفة {branchName, route} من جدول "branches" الحي (تاب "الفروع والعملاء" في لوحة التحكم) - بتتحمل مرة واحدة بس وتتستخدم لاقتراح خط سير تلقائي لعملاء "ربط خطوط السير" الناقصين
+    coordBranchesLoading: false
   };
 
   const FILTER_LABELS = { activity: 'النشاط', branch: 'الفرع', year: 'السنة', month: 'الشهر', rep: 'المندوب', item: 'الصنف' };
@@ -1032,6 +1034,70 @@ table.datatable details summary:hover { text-decoration: underline; }
   // بالإضافة لتوحيد المسافات، مستخدم بس في مطابقة دليل خطوط سير المناديب.
   function looseSiteKey(name) {
     return normItemName(name).replace(/[-_–—]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  // توحيد "أقوى" لاسم الفرع - زي looseSiteKey بالظبط بالإضافة لتوحيد أشكال الهمزة/الألف واليا،
+  // مستخدم بس في اقتراح خط سير تلقائي من جدول فروع التنسيق الحي (branches) لعملاء "ربط خطوط السير"
+  // الناقصين - عشان فروق كتابة زي "أسواق" مقابل "اسواق" ميعطلوش المطابقة.
+  function normArabicLoose(name) {
+    return looseSiteKey(name)
+      .replace(/[أإآ]/g, 'ا')
+      .replace(/ى/g, 'ي')
+      .replace(/ة/g, 'ه')
+      .toLowerCase();
+  }
+  // توكنز (كلمات) الاسم بعد التوحيد القوي - مستخدمة في المطابقة المرنة بالتشابه (Jaccard) لما مفيش تطابق حرفي كامل
+  function nameTokens(name) {
+    return normArabicLoose(name).split(' ').filter(w => w.length >= 2);
+  }
+  function jaccardSim(setA, setB) {
+    if (!setA.size || !setB.size) return 0;
+    let inter = 0;
+    setA.forEach(x => { if (setB.has(x)) inter++; });
+    const union = setA.size + setB.size - inter;
+    return union ? inter / union : 0;
+  }
+
+  // يجيب فروع التنسيق الحية (اسم الفرع + خط السير) من جدول "branches" في السحابة - نفس الجدول
+  // اللي شاشة "الفروع والعملاء" في لوحة التحكم بتشتغل عليه - مرة واحدة بس وتتخزن في state.coordBranches
+  async function loadCoordBranchesForRouteMatch() {
+    if (!sb || state.coordBranches || state.coordBranchesLoading) return;
+    state.coordBranchesLoading = true;
+    try {
+      const { data, error } = await sb.from('branches').select('branch_name,route').not('route', 'is', null).not('branch_name', 'is', null);
+      if (error) throw error;
+      state.coordBranches = (data || []).map(r => ({
+        branchName: r.branch_name,
+        route: r.route,
+        loose: normArabicLoose(r.branch_name),
+        tokens: new Set(nameTokens(r.branch_name))
+      })).filter(r => r.route);
+      logStatus(`تم تحميل ${fmt(state.coordBranches.length)} فرع من دليل فروع التنسيق لاقتراح خطوط السير ✓`, 'ok');
+    } catch (e) {
+      state.coordBranches = [];
+      logStatus('تعذر تحميل فروع التنسيق لاقتراح خطوط السير: ' + (e.message || e), 'err');
+    } finally {
+      state.coordBranchesLoading = false;
+    }
+    if (typeof renderLinkRoutes === 'function' && document.getElementById('panel-linkroutes')) renderLinkRoutes();
+  }
+
+  // يقترح خط سير لموقع/عميل ناقص، بالمطابقة مع دليل فروع التنسيق الحي (state.coordBranches):
+  // 1) تطابق حرفي بعد التوحيد القوي (أدق اقتراح) 2) وإلا أعلى تشابه توكنز (Jaccard) فوق حد أدنى معقول
+  function suggestCoordRoute(siteName) {
+    if (!state.coordBranches || !state.coordBranches.length || !siteName) return null;
+    const looseKey = normArabicLoose(siteName);
+    const exact = state.coordBranches.find(b => b.loose === looseKey);
+    if (exact) return { route: exact.route, branchName: exact.branchName, confidence: 'exact' };
+    const tokens = new Set(nameTokens(siteName));
+    if (!tokens.size) return null;
+    let best = null, bestScore = 0;
+    state.coordBranches.forEach(b => {
+      const score = jaccardSim(tokens, b.tokens);
+      if (score > bestScore) { bestScore = score; best = b; }
+    });
+    if (best && bestScore >= 0.5) return { route: best.route, branchName: best.branchName, confidence: 'fuzzy', score: bestScore };
+    return null;
   }
 
   function fmt(n, decimals) {
@@ -1582,6 +1648,28 @@ table.datatable details summary:hover { text-decoration: underline; }
       return true;
     } catch (e) {
       logStatus('تعذر حفظ ربط خط السير: ' + (e.message || e), 'err');
+      return false;
+    }
+  }
+
+  // حفظ جماعي لكل العملاء اللي عندهم خط سير مختار/مقترح دلوقتي مرة واحدة (upsert واحد بدل نداء لكل عميل)
+  // pairs = [{site, route, region, sector}, ...]
+  async function assignManualRoutesBulk(pairs) {
+    if (!sb) { logStatus('محتاج تكون مسجل دخول بالسحابة عشان يتحفظ الربط ده.', 'err'); return false; }
+    if (!pairs.length) return false;
+    const now = new Date().toISOString();
+    const rows = pairs.filter(p => p.site && p.route).map(p => ({ customer_site: p.site, route: p.route, region: p.region || null, sector: p.sector || null, updated_at: now }));
+    if (!rows.length) return false;
+    try {
+      const { error } = await sb.from('tamr_sales_manual_routes').upsert(rows, { onConflict: 'customer_site' });
+      if (error) throw error;
+      rows.forEach(r => state.manualRoutes.set(r.customer_site, { route: r.route, region: r.region, sector: r.sector }));
+      reapplyManualRoutesToState();
+      logStatus(`تم ربط ${fmt(rows.length)} عميل/موقع بخطوط سيرهم دفعة واحدة ✓`, 'ok');
+      renderAll();
+      return true;
+    } catch (e) {
+      logStatus('تعذر الحفظ الجماعي لربط خطوط السير: ' + (e.message || e), 'err');
       return false;
     }
   }
@@ -6457,11 +6545,17 @@ function renderLinkRoutes() {
   const inv = state.invoices; // بدون فلاتر - عشان نشوف كل العملاء الناقصين بغض النظر عن الفلتر الحالي
   if (!inv.length) { el.innerHTML = emptyState('ارفع ملفات الفواتير أولًا'); return; }
 
+  // تحميل دليل فروع التنسيق الحي (مرة واحدة بس) عشان نقترح خط سير تلقائي بدل الاختيار اليدوي بالكامل
+  if (!state.coordBranches && !state.coordBranchesLoading) loadCoordBranchesForRouteMatch();
+
   // كل خطوط السير المعروفة حاليًا (من ملف خطوط السير المرفوع + الروابط اليدوية + خطوط السير المنشأة يدويًا)
   const knownRoutes = new Map();
   inv.forEach(i => { if (i.__route && i.__route.خط_سير) knownRoutes.set(i.__route.خط_سير, { region: i.__route.المنطقة || '', sector: i.__route.القطاع || '' }); });
   state.manualRoutes.forEach(m => { if (m.route) knownRoutes.set(m.route, { region: m.region || '', sector: m.sector || '' }); });
   state.routeCatalog.forEach((c, routeName) => { knownRoutes.set(routeName, { region: c.region || '', sector: c.sector || '' }); });
+  // خطوط سير من دليل فروع التنسيق الحي - نضيفها للقائمة كمان عشان تبقى قابلة للاختيار حتى لو مكنش
+  // معروفة قبل كده في كتالوج الأداة الداخلي
+  if (state.coordBranches) state.coordBranches.forEach(b => { if (!knownRoutes.has(b.route)) knownRoutes.set(b.route, { region: '', sector: '' }); });
   const routeNames = Array.from(knownRoutes.keys()).sort((a, b) => String(a).localeCompare(String(b), 'ar'));
   const optionsHtml = routeNames.map(r => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join('');
 
@@ -6534,24 +6628,32 @@ function renderLinkRoutes() {
   // نحتفظ بالقيم الفعلية في مصفوفة (بدل ما نحقنها في attributes) عشان نتجنب أي مشاكل تهريب نصوص
   const linkRoutesRows = bySite.map(x => {
     const sample = unmatched.find(i => i['فرع_العميل'] === x.key);
-    return { site: x.key, customer: sample ? sample['العميل'] : '', branch: sample ? sample['الفرع'] : '', count: x.count, net: x.sum };
+    const suggestion = suggestCoordRoute(x.key);
+    return { site: x.key, customer: sample ? sample['العميل'] : '', branch: sample ? sample['الفرع'] : '', count: x.count, net: x.sum, suggestion };
   });
 
   const totalNet = bySite.reduce((s, x) => s + x.sum, 0);
+  const suggestedCount = linkRoutesRows.filter(r => r.suggestion).length;
 
-  const rowsHtml = linkRoutesRows.map((r, idx) => `
-    <tr data-idx="${idx}">
+  const rowsHtml = linkRoutesRows.map((r, idx) => {
+    const sug = r.suggestion;
+    const sugNote = sug
+      ? `<div style="font-size:10.5px; margin-top:3px; color:${sug.confidence === 'exact' ? '#2f6b45' : '#9A5B00'};">${sug.confidence === 'exact' ? '✓' : '🔎'} مقترح من فروع التنسيق (فرع: ${escapeHtml(sug.branchName)})</div>`
+      : '';
+    return `
+    <tr data-idx="${idx}" ${sug ? 'style="background:#FBF7EC;"' : ''}>
       <td>${escapeHtml(r.customer)}</td>
       <td>${escapeHtml(r.site)}</td>
       <td>${escapeHtml(r.branch)}</td>
       <td>${fmt(r.count)}</td>
       <td>${fmtMoney(r.net)}</td>
       <td>
-        <select class="lr-route-select" style="min-width:150px; font-family:inherit; padding:6px 8px; border-radius:8px; border:1.5px solid var(--sand-dark);">
+        <select class="lr-route-select" style="min-width:150px; font-family:inherit; padding:6px 8px; border-radius:8px; border:1.5px solid ${sug ? 'var(--caramel)' : 'var(--sand-dark)'};">
           <option value="">-- اختر خط سير --</option>
-          ${optionsHtml}
+          ${routeNames.map(rt => `<option value="${escapeHtml(rt)}" ${sug && sug.route === rt ? 'selected' : ''}>${escapeHtml(rt)}</option>`).join('')}
           <option value="__new__">+ إنشاء خط سير جديد</option>
         </select>
+        ${sugNote}
       </td>
       <td class="lr-new-fields" style="display:none; white-space:nowrap;">
         <input type="text" class="lr-new-name" placeholder="اسم خط السير" style="width:110px; font-family:inherit; padding:5px 7px; border-radius:6px; border:1.5px solid var(--sand-dark); margin-inline-end:4px;">
@@ -6560,10 +6662,19 @@ function renderLinkRoutes() {
       </td>
       <td><button type="button" class="btn lr-save-btn" style="padding:7px 14px; font-size:12.5px;">حفظ</button></td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
+
+  const loadingNote = state.coordBranchesLoading
+    ? `<div class="hint" style="margin-bottom:8px;">⏳ جاري تحميل دليل فروع التنسيق لاقتراح خطوط السير تلقائيًا...</div>`
+    : (state.coordBranches ? `<div class="hint" style="margin-bottom:8px;">💡 ${fmt(suggestedCount)} من أصل ${fmt(bySite.length)} اتقترحلهم خط سير تلقائي من دليل فروع التنسيق (الصفوف بالخلفية الفاتحة) - راجعهم واضغط "حفظ الكل" تحت، أو غيّر الاختيار لو مش مظبوط.</div>` : '');
 
   el.innerHTML = createRouteBoxHtml + `
-    <div class="pill-note">⚠ ${fmt(bySite.length)} عميل/موقع (${fmt(unmatched.length)} فاتورة بقيمة ${fmtMoney(totalNet)}) بدون خط سير مطابق. اربطهم بخط سير موجود أو أنشئ خط جديد من الجدول تحت.</div>
+    <div class="pill-note" style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+      <span>⚠ ${fmt(bySite.length)} عميل/موقع (${fmt(unmatched.length)} فاتورة بقيمة ${fmtMoney(totalNet)}) بدون خط سير مطابق. اربطهم بخط سير موجود أو أنشئ خط جديد من الجدول تحت.</span>
+      <button type="button" id="lr-bulk-save-btn" class="btn" style="padding:8px 16px; font-size:12.5px; display:none;">💾 حفظ الكل (<span id="lr-bulk-count">0</span>)</button>
+    </div>
+    ${loadingNote}
     <div class="table-wrap"><table class="datatable"><thead><tr>
       <th>العميل</th><th>فرع العميل (الموقع)</th><th>فرع الشركة</th><th>عدد الفواتير</th><th>صافي المبيعات</th>
       <th>اختيار خط السير</th><th>خط سير جديد</th><th></th>
@@ -6577,8 +6688,36 @@ function renderLinkRoutes() {
       const tr = sel.closest('tr');
       const newFields = tr.querySelector('.lr-new-fields');
       newFields.style.display = sel.value === '__new__' ? 'table-cell' : 'none';
+      updateLrBulkUI();
     });
   });
+
+  // زرار "حفظ الكل" - بيحفظ دفعة واحدة كل الصفوف اللي عليها خط سير مختار (مقترح تلقائي أو مختار يدوي)،
+  // من غير الصفوف اللي لسه فاضية أو بصدد إنشاء خط سير جديد (دي محتاجة تتحفظ فرديًا لإدخال بياناتها الإضافية)
+  const bulkBtn = document.getElementById('lr-bulk-save-btn');
+  const bulkCountEl = document.getElementById('lr-bulk-count');
+  const pendingLrSelects = () => Array.from(el.querySelectorAll('.lr-route-select')).filter(s => s.value && s.value !== '__new__');
+  const updateLrBulkUI = () => {
+    if (!bulkBtn) return;
+    const n = pendingLrSelects().length;
+    if (bulkCountEl) bulkCountEl.textContent = fmt(n);
+    bulkBtn.style.display = n > 0 ? '' : 'none';
+  };
+  updateLrBulkUI();
+  if (bulkBtn) {
+    bulkBtn.addEventListener('click', async () => {
+      const sels = pendingLrSelects();
+      if (!sels.length) return;
+      const pairs = sels.map(sel => {
+        const idx = Number(sel.closest('tr').dataset.idx);
+        const rowData = linkRoutesRows[idx];
+        const known = knownRoutes.get(sel.value) || {};
+        return { site: rowData.site, route: sel.value, region: known.region || '', sector: known.sector || '' };
+      });
+      bulkBtn.disabled = true; bulkBtn.textContent = 'جاري الحفظ...';
+      await assignManualRoutesBulk(pairs);
+    });
+  }
 
   el.querySelectorAll('.lr-save-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
