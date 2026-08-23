@@ -2549,7 +2549,9 @@ table.datatable details summary:hover { text-decoration: underline; }
     inv.__quarter = d ? Math.ceil((d.getMonth() + 1) / 3) : null;
     inv.__monthKey = d ? (d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')) : null;
     const route = state.routeIndex ? SalesParser.matchRoute(inv, state.routeIndex) : null;
-    inv.__route = route || resolveManualRoute(inv['فرع_العميل']);
+    // الربط اليدوي (state.manualRoutes) بقى بيتقدّم على مطابقة ملف خطوط السير المرفوع - عشان لو مطابقة
+    // الملف غلط (اسم فرع اتلخبط في الملف نفسه) يبقى فيه وسيلة تصحيح من الشاشة من غير ما تحتاج تعيد رفع الملف
+    inv.__route = resolveManualRoute(inv['فرع_العميل']) || route;
     const g = inv.footer || {};
     inv.__gross = g['قيمة_الفاتورة'] || 0;
     inv.__tax = g['إجمالي_الضريبة'] || 0;
@@ -6619,9 +6621,68 @@ function renderLinkRoutes() {
     });
   };
 
+  // ── تعديل ربط خط سير غلط لعميل/فرع مربوط بالفعل (مش بس الناقصين) - دروب داون بحث بكل الأسماء
+  // المعروفة، وبعد الاختيار يظهر خط السير الحالي (وهل جاي من ملف خطوط السير أو تعديل يدوي سابق)
+  // مع إمكانية تصحيحه وحفظه (بيتقدّم دايمًا على أي مطابقة تلقائية من الملف).
+  const allSiteNames = Array.from(new Set(inv.map(i => i['فرع_العميل']).filter(Boolean))).sort((a, b) => String(a).localeCompare(String(b), 'ar'));
+  const editSiteDatalistHtml = allSiteNames.map(s => `<option value="${escapeHtml(s)}"></option>`).join('');
+  const editExistingSectionHtml = `
+    <div class="card" style="margin:0 0 16px; padding:16px 18px; box-shadow:none; border:1.5px solid var(--sand-dark);">
+      <div class="table-title" style="margin:0 0 10px;">🔍 تعديل ربط خط سير غلط</div>
+      <div class="hint" style="margin:0 0 10px;">دوّر باسم العميل أو فرع العميل (حتى لو مربوط بخط سير بالفعل)، شوف خط السير الحالي، وصحّحه لو غلط.</div>
+      <div>
+        <div class="hint" style="margin:0 0 4px;">اسم العميل / فرع العميل</div>
+        <input type="text" id="lrEditSiteInput" list="lrEditSiteDatalist" placeholder="اكتب واختار من القائمة..." style="width:280px; font-family:inherit; padding:8px; border-radius:8px; border:1.5px solid var(--sand-dark);">
+        <datalist id="lrEditSiteDatalist">${editSiteDatalistHtml}</datalist>
+      </div>
+      <div id="lrEditResult" style="margin-top:12px;"></div>
+    </div>
+  `;
+  const wireEditExistingSection = () => {
+    const input = document.getElementById('lrEditSiteInput');
+    const resultEl = document.getElementById('lrEditResult');
+    if (!input || !resultEl) return;
+    input.addEventListener('change', () => {
+      const site = normItemName(input.value);
+      if (!site || !allSiteNames.includes(site)) { resultEl.innerHTML = ''; return; }
+      const sample = inv.find(i => i['فرع_العميل'] === site);
+      const currentRoute = sample && sample.__route ? sample.__route.خط_سير : null;
+      const isManual = state.manualRoutes.has(site);
+      const sourceNote = !currentRoute ? '<span style="color:var(--bad); font-weight:700;">بدون خط سير حاليًا</span>'
+        : (isManual ? '🔧 خط سير معدَّل يدويًا قبل كده' : '📄 من ملف خطوط السير المرفوع');
+      resultEl.innerHTML = `
+        <div style="background:#FAF7F2; border-radius:10px; padding:12px 14px;">
+          <div style="margin-bottom:6px; font-size:13px;"><b>${escapeHtml(sample ? sample['العميل'] : '')}</b> — ${escapeHtml(site)}</div>
+          <div style="margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);">خط السير الحالي: <b style="color:var(--ink);">${currentRoute ? escapeHtml(currentRoute) : '-'}</b> — ${sourceNote}</div>
+          <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+            <div>
+              <div class="hint" style="margin:0 0 4px;">خط السير الصحيح</div>
+              <select id="lrEditRouteSelect" style="min-width:180px; font-family:inherit; padding:8px; border-radius:8px; border:1.5px solid var(--sand-dark);">
+                <option value="">-- اختر خط سير --</option>
+                ${routeNames.map(r => `<option value="${escapeHtml(r)}" ${r === currentRoute ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}
+              </select>
+            </div>
+            <button type="button" id="lrEditSaveBtn" class="btn" style="padding:9px 18px;">حفظ التصحيح</button>
+          </div>
+        </div>
+      `;
+      document.getElementById('lrEditSaveBtn').addEventListener('click', async () => {
+        const sel = document.getElementById('lrEditRouteSelect');
+        const newRoute = sel.value;
+        if (!newRoute) { alert('اختر خط السير الصحيح الأول'); return; }
+        if (newRoute === currentRoute && isManual) { alert('ده نفس خط السير المحفوظ بالفعل.'); return; }
+        const known = knownRoutes.get(newRoute) || {};
+        const btn = document.getElementById('lrEditSaveBtn');
+        btn.disabled = true; btn.textContent = 'جاري الحفظ...';
+        await assignManualRoute(site, newRoute, known.region || '', known.sector || '');
+      });
+    });
+  };
+
   if (!bySite.length) {
-    el.innerHTML = createRouteBoxHtml + `<div class="pill-note" style="background:#E1EFE4;color:#2f6b45;">✓ كل العملاء مربوطين بخط سير - مفيش حد ناقص.</div>`;
+    el.innerHTML = createRouteBoxHtml + editExistingSectionHtml + `<div class="pill-note" style="background:#E1EFE4;color:#2f6b45;">✓ كل العملاء مربوطين بخط سير - مفيش حد ناقص.</div>`;
     wireCreateRouteBox();
+    wireEditExistingSection();
     return;
   }
 
@@ -6671,7 +6732,7 @@ function renderLinkRoutes() {
     ? `<div class="hint" style="margin-bottom:8px;">⏳ جاري تحميل دليل فروع التنسيق لاقتراح خطوط السير تلقائيًا...</div>`
     : (state.coordBranches ? `<div class="hint" style="margin-bottom:8px;">💡 ${fmt(suggestedCount)} من أصل ${fmt(bySite.length)} اتقترحلهم خط سير تلقائي من دليل فروع التنسيق (الصفوف بالخلفية الفاتحة) - راجعهم واضغط "حفظ الكل" تحت، أو غيّر الاختيار لو مش مظبوط.</div>` : '');
 
-  el.innerHTML = createRouteBoxHtml + `
+  el.innerHTML = createRouteBoxHtml + editExistingSectionHtml + `
     <div class="pill-note" style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
       <span>⚠ ${fmt(bySite.length)} عميل/موقع (${fmt(unmatched.length)} فاتورة بقيمة ${fmtMoney(totalNet)}) بدون خط سير مطابق. اربطهم بخط سير موجود أو أنشئ خط جديد من الجدول تحت.</span>
       <button type="button" id="lr-bulk-save-btn" class="btn" style="padding:8px 16px; font-size:12.5px; display:none;">💾 حفظ الكل (<span id="lr-bulk-count">0</span>)</button>
@@ -6685,6 +6746,7 @@ function renderLinkRoutes() {
   `;
 
   wireCreateRouteBox();
+  wireEditExistingSection();
 
   // زرار "حفظ الكل" - بيحفظ دفعة واحدة الصفوف "المحدد عليها" بس (مربع الاختيار جنبها) واللي عليها
   // خط سير مختار فعلاً - عشان تقدر تلغي تحديد أي اقتراح غلط قبل ما تحفظ، بدل ما تفضّي الاختيار بنفسك
