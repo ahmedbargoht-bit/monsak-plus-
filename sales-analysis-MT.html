@@ -6640,8 +6640,10 @@ function renderLinkRoutes() {
     const sugNote = sug
       ? `<div style="font-size:10.5px; margin-top:3px; color:${sug.confidence === 'exact' ? '#2f6b45' : '#9A5B00'};">${sug.confidence === 'exact' ? '✓' : '🔎'} مقترح من فروع التنسيق (فرع: ${escapeHtml(sug.branchName)})</div>`
       : '';
+    const hasVal = !!(sug && sug.route);
     return `
     <tr data-idx="${idx}" ${sug ? 'style="background:#FBF7EC;"' : ''}>
+      <td style="text-align:center;"><input type="checkbox" class="lr-row-cb" data-idx="${idx}" ${hasVal ? 'checked' : ''}></td>
       <td>${escapeHtml(r.customer)}</td>
       <td>${escapeHtml(r.site)}</td>
       <td>${escapeHtml(r.branch)}</td>
@@ -6676,6 +6678,7 @@ function renderLinkRoutes() {
     </div>
     ${loadingNote}
     <div class="table-wrap"><table class="datatable"><thead><tr>
+      <th style="text-align:center;"><input type="checkbox" id="lr-select-all-cb" checked></th>
       <th>العميل</th><th>فرع العميل (الموقع)</th><th>فرع الشركة</th><th>عدد الفواتير</th><th>صافي المبيعات</th>
       <th>اختيار خط السير</th><th>خط سير جديد</th><th></th>
     </tr></thead><tbody>${rowsHtml}</tbody></table></div>
@@ -6683,32 +6686,55 @@ function renderLinkRoutes() {
 
   wireCreateRouteBox();
 
+  // زرار "حفظ الكل" - بيحفظ دفعة واحدة الصفوف "المحدد عليها" بس (مربع الاختيار جنبها) واللي عليها
+  // خط سير مختار فعلاً - عشان تقدر تلغي تحديد أي اقتراح غلط قبل ما تحفظ، بدل ما تفضّي الاختيار بنفسك
+  const bulkBtn = document.getElementById('lr-bulk-save-btn');
+  const bulkCountEl = document.getElementById('lr-bulk-count');
+  const selectAllCb = document.getElementById('lr-select-all-cb');
+  const pendingLrRows = () => Array.from(el.querySelectorAll('.lr-row-cb')).filter(cb => cb.checked).map(cb => {
+    const tr = cb.closest('tr');
+    const sel = tr.querySelector('.lr-route-select');
+    return { cb, sel };
+  }).filter(x => x.sel.value && x.sel.value !== '__new__');
+  const updateLrBulkUI = () => {
+    if (!bulkBtn) return;
+    const n = pendingLrRows().length;
+    if (bulkCountEl) bulkCountEl.textContent = fmt(n);
+    bulkBtn.style.display = n > 0 ? '' : 'none';
+  };
+  updateLrBulkUI();
+
   el.querySelectorAll('.lr-route-select').forEach(sel => {
     sel.addEventListener('change', () => {
       const tr = sel.closest('tr');
       const newFields = tr.querySelector('.lr-new-fields');
       newFields.style.display = sel.value === '__new__' ? 'table-cell' : 'none';
+      // لو اليوزر اختار خط سير بنفسه بعد ما كانت فاضية، نعلّم مربع الاختيار تلقائي (ولو رجعها فاضية نشيل التعليم)
+      const cb = tr.querySelector('.lr-row-cb');
+      if (cb) cb.checked = !!sel.value && sel.value !== '__new__';
       updateLrBulkUI();
     });
   });
 
-  // زرار "حفظ الكل" - بيحفظ دفعة واحدة كل الصفوف اللي عليها خط سير مختار (مقترح تلقائي أو مختار يدوي)،
-  // من غير الصفوف اللي لسه فاضية أو بصدد إنشاء خط سير جديد (دي محتاجة تتحفظ فرديًا لإدخال بياناتها الإضافية)
-  const bulkBtn = document.getElementById('lr-bulk-save-btn');
-  const bulkCountEl = document.getElementById('lr-bulk-count');
-  const pendingLrSelects = () => Array.from(el.querySelectorAll('.lr-route-select')).filter(s => s.value && s.value !== '__new__');
-  const updateLrBulkUI = () => {
-    if (!bulkBtn) return;
-    const n = pendingLrSelects().length;
-    if (bulkCountEl) bulkCountEl.textContent = fmt(n);
-    bulkBtn.style.display = n > 0 ? '' : 'none';
-  };
-  updateLrBulkUI();
+  el.querySelectorAll('.lr-row-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (selectAllCb) selectAllCb.checked = Array.from(el.querySelectorAll('.lr-row-cb')).every(c => c.checked);
+      updateLrBulkUI();
+    });
+  });
+
+  if (selectAllCb) {
+    selectAllCb.addEventListener('change', () => {
+      el.querySelectorAll('.lr-row-cb').forEach(cb => { cb.checked = selectAllCb.checked; });
+      updateLrBulkUI();
+    });
+  }
+
   if (bulkBtn) {
     bulkBtn.addEventListener('click', async () => {
-      const sels = pendingLrSelects();
-      if (!sels.length) return;
-      const pairs = sels.map(sel => {
+      const rows = pendingLrRows();
+      if (!rows.length) return;
+      const pairs = rows.map(({ sel }) => {
         const idx = Number(sel.closest('tr').dataset.idx);
         const rowData = linkRoutesRows[idx];
         const known = knownRoutes.get(sel.value) || {};
