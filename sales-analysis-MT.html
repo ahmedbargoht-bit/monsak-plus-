@@ -2673,6 +2673,20 @@ table.datatable details summary:hover { text-decoration: underline; }
     });
     return byItem;
   }
+  // مفتاح موحّد (صنف+فرع) بيتستخدم لما "أصناف عميل معين" بتفصّل الصفوف على مستوى الفرع (أكتر من فرع
+  // عميل واحد محدد مع بعض) - عشان الكمية/السعر/عدد مرات الشراء تتحسب لكل فرع لوحده مش مجمّعة مع بعض.
+  function itemSiteKey(item, site) { return item + '__SITE__' + (site || ''); }
+  // نسخة من lastPiecePriceMap بس بتحسب "آخر سعر" لكل (صنف+فرع) لوحده بدل ما تجمّع كل الفروع مع بعض
+  function lastPiecePriceMapBySite(rows) {
+    const byItemSite = new Map();
+    rows.forEach(r => {
+      if (!r.date) return;
+      const k = itemSiteKey(r.item, r.site);
+      const cur = byItemSite.get(k);
+      if (!cur || r.date > cur.date) byItemSite.set(k, { date: r.date, price: r.pricePiece || 0, priceCarton: r.priceCarton || 0 });
+    });
+    return byItemSite;
+  }
 
   // بالتة ألوان دورية لتمييز كل شهر بلون مختلف في جدول "أصناف عميل معين خلال فترة معينة" (شاشة/PDF)
   // وفي تصدير Excel (نسخة ARGB مقابلة). لو عدد الشهور المختارة أكتر من عدد الألوان، بتتكرر بالدور.
@@ -3164,6 +3178,21 @@ table.datatable details summary:hover { text-decoration: underline; }
     return Array.from(m.values());
   }
   function topN(arr, n) { return arr.slice().sort((a, b) => b.sum - a.sum).slice(0, n); }
+  // نسخة من groupSum بس بتفصّل كل صنف على مستوى الفرع كمان (صف منفصل لكل صنف+فرع) - مستخدمة في أداة
+  // "أصناف عميل معين" لما يكون فيه أكتر من فرع عميل واحد ظاهر في النتيجة، عشان يبان اسم الفرع قدام كل
+  // صنف. x.key بيفضل اسم الصنف بس (عشان resolveItemCategory/groupItemsByCategoryDesc يشتغلوا عادي) وx.site فيه اسم الفرع.
+  function groupSumByItemSite(rows) {
+    const m = new Map();
+    for (const r of rows) {
+      if (!r.item) continue;
+      const k = itemSiteKey(r.item, r.site);
+      if (!m.has(k)) m.set(k, { key: r.item, site: r.site || '', sum: 0, count: 0 });
+      const e = m.get(k);
+      e.sum += r.total || 0;
+      e.count += 1;
+    }
+    return Array.from(m.values());
+  }
 
   /* ---------------- Tabs ---------------- */
   function updatePrintBtnLabel() {
@@ -3321,20 +3350,33 @@ table.datatable details summary:hover { text-decoration: underline; }
         currentPriceMap
       });
     } else {
-      const byItemCust = groupItemsByCategoryDesc(groupSum(lkRows, r => r.item, r => r.total).sort((a, b) => b.sum - a.sum));
+      // لو النتيجة شاملة أكتر من فرع عميل واحد (اختيار متعدد من فلتر "فرع العميل")، بنفصّل كل صنف على
+      // مستوى الفرع (صف منفصل لكل صنف+فرع) عشان يبان اسم الفرع قدام كل صنف بدل ما تتجمع كل الفروع مع بعض.
+      const sitesInResult = new Set(lkRows.map(r => r.site).filter(Boolean));
+      const showBranchCol = sitesInResult.size > 1;
+      const byItemCust = groupItemsByCategoryDesc((showBranchCol ? groupSumByItemSite(lkRows) : groupSum(lkRows, r => r.item, r => r.total)).sort((a, b) => b.sum - a.sum));
       const custQtyOf = new Map();
-      lkRows.forEach(r => { custQtyOf.set(r.item, (custQtyOf.get(r.item) || 0) + (r.qtyCarton || 0) + (r.qtyPiece || 0)); });
-      const lastPriceOf = lastPiecePriceMap(lkRows);
+      lkRows.forEach(r => {
+        const k = showBranchCol ? itemSiteKey(r.item, r.site) : r.item;
+        custQtyOf.set(k, (custQtyOf.get(k) || 0) + (r.qtyCarton || 0) + (r.qtyPiece || 0));
+      });
+      const lastPriceOf = showBranchCol ? lastPiecePriceMapBySite(lkRows) : lastPiecePriceMap(lkRows);
       const totalSum = byItemCust.reduce((s, x) => s + x.sum, 0);
       const totalQty = Array.from(custQtyOf.values()).reduce((s, v) => s + v, 0);
       itemCount = byItemCust.length;
-      const headers = [t.itemCode, t.item, t.category, t.qty, t.cartonUnitPrice, t.pieceUnitPrice, t.value, t.pctOfTotal];
+      const headers = showBranchCol
+        ? [t.branchName, t.itemCode, t.item, t.category, t.qty, t.cartonUnitPrice, t.pieceUnitPrice, t.value, t.pctOfTotal]
+        : [t.itemCode, t.item, t.category, t.qty, t.cartonUnitPrice, t.pieceUnitPrice, t.value, t.pctOfTotal];
       const rows = byItemCust.map(x => {
         const pct = totalSum ? x.sum / totalSum : 0;
-        const lp = lastPriceOf.get(x.key);
-        return [resolveItemCode(x.key) || '-', x.key, resolveItemCategory(x.key) || '-', fmt(custQtyOf.get(x.key) || 0), lp ? fmt(lp.priceCarton, 2) : '-', lp ? fmt(lp.price, 2) : '-', fmtMoney(x.sum), fmtPct(pct)];
+        const k = showBranchCol ? itemSiteKey(x.key, x.site) : x.key;
+        const lp = lastPriceOf.get(k);
+        const cells = [resolveItemCode(x.key) || '-', x.key, resolveItemCategory(x.key) || '-', fmt(custQtyOf.get(k) || 0), lp ? fmt(lp.priceCarton, 2) : '-', lp ? fmt(lp.price, 2) : '-', fmtMoney(x.sum), fmtPct(pct)];
+        return showBranchCol ? [x.site || '-', ...cells] : cells;
       });
-      const footer = ['-', t.total, '-', fmt(totalQty), '-', '-', fmtMoney(totalSum), fmtPct(1)];
+      const footer = showBranchCol
+        ? ['-', '-', t.total, '-', fmt(totalQty), '-', '-', fmtMoney(totalSum), fmtPct(1)]
+        : ['-', t.total, '-', fmt(totalQty), '-', '-', fmtMoney(totalSum), fmtPct(1)];
       tableBodyHtml = `<div class="table-wrap">${tableHTML(headers, rows, footer)}</div>`;
     }
 
@@ -3409,25 +3451,31 @@ table.datatable details summary:hover { text-decoration: underline; }
 
     const monthly = lk.months.length ? computeCustLookupMonthlyGroups(lkRows) : null;
     if (monthly && !monthly.groups.length) { alert('مفيش بيانات لهذا العميل/الفرع في الفترة المحددة.'); return; }
-    const byItemCust = monthly ? null : groupItemsByCategoryDesc(groupSum(lkRows, r => r.item, r => r.total).sort((a, b) => b.sum - a.sum));
+    // لو النتيجة شاملة أكتر من فرع عميل واحد (اختيار متعدد من فلتر "فرع العميل")، بنفصّل كل صنف على مستوى
+    // الفرع (صف منفصل لكل صنف+فرع) في الجدول غير الموزّع بالشهور، عشان يبان اسم الفرع قدام كل صنف.
+    const sitesInResult = new Set(lkRows.map(r => r.site).filter(Boolean));
+    const showBranchCol = !monthly && sitesInResult.size > 1;
+    const byItemCust = monthly ? null : groupItemsByCategoryDesc((showBranchCol ? groupSumByItemSite(lkRows) : groupSum(lkRows, r => r.item, r => r.total)).sort((a, b) => b.sum - a.sum));
     // بنجمّع كمية الكراتين وكمية القطع كل واحدة لوحدها، وبعدين لو الصنف معاه "عدد قطع/كرتونة" محفوظ في
     // الكتالوج بنحوّل كل الكميات لوحدة واحدة موحّدة (قطعة وكرتونة مع بعض) - نفس منطق العرض على الشاشة
     // بالظبط، عشان عمود "عدد الكراتين" في التصدير يبقى مطابق لما هو ظاهر فعليًا في الجدول.
     const custQtyCartonOf = new Map();
     const custQtyPieceOf = new Map();
     if (!monthly) lkRows.forEach(r => {
-      custQtyCartonOf.set(r.item, (custQtyCartonOf.get(r.item) || 0) + (r.qtyCarton || 0));
-      custQtyPieceOf.set(r.item, (custQtyPieceOf.get(r.item) || 0) + (r.qtyPiece || 0));
+      const k = showBranchCol ? itemSiteKey(r.item, r.site) : r.item;
+      custQtyCartonOf.set(k, (custQtyCartonOf.get(k) || 0) + (r.qtyCarton || 0));
+      custQtyPieceOf.set(k, (custQtyPieceOf.get(k) || 0) + (r.qtyPiece || 0));
     });
     const custTotalsOf = monthly ? null : new Map(byItemCust.map(x => {
-      const cartons = custQtyCartonOf.get(x.key) || 0;
-      const pieces = custQtyPieceOf.get(x.key) || 0;
+      const k = showBranchCol ? itemSiteKey(x.key, x.site) : x.key;
+      const cartons = custQtyCartonOf.get(k) || 0;
+      const pieces = custQtyPieceOf.get(k) || 0;
       const ppc = resolveItemPiecesPerCarton(x.key);
       const totalPieces = ppc ? (cartons * ppc + pieces) : pieces;
       const totalCartons = ppc ? (cartons + pieces / ppc) : cartons;
-      return [x.key, { totalPieces, totalCartons, ppc }];
+      return [k, { totalPieces, totalCartons, ppc }];
     }));
-    const lastPriceOf = monthly ? null : lastPiecePriceMap(lkRows);
+    const lastPriceOf = monthly ? null : (showBranchCol ? lastPiecePriceMapBySite(lkRows) : lastPiecePriceMap(lkRows));
     const totalSum = monthly ? monthly.grandTotal : byItemCust.reduce((s, x) => s + x.sum, 0);
     const totalQty = monthly ? monthly.grandQty : Array.from(custTotalsOf.values()).reduce((s, t) => s + t.totalPieces, 0);
     const totalCartonsQty = monthly ? null : Array.from(custTotalsOf.values()).reduce((s, t) => s + t.totalCartons, 0);
@@ -3460,7 +3508,7 @@ table.datatable details summary:hover { text-decoration: underline; }
     const nSub = activeDefs.length || 1;
     // عمود ثابت "السعر الحالي" (مش جوه أي مجموعة شهر) بيتحط بعد كل مجموعات الشهور مباشرة وقبل عمود الإجمالي
     const currentPriceCol = monthly ? (4 + monthly.groups.length * nSub) : null;
-    const totalCols = monthly ? (currentPriceCol + 1) : 8;
+    const totalCols = monthly ? (currentPriceCol + 1) : (showBranchCol ? 9 : 8);
     const colLetter = (n) => { let s = ''; while (n > 0) { const rem = (n - 1) % 26; s = String.fromCharCode(65 + rem) + s; n = Math.floor((n - 1) / 26); } return s; };
 
     try {
@@ -3594,7 +3642,9 @@ table.datatable details summary:hover { text-decoration: underline; }
       ws.getColumn(currentPriceCol).width = 22;
       ws.getColumn(totalCols).width = 16;
     } else {
-      const headers = ['كود الصنف', 'الصنف', 'التصنيف', 'الكمية (قطعة)', 'عدد الكراتين', 'سعر الكرتونة/العبوة (آخر توريد)', 'سعر القطعة (آخر توريد)', 'القيمة', 'نسبة من الإجمالي'];
+      // لو فيه أكتر من فرع في النتيجة، بنضيف عمود "اسم الفرع" أول عمود ونزحزح باقي الأعمدة بواحد
+      const off = showBranchCol ? 1 : 0;
+      const headers = (showBranchCol ? ['اسم الفرع'] : []).concat(['كود الصنف', 'الصنف', 'التصنيف', 'الكمية (قطعة)', 'عدد الكراتين', 'سعر الكرتونة/العبوة (آخر توريد)', 'سعر القطعة (آخر توريد)', 'القيمة', 'نسبة من الإجمالي']);
       const headerRow = ws.addRow(headers);
       headerRow.eachCell(cell => {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: INK } };
@@ -3606,41 +3656,45 @@ table.datatable details summary:hover { text-decoration: underline; }
 
       byItemCust.forEach((x, idx) => {
         const pct = totalSum ? x.sum / totalSum : 0;
-        const lp = lastPriceOf.get(x.key);
-        const t = custTotalsOf.get(x.key);
-        const row = ws.addRow([resolveItemCode(x.key) || '-', x.key, resolveItemCategory(x.key) || '-', t.totalPieces || 0, t.ppc ? t.totalCartons : null, lp ? lp.priceCarton : null, lp ? lp.price : null, x.sum, pct]);
+        const k = showBranchCol ? itemSiteKey(x.key, x.site) : x.key;
+        const lp = lastPriceOf.get(k);
+        const t = custTotalsOf.get(k);
+        const rowVals = (showBranchCol ? [x.site || '-'] : []).concat([resolveItemCode(x.key) || '-', x.key, resolveItemCategory(x.key) || '-', t.totalPieces || 0, t.ppc ? t.totalCartons : null, lp ? lp.priceCarton : null, lp ? lp.price : null, x.sum, pct]);
+        const row = ws.addRow(rowVals);
         if (idx % 2 === 1) {
           row.eachCell(cell => { if (!cell.fill || !cell.fill.fgColor) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
         }
-        row.getCell(4).numFmt = '#,##0';
-        row.getCell(5).numFmt = '#,##0.00';
-        row.getCell(6).numFmt = '#,##0.00';
-        row.getCell(7).numFmt = '#,##0.00';
-        row.getCell(8).numFmt = '#,##0';
-        row.getCell(9).numFmt = '0.0%';
-        row.getCell(2).alignment = { horizontal: 'right' };
+        row.getCell(4 + off).numFmt = '#,##0';
+        row.getCell(5 + off).numFmt = '#,##0.00';
+        row.getCell(6 + off).numFmt = '#,##0.00';
+        row.getCell(7 + off).numFmt = '#,##0.00';
+        row.getCell(8 + off).numFmt = '#,##0';
+        row.getCell(9 + off).numFmt = '0.0%';
+        row.getCell(2 + off).alignment = { horizontal: 'right' };
       });
 
-      const footerRow = ws.addRow(['-', 'الإجمالي', '-', totalQty, totalCartonsQty, null, null, totalSum, 1]);
+      const footerVals = (showBranchCol ? ['-'] : []).concat(['-', 'الإجمالي', '-', totalQty, totalCartonsQty, null, null, totalSum, 1]);
+      const footerRow = ws.addRow(footerVals);
       footerRow.eachCell(cell => {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SAND_DARK } };
         cell.font = { bold: true, color: { argb: INK } };
         cell.border = { top: { style: 'medium', color: { argb: INK } } };
       });
-      footerRow.getCell(4).numFmt = '#,##0';
-      footerRow.getCell(5).numFmt = '#,##0.00';
-      footerRow.getCell(8).numFmt = '#,##0';
-      footerRow.getCell(9).numFmt = '0.0%';
+      footerRow.getCell(4 + off).numFmt = '#,##0';
+      footerRow.getCell(5 + off).numFmt = '#,##0.00';
+      footerRow.getCell(8 + off).numFmt = '#,##0';
+      footerRow.getCell(9 + off).numFmt = '0.0%';
 
-      ws.getColumn(1).width = 14;
-      ws.getColumn(2).width = 42;
-      ws.getColumn(3).width = 20;
-      ws.getColumn(4).width = 14;
-      ws.getColumn(5).width = 14;
-      ws.getColumn(6).width = 22;
-      ws.getColumn(7).width = 20;
-      ws.getColumn(8).width = 16;
-      ws.getColumn(9).width = 16;
+      if (showBranchCol) ws.getColumn(1).width = 22;
+      ws.getColumn(1 + off).width = 14;
+      ws.getColumn(2 + off).width = 42;
+      ws.getColumn(3 + off).width = 20;
+      ws.getColumn(4 + off).width = 14;
+      ws.getColumn(5 + off).width = 14;
+      ws.getColumn(6 + off).width = 22;
+      ws.getColumn(7 + off).width = 20;
+      ws.getColumn(8 + off).width = 16;
+      ws.getColumn(9 + off).width = 16;
     }
 
     ws.addRow([]); ws.addRow([]);
@@ -5383,44 +5437,57 @@ function renderItems() {
           `;
         }
       } else {
-        const byItemCust = groupItemsByCategoryDesc(groupSum(lkRows, r => r.item, r => r.total).sort((a, b) => b.sum - a.sum));
+        // لو النتيجة شاملة أكتر من فرع عميل واحد (اختيار متعدد من فلتر "فرع العميل")، بنفصّل كل صنف على
+        // مستوى الفرع (صف منفصل لكل صنف+فرع) عشان يبان اسم الفرع قدام كل صنف بدل ما تتجمع كل الفروع مع بعض.
+        const sitesInResult = new Set(lkRows.map(r => r.site).filter(Boolean));
+        const showBranchCol = sitesInResult.size > 1;
+        const byItemCust = groupItemsByCategoryDesc((showBranchCol ? groupSumByItemSite(lkRows) : groupSum(lkRows, r => r.item, r => r.total)).sort((a, b) => b.sum - a.sum));
         // بنجمّع كمية الكراتين وكمية القطع كل واحدة لوحدها (بدل جمعهم في رقم واحد مضلل بوحدتين مختلفتين)
         const custQtyCartonOf = new Map();
         const custQtyPieceOf = new Map();
         lkRows.forEach(r => {
-          custQtyCartonOf.set(r.item, (custQtyCartonOf.get(r.item) || 0) + (r.qtyCarton || 0));
-          custQtyPieceOf.set(r.item, (custQtyPieceOf.get(r.item) || 0) + (r.qtyPiece || 0));
+          const k = showBranchCol ? itemSiteKey(r.item, r.site) : r.item;
+          custQtyCartonOf.set(k, (custQtyCartonOf.get(k) || 0) + (r.qtyCarton || 0));
+          custQtyPieceOf.set(k, (custQtyPieceOf.get(k) || 0) + (r.qtyPiece || 0));
         });
-        const lastPriceOf = lastPiecePriceMap(lkRows);
+        const lastPriceOf = showBranchCol ? lastPiecePriceMapBySite(lkRows) : lastPiecePriceMap(lkRows);
         // لو الصنف معاه "عدد قطع/كرتونة" محفوظ في الكتالوج، بنحول كل الكميات لوحدة واحدة موحّدة (قطعة
         // وكرتونة) ونعرض الإجمالي الصحيح في الوحدتين؛ لو مش محفوظ، بنعرض كل كمية بوحدتها الأصلية بس من غير تحويل.
         const custTotalsOf = new Map(byItemCust.map(x => {
-          const cartons = custQtyCartonOf.get(x.key) || 0;
-          const pieces = custQtyPieceOf.get(x.key) || 0;
+          const k = showBranchCol ? itemSiteKey(x.key, x.site) : x.key;
+          const cartons = custQtyCartonOf.get(k) || 0;
+          const pieces = custQtyPieceOf.get(k) || 0;
           const ppc = resolveItemPiecesPerCarton(x.key);
           const totalPieces = ppc ? (cartons * ppc + pieces) : pieces;
           const totalCartons = ppc ? (cartons + pieces / ppc) : cartons;
-          return [x.key, { totalPieces, totalCartons, ppc }];
+          return [k, { totalPieces, totalCartons, ppc }];
         }));
         const lkTableRows = byItemCust.map(x => {
-          const lp = lastPriceOf.get(x.key);
-          const t = custTotalsOf.get(x.key);
+          const k = showBranchCol ? itemSiteKey(x.key, x.site) : x.key;
+          const lp = lastPriceOf.get(k);
+          const t = custTotalsOf.get(k);
           const qtyPieceCell = t.ppc ? fmt(t.totalPieces) : (t.totalPieces ? fmt(t.totalPieces) : '-');
           const qtyCartonCell = t.ppc ? fmt(t.totalCartons, 2) : (t.totalCartons ? fmt(t.totalCartons) : '-');
-          return [itemCodeCell(x.key), x.key, itemCategoryCell(x.key), itemPiecesCell(x.key), qtyPieceCell, qtyCartonCell, lp ? fmt(lp.priceCarton, 2) : '-', lp ? fmt(lp.price, 2) : '-', fmtMoney(x.sum), fmt(x.count)];
+          const cells = [itemCodeCell(x.key), x.key, itemCategoryCell(x.key), itemPiecesCell(x.key), qtyPieceCell, qtyCartonCell, lp ? fmt(lp.priceCarton, 2) : '-', lp ? fmt(lp.price, 2) : '-', fmtMoney(x.sum), fmt(x.count)];
+          return showBranchCol ? [escapeHtml(x.site || '-'), ...cells] : cells;
         });
         const lkTotalPieces = Array.from(custTotalsOf.values()).reduce((s, t) => s + t.totalPieces, 0);
         const lkTotalCartons = Array.from(custTotalsOf.values()).reduce((s, t) => s + t.totalCartons, 0);
         const lkTotalSum = byItemCust.reduce((s, x) => s + x.sum, 0);
         const lkTotalCount = byItemCust.reduce((s, x) => s + x.count, 0);
-        const lkFooter = ['-', 'الإجمالي', '-', '-', fmt(lkTotalPieces), fmt(lkTotalCartons, 2), '-', '-', fmtMoney(lkTotalSum), fmt(lkTotalCount)];
+        const lkFooter = showBranchCol
+          ? ['-', '-', 'الإجمالي', '-', '-', fmt(lkTotalPieces), fmt(lkTotalCartons, 2), '-', '-', fmtMoney(lkTotalSum), fmt(lkTotalCount)]
+          : ['-', 'الإجمالي', '-', '-', fmt(lkTotalPieces), fmt(lkTotalCartons, 2), '-', '-', fmtMoney(lkTotalSum), fmt(lkTotalCount)];
+        const lkHeaders = showBranchCol
+          ? ['اسم الفرع', 'كود الصنف', 'الصنف', 'التصنيف', 'قطع/كرتونة', 'الكمية (قطعة)', 'الكمية (كراتين)', 'سعر الكرتونة/العبوة (آخر توريد)', 'سعر القطعة (آخر توريد)', 'القيمة', 'عدد مرات الشراء']
+          : ['كود الصنف', 'الصنف', 'التصنيف', 'قطع/كرتونة', 'الكمية (قطعة)', 'الكمية (كراتين)', 'سعر الكرتونة/العبوة (آخر توريد)', 'سعر القطعة (آخر توريد)', 'القيمة', 'عدد مرات الشراء'];
         resultEl.innerHTML = `
           <div class="hint" style="margin-bottom:8px;">${fmt(byItemCust.length)} صنف اشتراهم ${targetLabel} "${escapeHtml(targetName)}" في الفترة دي${activityNote}${companyBranchNote}${sectorNote}${itemsNote}</div>
           <div class="hint" style="margin-bottom:8px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
             <span>💡 اكتب "عدد القطع جوه الكرتونة" في عمود "قطع/كرتونة" لأي عدد أصناف عايزهم، وبعدين احفظهم كلهم مرة واحدة.</span>
             <button type="button" id="ppc-bulk-save-btn" class="btn" style="padding:8px 16px; font-size:12.5px; display:none;">💾 حفظ الكل (<span id="ppc-bulk-count">0</span>)</button>
           </div>
-          <div class="table-wrap">${tableHTML(['كود الصنف', 'الصنف', 'التصنيف', 'قطع/كرتونة', 'الكمية (قطعة)', 'الكمية (كراتين)', 'سعر الكرتونة/العبوة (آخر توريد)', 'سعر القطعة (آخر توريد)', 'القيمة', 'عدد مرات الشراء'], lkTableRows, lkFooter)}</div>
+          <div class="table-wrap">${tableHTML(lkHeaders, lkTableRows, lkFooter)}</div>
         `;
       }
     }
