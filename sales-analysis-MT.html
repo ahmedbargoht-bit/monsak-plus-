@@ -2724,15 +2724,17 @@ table.datatable details summary:hover { text-decoration: underline; }
       return { key: k, year: y, month: m };
     });
 
-    const perItem = new Map(); // item -> Map(groupKey -> {qty, value, count, lastPrice})
+    const perItem = new Map(); // item -> Map(groupKey -> {qty, qtyCarton, qtyPiece, value, count, lastPrice})
     rows.forEach(r => {
       if (!r.year || !r.monthNum) return;
       const gk = r.year + '-' + String(r.monthNum).padStart(2, '0');
       if (!perItem.has(r.item)) perItem.set(r.item, new Map());
       const byGroup = perItem.get(r.item);
-      if (!byGroup.has(gk)) byGroup.set(gk, { qty: 0, value: 0, count: 0, lastPrice: null });
+      if (!byGroup.has(gk)) byGroup.set(gk, { qty: 0, qtyCarton: 0, qtyPiece: 0, value: 0, count: 0, lastPrice: null });
       const g = byGroup.get(gk);
       g.qty += (r.qtyCarton || 0) + (r.qtyPiece || 0);
+      g.qtyCarton += r.qtyCarton || 0;
+      g.qtyPiece += r.qtyPiece || 0;
       g.value += r.total || 0;
       g.count += 1;
       if (r.date && (!g.lastPrice || r.date > g.lastPrice.date)) g.lastPrice = { date: r.date, price: r.pricePiece || 0, priceCarton: r.priceCarton || 0 };
@@ -2746,12 +2748,18 @@ table.datatable details summary:hover { text-decoration: underline; }
     const orderedItems = groupItemsByCategoryDesc(itemTotals.sort((a, b) => b.sum - a.sum)).map(x => x.key);
 
     const groupTotals = new Map();
-    groups.forEach(g => groupTotals.set(g.key, { qty: 0, value: 0, count: 0 }));
+    groups.forEach(g => groupTotals.set(g.key, { qty: 0, value: 0, count: 0, cartons: 0 }));
     let grandTotal = 0, grandQty = 0;
-    perItem.forEach(byGroup => {
+    // بنحسب "عدد الكراتين" لكل خلية (شهر × صنف) بتحويل القطع لكراتين حسب "عدد قطع/كرتونة" الخاص
+    // بالصنف نفسه (لازم نحسبها لكل صنف على حدة قبل التجميع، لأن كل صنف له تحويل مختلف) - نفس منطق
+    // عمود "الكمية (كراتين)" في الجدول غير الموزّع بالشهور، عشان يبقى العمود متاح هنا كمان.
+    perItem.forEach((byGroup, item) => {
+      const ppc = resolveItemPiecesPerCarton(item);
       byGroup.forEach((g, gk) => {
+        g.ppc = ppc;
+        g.cartons = ppc ? (g.qtyCarton + g.qtyPiece / ppc) : g.qtyCarton;
         const t = groupTotals.get(gk);
-        if (t) { t.qty += g.qty; t.value += g.value; t.count += g.count; }
+        if (t) { t.qty += g.qty; t.value += g.value; t.count += g.count; t.cartons += g.cartons; }
         grandTotal += g.value; grandQty += g.qty;
       });
     });
@@ -2794,10 +2802,11 @@ table.datatable details summary:hover { text-decoration: underline; }
   // الثابت دايمًا (بغض النظر عن ترتيب اختيار اليوزر ليها من دروب داون "الأعمدة الظاهرة"). ctx بتتبعت
   // لـget() الخاص بعمود "نسبة النمو" بس، وفيها {byGroup, groups, idx} اللازمين لإيجاد نفس الشهر في
   // أقرب سنة أقدم.
-  const CUST_LOOKUP_ALL_COLS = ['qty', 'priceCarton', 'price', 'value', 'count', 'growth'];
+  const CUST_LOOKUP_ALL_COLS = ['qty', 'cartons', 'priceCarton', 'price', 'value', 'count', 'growth'];
   function custLookupColDefs(t) {
     return [
       { key: 'qty', label: t.qty, kind: 'num', get: (cell) => cell ? cell.qty : 0 },
+      { key: 'cartons', label: t.cartonsQty, kind: 'cartons', get: (cell) => (cell && cell.ppc) ? cell.cartons : null },
       { key: 'priceCarton', label: t.cartonUnitPrice, kind: 'unitprice', get: (cell) => (cell && cell.lastPrice) ? cell.lastPrice.priceCarton : 0 },
       { key: 'price', label: t.pieceUnitPrice, kind: 'unitprice', get: (cell) => (cell && cell.lastPrice) ? cell.lastPrice.price : 0 },
       { key: 'value', label: t.value, kind: 'money', get: (cell) => cell ? cell.value : 0 },
@@ -2855,6 +2864,7 @@ table.datatable details summary:hover { text-decoration: underline; }
           let disp;
           if (d.kind === 'pct') disp = (v === null || v === undefined) ? '-' : fmtGrowthPct(v);
           else if (d.kind === 'unitprice') disp = v ? fmt(v, 2) : '-'; // سعر الوحدة (كرتونة/قطعة) بكسور الجنيه لو موجودة
+          else if (d.kind === 'cartons') disp = v ? fmt(v, 2) : '-'; // عدد الكراتين ممكن يبقى فيه كسور (تحويل من قطع فرادى)
           else disp = v ? (d.kind === 'money' ? fmtMoney(v) : fmt(v)) : '-';
           cells += `<td${bg}>${disp}</td>`;
         });
@@ -2868,10 +2878,11 @@ table.datatable details summary:hover { text-decoration: underline; }
 
     let footerCells = `<td colspan="3">${t.total}</td>`;
     groups.forEach((g, idx) => {
-      const gt = groupTotals.get(g.key) || { qty: 0, value: 0, count: 0 };
+      const gt = groupTotals.get(g.key) || { qty: 0, value: 0, count: 0, cartons: 0 };
       activeDefs.forEach(d => {
         let v = '-';
         if (d.key === 'qty') v = fmt(gt.qty);
+        else if (d.key === 'cartons') v = gt.cartons ? fmt(gt.cartons, 2) : '-';
         else if (d.key === 'value') v = fmtMoney(gt.value);
         else if (d.key === 'count') v = fmt(gt.count);
         else if (d.key === 'growth') {
@@ -3272,7 +3283,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       reportTitle: 'تقرير أصناف العميل', customer: 'العميل', branchName: 'الفرع', activityLabel: 'النشاط', companyBranchLabel: 'فرع الشركة', sectorLabel: 'القطاع', period: 'الفترة',
       allPeriod: 'كل الفترة المتاحة', allYears: 'كل السنوات', allMonths: 'كل الشهور', allCustomers: 'كل العملاء',
       branchCount: 'عدد الفروع', itemCount: 'عدد الأصناف الموردة',
-      itemCode: 'كود الصنف', item: 'الصنف', category: 'التصنيف', qty: 'الكمية', value: 'القيمة',
+      itemCode: 'كود الصنف', item: 'الصنف', category: 'التصنيف', qty: 'الكمية', cartonsQty: 'عدد الكراتين', value: 'القيمة',
       cartonUnitPrice: 'سعر الكرتونة/العبوة (آخر توريد)', pieceUnitPrice: 'سعر القطعة (آخر توريد)', currentPiecePrice: 'سعر القطعة الآن (آخر توريد فعلي)', purchaseCount: 'عدد مرات الشراء', growth: 'نسبة النمو % (نفس الشهر)',
       pctOfTotal: 'نسبة من إجمالي مبيعات العميل', total: 'الإجمالي',
       sigSales: 'مدير مبيعات مودرن تريد', sigGM: 'مدير عام المبيعات', sigLine: 'الاسم / التوقيع / التاريخ',
@@ -3282,7 +3293,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       reportTitle: 'Customer Items Report', customer: 'Customer', branchName: 'Branch', activityLabel: 'Activity', companyBranchLabel: 'Company Branch', sectorLabel: 'Sector', period: 'Period',
       allPeriod: 'All available period', allYears: 'All years', allMonths: 'All months', allCustomers: 'All Customers',
       branchCount: 'Number of Branches', itemCount: 'Number of Items Supplied',
-      itemCode: 'Item Code', item: 'Item', category: 'Category', qty: 'Quantity', value: 'Value',
+      itemCode: 'Item Code', item: 'Item', category: 'Category', qty: 'Quantity', cartonsQty: 'Cartons', value: 'Value',
       cartonUnitPrice: 'Carton/Pack Price (Last Delivery)', pieceUnitPrice: 'Unit Price (Last Delivery)', currentPiecePrice: 'Current Unit Price (Latest Delivery)', purchaseCount: 'Purchase Count', growth: 'Growth % (Same Month YoY)',
       pctOfTotal: '% of Customer Total Sales', total: 'Total',
       sigSales: 'Modern Trade Sales Manager', sigGM: 'General Sales Manager', sigLine: 'Name / Signature / Date',
@@ -3292,7 +3303,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       reportTitle: 'Rapport des articles du client', customer: 'Client', branchName: 'Succursale', activityLabel: 'Activité', companyBranchLabel: "Succursale de l'entreprise", sectorLabel: 'Secteur', period: 'Période',
       allPeriod: 'Toute la période disponible', allYears: 'Toutes les années', allMonths: 'Tous les mois', allCustomers: 'Tous les clients',
       branchCount: 'Nombre de succursales', itemCount: "Nombre d'articles fournis",
-      itemCode: "Code d'article", item: 'Article', category: 'Catégorie', qty: 'Quantité', value: 'Valeur',
+      itemCode: "Code d'article", item: 'Article', category: 'Catégorie', qty: 'Quantité', cartonsQty: 'Cartons', value: 'Valeur',
       cartonUnitPrice: 'Prix carton/colis (dernière livraison)', pieceUnitPrice: 'Prix unitaire (dernière livraison)', currentPiecePrice: 'Prix unitaire actuel (dernière livraison réelle)', purchaseCount: "Nombre d'achats", growth: 'Croissance % (même mois, annuel)',
       pctOfTotal: '% du total des ventes du client', total: 'Total',
       sigSales: 'Directeur des ventes Modern Trade', sigGM: 'Directeur général des ventes', sigLine: 'Nom / Signature / Date',
@@ -3302,7 +3313,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       reportTitle: 'Kundenartikelbericht', customer: 'Kunde', branchName: 'Filiale', activityLabel: 'Aktivität', companyBranchLabel: 'Unternehmensfiliale', sectorLabel: 'Sektor', period: 'Zeitraum',
       allPeriod: 'Gesamter verfügbarer Zeitraum', allYears: 'Alle Jahre', allMonths: 'Alle Monate', allCustomers: 'Alle Kunden',
       branchCount: 'Anzahl der Filialen', itemCount: 'Anzahl der gelieferten Artikel',
-      itemCode: 'Artikelcode', item: 'Artikel', category: 'Kategorie', qty: 'Menge', value: 'Wert',
+      itemCode: 'Artikelcode', item: 'Artikel', category: 'Kategorie', qty: 'Menge', cartonsQty: 'Kartons', value: 'Wert',
       cartonUnitPrice: 'Kartonpreis (letzte Lieferung)', pieceUnitPrice: 'Stückpreis (letzte Lieferung)', currentPiecePrice: 'Aktueller Stückpreis (letzte tatsächliche Lieferung)', purchaseCount: 'Anzahl der Käufe', growth: 'Wachstum % (gleicher Monat, Jahresvergleich)',
       pctOfTotal: '% des Gesamtumsatzes des Kunden', total: 'Gesamt',
       sigSales: 'Verkaufsleiter Modern Trade', sigGM: 'Generalverkaufsleiter', sigLine: 'Name / Unterschrift / Datum',
@@ -3519,6 +3530,7 @@ table.datatable details summary:hover { text-decoration: underline; }
     // الشاشة - بيتطبق هنا بالظبط عشان يفضل التصدير متطابق مع اللي شايفه على الشاشة.
     const XLSX_COL_DEFS = [
       { key: 'qty', label: 'الكمية', get: (cell) => cell ? cell.qty : null, numFmt: '#,##0', width: 12 },
+      { key: 'cartons', label: 'عدد الكراتين', get: (cell) => (cell && cell.ppc) ? cell.cartons : null, numFmt: '#,##0.00', width: 14 },
       { key: 'priceCarton', label: 'سعر الكرتونة/العبوة (آخر توريد)', get: (cell) => (cell && cell.lastPrice) ? cell.lastPrice.priceCarton : null, numFmt: '#,##0.00', width: 18 },
       { key: 'price', label: 'سعر القطعة (آخر توريد)', get: (cell) => (cell && cell.lastPrice) ? cell.lastPrice.price : null, numFmt: '#,##0.00', width: 16 },
       { key: 'value', label: 'القيمة', get: (cell) => cell ? cell.value : null, numFmt: '#,##0', width: 14 },
@@ -3633,10 +3645,11 @@ table.datatable details summary:hover { text-decoration: underline; }
       ws.mergeCells(footerRow.number, 2, footerRow.number, 3);
       monthly.groups.forEach((g, idx) => {
         const startCol = 4 + idx * nSub;
-        const gt = monthly.groupTotals.get(g.key) || { qty: 0, value: 0, count: 0 };
+        const gt = monthly.groupTotals.get(g.key) || { qty: 0, value: 0, count: 0, cartons: 0 };
         activeDefs.forEach((d, j) => {
           let v = null, numFmt = '#,##0';
           if (d.key === 'qty') v = gt.qty;
+          else if (d.key === 'cartons') { v = gt.cartons || null; numFmt = '#,##0.00'; }
           else if (d.key === 'value') v = gt.value;
           else if (d.key === 'count') v = gt.count;
           else if (d.key === 'growth') { v = custLookupGrowthPct(monthly.groupTotals, monthly.groups, idx); numFmt = '0.0%'; }
