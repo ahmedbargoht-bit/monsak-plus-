@@ -35,6 +35,11 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<style>
+.branch-name-label{font-family:Cairo,sans-serif;font-size:10px;font-weight:700;color:#0C447C;background:#fff;border:1px solid #378ADD;padding:1px 6px;border-radius:5px}
+.branch-name-label::before{display:none}
+</style>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -1213,8 +1218,10 @@ h2,h3{color:#2C1F0A}
                   </button>
                 </div>
               </div>
+              <div id="loc-map-route-info" style="display:none;margin-bottom:8px;gap:8px;flex-wrap:wrap"></div>
               <div id="loc-map-el" style="height:420px;border-radius:10px;border:1px solid var(--border)"></div>
               <div id="loc-map-nogps" style="display:none;margin-top:8px;background:#F5F0E8;border:1px solid #E8D9C0;border-radius:8px;padding:8px 12px"></div>
+              <div id="loc-map-nogeo" style="display:none;margin-top:8px;background:#FFF3E0;border:1px solid #FFCC80;border-radius:8px;padding:8px 12px"></div>
               <p style="font-size:10px;color:var(--text2);margin-top:6px">
                 📍 بتعرض بس المنسقين اللي بعتوا لوكيشن — اختار منسق معين من القايمة عشان يظهر هو بس، أو سيبها "كل المنسقين" مع فلتر المجموعة فوق
               </p>
@@ -14534,6 +14541,28 @@ async function filterLocations(){
 // ══ خريطة مواقع المنسقين اللايف (Leaflet) — جوه بانل "الموقع الحالي" ══
 let _locMapInstance = null;
 let _locMapMarkersLayer = null;
+let _locBranchLayer = null;
+
+// حساب "الغلاف المحدّب" (convex hull) لمجموعة نقط - بيرجع أصغر مضلّع بيحيط بكل النقط، مستخدم لرسم
+// حدود تقريبية حوالين فروع خط سير معين على الخريطة. خوارزمية Andrew's monotone chain القياسية.
+function convexHull(points){
+  const pts = points.slice().sort((a,b)=> a[0]===b[0] ? a[1]-b[1] : a[0]-b[0]);
+  if(pts.length<3) return pts;
+  const cross=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const lower=[];
+  for(const p of pts){
+    while(lower.length>=2 && cross(lower[lower.length-2],lower[lower.length-1],p)<=0) lower.pop();
+    lower.push(p);
+  }
+  const upper=[];
+  for(let i=pts.length-1;i>=0;i--){
+    const p=pts[i];
+    while(upper.length>=2 && cross(upper[upper.length-2],upper[upper.length-1],p)<=0) upper.pop();
+    upper.push(p);
+  }
+  lower.pop(); upper.pop();
+  return lower.concat(upper);
+}
 
 async function renderLocationMap(){
   const mapEl = document.getElementById('loc-map-el');
@@ -14546,6 +14575,7 @@ async function renderLocationMap(){
       attribution: '&copy; OpenStreetMap', maxZoom: 19
     }).addTo(_locMapInstance);
     _locMapMarkersLayer = L.layerGroup().addTo(_locMapInstance);
+    _locBranchLayer = L.layerGroup().addTo(_locMapInstance);
   }
   // البانل ممكن يكون كان display:none وقت التهيئة فتبقى مقاسات الخريطة غلط — نصلحها بعد ما يظهر
   setTimeout(()=>{ try{ _locMapInstance.invalidateSize(); }catch(e){} }, 80);
@@ -14638,6 +14668,7 @@ async function renderLocationMap(){
   if(legendEl){
     let txt = rows.length ? `🟢 ${greenN}   🟡 ${amberN}   🔴 ${oldN}` : (repFilter!=='all' ? `"${repFilter}" معندوش لوكيشن مسجلة` : 'مفيش منسقين بعتوا لوكيشن');
     if(noGpsRows.length) txt += `   ⚪ ${noGpsRows.length} أونلاين بدون GPS`;
+    if(repFilter!=='all') txt += `   🔵 فروع خط السير`;
     legendEl.textContent = txt;
   }
 
@@ -14658,6 +14689,68 @@ async function renderLocationMap(){
       nogpsEl.style.display = 'none';
       nogpsEl.innerHTML = '';
     }
+  }
+
+  // ══ فروع خط سير المنسق المختار — نقط زرقا بالاسم + حدود تقريبية حوالين الخط ══
+  // بتتفعّل بس لما يكون فيه منسق معين مختار (مش "كل المنسقين")، وبتقرا مواقع الفروع الثابتة (lat/lng)
+  // اللي بتتسجل من تاب "الفروع والعملاء" - مش لوكيشن لحظي.
+  _locBranchLayer.clearLayers();
+  const routeInfoEl = document.getElementById('loc-map-route-info');
+  const nogeoEl = document.getElementById('loc-map-nogeo');
+  window._locRouteSnapshot = null;
+
+  if(repFilter!=='all'){
+    const route = repRouteByName[repFilter] || '';
+    const grp = repGroupByName[repFilter] || '';
+    let branches = [];
+    if(route){
+      try{
+        const rb = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,lat,lng&route=eq.${encodeURIComponent(route)}&status=eq.active&limit=1000`, {headers:H});
+        branches = rb.ok ? await rb.json() : [];
+      }catch(e){ branches = []; }
+    }
+    const withGeo = branches.filter(b=>b.lat&&b.lng);
+    const noGeo   = branches.filter(b=>!(b.lat&&b.lng));
+    const gLabel = GROUPS[grp]?.label || grp || '—';
+
+    withGeo.forEach(b=>{
+      const lat = Number(b.lat), lng = Number(b.lng);
+      const marker = L.circleMarker([lat,lng], {radius:8, color:'#fff', weight:2, fillColor:'#378ADD', fillOpacity:1}).addTo(_locBranchLayer);
+      marker.bindTooltip((b.branch_name||'—'), {permanent:true, direction:'top', offset:[0,-6], className:'branch-name-label'});
+      marker.bindPopup(`<div style="font-family:Cairo,sans-serif;text-align:right;min-width:140px"><b>${(b.branch_name||'—').replace(/</g,'&lt;')}</b></div>`);
+      bounds.push([lat,lng]);
+    });
+
+    if(withGeo.length>=3){
+      const hull = convexHull(withGeo.map(b=>[Number(b.lat),Number(b.lng)]));
+      L.polygon(hull, {color:'#378ADD', weight:2, dashArray:'6,4', fillColor:'#378ADD', fillOpacity:0.12}).addTo(_locBranchLayer);
+    }
+
+    if(routeInfoEl){
+      routeInfoEl.style.display = 'flex';
+      routeInfoEl.innerHTML = `
+        <span class="badge" style="background:${GROUPS[grp]?.color||'#888'}22;color:${GROUPS[grp]?.color||'#555'}"><i class="ti ti-users-group"></i> ${gLabel}</span>
+        <span class="badge" style="background:#EEF6FF;color:#1D4ED8"><i class="ti ti-route"></i> خط سير ${route||'—'}</span>
+        <span class="badge" style="background:#E8F5E9;color:#1A7A4A"><i class="ti ti-building-store"></i> ${branches.length} فرع${withGeo.length<branches.length?` (${withGeo.length} محدد الموقع)`:''}</span>
+      `;
+    }
+    if(nogeoEl){
+      if(noGeo.length){
+        nogeoEl.style.display = 'block';
+        nogeoEl.innerHTML = `
+          <div style="font-size:12px;font-weight:700;color:#E65100;margin-bottom:6px">🟠 ${noGeo.length} فرع من الخط لسه مفيهمش موقع محدد (سجّل موقعهم من تاب "الفروع والعملاء" عشان يظهروا هنا)</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            ${noGeo.map(b=>`<span style="background:#FFFDF8;border:1px solid #FFCC80;border-radius:6px;padding:4px 10px;font-size:11px;color:#2C1F0A">${(b.branch_name||'—').replace(/</g,'&lt;')}</span>`).join('')}
+          </div>`;
+      } else {
+        nogeoEl.style.display = 'none';
+        nogeoEl.innerHTML = '';
+      }
+    }
+    window._locRouteSnapshot = { grpLabel:gLabel, route, branchCount:branches.length, geoCount:withGeo.length };
+  } else {
+    if(routeInfoEl){ routeInfoEl.style.display='none'; routeInfoEl.innerHTML=''; }
+    if(nogeoEl){ nogeoEl.style.display='none'; nogeoEl.innerHTML=''; }
   }
 
   if(bounds.length) _locMapInstance.fitBounds(bounds, {padding:[30,30], maxZoom:14});
@@ -14731,9 +14824,29 @@ function locToggleAll(cb){
   locOnCheckChange();
 }
 
-function exportLocationPDF(){
+async function exportLocationPDF(){
   const rows = document.querySelectorAll('#loc-table tr');
   if(!rows.length){ alert('لا توجد بيانات للتصدير'); return; }
+
+  // لو فيه منسق معين مختار وظاهر معاه خريطة فروع خط سيره، بناخد صورة من الخريطة (بما فيها الفروع
+  // وحدود الخط) ونحطها فوق التقرير مع تفاصيل المجموعة/خط السير/عدد الفروع
+  let mapSectionHtml = '';
+  const routeSnap = window._locRouteSnapshot;
+  if(routeSnap && typeof html2canvas!=='undefined'){
+    try{
+      const mapEl = document.getElementById('loc-map-el');
+      const canvas = await html2canvas(mapEl, {useCORS:true, logging:false});
+      const imgData = canvas.toDataURL('image/png');
+      mapSectionHtml = `
+        <div class="info-bar">
+          <span>👥 ${routeSnap.grpLabel}</span>
+          <span>🧭 خط سير ${routeSnap.route||'—'}</span>
+          <span>🏪 عدد الفروع: ${routeSnap.branchCount}${routeSnap.geoCount<routeSnap.branchCount?` (${routeSnap.geoCount} محدد الموقع)`:''}</span>
+        </div>
+        <img src="${imgData}" style="width:100%;border-radius:10px;border:1px solid #e8d5b0;margin-bottom:16px"/>
+      `;
+    }catch(e){ console.warn('map capture failed', e); }
+  }
 
   const grpEl  = document.getElementById('loc-filter-group');
   const grpLbl = grpEl?.options[grpEl.selectedIndex]?.text || 'كل المجموعات';
@@ -14795,6 +14908,7 @@ function exportLocationPDF(){
     </div>
     <img src="${logoBase64}" alt="Al Tahhan Logo"/>
   </div>
+  ${mapSectionHtml}
   <div class="info-bar">
     <span>📅 ${dateLbl}</span>
     <span>👥 ${grpLbl}</span>
