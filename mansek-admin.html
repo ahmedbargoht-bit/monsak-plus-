@@ -2377,7 +2377,7 @@ h2,h3{color:#2C1F0A}
               <table>
                 <thead><tr>
                   <th>اسم الفرع</th><th>خط السير</th><th>المجموعة</th>
-                  <th>صنف العميل</th><th>الحالة</th><th>إجراءات</th>
+                  <th>صنف العميل</th><th>الحالة</th><th>الموقع على الخريطة</th><th>إجراءات</th>
                 </tr></thead>
                 <tbody id="branches-table"></tbody>
               </table>
@@ -7722,6 +7722,28 @@ h2,h3{color:#2C1F0A}
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('modal-edit-branch')">إلغاء</button>
       <button class="btn btn-blue" onclick="saveBranchEdit()"><i class="ti ti-check"></i> حفظ</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Modal: تثبيت موقع الفرع على الخريطة ══ -->
+<div class="modal-overlay" id="modal-branch-location">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-title">
+      <i class="ti ti-map-pin"></i> تثبيت موقع الفرع
+      <button class="modal-close" onclick="closeModal('modal-branch-location')">✕</button>
+    </div>
+    <div id="bl-branch-name" style="font-size:13px;font-weight:700;color:#4B3C1A;margin-bottom:8px"></div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:10px">
+      دوس على مكان الفرع بالظبط على الخريطة (أو اسحب الدبوس لو محتاج تظبطه)، وبعدين احفظ. الموقع ده بيبقى المرجع اللي بنقارن بيه موقع الزيارات الفعلية بعد كده.
+    </div>
+    <div id="bl-map-el" style="height:320px;border-radius:10px;overflow:hidden;border:1px solid #ddd"></div>
+    <div id="bl-coords" style="font-size:11px;color:var(--text2);margin-top:8px;direction:ltr;text-align:left"></div>
+    <div id="bl-ok" style="display:none;background:#E8F5E9;color:#1A7A4A;padding:8px 12px;border-radius:8px;font-size:12px;margin-top:8px"></div>
+    <div id="bl-err" style="display:none;background:#FFEBEE;color:#B71C1C;padding:8px 12px;border-radius:8px;font-size:12px;margin-top:8px"></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-branch-location')">إلغاء</button>
+      <button class="btn btn-blue" onclick="saveBranchLocation()"><i class="ti ti-check"></i> حفظ الموقع</button>
     </div>
   </div>
 </div>
@@ -19045,7 +19067,8 @@ async function loadBranches(){
 
   // إحصاء
   const statsEl=document.getElementById('br-stats');
-  if(statsEl) statsEl.innerHTML=`إجمالي: <b>${data.length}</b> فرع · نشط: <b>${data.filter(b=>b.status==='active').length}</b> · متوقف: <b>${data.filter(b=>b.status==='suspended').length}</b> · مغلق: <b>${data.filter(b=>b.status==='closed').length}</b>`;
+  const locCount = data.filter(b=>b.lat&&b.lng).length;
+  if(statsEl) statsEl.innerHTML=`إجمالي: <b>${data.length}</b> فرع · نشط: <b>${data.filter(b=>b.status==='active').length}</b> · متوقف: <b>${data.filter(b=>b.status==='suspended').length}</b> · مغلق: <b>${data.filter(b=>b.status==='closed').length}</b> · <i class="ti ti-map-pin" style="color:#1A7A4A"></i> الموقع محدد: <b style="color:#1A7A4A">${locCount}</b> من ${data.length}`;
 
   const statusLabel = {
     active:'<span class="badge b-green">نشط</span>',
@@ -19059,6 +19082,11 @@ async function loadBranches(){
     <td><span class="badge" style="background:${GROUPS[b.grp]?.color||'#ccc'}22;color:${GROUPS[b.grp]?.color||'#555'}">${GROUPS[b.grp]?.label||b.grp||'—'}</span></td>
     <td style="font-size:11px;text-align:center">${b.client_type||b.rep_name||'—'}</td>
     <td>${statusLabel[b.status]||statusLabel.active}</td>
+    <td>
+      ${(b.lat&&b.lng)
+        ? `<button onclick="openBranchLocationModal(${JSON.stringify({id:b.id,branch_name:b.branch_name,lat:b.lat,lng:b.lng}).replace(/"/g,'&quot;')})" class="btn btn-sm" style="background:#E8F5E9;color:#1A7A4A" title="عرض/تعديل الموقع"><i class="ti ti-map-pin-check"></i> محدد</button>`
+        : `<button onclick="openBranchLocationModal(${JSON.stringify({id:b.id,branch_name:b.branch_name,lat:b.lat,lng:b.lng}).replace(/"/g,'&quot;')})" class="btn btn-sm" style="background:#FFF3E0;color:#E65100" title="تثبيت الموقع"><i class="ti ti-map-pin-plus"></i> تحديد الموقع</button>`}
+    </td>
     <td>
       <div style="display:flex;gap:4px;align-items:center">
         <button onclick="openEditBranch(${JSON.stringify(b).replace(/"/g,'&quot;')})"
@@ -19079,7 +19107,74 @@ async function loadBranches(){
         </button>
       </div>
     </td>
-  </tr>`).join('')||'<tr><td colspan="6" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات — ارفع شيت البيانات أولاً</td></tr>';
+  </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات — ارفع شيت البيانات أولاً</td></tr>';
+}
+
+// ══ تثبيت موقع الفرع الثابت على الخريطة (lat/lng في جدول branches) ══
+// موقع مرجعي بيتحفظ مرة واحدة لكل فرع (مش لوكيشن لحظي زي "الموقع الحالي")، وبيتقارن بيه بعدين موقع
+// الزيارات الفعلية. أول ما يتحفظ، الزرار في الجدول بيتحول لـ"محدد" (أخضر) بدل "تحديد الموقع" (برتقالي)،
+// وبرضه ممكن تعيد فتحه وتعدّل الدبوس وتحفظ تاني لو محتاج تصحيح.
+let _blMapInstance = null;
+let _blMarker = null;
+let _blCtx = null; // {id, branch_name}
+
+function openBranchLocationModal(b){
+  _blCtx = { id:b.id, branch_name:b.branch_name };
+  document.getElementById('bl-branch-name').textContent = '📍 '+(b.branch_name||'—');
+  document.getElementById('bl-ok').style.display='none';
+  document.getElementById('bl-err').style.display='none';
+  openModal('modal-branch-location');
+
+  const hasLoc = !!(b.lat && b.lng);
+  const startLat = hasLoc ? Number(b.lat) : 30.0444;
+  const startLng = hasLoc ? Number(b.lng) : 31.2357;
+
+  setTimeout(()=>{
+    if(!_blMapInstance){
+      _blMapInstance = L.map('bl-map-el').setView([startLat,startLng], hasLoc?16:11);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution:'&copy; OpenStreetMap', maxZoom:19
+      }).addTo(_blMapInstance);
+      _blMapInstance.on('click', e=>{ setBlMarker(e.latlng.lat, e.latlng.lng); });
+    } else {
+      _blMapInstance.setView([startLat,startLng], hasLoc?16:11);
+    }
+    _blMapInstance.invalidateSize();
+    setBlMarker(startLat, startLng);
+  }, 100);
+}
+
+function setBlMarker(lat,lng){
+  if(_blMarker) _blMapInstance.removeLayer(_blMarker);
+  _blMarker = L.marker([lat,lng], {draggable:true}).addTo(_blMapInstance);
+  _blMarker.on('dragend', ()=>{ const p=_blMarker.getLatLng(); updateBlCoords(p.lat,p.lng); });
+  updateBlCoords(lat,lng);
+}
+
+function updateBlCoords(lat,lng){
+  document.getElementById('bl-coords').textContent = `Lat: ${lat.toFixed(6)}   Lng: ${lng.toFixed(6)}`;
+}
+
+async function saveBranchLocation(){
+  if(!_blCtx || !_blMarker){ return; }
+  const p = _blMarker.getLatLng();
+  const okEl=document.getElementById('bl-ok'), errEl=document.getElementById('bl-err');
+  okEl.style.display='none'; errEl.style.display='none';
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${_blCtx.id}`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body: JSON.stringify({lat:p.lat, lng:p.lng, location_saved_at:new Date().toISOString()})
+    });
+    if(!res.ok){ const err=await res.text(); throw new Error(err); }
+    okEl.textContent = '✅ اتحفظ الموقع بنجاح';
+    okEl.style.display='block';
+    await loadBranches();
+    setTimeout(()=>closeModal('modal-branch-location'), 700);
+  }catch(e){
+    errEl.textContent = '❌ فشل الحفظ: '+e.message;
+    errEl.style.display='block';
+  }
 }
 
 // ══ تصدير Excel لجدول "إدارة الفروع والعملاء" — اسم الفرع / خط السير / المجموعة ══
