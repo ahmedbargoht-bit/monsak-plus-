@@ -14542,6 +14542,8 @@ async function filterLocations(){
 let _locMapInstance = null;
 let _locMapMarkersLayer = null;
 let _locBranchLayer = null;
+// بالتة ألوان دورية لتمييز حدود كل خط سير عن التاني لما تختار مجموعة كاملة (بدون منسق معين)
+const LOC_ROUTE_COLORS = ['#378ADD','#1A7A4A','#D97706','#B91C1C','#7C3AED','#DB2777','#0D9488','#EA580C','#4338CA','#0891B2'];
 
 // حساب "الغلاف المحدّب" (convex hull) لمجموعة نقط - بيرجع أصغر مضلّع بيحيط بكل النقط، مستخدم لرسم
 // حدود تقريبية حوالين فروع خط سير معين على الخريطة. خوارزمية Andrew's monotone chain القياسية.
@@ -14752,6 +14754,65 @@ async function renderLocationMap(){
       }
     }
     window._locRouteSnapshot = { grpLabel:gLabel, route, branchCount:branches.length, geoCount:withGeo.length };
+  } else if(grpFilter!=='all'){
+    // ══ مجموعة كاملة مختارة (من غير منسق معين) — حدود فاصلة لكل خط سير جوه المجموعة، كل خط بلون مختلف ══
+    let branches = [];
+    try{
+      const rb = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,lat,lng&grp=eq.${encodeURIComponent(grpFilter)}&status=eq.active&limit=3000`, {headers:H});
+      branches = rb.ok ? await rb.json() : [];
+    }catch(e){ branches = []; }
+
+    const byRoute = new Map();
+    branches.forEach(b=>{ const r=b.route||'—'; if(!byRoute.has(r)) byRoute.set(r,[]); byRoute.get(r).push(b); });
+    const routeNames = [...byRoute.keys()].sort((a,b)=>a.localeCompare(b,'ar'));
+    const gLabel = GROUPS[grpFilter]?.label || grpFilter || '—';
+    let totalGeo = 0, totalNoGeo = 0;
+    const noGeoAll = [];
+
+    routeNames.forEach((routeName,idx)=>{
+      const c = LOC_ROUTE_COLORS[idx % LOC_ROUTE_COLORS.length];
+      const list = byRoute.get(routeName);
+      const withGeo = list.filter(b=>b.lat&&b.lng);
+      const noGeo = list.filter(b=>!(b.lat&&b.lng));
+      totalGeo += withGeo.length; totalNoGeo += noGeo.length;
+      noGeo.forEach(b=>noGeoAll.push(b));
+
+      withGeo.forEach(b=>{
+        const lat=Number(b.lat), lng=Number(b.lng);
+        const marker = L.circleMarker([lat,lng], {radius:6, color:'#fff', weight:1.5, fillColor:c, fillOpacity:1}).addTo(_locBranchLayer);
+        marker.bindPopup(`<div style="font-family:Cairo,sans-serif;text-align:right;min-width:140px"><b>${(b.branch_name||'—').replace(/</g,'&lt;')}</b><br><span style="font-size:11px;color:#555">🧭 ${routeName}</span></div>`);
+        bounds.push([lat,lng]);
+      });
+
+      if(withGeo.length>=3){
+        const hull = convexHull(withGeo.map(b=>[Number(b.lat),Number(b.lng)]));
+        const poly = L.polygon(hull, {color:c, weight:2, dashArray:'6,4', fillColor:c, fillOpacity:0.12}).addTo(_locBranchLayer);
+        poly.bindTooltip(routeName, {permanent:true, direction:'center', className:'branch-name-label'});
+      }
+    });
+
+    if(routeInfoEl){
+      routeInfoEl.style.display = 'flex';
+      routeInfoEl.innerHTML = `
+        <span class="badge" style="background:${GROUPS[grpFilter]?.color||'#888'}22;color:${GROUPS[grpFilter]?.color||'#555'}"><i class="ti ti-users-group"></i> ${gLabel}</span>
+        <span class="badge" style="background:#EEF6FF;color:#1D4ED8"><i class="ti ti-route"></i> ${routeNames.length} خط سير</span>
+        <span class="badge" style="background:#E8F5E9;color:#1A7A4A"><i class="ti ti-building-store"></i> ${branches.length} فرع${totalNoGeo?` (${totalGeo} محدد الموقع)`:''}</span>
+      `;
+    }
+    if(nogeoEl){
+      if(noGeoAll.length){
+        nogeoEl.style.display = 'block';
+        nogeoEl.innerHTML = `
+          <div style="font-size:12px;font-weight:700;color:#E65100;margin-bottom:6px">🟠 ${noGeoAll.length} فرع في المجموعة لسه مفيهمش موقع محدد (سجّل موقعهم من تاب "الفروع والعملاء" عشان يظهروا هنا)</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            ${noGeoAll.map(b=>`<span style="background:#FFFDF8;border:1px solid #FFCC80;border-radius:6px;padding:4px 10px;font-size:11px;color:#2C1F0A">${(b.branch_name||'—').replace(/</g,'&lt;')}</span>`).join('')}
+          </div>`;
+      } else {
+        nogeoEl.style.display = 'none';
+        nogeoEl.innerHTML = '';
+      }
+    }
+    window._locRouteSnapshot = { grpLabel:gLabel, route:`${routeNames.length} خط سير`, branchCount:branches.length, geoCount:totalGeo };
   } else {
     if(routeInfoEl){ routeInfoEl.style.display='none'; routeInfoEl.innerHTML=''; }
     if(nogeoEl){ nogeoEl.style.display='none'; nogeoEl.innerHTML=''; }
