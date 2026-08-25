@@ -14755,7 +14755,7 @@ async function renderLocationMap(){
           <div style="display:flex;flex-wrap:wrap;gap:6px">
             ${branches.map(b=>{
               const done = !!(b.lat&&b.lng);
-              const payload = JSON.stringify({id:b.id, branch_name:b.branch_name, lat:b.lat, lng:b.lng}).replace(/"/g,'&quot;');
+              const payload = JSON.stringify({id:b.id, branch_name:b.branch_name, lat:b.lat, lng:b.lng, route}).replace(/"/g,'&quot;');
               return `<span onclick="openBranchLocationModal(${payload})" style="cursor:pointer;background:${done?'#E8F5E9':'#FFFDF8'};border:1px solid ${done?'#1A7A4A':'#FFCC80'};border-radius:6px;padding:4px 10px;font-size:11px;color:${done?'#1A7A4A':'#2C1F0A'};font-weight:${done?'700':'400'}">${done?'✓ ':''}${(b.branch_name||'—').replace(/</g,'&lt;')}</span>`;
             }).join('')}
           </div>`;
@@ -14822,7 +14822,7 @@ async function renderLocationMap(){
           <div style="display:flex;flex-wrap:wrap;gap:6px">
             ${branches.map(b=>{
               const done = !!(b.lat&&b.lng);
-              const payload = JSON.stringify({id:b.id, branch_name:b.branch_name, lat:b.lat, lng:b.lng}).replace(/"/g,'&quot;');
+              const payload = JSON.stringify({id:b.id, branch_name:b.branch_name, lat:b.lat, lng:b.lng, route:b.route}).replace(/"/g,'&quot;');
               return `<span onclick="openBranchLocationModal(${payload})" style="cursor:pointer;background:${done?'#E8F5E9':'#FFFDF8'};border:1px solid ${done?'#1A7A4A':'#FFCC80'};border-radius:6px;padding:4px 10px;font-size:11px;color:${done?'#1A7A4A':'#2C1F0A'};font-weight:${done?'700':'400'}">${done?'✓ ':''}${(b.branch_name||'—').replace(/</g,'&lt;')}</span>`;
             }).join('')}
           </div>`;
@@ -19282,8 +19282,8 @@ async function loadBranches(){
     <td>${statusLabel[b.status]||statusLabel.active}</td>
     <td>
       ${(b.lat&&b.lng)
-        ? `<button onclick="openBranchLocationModal(${JSON.stringify({id:b.id,branch_name:b.branch_name,lat:b.lat,lng:b.lng}).replace(/"/g,'&quot;')})" class="btn btn-sm" style="background:#E8F5E9;color:#1A7A4A" title="عرض/تعديل الموقع"><i class="ti ti-map-pin-check"></i> محدد</button>`
-        : `<button onclick="openBranchLocationModal(${JSON.stringify({id:b.id,branch_name:b.branch_name,lat:b.lat,lng:b.lng}).replace(/"/g,'&quot;')})" class="btn btn-sm" style="background:#FFF3E0;color:#E65100" title="تثبيت الموقع"><i class="ti ti-map-pin-plus"></i> تحديد الموقع</button>`}
+        ? `<button onclick="openBranchLocationModal(${JSON.stringify({id:b.id,branch_name:b.branch_name,lat:b.lat,lng:b.lng,route:b.route}).replace(/"/g,'&quot;')})" class="btn btn-sm" style="background:#E8F5E9;color:#1A7A4A" title="عرض/تعديل الموقع"><i class="ti ti-map-pin-check"></i> محدد</button>`
+        : `<button onclick="openBranchLocationModal(${JSON.stringify({id:b.id,branch_name:b.branch_name,lat:b.lat,lng:b.lng,route:b.route}).replace(/"/g,'&quot;')})" class="btn btn-sm" style="background:#FFF3E0;color:#E65100" title="تثبيت الموقع"><i class="ti ti-map-pin-plus"></i> تحديد الموقع</button>`}
     </td>
     <td>
       <div style="display:flex;gap:4px;align-items:center">
@@ -19316,7 +19316,7 @@ let _blMapInstance = null;
 let _blMarker = null;
 let _blCtx = null; // {id, branch_name}
 
-function openBranchLocationModal(b){
+async function openBranchLocationModal(b){
   _blCtx = { id:b.id, branch_name:b.branch_name };
   document.getElementById('bl-branch-name').textContent = '📍 '+(b.branch_name||'—');
   document.getElementById('bl-ok').style.display='none';
@@ -19324,18 +19324,35 @@ function openBranchLocationModal(b){
   openModal('modal-branch-location');
 
   const hasLoc = !!(b.lat && b.lng);
-  const startLat = hasLoc ? Number(b.lat) : 30.0444;
-  const startLng = hasLoc ? Number(b.lng) : 31.2357;
+  let startLat = hasLoc ? Number(b.lat) : 30.0444;
+  let startLng = hasLoc ? Number(b.lng) : 31.2357;
+  let startZoom = hasLoc ? 16 : 11;
+
+  // لو الفرع ده لسه معندوش موقع، بندوّر على فروع تانية من نفس خط السير ليها موقع متسجل بالفعل، ونبدأ
+  // الخريطة قريبة منهم بدل ما تفتح دايمًا على نفس نقطة القاهرة العامة الثابتة - فروع نفس الخط عادة
+  // قريبة من بعض جغرافيًا، فده بيوفّر وقت كبير في تسجيل فروع كتير بالجملة.
+  if(!hasLoc && b.route){
+    try{
+      const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+      const rb = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=lat,lng&route=eq.${encodeURIComponent(b.route)}&status=eq.active&limit=200`, {headers:H});
+      const siblings = (rb.ok ? await rb.json() : []).filter(s=>s.lat&&s.lng);
+      if(siblings.length){
+        startLat = siblings.reduce((s,x)=>s+Number(x.lat),0)/siblings.length;
+        startLng = siblings.reduce((s,x)=>s+Number(x.lng),0)/siblings.length;
+        startZoom = 14;
+      }
+    }catch(e){}
+  }
 
   setTimeout(()=>{
     if(!_blMapInstance){
-      _blMapInstance = L.map('bl-map-el').setView([startLat,startLng], hasLoc?16:11);
+      _blMapInstance = L.map('bl-map-el').setView([startLat,startLng], startZoom);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution:'&copy; OpenStreetMap', maxZoom:19
       }).addTo(_blMapInstance);
       _blMapInstance.on('click', e=>{ setBlMarker(e.latlng.lat, e.latlng.lng); });
     } else {
-      _blMapInstance.setView([startLat,startLng], hasLoc?16:11);
+      _blMapInstance.setView([startLat,startLng], startZoom);
     }
     _blMapInstance.invalidateSize();
     setBlMarker(startLat, startLng);
