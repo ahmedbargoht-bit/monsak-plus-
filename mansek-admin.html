@@ -33402,6 +33402,11 @@ async function sevLoadContext(){
   const attEdits = await fetch(`${SUPABASE_URL}/rest/v1/attendance_edits?date=gte.${start}&date=lte.${end}&select=*`,{headers:H})
     .then(r=>r.ok?r.json():[]).catch(()=>[]);
 
+  // إجازات رسمية/دينية (holidays) — عشان معيار "متابعة الحضور والغياب" ميحسبش أيام العيد أو الإجازات
+  // الرسمية غياب محتاج تصنيف. لو grp فاضي/null يبقى الإجازة عامة لكل المجموعات.
+  const holidayRows = await fetch(`${SUPABASE_URL}/rest/v1/holidays?select=date,grp,exceptions&date=gte.${start}&date=lte.${end}`,{headers:H})
+    .then(r=>r.ok?r.json():[]).catch(()=>[]);
+
   const locs = await fetch(`${SUPABASE_URL}/rest/v1/location?select=name,updated_at`,{headers:H})
     .then(r=>r.ok?r.json():[]).catch(()=>[]);
 
@@ -33418,7 +33423,7 @@ async function sevLoadContext(){
     .then(r=>r.ok?r.json():[]).catch(()=>[]);
 
   return {
-    start, end, periodLabel, H, supGroups, plans, planBranches, attEdits, locs, ssoOrders, missingRows, returnsRows,
+    start, end, periodLabel, H, supGroups, plans, planBranches, attEdits, locs, ssoOrders, missingRows, returnsRows, holidayRows,
     now: Date.now(),
     orders:     cachedData.orders||[],
     visits:     cachedData.visits||[],
@@ -33432,6 +33437,7 @@ async function sevLoadContext(){
 function sevComputeCriteria(groups, ctx){
   const { supGroups, plans, planBranches, attEdits, locs, orders, visits, attendance, branches, inRange, now, start, end, ssoOrders, missingRows, returnsRows } = ctx;
   const periodLabel = ctx.periodLabel || 'الأسبوع ده';
+  const holidayRows = ctx.holidayRows || [];
   const reps = (REPS||[]).filter(r=>groups.includes(r.group||'') && r.status!=='inactive');
   const repNames = new Set(reps.map(r=>r.name));
 
@@ -33468,13 +33474,27 @@ function sevComputeCriteria(groups, ctx){
     });
   }
 
-  // 2) متابعة الحضور والغياب — من غير يوم الإجازة الأسبوعية الثابتة لكل منسق
+  // 2) متابعة الحضور والغياب — من غير يوم الإجازة الأسبوعية الثابتة لكل منسق ولا أيام الإجازات
+  // الرسمية/الدينية (جدول holidays) - لو grp فاضي يبقى الإجازة عامة لكل المجموعات، ولو المنسق
+  // مذكور في exceptions يبقى مستثنى من الإجازة دي (لازم يشتغل عادي رغم الإجازة).
+  // ملحوظة مهمة: بنوقف العد عند "امبارح" (يوم قبل النهاردة) - أي يوم من النهاردة أو في المستقبل
+  // (لسه ما جاش) بنتجاهله تمامًا، عشان مش معقول نعتبره "غياب محتاج تصنيف" قبل ما اليوم نفسه يخلص.
+  const todayISO = localISO(new Date());
+  const isHolidayFor = (dISO, repName) => holidayRows.some(h=>{
+    if((h.date||'').slice(0,10) !== dISO) return false;
+    if(h.grp && !groups.includes(h.grp)) return false;
+    const excList = (h.exceptions||'').split(',').map(x=>x.trim()).filter(Boolean);
+    if(excList.includes(repName)) return false;
+    return true;
+  });
   let absentDays=0, classified=0, sameDay=0, attDetails=[];
   const attDetailsLate = [];
   reps.forEach(r=>{
     const dayOffNum = attDayNameToNum(r.day_off||'none');
     for(let d=new Date(start+'T00:00:00'); d<=new Date(end+'T00:00:00'); d.setDate(d.getDate()+1)){
       const dISO = localISO(d);
+      if(dISO >= todayISO) continue;
+      if(isHolidayFor(dISO, r.name)) continue;
       const hasIn = attendance.some(a=>a.name===r.name && (a.date||'').slice(0,10)===dISO && a.time_in);
       if(!hasIn){
         if(dayOffNum>=0 && dayOffNum===d.getDay()) continue;
