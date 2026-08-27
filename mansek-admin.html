@@ -2802,17 +2802,38 @@ h2,h3{color:#2C1F0A}
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
               <input type="text" id="rev-search" placeholder="بحث باسم المندوب..." oninput="repEvalRender()"
                 style="flex:1;min-width:180px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
-              <select id="rev-grp-filter" onchange="repEvalRender()" style="flex:1;min-width:160px">
-                <option value="all">كل المجموعات</option>
+              <!-- مربع اختيارات متعدد للمجموعات -->
+              <div style="position:relative;flex:1;min-width:180px">
+                <button type="button" id="rev-grp-btn" onclick="revToggleGrpDropdown()"
+                  style="width:100%;text-align:right;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:#fff;font-family:Cairo,sans-serif;font-size:12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center">
+                  <span id="rev-grp-label">كل المجموعات</span>
+                  <i class="ti ti-chevron-down" style="font-size:12px"></i>
+                </button>
+                <div id="rev-grp-panel" style="display:none;position:absolute;top:100%;right:0;left:0;z-index:50;background:#fff;border:1px solid var(--border);border-radius:8px;margin-top:4px;max-height:260px;overflow-y:auto;box-shadow:0 6px 20px rgba(0,0,0,.12)">
+                  <div style="padding:8px;border-bottom:1px solid var(--border);display:flex;gap:6px">
+                    <button class="btn btn-xs" onclick="revSelectAllGrps(true)" style="flex:1">تحديد الكل</button>
+                    <button class="btn btn-xs" onclick="revSelectAllGrps(false)" style="flex:1">إلغاء الكل</button>
+                  </div>
+                  <div id="rev-grp-options" style="padding:6px"></div>
+                </div>
+              </div>
+              <select id="rev-year-filter" onchange="revPopulateWeekFilter();repEvalRefresh()" style="min-width:100px"></select>
+              <select id="rev-month-filter" onchange="revPopulateWeekFilter();repEvalRefresh()" style="min-width:110px">
+                <option value="1">يناير</option>
+                <option value="2">فبراير</option>
+                <option value="3">مارس</option>
+                <option value="4">أبريل</option>
+                <option value="5">مايو</option>
+                <option value="6">يونيو</option>
+                <option value="7">يوليو</option>
+                <option value="8">أغسطس</option>
+                <option value="9">سبتمبر</option>
+                <option value="10">أكتوبر</option>
+                <option value="11">نوفمبر</option>
+                <option value="12">ديسمبر</option>
               </select>
-              <select id="rev-period-filter" onchange="repEvalRefresh()" style="flex:1;min-width:140px">
-                <option value="current">الأسبوع الحالي</option>
-                <option value="prev">الأسبوع الماضي</option>
-                <option value="next">الأسبوع القادم</option>
-                <option value="month" selected>شهري (الشهر الحالي)</option>
-                <option value="quarter">ربع سنوي (3 شهور)</option>
-                <option value="half">نصف سنوي (6 شهور)</option>
-                <option value="year">سنوي (السنة الحالية)</option>
+              <select id="rev-week-filter" onchange="repEvalRefresh()" style="min-width:160px">
+                <option value="all">الشهر كامل</option>
               </select>
             </div>
           </div>
@@ -31542,17 +31563,31 @@ async function sdLoad(){
     } catch(e){}
   }
 
-  // ── جيب مبيعات الفواتير من sales_deliveries ──
+  // ── جيب مبيعات الفواتير من sales_deliveries (مع الضريبة عشان نحسب الصافي الصحيح) ──
   const deliveriesCacheKey = `sd_deliveries_${month}`;
   let deliveries = sdCacheGet(deliveriesCacheKey);
   if(!deliveries){
     deliveries = [];
     try {
       const delRes = await fetch(
-        `${SUPABASE_URL}/rest/v1/sales_deliveries?delivery_date=gte.${month}-01&delivery_date=lte.${month}-31&deleted_at=is.null&select=rep_name,total_net,delivery_date&limit=5000`,
+        `${SUPABASE_URL}/rest/v1/sales_deliveries?delivery_date=gte.${month}-01&delivery_date=lte.${month}-31&deleted_at=is.null&select=rep_name,total_net,total_tax,delivery_date&limit=5000`,
         {headers:H}
       );
       if(delRes.ok){ deliveries = await delRes.json(); if(!Array.isArray(deliveries)) deliveries=[]; else sdCacheSet(deliveriesCacheKey, deliveries); }
+    } catch(e){}
+  }
+
+  // ── جيب المرتجعات من sales_returns — المحقق لازم يطرح صافي المرتجع بالظبط زي شاشة الأهداف (sgLoad) ──
+  const returnsCacheKey = `sd_returns_${month}`;
+  let sdReturnsData = sdCacheGet(returnsCacheKey);
+  if(!sdReturnsData){
+    sdReturnsData = [];
+    try {
+      const retRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/sales_returns?return_date=gte.${month}-01&return_date=lte.${month}-31&deleted_at=is.null&select=rep_name,total_net,total_tax,return_date&limit=5000`,
+        {headers:H}
+      );
+      if(retRes.ok){ sdReturnsData = await retRes.json(); if(!Array.isArray(sdReturnsData)) sdReturnsData=[]; else sdCacheSet(returnsCacheKey, sdReturnsData); }
     } catch(e){}
   }
 
@@ -31627,16 +31662,27 @@ async function sdLoad(){
     salesBySector[sec] = (salesBySector[sec]||0) + (+(s.amount||0));
     if(s.entry_date===todayStr) todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+(+(s.amount||0));
   });
-  // اجمع صافي كل مندوب على حدة (عشان لو عنده تعديل يدوي على "المحقق" نطبقه بدل الرقم المحسوب — الجزء اليومي بيفضل زي ما هو)
+  // اجمع صافي كل مندوب على حدة (عشان لو عنده تعديل يدوي على "المحقق" نطبقه بدل الرقم المحسوب) —
+  // الصافي = (total_net-total_tax) للتسليم ناقص (total_net-total_tax) للمرتجع، بالظبط زي شاشة الأهداف (sgLoad)
   const sdRepNetMap = {};
   const sdDeliveriesByRep = {};
+  const sdReturnsByRep = {};
   (Array.isArray(deliveries)?deliveries:[]).forEach(d=>{
-    sdRepNetMap[d.rep_name] = (sdRepNetMap[d.rep_name]||0) + (+(d.total_net||0));
+    sdRepNetMap[d.rep_name] = (sdRepNetMap[d.rep_name]||0) + ((+(d.total_net||0)) - (+(d.total_tax||0)));
     (sdDeliveriesByRep[d.rep_name] ||= []).push(d);
     if(d.delivery_date===todayStr){
       const sup = repSupMap[d.rep_name]||'';
       const sec = supSectorMap[sup]||sup||'غير محدد';
-      todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+(+(d.total_net||0));
+      todaySalesBySector[sec]=(todaySalesBySector[sec]||0)+((+(d.total_net||0))-(+(d.total_tax||0)));
+    }
+  });
+  (Array.isArray(sdReturnsData)?sdReturnsData:[]).forEach(r=>{
+    sdRepNetMap[r.rep_name] = (sdRepNetMap[r.rep_name]||0) - ((+(r.total_net||0)) - (+(r.total_tax||0)));
+    (sdReturnsByRep[r.rep_name] ||= []).push(r);
+    if(r.return_date===todayStr){
+      const sup = repSupMap[r.rep_name]||'';
+      const sec = supSectorMap[sup]||sup||'غير محدد';
+      todaySalesBySector[sec]=(todaySalesBySector[sec]||0)-((+(r.total_net||0))-(+(r.total_tax||0)));
     }
   });
   const sdOverridesCacheKey = `sd_rep_overrides_${month}`;
@@ -31652,9 +31698,14 @@ async function sdLoad(){
   (Array.isArray(sdRepOverrides)?sdRepOverrides:[]).forEach(o=>{
     const cutoff = o.range_to || sdMonthEnd;
     let afterCutoff = 0;
-    (sdDeliveriesByRep[o.rep_name]||[]).forEach(d=>{ if((d.delivery_date||'')>cutoff) afterCutoff += (+(d.total_net||0)); });
+    (sdDeliveriesByRep[o.rep_name]||[]).forEach(d=>{ if((d.delivery_date||'')>cutoff) afterCutoff += (+(d.total_net||0))-(+(d.total_tax||0)); });
+    (sdReturnsByRep[o.rep_name]||[]).forEach(r=>{ if((r.return_date||'')>cutoff) afterCutoff -= (+(r.total_net||0))-(+(r.total_tax||0)); });
     sdRepNetMap[o.rep_name] = (+o.amount||0) + afterCutoff;
   });
+  // الإجمالي الصحيح لـ"المحقق حتى الآن" = مجموع صافي كل المناديب مباشرة (نفس مصدر ونفس صيغة "المبيعات
+  // الفعلية" في شاشة الأهداف بالظبط) — بدل الاعتماد على تجميع القطاعات اللي ممكن يسقط مندوب لو اسمه
+  // معندوش ربط مباشر بمشرف (مصدر الفرق اللي كان موجود قبل كده بين الشاشتين)
+  const sdTotalAchievedTrue = Object.values(sdRepNetMap).reduce((s,v)=>s+(v||0),0);
   Object.entries(sdRepNetMap).forEach(([repName, netAmt])=>{
     const sup = repSupMap[repName]||'';
     const sec = supSectorMap[sup]||sup||'غير محدد';
@@ -31732,6 +31783,8 @@ async function sdLoad(){
     d.expected = workDaysPassed>0 ? (d.achieved/workDaysPassed)*workDays : 0;
     totTarget+=d.target; totAchieved+=d.achieved; totToday+=d.todaySale;
   });
+  // استخدم الإجمالي الصحيح (مجموع صافي كل المناديب مباشرة) بدل مجموع القطاعات — مطابق تمامًا لشاشة الأهداف
+  totAchieved = sdTotalAchievedTrue;
 
   const totDaily = workDays>0?totTarget/workDays:0;
   const totRequired = totDaily*workDaysPassed;
@@ -34229,6 +34282,116 @@ function sevExportExcel(onlyName){
 // ══════════════════════════════════════════════════════════════
 let _revResults = [];
 let _revAllReps = [];
+let _revSelectedGrps = [];
+let _revAllGrps = [];
+
+const REV_MONTH_NAMES = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+const REV_WEEK_LABELS = { w1:'الأسبوع الأول', w2:'الأسبوع الثاني', w3:'الأسبوع الثالث', w4:'الأسبوع الرابع', w5:'الأسبوع الخامس' };
+const REV_WEEK_RANGES = { w1:[1,7], w2:[8,14], w3:[15,21], w4:[22,28], w5:[29,31] };
+
+// ── فلاتر الفترة: سنة + شهر + أسبوع (دروب داون مستقلة) ──
+function revInitFilters(){
+  const yearSel = document.getElementById('rev-year-filter');
+  if(yearSel && !yearSel.options.length){
+    const nowY = new Date().getFullYear();
+    const years = [];
+    for(let y=nowY-2; y<=nowY+1; y++) years.push(y);
+    yearSel.innerHTML = years.map(y=>`<option value="${y}" ${y===nowY?'selected':''}>${y}</option>`).join('');
+  }
+  const monthSel = document.getElementById('rev-month-filter');
+  if(monthSel && !monthSel.dataset.inited){
+    monthSel.value = String(new Date().getMonth()+1);
+    monthSel.dataset.inited = '1';
+  }
+  revPopulateWeekFilter();
+}
+
+function revPopulateWeekFilter(){
+  const year = parseInt(document.getElementById('rev-year-filter')?.value) || new Date().getFullYear();
+  const month = parseInt(document.getElementById('rev-month-filter')?.value) || (new Date().getMonth()+1);
+  const lastDay = new Date(year, month, 0).getDate();
+  const sel = document.getElementById('rev-week-filter');
+  if(!sel) return;
+  const cur = sel.value || 'all';
+  const weeks = [
+    {v:'all', l:'الشهر كامل'},
+    {v:'w1', l:'الأسبوع الأول (1-7)'},
+    {v:'w2', l:'الأسبوع الثاني (8-14)'},
+    {v:'w3', l:'الأسبوع الثالث (15-21)'},
+    {v:'w4', l:'الأسبوع الرابع (22-28)'},
+  ];
+  if(lastDay>=29) weeks.push({v:'w5', l:`الأسبوع الخامس (29-${lastDay})`});
+  sel.innerHTML = weeks.map(w=>`<option value="${w.v}">${w.l}</option>`).join('');
+  sel.value = weeks.some(w=>w.v===cur) ? cur : 'all';
+}
+
+function revGetPeriodRange(){
+  const year = parseInt(document.getElementById('rev-year-filter')?.value) || new Date().getFullYear();
+  const month = parseInt(document.getElementById('rev-month-filter')?.value) || (new Date().getMonth()+1);
+  const week = document.getElementById('rev-week-filter')?.value || 'all';
+  const mm = String(month).padStart(2,'0');
+  const lastDay = new Date(year, month, 0).getDate();
+  const monthStart = `${year}-${mm}-01`;
+  const monthEnd = `${year}-${mm}-${String(lastDay).padStart(2,'0')}`;
+  const rng = REV_WEEK_RANGES[week];
+  if(week==='all' || !rng || rng[0]>lastDay) return { start: monthStart, end: monthEnd };
+  const endDay = Math.min(rng[1], lastDay);
+  return { start: `${year}-${mm}-${String(rng[0]).padStart(2,'0')}`, end: `${year}-${mm}-${String(endDay).padStart(2,'0')}` };
+}
+
+function revPeriodLabel(){
+  const year = parseInt(document.getElementById('rev-year-filter')?.value) || new Date().getFullYear();
+  const month = parseInt(document.getElementById('rev-month-filter')?.value) || (new Date().getMonth()+1);
+  const week = document.getElementById('rev-week-filter')?.value || 'all';
+  const base = `${REV_MONTH_NAMES[month-1]} ${year}`;
+  return (week!=='all' && REV_WEEK_LABELS[week]) ? `${REV_WEEK_LABELS[week]} - ${base}` : base;
+}
+
+// ── مربع اختيارات متعدد للمجموعات ──
+function revToggleGrpDropdown(forceClose){
+  const panel = document.getElementById('rev-grp-panel');
+  if(!panel) return;
+  if(forceClose===true){ panel.style.display='none'; return; }
+  panel.style.display = panel.style.display==='none' ? 'block' : 'none';
+}
+document.addEventListener('click', (ev)=>{
+  const btn = document.getElementById('rev-grp-btn');
+  const panel = document.getElementById('rev-grp-panel');
+  if(!btn || !panel) return;
+  if(!btn.contains(ev.target) && !panel.contains(ev.target)) panel.style.display='none';
+});
+
+function revRenderGrpOptions(){
+  const wrap = document.getElementById('rev-grp-options');
+  if(!wrap) return;
+  wrap.innerHTML = _revAllGrps.map(g=>`
+    <label style="display:flex;align-items:center;gap:6px;padding:5px 4px;font-size:12px;cursor:pointer">
+      <input type="checkbox" value="${g}" ${_revSelectedGrps.includes(g)?'checked':''} onchange="revOnGrpCheck(this)"/>
+      ${GROUPS[g]?.label||g}
+    </label>`).join('') || '<div style="padding:8px;font-size:11px;color:var(--text2)">مفيش مجموعات</div>';
+}
+
+function revOnGrpCheck(el){
+  if(el.checked){ if(!_revSelectedGrps.includes(el.value)) _revSelectedGrps.push(el.value); }
+  else{ _revSelectedGrps = _revSelectedGrps.filter(g=>g!==el.value); }
+  revUpdateGrpLabel();
+  repEvalRender();
+}
+
+function revSelectAllGrps(all){
+  _revSelectedGrps = all ? [..._revAllGrps] : [];
+  revRenderGrpOptions();
+  revUpdateGrpLabel();
+  repEvalRender();
+}
+
+function revUpdateGrpLabel(){
+  const lbl = document.getElementById('rev-grp-label');
+  if(!lbl) return;
+  if(!_revSelectedGrps.length) lbl.textContent = 'كل المجموعات';
+  else if(_revSelectedGrps.length===1) lbl.textContent = GROUPS[_revSelectedGrps[0]]?.label || _revSelectedGrps[0];
+  else lbl.textContent = `${_revSelectedGrps.length} مجموعات مختارة`;
+}
 
 function revMonthsInRange(start, end){
   const months = [];
@@ -34246,9 +34409,8 @@ function revMonthsInRange(start, end){
 }
 
 async function revLoadContext(){
-  const periodType = document.getElementById('rev-period-filter')?.value || 'month';
-  const { start, end } = sevGetPeriodRange(periodType);
-  const periodLabel = SEV_PERIOD_LABELS[periodType] || 'الفترة دي';
+  const { start, end } = revGetPeriodRange();
+  const periodLabel = revPeriodLabel();
   const H = PLANS_H();
 
   const repsRes = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&status=eq.active&name=neq.${encodeURIComponent('تحت التعيين')}&select=id,name,grp,grps,route,routes,user_type,day_off,supervisors&order=name.asc&limit=500`,{headers:H});
@@ -34419,18 +34581,15 @@ function revComputeForRep(rep, ctx){
 }
 
 function revPopulateGrpFilter(reps){
-  const sel = document.getElementById('rev-grp-filter');
-  if(!sel) return;
-  const cur = sel.value || 'all';
   const grpsSet = new Set();
   reps.forEach(r=>{
     const arr = Array.isArray(r.grps) && r.grps.length ? r.grps : (r.grp ? [r.grp] : []);
     arr.forEach(g=>grpsSet.add(g));
   });
-  const opts = ['<option value="all">كل المجموعات</option>']
-    .concat([...grpsSet].sort().map(g=>`<option value="${g}">${GROUPS[g]?.label||g}</option>`));
-  sel.innerHTML = opts.join('');
-  sel.value = [...grpsSet].includes(cur) ? cur : 'all';
+  _revAllGrps = [...grpsSet].sort();
+  _revSelectedGrps = _revSelectedGrps.filter(g=>_revAllGrps.includes(g));
+  revRenderGrpOptions();
+  revUpdateGrpLabel();
 }
 
 function revRenderStats(){
@@ -34504,9 +34663,8 @@ function repEvalRender(){
   const listEl = document.getElementById('rev-eval-list');
   if(!listEl) return;
   const q = (document.getElementById('rev-search')?.value||'').trim();
-  const grp = document.getElementById('rev-grp-filter')?.value || 'all';
   let filtered = _revResults;
-  if(grp!=='all') filtered = filtered.filter(r=>r.groups.includes(grp));
+  if(_revSelectedGrps.length) filtered = filtered.filter(r=>r.groups.some(g=>_revSelectedGrps.includes(g)));
   if(q) filtered = filtered.filter(r=>r.name.includes(q));
   listEl.innerHTML = filtered.map(revRenderCard).join('') || '<div style="text-align:center;padding:40px;color:var(--text2)">لا يوجد مناديب مطابقون للفلتر</div>';
 }
@@ -34514,6 +34672,7 @@ function repEvalRender(){
 async function repEvalRefresh(){
   const listEl = document.getElementById('rev-eval-list');
   if(!listEl) return;
+  revInitFilters();
   listEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text2)">جاري تحميل التقييم...</div>';
   try{
     const ctx = await revLoadContext();
