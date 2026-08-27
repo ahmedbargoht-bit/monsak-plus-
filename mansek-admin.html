@@ -2768,7 +2768,7 @@ h2,h3{color:#2C1F0A}
             </div>
           </div>
           <p id="sev-crit-note" style="font-size:11px;color:var(--text2);margin-bottom:10px">
-            التقييم بيتحسب من 5 معايير: الالتزام بالخطط وتنفيذها، متابعة الحضور والغياب، تغطية الفريق، استخدام اللوكيشن اللايف، وتحويل الأوردرات للمنسقين.
+            التقييم بيتحسب من 7 معايير: الالتزام بالخطط وتنفيذها، متابعة الحضور والغياب، تغطية الفريق، استخدام اللوكيشن اللايف، تحويل الأوردرات للمنسقين، جودة الزيارات، والحضور الشخصي (توثيق زيارة السوق).
           </p>
           <!-- ليدربورد — كارت نسبة صغير لكل فرد -->
           <div id="sev-leaderboard" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px"></div>
@@ -33282,8 +33282,8 @@ function sevSetRole(role){
   if(mgrBtn){ mgrBtn.style.background = role==='mgr'?'var(--navy)':'#fff'; mgrBtn.style.color = role==='mgr'?'#fff':'var(--navy)'; }
   const note = document.getElementById('sev-crit-note');
   if(note) note.textContent = role==='mgr'
-    ? 'التقييم بيتحسب من 6 معايير: الالتزام بالخطط وتنفيذها، متابعة الحضور والغياب، تغطية الفريق، استخدام اللوكيشن اللايف، تحويل الأوردرات للمنسقين، وسرعة اعتماد خطط المشرفين.'
-    : 'التقييم بيتحسب من 5 معايير: الالتزام بالخطط وتنفيذها، متابعة الحضور والغياب، تغطية الفريق، استخدام اللوكيشن اللايف، وتحويل الأوردرات للمنسقين.';
+    ? 'التقييم بيتحسب من 8 معايير: الالتزام بالخطط وتنفيذها، متابعة الحضور والغياب، تغطية الفريق، استخدام اللوكيشن اللايف، تحويل الأوردرات للمنسقين، جودة الزيارات، الحضور الشخصي (توثيق زيارة السوق)، وسرعة اعتماد خطط المشرفين.'
+    : 'التقييم بيتحسب من 7 معايير: الالتزام بالخطط وتنفيذها، متابعة الحضور والغياب، تغطية الفريق، استخدام اللوكيشن اللايف، تحويل الأوردرات للمنسقين، جودة الزيارات، والحضور الشخصي (توثيق زيارة السوق).';
   _sevSelectedWho = [];
   sevRefresh();
 }
@@ -33392,25 +33392,36 @@ function sevComputeCriteria(groups, ctx){
 
   // 1) الالتزام بالخطط وتنفيذها
   const supPlans = plans.filter(p=>relevantSupNames.includes(p.supervisor_name));
+  // planIds/myBranches بيتحسبوا هنا (مش جوه شرط وجود خطط بس) عشان معيار "الحضور الشخصي" رقم 7 تحت
+  // محتاجهم كمان حتى لو مفيش خطط قدمها المشرف أصلاً.
+  const planIds = new Set(supPlans.map(p=>p.id));
+  const myBranches = planBranches.filter(b=>planIds.has(b.plan_id));
   let planCrit, planDetails=[];
   if(!supPlans.length){
     planCrit = {level:'needsWork', text:'لسه محدش قدم خطة الأسبوع ده'};
   } else {
     const rejected = supPlans.filter(p=>p.status==='rejected').length;
     const onTime   = supPlans.filter(p=>p.created_at && p.created_at.slice(0,10) <= start).length;
-    const planIds  = new Set(supPlans.map(p=>p.id));
-    const myBranches = planBranches.filter(b=>planIds.has(b.plan_id));
     const done = myBranches.filter(b=>b.visit_status==='done').length;
     const execPct = myBranches.length ? Math.round(done/myBranches.length*100) : 0;
     let level = 'good';
     if(execPct>=80 && rejected===0) level='excellent';
     else if(execPct<50 || rejected>0) level='needsWork';
     planCrit = {level, text:`${onTime}/${supPlans.length} قدمها في الميعاد · تنفيذ ${execPct}% من الزيارات المخططة${rejected?` · ${rejected} خطة مرفوضة`:''}`};
-    planDetails = supPlans.map(p=>`${p.supervisor_name||'—'} — أسبوع ${p.week_start||'—'} — ${p.status==='approved'?'✅ معتمدة':p.status==='rejected'?'❌ مرفوضة':p.status==='submitted'?'📤 مقدمة':'⏳ مسودة'}`);
+    // تفاصيل أدق: نسبة تنفيذ كل خطة على حدة (مش بس حالتها) + عدد الفروع اللي لسه فائتة/معلقة فيها
+    planDetails = supPlans.map(p=>{
+      const pBranches = planBranches.filter(b=>b.plan_id===p.id);
+      const pDone = pBranches.filter(b=>b.visit_status==='done').length;
+      const pMissed = pBranches.filter(b=>b.visit_status==='missed').length;
+      const pPct = pBranches.length ? Math.round(pDone/pBranches.length*100) : 0;
+      const statusTxt = p.status==='approved'?'✅ معتمدة':p.status==='rejected'?'❌ مرفوضة':p.status==='submitted'?'📤 مقدمة':'⏳ مسودة';
+      return `${p.supervisor_name||'—'} — أسبوع ${p.week_start||'—'} — ${statusTxt} — تنفيذ ${pPct}% (${pDone}/${pBranches.length})${pMissed?` · ${pMissed} فرع فائت`:''}`;
+    });
   }
 
   // 2) متابعة الحضور والغياب — من غير يوم الإجازة الأسبوعية الثابتة لكل منسق
   let absentDays=0, classified=0, sameDay=0, attDetails=[];
+  const attDetailsLate = [];
   reps.forEach(r=>{
     const dayOffNum = attDayNameToNum(r.day_off||'none');
     for(let d=new Date(start+'T00:00:00'); d<=new Date(end+'T00:00:00'); d.setDate(d.getDate()+1)){
@@ -33423,12 +33434,15 @@ function sevComputeCriteria(groups, ctx){
         if(edit){
           classified++;
           if((edit.updated_at||'').slice(0,10)===dISO) sameDay++;
+          else attDetailsLate.push(`${r.name} — ${dISO} — اتصنّف متأخر (${(edit.updated_at||'').slice(0,10)})${edit.reason_type?' — '+edit.reason_type:''}`);
         } else {
           attDetails.push(`${r.name} — ${dISO} — لسه من غير تصنيف`);
         }
       }
     }
   });
+  // تفاصيل أدق: التصنيفات المتأخرة (اتعملت بعد يوم الغياب نفسه) بعد قائمة الغياب اللي لسه من غير تصنيف خالص
+  attDetails = attDetails.concat(attDetailsLate);
   let attCrit;
   if(absentDays===0){
     attCrit = {level:'excellent', text:'مفيش أيام غياب مسجلة للفريق الأسبوع ده'};
@@ -33450,8 +33464,13 @@ function sevComputeCriteria(groups, ctx){
     : null;
   const covLevel = covPct>=90 ? 'excellent' : covPct>=70 ? 'good' : 'needsWork';
   const covCrit = {level:covLevel, text:`${activeRepsList.length}/${reps.length} منسق نشط الأسبوع ده${branchCovPct!==null?` · ${branchCovPct}% من فروع المجموعة اتزارت`:''}`};
+  // تفاصيل أدق: عدد زيارات كل منسق نشط (مش بس نشط/مش نشط) - بيوضح لو "النشاط" ضعيف رغم وجود زيارة واحدة بس
   const covDetails = [
     ...inactiveRepsList.map(r=>`⛔ ${r.name} — من غير أي زيارة الأسبوع ده`),
+    ...activeRepsList.map(r=>{
+      const cnt = visits.filter(v=>v.name===r.name && inRange(v.created_at)).length;
+      return `${cnt<=2?'⚠️':'✅'} ${r.name} — ${cnt} زيارة الأسبوع ده`;
+    }),
     ...unvisitedBranches.slice(0,30).map(b=>`🏬 ${b.branch_name} — مش متزار`),
   ];
 
@@ -33461,7 +33480,13 @@ function sevComputeCriteria(groups, ctx){
   const locPct = reps.length ? Math.round(repsWithLoc.length/reps.length*100) : 0;
   const locLevel = locPct>=80 ? 'excellent' : locPct>=50 ? 'good' : 'needsWork';
   const locCrit = {level:locLevel, text:`${repsWithLoc.length}/${reps.length} منسق بعت لوكيشن خلال آخر يوم`};
-  const locDetails = repsNoLoc.map(r=>`📍 ${r.name} — من غير لوكيشن حديث`);
+  // تفاصيل أدق: آخر ظهور فعلي للمنسق (لو عنده سجل لوكيشن قديم) بدل ما نقول "من غير لوكيشن حديث" بس
+  const locDetails = repsNoLoc.map(r=>{
+    const rec = locs.find(l=>l.name===r.name && l.updated_at);
+    if(!rec) return `📍 ${r.name} — من غير أي لوكيشن مسجل خالص`;
+    const daysAgo = Math.floor((now-new Date(rec.updated_at).getTime())/86400000);
+    return `📍 ${r.name} — آخر لوكيشن من ${daysAgo} يوم`;
+  });
 
   // 5) تحويل الأوردرات للمنسقين
   const pendingOrders = orders.filter(o=>groups.includes(o.grp||'') && (o.status==='pending_supervisor'||o.status==='pending'));
@@ -33474,6 +33499,42 @@ function sevComputeCriteria(groups, ctx){
   const ordCrit = {level:ordLevel, text: pendingOrders.length ? `${pendingOrders.length} طلبية معلقة، أقدمهم من ${oldestDays} يوم` : 'مفيش طلبيات معلقة'};
   const ordDetails = pendingOrders.map(o=>`📦 ${o.from_name||'—'} — من ${Math.floor((now-new Date(o.created_at).getTime())/86400000)} يوم`);
 
+  // 6) جودة الزيارات — متوسط مدة الزيارة (من وقت الدخول والخروج) وعدد الزيارات "السريعة جدًا" (أقل من
+  // 5 دقايق) كمؤشر على زيارة سطحية شكلية بدل ما تكون فعلية - بيراقبها المشرف من متابعته اليومية للفريق.
+  const periodVisitsTimed = visits.filter(v=>inRange(v.created_at) && repNames.has(v.name) && v.time_in && v.time_out);
+  const visitDurations = periodVisitsTimed.map(v=>({v, mins:vCalcMinutes(v.time_in, v.time_out)})).filter(x=>x.mins>0);
+  const avgVisitMins = visitDurations.length ? Math.round(visitDurations.reduce((s,x)=>s+x.mins,0)/visitDurations.length) : null;
+  const quickVisits = visitDurations.filter(x=>x.mins<5);
+  const quickPct = visitDurations.length ? Math.round(quickVisits.length/visitDurations.length*100) : 0;
+  let qualLevel;
+  if(!visitDurations.length) qualLevel = 'needsWork';
+  else if(avgVisitMins>=15 && quickPct<=10) qualLevel = 'excellent';
+  else if(avgVisitMins>=8 && quickPct<=25) qualLevel = 'good';
+  else qualLevel = 'needsWork';
+  const qualCrit = {
+    level: qualLevel,
+    text: visitDurations.length
+      ? `متوسط مدة الزيارة ${avgVisitMins} دقيقة · ${quickVisits.length} زيارة أقل من 5 دقايق من ${visitDurations.length}`
+      : 'مفيش بيانات وقت دخول/خروج كافية لحساب مدة الزيارات',
+  };
+  const qualDetails = quickVisits.map(x=>`⏱️ ${x.v.name} — ${x.v.branch||'—'} — ${x.mins} دقيقة (${x.v.date||'—'})`);
+
+  // 7) الحضور الشخصي للمشرف (توثيق زيارة السوق) — نسبة الزيارات المخططة "المنجزة" اللي المشرف كتب
+  // عليها ملاحظة فعلية من تاب "اليومي" في تطبيقه، كدليل إنه فعلاً نزل السوق شافه بعينه مش بس ضغط "منجز".
+  const doneBranches = myBranches.filter(b=>b.visit_status==='done');
+  const notedBranches = doneBranches.filter(b=>(b.notes||'').trim());
+  const notePct = doneBranches.length ? Math.round(notedBranches.length/doneBranches.length*100) : 0;
+  let noteLevel;
+  if(!doneBranches.length) noteLevel = 'needsWork';
+  else if(notePct>=80) noteLevel = 'excellent';
+  else if(notePct>=50) noteLevel = 'good';
+  else noteLevel = 'needsWork';
+  const noteCrit = {
+    level: noteLevel,
+    text: doneBranches.length ? `${notedBranches.length}/${doneBranches.length} زيارة منجزة معاها ملاحظة سوق موثّقة (${notePct}%)` : 'مفيش زيارات منجزة الأسبوع ده',
+  };
+  const noteDetails = doneBranches.filter(b=>!(b.notes||'').trim()).map(b=>`📝 ${b.branch_name||'—'} — منجزة من غير ملاحظة سوق`);
+
   return {
     relevantSupNames, supPlans,
     crits: [
@@ -33482,6 +33543,8 @@ function sevComputeCriteria(groups, ctx){
       {icon:'🧭', title:'تغطية الفريق',                   ...covCrit,  details:covDetails},
       {icon:'📍', title:'استخدام اللوكيشن اللايف',        ...locCrit,  details:locDetails},
       {icon:'📦', title:'تحويل الأوردرات للمنسقين',       ...ordCrit,  details:ordDetails},
+      {icon:'⏱️', title:'جودة الزيارات',                  ...qualCrit, details:qualDetails},
+      {icon:'📝', title:'الحضور الشخصي (توثيق زيارة السوق)', ...noteCrit, details:noteDetails},
     ],
   };
 }
