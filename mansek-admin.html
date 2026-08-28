@@ -4160,6 +4160,10 @@ h2,h3{color:#2C1F0A}
               style="padding:8px 20px;border:none;border-bottom:3px solid transparent;background:none;font-family:Cairo,sans-serif;font-size:13px;font-weight:600;color:var(--text2);cursor:pointer">
               ⭐ قوائم الأسعار الاستثنائية
             </button>
+            <button id="spl-tab-custitems" onclick="splShowTab('custitems')"
+              style="padding:8px 20px;border:none;border-bottom:3px solid transparent;background:none;font-family:Cairo,sans-serif;font-size:13px;font-weight:600;color:var(--text2);cursor:pointer">
+              🧾 أصناف العملاء
+            </button>
           </div>
 
           <!-- ── تاب الأصناف ── -->
@@ -4583,6 +4587,53 @@ h2,h3{color:#2C1F0A}
                 </tbody>
               </table>
             </div>
+          </div>
+
+          <!-- ── تاب أصناف العملاء ── -->
+          <div id="spl-pane-custitems" style="display:none">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+              <div>
+                <div style="font-size:13px;font-weight:700;color:#4B3C1A">أصناف العملاء</div>
+                <div style="font-size:11px;color:var(--text2);margin-top:2px">أصناف كل عميل مبنية لايف من فواتير المناديب الفعلية — أي صنف جديد ينزل للعميل يظهر هنا تلقائيًا</div>
+              </div>
+              <div style="display:flex;gap:8px">
+                <button onclick="sciExportExcel()" class="btn btn-ghost btn-sm"><i class="ti ti-file-spreadsheet"></i> Excel</button>
+                <button onclick="sciExportPDF()" class="btn btn-ghost btn-sm"><i class="ti ti-file-type-pdf"></i> PDF</button>
+              </div>
+            </div>
+
+            <div class="card" style="margin-bottom:14px">
+              <div class="fld" style="margin:0">
+                <label class="lbl">العميل *</label>
+                <select id="sci-client" onchange="sciOnClientChange()" style="width:100%">
+                  <option value="">اختر العميل...</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="sci-stats" style="display:none;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px"></div>
+
+            <div class="card" id="sci-results-card" style="display:none">
+              <div style="margin-bottom:10px">
+                <input type="text" id="sci-search" oninput="sciRenderTable()" placeholder="🔍 بحث في أصناف العميل..."
+                  style="width:100%;padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12.5px"/>
+              </div>
+              <div class="tbl-wrap" style="border:1px solid var(--border);border-radius:10px;overflow:hidden">
+                <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+                  <thead>
+                    <tr style="background:#4B3C1A;color:#EDE5D8">
+                      <th style="padding:9px 12px;text-align:right">#</th>
+                      <th style="padding:9px 12px;text-align:right">الصنف</th>
+                      <th style="padding:9px 12px;text-align:center">الفئة</th>
+                      <th style="padding:9px 12px;text-align:center">التصنيف</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sci-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div id="sci-empty" style="text-align:center;padding:40px 20px;color:var(--text2);font-size:13px">اختر عميل من القائمة فوق لعرض الأصناف اللي بيشتغل فيها</div>
           </div>
 
         </div>
@@ -25364,7 +25415,7 @@ async function splDeleteBranchMap(id, branch){
 }
 
 function splShowTab(tab){
-  ['products','discounts','catdisc','promos','special'].forEach(t=>{
+  ['products','discounts','catdisc','promos','special','custitems'].forEach(t=>{
     const pane = document.getElementById(`spl-pane-${t}`);
     if(pane) pane.style.display = tab===t ? '' : 'none';
     const btn = document.getElementById(`spl-tab-${t}`);
@@ -25377,6 +25428,243 @@ function splShowTab(tab){
   if(tab==='catdisc') splInitCatDiscTab();
   if(tab==='promos')  splInitPromosTab();
   if(tab==='special') splSpecialInit();
+  if(tab==='custitems') sciInit();
+}
+
+// ══════════════════════════════════════════════════════════════
+// أصناف العملاء — قائمة أصناف كل عميل مبنية لايف من فواتير المناديب
+// ══════════════════════════════════════════════════════════════
+let _sciClientBranches = {}; // {client_name: Set(branch_name)}
+let _sciCurrentClient  = '';
+let _sciCurrentRows    = []; // [{name, fea, cat}] — الأصناف الحالية على الشاشة (بعد الفلترة)
+let _sciAllRows        = []; // [{name, fea, cat}] — كل أصناف العميل قبل فلتر البحث
+
+async function sciInit(){
+  await sciLoadClients();
+}
+
+async function sciLoadClients(){
+  const sel = document.getElementById('sci-client');
+  if(!sel || sel.dataset.loaded) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  try{
+    const [clientsRes, mapRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/sales_clients?select=id,name&order=name.asc`, {headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?select=client_name,branch_name&limit=5000`, {headers:H}),
+    ]);
+    const clients = clientsRes.ok ? await clientsRes.json() : [];
+    const map     = mapRes.ok ? await mapRes.json() : [];
+    _sciClientBranches = {};
+    (Array.isArray(map)?map:[]).forEach(m=>{
+      if(!m.client_name||!m.branch_name) return;
+      if(!_sciClientBranches[m.client_name]) _sciClientBranches[m.client_name] = new Set();
+      _sciClientBranches[m.client_name].add(m.branch_name);
+    });
+    const names = (Array.isArray(clients)?clients:[]).map(c=>c.name).filter(Boolean);
+    sel.innerHTML = '<option value="">اختر العميل...</option>' +
+      names.map(n=>{
+        const count = _sciClientBranches[n] ? _sciClientBranches[n].size : 0;
+        return `<option value="${n.replace(/"/g,'&quot;')}">${n} (${count} فرع)</option>`;
+      }).join('');
+    sel.dataset.loaded = '1';
+  }catch(e){ console.error('[sciLoadClients]', e); }
+}
+
+// ── يبني فهرس (اسم الصنف → {fea,cat}) من قاعدة الأصناف الكاملة (PDB) المحمّلة أصلاً في التطبيق ──
+function sciBuildPdbIndex(){
+  const idx = {};
+  Object.entries(PDB||{}).forEach(([fea,cats])=>{
+    Object.entries(cats||{}).forEach(([cat,grps])=>{
+      Object.entries(grps||{}).forEach(([grp,items])=>{
+        (items||[]).forEach(item=>{
+          const isObj = typeof item==='object' && item!==null;
+          const name = (isObj ? (item.name||'') : String(item)).trim();
+          if(name && !idx[name]) idx[name] = {fea, cat};
+        });
+      });
+    });
+  });
+  return idx;
+}
+
+async function sciOnClientChange(){
+  const client = document.getElementById('sci-client')?.value || '';
+  _sciCurrentClient = client;
+  const statsEl   = document.getElementById('sci-stats');
+  const cardEl    = document.getElementById('sci-results-card');
+  const emptyEl   = document.getElementById('sci-empty');
+  const searchEl  = document.getElementById('sci-search');
+  if(searchEl) searchEl.value = '';
+
+  if(!client){
+    if(statsEl) statsEl.style.display = 'none';
+    if(cardEl) cardEl.style.display = 'none';
+    if(emptyEl){ emptyEl.style.display = ''; emptyEl.textContent = 'اختر عميل من القائمة فوق لعرض الأصناف اللي بيشتغل فيها'; }
+    return;
+  }
+
+  if(emptyEl){ emptyEl.style.display = ''; emptyEl.textContent = 'جاري تحميل الأصناف...'; }
+  if(statsEl) statsEl.style.display = 'none';
+  if(cardEl) cardEl.style.display = 'none';
+
+  const branches = [..._sciClientBranches[client] || []];
+  if(!branches.length){
+    if(emptyEl){ emptyEl.style.display = ''; emptyEl.textContent = 'العميل ده مفيش فروع مربوطة بيه دلوقتي — اربط فروعه الأول من تاب "خصومات العملاء"'; }
+    return;
+  }
+
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const orFilter = 'or=(' + branches.map(b=>`branch_name.eq.${encodeURIComponent(b)}`).join(',') + ')';
+  let rows = [];
+  try{
+    rows = await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?${orFilter}&deleted_at=is.null&select=items`, H);
+  }catch(e){ console.error('[sciOnClientChange]', e); }
+
+  const pdbIdx = sciBuildPdbIndex();
+  const seen = {};
+  (Array.isArray(rows)?rows:[]).forEach(r=>{
+    (Array.isArray(r.items)?r.items:[]).forEach(it=>{
+      const name = (it && it.name ? String(it.name) : '').trim();
+      if(name) seen[name] = true;
+    });
+  });
+
+  // أصناف العميل الفريدة، مرتبة أبجديًا، مع الفئة/التصنيف من قاعدة الأصناف الكاملة (لو موجود)
+  _sciAllRows = Object.keys(seen).map(name=>{
+    const meta = pdbIdx[name] || {};
+    return {name, fea: meta.fea||'', cat: meta.cat||''};
+  }).sort((a,b)=>a.name.localeCompare(b.name,'ar'));
+
+  if(emptyEl) emptyEl.style.display = 'none';
+  if(cardEl) cardEl.style.display = '';
+  if(statsEl){
+    statsEl.style.display = 'grid';
+    statsEl.innerHTML = `
+      <div class="card" style="margin:0;padding:12px"><div style="font-size:11px;color:var(--text2);margin-bottom:4px">عدد الفروع</div><div style="font-size:19px;font-weight:700;color:var(--navy)">${branches.length}</div></div>
+      <div class="card" style="margin:0;padding:12px"><div style="font-size:11px;color:var(--text2);margin-bottom:4px">عدد الأصناف</div><div style="font-size:19px;font-weight:700;color:var(--caramel)">${_sciAllRows.length}</div></div>
+      <div class="card" style="margin:0;padding:12px"><div style="font-size:11px;color:var(--text2);margin-bottom:4px">آخر تحديث</div><div style="font-size:13px;font-weight:700;color:var(--green)">لحظي (لايف)</div></div>
+    `;
+  }
+  sciRenderTable();
+}
+
+function sciRenderTable(){
+  const q = (document.getElementById('sci-search')?.value || '').trim();
+  const tbody = document.getElementById('sci-tbody');
+  if(!tbody) return;
+  const filtered = q ? _sciAllRows.filter(r=>r.name.includes(q)) : _sciAllRows;
+  _sciCurrentRows = filtered;
+  if(!filtered.length){
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#aaa">لا توجد نتائج</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = filtered.map((r,i)=>`
+    <tr style="${i%2===1?'background:#F9F6F1':''}">
+      <td style="padding:7px 12px;color:var(--text2);font-size:11px">${i+1}</td>
+      <td style="padding:7px 12px;font-weight:600">${r.name}</td>
+      <td style="padding:7px 12px;text-align:center">${r.fea?`<span class="badge b-blue">${r.fea}</span>`:'<span style="color:#ccc">—</span>'}</td>
+      <td style="padding:7px 12px;text-align:center;font-size:11.5px">${r.cat||'<span style="color:#ccc">—</span>'}</td>
+    </tr>
+  `).join('');
+}
+
+function sciExportPDF(){
+  if(!_sciCurrentClient || !_sciAllRows.length){ alert('اختر عميل عنده أصناف الأول'); return; }
+  const rows = (_sciCurrentRows && _sciCurrentRows.length) ? _sciCurrentRows : _sciAllRows;
+  const C = {dark:'#2C1F0A', caramel:'#4B3C1A', gold:'#C8A96E', cream:'#EDE5D8', light:'#F5F0E8'};
+  const now = new Date().toLocaleString('ar-EG');
+
+  const tableRows = rows.map((r,i)=>`
+    <tr style="${i%2===1?'background:'+C.light:''}">
+      <td style="padding:6px 8px;font-size:10.5px;color:#888">${i+1}</td>
+      <td style="padding:6px 8px;font-weight:700;font-size:12px">${r.name}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px">${r.fea||'—'}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px">${r.cat||'—'}</td>
+    </tr>`).join('');
+
+  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8"><title>أصناف ${_sciCurrentClient}</title>
+  <style>
+    *{box-sizing:border-box}
+    body{font-family:Arial,sans-serif;font-size:13px;direction:rtl;margin:0;padding:18px;background:#fff;color:${C.dark}}
+    .header{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,${C.caramel},${C.dark});color:${C.cream};padding:16px 22px;border-radius:12px;margin-bottom:16px}
+    .header-title{font-size:19px;font-weight:800}
+    .header-sub{font-size:12px;opacity:.85;margin-top:3px}
+    .logo{height:56px;background:#fff;border-radius:8px;padding:4px}
+    .info-bar{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+    .info-bar span{background:${C.light};border:1px solid ${C.gold};color:${C.caramel};padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700}
+    table{width:100%;border-collapse:collapse}
+    th{background:${C.caramel};color:${C.cream};padding:8px;text-align:right;font-size:11px}
+    td{border-bottom:0.5px solid #e5e7eb}
+    @media print{body{padding:0}}
+  </style></head><body>
+  <div class="header">
+    <div>
+      <div class="header-title">🧾 أصناف عميل: ${_sciCurrentClient}</div>
+      <div class="header-sub">الطحان جولدن دايتس — قائمة الأصناف الفعلية من فواتير المناديب</div>
+    </div>
+    <img class="logo" src="data:image/jpeg;base64,${AT_LOGO_B64.split(',')[1]}" alt="Al Tahhan Golden Dates"/>
+  </div>
+  <div class="info-bar">
+    <span>🕐 ${now}</span>
+    <span>📦 ${rows.length} صنف</span>
+  </div>
+  <table>
+    <thead><tr><th>#</th><th>الصنف</th><th style="text-align:center">الفئة</th><th style="text-align:center">التصنيف</th></tr></thead>
+    <tbody>${tableRows}</tbody>
+  </table>
+  <${'script'}>window.onload=()=>window.print();</${'script'}>
+  </body></html>`;
+
+  const blob = new Blob([html], {type:'text/html;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const w = window.open(url, '_blank');
+  if(!w){ const a=document.createElement('a'); a.href=url; a.download=`أصناف_${_sciCurrentClient}.html`; a.click(); }
+  setTimeout(()=>URL.revokeObjectURL(url), 30000);
+}
+
+function sciExportExcel(){
+  if(!_sciCurrentClient || !_sciAllRows.length){ alert('اختر عميل عنده أصناف الأول'); return; }
+  if(typeof XLSX === 'undefined'){ showToast('جاري تحميل مكتبة الإكسيل - حاول تاني بعد ثانية', 'info'); return; }
+  const rows = (_sciCurrentRows && _sciCurrentRows.length) ? _sciCurrentRows : _sciAllRows;
+
+  const DARK='2C1F0A', CARAMEL='4B3C1A', GOLD='C8A96E', CREAM='EDE5D8', WHITE='FFFFFF';
+  const S = (bg,fc,bold,sz,right) => ({
+    fill:{fgColor:{rgb:bg}},
+    font:{bold:bold||false, color:{rgb:fc||DARK}, sz:sz||11, name:'Cairo'},
+    alignment:{horizontal:right?'right':'center', vertical:'center', wrapText:true, readingOrder:2},
+    border:{top:{style:'thin',color:{rgb:'D9D0C0'}}, bottom:{style:'thin',color:{rgb:'D9D0C0'}}, left:{style:'thin',color:{rgb:'D9D0C0'}}, right:{style:'thin',color:{rgb:'D9D0C0'}}},
+  });
+
+  const aoa = [
+    [`أصناف عميل: ${_sciCurrentClient}`, '', ''],
+    [`الطحان جولدن دايتس — ${new Date().toLocaleString('ar-EG')} — ${rows.length} صنف`, '', ''],
+    ['#', 'الصنف', 'الفئة', 'التصنيف'],
+    ...rows.map((r,i)=>[i+1, r.name, r.fea||'—', r.cat||'—']),
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [
+    {s:{r:0,c:0}, e:{r:0,c:3}},
+    {s:{r:1,c:0}, e:{r:1,c:3}},
+  ];
+  ws['!cols'] = [{wch:6},{wch:44},{wch:16},{wch:22}];
+  for(let c=0;c<4;c++){
+    const t = XLSX.utils.encode_cell({r:0,c});
+    if(ws[t]) ws[t].s = S(CARAMEL, CREAM, true, 14, true);
+    const s = XLSX.utils.encode_cell({r:1,c});
+    if(ws[s]) ws[s].s = S(CREAM, CARAMEL, false, 10, true);
+    const h = XLSX.utils.encode_cell({r:2,c});
+    if(ws[h]) ws[h].s = S(CARAMEL, CREAM, true, 11);
+  }
+  rows.forEach((r,i)=>{
+    const rIdx = 3+i;
+    for(let c=0;c<4;c++){
+      const cell = XLSX.utils.encode_cell({r:rIdx,c});
+      if(ws[cell]) ws[cell].s = S(i%2===1?'F5F0E8':WHITE, DARK, c===1, 10.5, c===1);
+    }
+  });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'أصناف العميل');
+  XLSX.writeFile(wb, `أصناف_${_sciCurrentClient}.xlsx`);
 }
 
 // ══ قوائم الأسعار الاستثنائية ══════════════════════════════
