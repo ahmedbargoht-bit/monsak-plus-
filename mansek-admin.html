@@ -4623,6 +4623,7 @@ h2,h3{color:#2C1F0A}
                   <thead>
                     <tr style="background:#4B3C1A;color:#EDE5D8">
                       <th style="padding:9px 12px;text-align:right">#</th>
+                      <th style="padding:9px 12px;text-align:center">الباركود</th>
                       <th style="padding:9px 12px;text-align:right">الصنف</th>
                       <th style="padding:9px 12px;text-align:center">الفئة</th>
                       <th style="padding:9px 12px;text-align:center">التصنيف</th>
@@ -25470,6 +25471,24 @@ async function sciLoadClients(){
   }catch(e){ console.error('[sciLoadClients]', e); }
 }
 
+// ── يبني فهرس (اسم الصنف → باركود) من كتالوج أصناف تحليل فواتير عملاء MT (tamr_sales_item_catalog) ──
+let _sciBarcodeIdx = null; // بيتحمّل مرة واحدة ويتخزّن (170 صنف بس، مفيش داعي نعيد الجلب كل مرة)
+async function sciBuildBarcodeIndex(){
+  if(_sciBarcodeIdx) return _sciBarcodeIdx;
+  const idx = {};
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?select=item_name,item_code`, {headers:H});
+    const rows = res.ok ? await res.json() : [];
+    (Array.isArray(rows)?rows:[]).forEach(r=>{
+      const name = (r.item_name||'').trim();
+      if(name && r.item_code) idx[name] = String(r.item_code);
+    });
+  }catch(e){ console.error('[sciBuildBarcodeIndex]', e); }
+  _sciBarcodeIdx = idx;
+  return idx;
+}
+
 // ── يبني فهرس (اسم الصنف → {fea,cat}) من قاعدة الأصناف الكاملة (PDB) المحمّلة أصلاً في التطبيق ──
 function sciBuildPdbIndex(){
   const idx = {};
@@ -25521,6 +25540,7 @@ async function sciOnClientChange(){
   }catch(e){ console.error('[sciOnClientChange]', e); }
 
   const pdbIdx = sciBuildPdbIndex();
+  const barcodeIdx = await sciBuildBarcodeIndex();
   const seen = {};
   (Array.isArray(rows)?rows:[]).forEach(r=>{
     (Array.isArray(r.items)?r.items:[]).forEach(it=>{
@@ -25529,10 +25549,10 @@ async function sciOnClientChange(){
     });
   });
 
-  // أصناف العميل الفريدة، مرتبة أبجديًا، مع الفئة/التصنيف من قاعدة الأصناف الكاملة (لو موجود)
+  // أصناف العميل الفريدة، مرتبة أبجديًا، مع الباركود (من تحليل فواتير عملاء MT) والفئة/التصنيف (من قاعدة الأصناف الكاملة) لو موجودين
   _sciAllRows = Object.keys(seen).map(name=>{
     const meta = pdbIdx[name] || {};
-    return {name, fea: meta.fea||'', cat: meta.cat||''};
+    return {name, barcode: barcodeIdx[name] || '', fea: meta.fea||'', cat: meta.cat||''};
   }).sort((a,b)=>a.name.localeCompare(b.name,'ar'));
 
   if(emptyEl) emptyEl.style.display = 'none';
@@ -25555,12 +25575,13 @@ function sciRenderTable(){
   const filtered = q ? _sciAllRows.filter(r=>r.name.includes(q)) : _sciAllRows;
   _sciCurrentRows = filtered;
   if(!filtered.length){
-    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#aaa">لا توجد نتائج</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:20px;color:#aaa">لا توجد نتائج</td></tr>`;
     return;
   }
   tbody.innerHTML = filtered.map((r,i)=>`
     <tr style="${i%2===1?'background:#F9F6F1':''}">
       <td style="padding:7px 12px;color:var(--text2);font-size:11px">${i+1}</td>
+      <td style="padding:7px 12px;text-align:center;font-family:monospace;font-size:11.5px">${r.barcode||'<span style="color:#ccc;font-family:Cairo,sans-serif">—</span>'}</td>
       <td style="padding:7px 12px;font-weight:600">${r.name}</td>
       <td style="padding:7px 12px;text-align:center">${r.fea?`<span class="badge b-blue">${r.fea}</span>`:'<span style="color:#ccc">—</span>'}</td>
       <td style="padding:7px 12px;text-align:center;font-size:11.5px">${r.cat||'<span style="color:#ccc">—</span>'}</td>
@@ -25577,6 +25598,7 @@ function sciExportPDF(){
   const tableRows = rows.map((r,i)=>`
     <tr style="${i%2===1?'background:'+C.light:''}">
       <td style="padding:6px 8px;font-size:10.5px;color:#888">${i+1}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:10.5px;font-family:monospace">${r.barcode||'—'}</td>
       <td style="padding:6px 8px;font-weight:700;font-size:12px">${r.name}</td>
       <td style="padding:6px 8px;text-align:center;font-size:11px">${r.fea||'—'}</td>
       <td style="padding:6px 8px;text-align:center;font-size:11px">${r.cat||'—'}</td>
@@ -25609,7 +25631,7 @@ function sciExportPDF(){
     <span>📦 ${rows.length} صنف</span>
   </div>
   <table>
-    <thead><tr><th>#</th><th>الصنف</th><th style="text-align:center">الفئة</th><th style="text-align:center">التصنيف</th></tr></thead>
+    <thead><tr><th>#</th><th style="text-align:center">الباركود</th><th>الصنف</th><th style="text-align:center">الفئة</th><th style="text-align:center">التصنيف</th></tr></thead>
     <tbody>${tableRows}</tbody>
   </table>
   <${'script'}>window.onload=()=>window.print();</${'script'}>
@@ -25636,18 +25658,18 @@ function sciExportExcel(){
   });
 
   const aoa = [
-    [`أصناف عميل: ${_sciCurrentClient}`, '', ''],
-    [`الطحان جولدن دايتس — ${new Date().toLocaleString('ar-EG')} — ${rows.length} صنف`, '', ''],
-    ['#', 'الصنف', 'الفئة', 'التصنيف'],
-    ...rows.map((r,i)=>[i+1, r.name, r.fea||'—', r.cat||'—']),
+    [`أصناف عميل: ${_sciCurrentClient}`, '', '', ''],
+    [`الطحان جولدن دايتس — ${new Date().toLocaleString('ar-EG')} — ${rows.length} صنف`, '', '', ''],
+    ['#', 'الباركود', 'الصنف', 'الفئة', 'التصنيف'],
+    ...rows.map((r,i)=>[i+1, r.barcode||'—', r.name, r.fea||'—', r.cat||'—']),
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [
-    {s:{r:0,c:0}, e:{r:0,c:3}},
-    {s:{r:1,c:0}, e:{r:1,c:3}},
+    {s:{r:0,c:0}, e:{r:0,c:4}},
+    {s:{r:1,c:0}, e:{r:1,c:4}},
   ];
-  ws['!cols'] = [{wch:6},{wch:44},{wch:16},{wch:22}];
-  for(let c=0;c<4;c++){
+  ws['!cols'] = [{wch:6},{wch:16},{wch:44},{wch:16},{wch:22}];
+  for(let c=0;c<5;c++){
     const t = XLSX.utils.encode_cell({r:0,c});
     if(ws[t]) ws[t].s = S(CARAMEL, CREAM, true, 14, true);
     const s = XLSX.utils.encode_cell({r:1,c});
@@ -25657,9 +25679,9 @@ function sciExportExcel(){
   }
   rows.forEach((r,i)=>{
     const rIdx = 3+i;
-    for(let c=0;c<4;c++){
+    for(let c=0;c<5;c++){
       const cell = XLSX.utils.encode_cell({r:rIdx,c});
-      if(ws[cell]) ws[cell].s = S(i%2===1?'F5F0E8':WHITE, DARK, c===1, 10.5, c===1);
+      if(ws[cell]) ws[cell].s = S(i%2===1?'F5F0E8':WHITE, DARK, c===2, 10.5, c===2);
     }
   });
   const wb = XLSX.utils.book_new();
