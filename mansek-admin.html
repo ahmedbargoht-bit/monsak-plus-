@@ -25510,6 +25510,7 @@ async function sciLoadClients(){
     });
     const names = (Array.isArray(clients)?clients:[]).map(c=>c.name).filter(Boolean);
     sel.innerHTML = '<option value="">اختر العميل...</option>' +
+      '<option value="__ALL__">⭐ كل العملاء (كل الأصناف اللي بتتورد)</option>' +
       names.map(n=>{
         const count = _sciClientBranches[n] ? _sciClientBranches[n].size : 0;
         return `<option value="${n.replace(/"/g,'&quot;')}">${n} (${count} فرع)</option>`;
@@ -25648,7 +25649,7 @@ function sciBuildPdbIndex(){
 
 async function sciOnClientChange(){
   const client = document.getElementById('sci-client')?.value || '';
-  _sciCurrentClient = client;
+  _sciCurrentClient = client === '__ALL__' ? 'كل العملاء' : client;
   const statsEl   = document.getElementById('sci-stats');
   const cardEl    = document.getElementById('sci-results-card');
   const emptyEl   = document.getElementById('sci-empty');
@@ -25666,17 +25667,30 @@ async function sciOnClientChange(){
   if(statsEl) statsEl.style.display = 'none';
   if(cardEl) cardEl.style.display = 'none';
 
-  const branches = [..._sciClientBranches[client] || []];
-  if(!branches.length){
-    if(emptyEl){ emptyEl.style.display = ''; emptyEl.textContent = 'العميل ده مفيش فروع مربوطة بيه دلوقتي — اربط فروعه الأول من تاب "خصومات العملاء"'; }
-    return;
+  const isAll = client === '__ALL__';
+  let branches = [];
+  if(isAll){
+    const allSet = new Set();
+    Object.values(_sciClientBranches).forEach(s=>{ [...s].forEach(b=>allSet.add(b)); });
+    branches = [...allSet];
+  } else {
+    branches = [..._sciClientBranches[client] || []];
+    if(!branches.length){
+      if(emptyEl){ emptyEl.style.display = ''; emptyEl.textContent = 'العميل ده مفيش فروع مربوطة بيه دلوقتي — اربط فروعه الأول من تاب "خصومات العملاء"'; }
+      return;
+    }
   }
 
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-  const orFilter = 'or=(' + branches.map(b=>`branch_name.eq.${pgOrVal(b)}`).join(',') + ')';
   let rows = [];
   try{
-    rows = await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?${orFilter}&deleted_at=is.null&select=items`, H);
+    if(isAll){
+      // كل العملاء: نجيب كل الفواتير من غير فلترة بفرع (أسرع وأشمل من عمل or= بمئات الفروع)
+      rows = await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?deleted_at=is.null&select=items`, H);
+    } else {
+      const orFilter = 'or=(' + branches.map(b=>`branch_name.eq.${pgOrVal(b)}`).join(',') + ')';
+      rows = await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?${orFilter}&deleted_at=is.null&select=items`, H);
+    }
   }catch(e){ console.error('[sciOnClientChange]', e); }
 
   const pdbIdx = sciBuildPdbIndex();
