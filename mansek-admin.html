@@ -4613,6 +4613,10 @@ h2,h3{color:#2C1F0A}
 
             <div id="sci-stats" style="display:none;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px"></div>
 
+            <div id="sci-barcode-hint" style="display:none;background:#FFF7E8;border:1px solid #E8C88A;color:#8B6A1F;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:12.5px;font-weight:600">
+              ⚠️ الباركود مش هيظهر دلوقتي — لازم تفتح شاشة "تحليل فواتير عملاء MT" وتسجل دخول فيها مرة واحدة في نفس المتصفح ده، وبعدها الباركود هيظهر تلقائي هنا.
+            </div>
+
             <div class="card" id="sci-results-card" style="display:none">
               <div style="margin-bottom:10px">
                 <input type="text" id="sci-search" oninput="sciRenderTable()" placeholder="🔍 بحث في أصناف العميل..."
@@ -9857,6 +9861,19 @@ function sgExportPDF(){
 let SUPABASE_URL = localStorage.getItem('sb_url') || 'https://tneeosrbxedexsrigapg.supabase.co';
 let SUPABASE_KEY = localStorage.getItem('sb_key') || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRuZWVvc3JieGVkZXhzcmlnYXBnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxMTcxMTQsImV4cCI6MjA5NDY5MzExNH0.JHXgJ6EeDcdeofD5HShRnWvwPazCIfY7q7pCC2GMOFw';
 
+// قيم فلتر or=(...) في PostgREST لازم تتحط بين علامتي تنصيص لو فيها رموز محجوزة زي القوس ( ) أو الفاصلة ,
+// (زي "لولو - الحمد ( التجمع التالت )") — لأن الفلتر بيتفك ترميزه (decode) الأول وبعدين يتقرأ كلغة، فترميز
+// القوس بالـ %28/%29 مش كفاية، لازم تنصيص فعلي. بنهرب علامة التنصيص والباك سلاش جوه القيمة ثم نرمّز الكل.
+function pgOrVal(v){
+  const esc = String(v==null?'':v).replace(/\\/g,'\\\\').replace(/"/g,'\\"');
+  return encodeURIComponent('"' + esc + '"');
+}
+// نفس الفكرة لكن لقيم ilike اللي بتحتاج * قبل وبعد القيمة (بحث بالاحتواء)
+function pgOrLikeVal(v){
+  const esc = String(v==null?'':v).replace(/\\/g,'\\\\').replace(/"/g,'\\"');
+  return encodeURIComponent('"*' + esc + '*"');
+}
+
 // تاريخ اليوم/أي تاريخ بصيغة YYYY-MM-DD بالتوقيت المحلي — ممنوع استخدام toISOString() هنا
 // لأنها بتحول لتوقيت UTC وترجّع تاريخ يوم قبل الصحيح في أول ساعتين/تلاتة بعد نص الليل بتوقيت مصر
 function localISO(d){
@@ -13953,7 +13970,7 @@ async function caFetchClientContext(clientName){
   // fallback: لو مفيش ربط موثّق في branch_client_map، استخدم المطابقة النصية القديمة على اسم الفرع
   if(!matchedBranchNames.length){
     try{
-      const orFilter = 'or=(' + keywords.map(k=>`branch_name.ilike.*${encodeURIComponent(k)}*`).join(',') + ')';
+      const orFilter = 'or=(' + keywords.map(k=>`branch_name.ilike.${pgOrLikeVal(k)}`).join(',') + ')';
       const rB = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&${orFilter}&limit=3000`,{headers:H});
       if(rB.ok){
         const data = await rB.json().catch(()=>[]);
@@ -13974,7 +13991,7 @@ async function caFetchClientContext(clientName){
       params.set('limit','8000');
       productsUrl = `${SUPABASE_URL}/rest/v1/products?${params.toString()}`;
     } else {
-      const orFilterP = 'or=(' + keywords.map(k=>`branch.ilike.*${encodeURIComponent(k)}*`).join(',') + ')';
+      const orFilterP = 'or=(' + keywords.map(k=>`branch.ilike.${pgOrLikeVal(k)}`).join(',') + ')';
       productsUrl = `${SUPABASE_URL}/rest/v1/products?select=snf&${orFilterP}&limit=8000`;
     }
     const rP = await fetch(productsUrl,{headers:H});
@@ -25473,17 +25490,24 @@ async function sciLoadClients(){
 
 // ── يبني فهرس (اسم الصنف → باركود) من كتالوج أصناف تحليل فواتير عملاء MT (tamr_sales_item_catalog) ──
 let _sciBarcodeIdx = null; // بيتحمّل مرة واحدة ويتخزّن (170 صنف بس، مفيش داعي نعيد الجلب كل مرة)
+let _sciBarcodeIdxLocked = false; // true = مقفول لأن مفيش سر دخول محفوظ لتحليل فواتير عملاء MT في المتصفح ده
 async function sciBuildBarcodeIndex(){
   if(_sciBarcodeIdx) return _sciBarcodeIdx;
   const idx = {};
   try{
+    // جدول تحليل فواتير عملاء MT محمي بسر دخول خاص (x-app-secret) — نفس السر
+    // اللي بيتحفظ في localStorage لما الأدمن يدخل شاشة "تحليل فواتير عملاء MT"
+    let appSecret = '';
+    try{ appSecret = localStorage.getItem('tamr_sales_app_secret_v1') || ''; }catch(e){}
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    if(appSecret) H['x-app-secret'] = appSecret;
     const res = await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?select=item_name,item_code`, {headers:H});
     const rows = res.ok ? await res.json() : [];
     (Array.isArray(rows)?rows:[]).forEach(r=>{
       const name = (r.item_name||'').trim();
       if(name && r.item_code) idx[name] = String(r.item_code);
     });
+    _sciBarcodeIdxLocked = !appSecret;
   }catch(e){ console.error('[sciBuildBarcodeIndex]', e); }
   _sciBarcodeIdx = idx;
   return idx;
@@ -25533,7 +25557,7 @@ async function sciOnClientChange(){
   }
 
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-  const orFilter = 'or=(' + branches.map(b=>`branch_name.eq.${encodeURIComponent(b)}`).join(',') + ')';
+  const orFilter = 'or=(' + branches.map(b=>`branch_name.eq.${pgOrVal(b)}`).join(',') + ')';
   let rows = [];
   try{
     rows = await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?${orFilter}&deleted_at=is.null&select=items`, H);
@@ -25565,6 +25589,8 @@ async function sciOnClientChange(){
       <div class="card" style="margin:0;padding:12px"><div style="font-size:11px;color:var(--text2);margin-bottom:4px">آخر تحديث</div><div style="font-size:13px;font-weight:700;color:var(--green)">لحظي (لايف)</div></div>
     `;
   }
+  const barcodeHintEl = document.getElementById('sci-barcode-hint');
+  if(barcodeHintEl) barcodeHintEl.style.display = _sciBarcodeIdxLocked ? '' : 'none';
   sciRenderTable();
 }
 
