@@ -4614,7 +4614,7 @@ h2,h3{color:#2C1F0A}
             <div id="sci-stats" style="display:none;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px"></div>
 
             <div id="sci-barcode-hint" style="display:none;background:#FFF7E8;border:1px solid #E8C88A;color:#8B6A1F;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:12.5px;font-weight:600">
-              ⚠️ الباركود مش هيظهر دلوقتي — لازم تفتح شاشة "تحليل فواتير عملاء MT" وتسجل دخول فيها مرة واحدة في نفس المتصفح ده، وبعدها الباركود هيظهر تلقائي هنا.
+              ⚠️ الباركود وبعض أصناف فواتير MT مش هيظهروا دلوقتي — لازم تفتح شاشة "تحليل فواتير عملاء MT" وتسجل دخول فيها مرة واحدة في نفس المتصفح ده، وبعدها هيظهروا تلقائي هنا.
             </div>
 
             <div class="card" id="sci-results-card" style="display:none">
@@ -25544,6 +25544,45 @@ async function sciBuildBarcodeIndex(){
   return idx;
 }
 
+// ── دمج أصناف "تحليل فواتير عملاء MT" (عام 2026 بس) مع أصناف فواتير التسليم في تاب أصناف العملاء ──
+// بعض العملاء (خصوصًا سلاسل السوبر ماركت) تاريخهم الأدق مسجل في فواتير MT مش في فواتير التسليم اللحظية،
+// فمن غير الدمج ده القائمة بتطلع ناقصة. الأسماء بين المصدرين ممكن تختلف شكليًا (مسافات مزدوجة/كشيدة)،
+// فبنعمل مطابقة بمفتاح منظّف بدل المطابقة الحرفية.
+let _sciMt2026Cache = null;   // [{customer,item}] لعام 2026 — بيتحمّل مرة واحدة ويتخزّن
+let _sciMtCustomerMap = null; // {مفتاح_منظّف: اسم_العميل_الخام في فواتير MT}
+
+function sciNormalizeCustomerKey(s){
+  if(!s) return '';
+  return String(s).trim()
+    .replace(/ـ/g, '')     // إزالة حرف الكشيدة (تطويل الحروف)
+    .replace(/\s+/g, ' ')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي');
+}
+
+async function sciLoadMt2026(){
+  if(_sciMt2026Cache) return _sciMt2026Cache;
+  let rows = [];
+  try{
+    let appSecret = '';
+    try{ appSecret = localStorage.getItem('tamr_sales_app_secret_v1') || ''; }catch(e){}
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    if(appSecret) H['x-app-secret'] = appSecret;
+    const res = await fetchAllRows(`${SUPABASE_URL}/rest/v1/tamr_sales_items?select=customer,item&year=eq.2026`, H);
+    if(Array.isArray(res)) rows = res;
+  }catch(e){ console.error('[sciLoadMt2026]', e); }
+  _sciMt2026Cache = rows;
+  _sciMtCustomerMap = {};
+  rows.forEach(r=>{
+    const raw = (r.customer||'').trim();
+    if(!raw) return;
+    const key = sciNormalizeCustomerKey(raw);
+    if(key && !_sciMtCustomerMap[key]) _sciMtCustomerMap[key] = raw;
+  });
+  return _sciMt2026Cache;
+}
+
 // ══ تعديل باركود صنف (يكتب في tamr_sales_item_catalog) ══════════════════
 let _mebcCurrentItem = '';
 function mebcOpen(itemName){
@@ -25702,6 +25741,22 @@ async function sciOnClientChange(){
       if(name) seen[name] = true;
     });
   });
+
+  // دمج أصناف تحليل فواتير عملاء MT لعام 2026 (لو العميل ده عنده فواتير MT مسجلة)
+  try{
+    const mtRows = await sciLoadMt2026();
+    let mtMatched = [];
+    if(isAll){
+      mtMatched = mtRows;
+    } else {
+      const rawCustomer = _sciMtCustomerMap[sciNormalizeCustomerKey(client)];
+      if(rawCustomer) mtMatched = mtRows.filter(r=>r.customer===rawCustomer);
+    }
+    mtMatched.forEach(r=>{
+      const name = (r.item||'').trim();
+      if(name) seen[name] = true;
+    });
+  }catch(e){ console.error('[sciOnClientChange MT merge]', e); }
 
   // أصناف العميل الفريدة، مع الباركود (من تحليل فواتير عملاء MT) والفئة/التصنيف (من قاعدة الأصناف الكاملة) لو موجودين
   // الترتيب: حسب التصنيف الأول (كل تصنيف مجموعة مع بعض)، وجوه كل تصنيف أبجديًا بالاسم.
