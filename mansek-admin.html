@@ -4596,7 +4596,10 @@ h2,h3{color:#2C1F0A}
                 <div style="font-size:13px;font-weight:700;color:#4B3C1A">أصناف العملاء</div>
                 <div style="font-size:11px;color:var(--text2);margin-top:2px">أصناف كل عميل مبنية لايف من فواتير المناديب الفعلية — أي صنف جديد ينزل للعميل يظهر هنا تلقائيًا</div>
               </div>
-              <div style="display:flex;gap:8px">
+              <div style="display:flex;gap:8px;align-items:center">
+                <button id="sci-hidden-btn" onclick="sciOpenHiddenModal()" class="btn btn-ghost btn-sm" style="display:none">
+                  <i class="ti ti-eye-off"></i> الأصناف المخفية (<span id="sci-hidden-count">0</span>)
+                </button>
                 <button onclick="sciExportExcel()" class="btn btn-ghost btn-sm"><i class="ti ti-file-spreadsheet"></i> Excel</button>
                 <button onclick="sciExportPDF()" class="btn btn-ghost btn-sm"><i class="ti ti-file-type-pdf"></i> PDF</button>
               </div>
@@ -4631,6 +4634,7 @@ h2,h3{color:#2C1F0A}
                       <th style="padding:9px 12px;text-align:right">الصنف</th>
                       <th style="padding:9px 12px;text-align:center">الفئة</th>
                       <th style="padding:9px 12px;text-align:center">التصنيف</th>
+                      <th id="sci-actions-th" style="padding:9px 12px;text-align:center;display:none"></th>
                     </tr>
                   </thead>
                   <tbody id="sci-tbody"></tbody>
@@ -4810,6 +4814,22 @@ h2,h3{color:#2C1F0A}
           </div>
         </div>
         <!-- ══ END MODAL: تعديل باركود الصنف ══════════════════════════ -->
+
+        <!-- ══ MODAL: الأصناف المخفية (أصناف العملاء) ══════════════════ -->
+        <div class="modal-overlay" id="modal-sci-hidden">
+          <div class="modal" style="max-width:460px;max-height:80vh;overflow-y:auto">
+            <div class="modal-title">
+              <span>الأصناف المخفية — <span id="sh-client-name"></span></span>
+              <button class="modal-close" onclick="closeModal('modal-sci-hidden')">✕</button>
+            </div>
+            <div style="font-size:11.5px;color:var(--text2);margin-bottom:10px">الأصناف دي متخفية من قائمة العميل ده بس. اضغط "استرجاع" عشان ترجعها تظهر تاني.</div>
+            <div id="sh-list"></div>
+            <div class="modal-footer">
+              <button class="btn btn-ghost" onclick="closeModal('modal-sci-hidden')">إغلاق</button>
+            </div>
+          </div>
+        </div>
+        <!-- ══ END MODAL: الأصناف المخفية ══════════════════════════════ -->
 
         <!-- ══ PANEL: مرتجعات المبيعات ══════════════════════════════ -->
         <div id="panel-sales-returns" class="panel">
@@ -25484,11 +25504,17 @@ function splShowTab(tab){
 // ══════════════════════════════════════════════════════════════
 let _sciClientBranches = {}; // {client_name: Set(branch_name)}
 let _sciCurrentClient  = '';
+let _sciCurrentClientRaw = ''; // القيمة الخام المختارة في الدروب داون (اسم العميل الحقيقي أو '__ALL__')
 let _sciCurrentRows    = []; // [{name, fea, cat}] — الأصناف الحالية على الشاشة (بعد الفلترة)
 let _sciAllRows        = []; // [{name, fea, cat}] — كل أصناف العميل قبل فلتر البحث
+let _sciHiddenSet      = new Set(); // أسماء الأصناف المخفية للعميل الحالي بس
+let _sciShowActions    = false; // true لو فيه عميل محدد (مش "كل العملاء") — عشان يظهر زرار الإخفاء
 
 async function sciInit(){
   await sciLoadClients();
+  // تحميل أصناف MT لعام 2026 في الخلفية من دلوقتي (من غير ما نستنى) عشان تكون جاهزة ومخزّنة
+  // قبل ما الأدمن يختار عميل، فأول اختيار عميل ميحسّش بالبطء
+  sciLoadMt2026();
 }
 
 async function sciLoadClients(){
@@ -25561,17 +25587,46 @@ function sciNormalizeCustomerKey(s){
     .replace(/ى/g, 'ي');
 }
 
+let _sciMt2026LoadingPromise = null; // يمنع تكرار نفس التحميل لو اتنادت الدالة أكتر من مرة قبل ما تخلص
 async function sciLoadMt2026(){
   if(_sciMt2026Cache) return _sciMt2026Cache;
+  if(_sciMt2026LoadingPromise) return _sciMt2026LoadingPromise;
+  _sciMt2026LoadingPromise = (async () => {
   let rows = [];
   try{
     let appSecret = '';
     try{ appSecret = localStorage.getItem('tamr_sales_app_secret_v1') || ''; }catch(e){}
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
     if(appSecret) H['x-app-secret'] = appSecret;
-    const res = await fetchAllRows(`${SUPABASE_URL}/rest/v1/tamr_sales_items?select=customer,item&year=eq.2026`, H);
-    if(Array.isArray(res)) rows = res;
-  }catch(e){ console.error('[sciLoadMt2026]', e); }
+    const baseUrl = `${SUPABASE_URL}/rest/v1/tamr_sales_items?select=customer,item&year=eq.2026`;
+    const pageSize = 1000;
+
+    // أول صفحة بيرجع معاها العدد الكلي (Prefer: count=exact)، وبعدين باقي الصفحات كلها بتتجاب مع
+    // بعض بالتوازي (Promise.all) بدل ما نستناها واحدة ورا التانية — بيقلل وقت التحميل الأول بشكل كبير
+    const firstRes = await fetch(`${baseUrl}&limit=${pageSize}&offset=0`, {headers: {...H, 'Prefer':'count=exact'}});
+    if(!firstRes.ok) throw new Error('mt-2026-fetch-failed:'+firstRes.status);
+    const firstPage = await firstRes.json().catch(()=>[]);
+    rows = Array.isArray(firstPage) ? firstPage.slice() : [];
+    const range = firstRes.headers.get('content-range') || '';
+    const total = parseInt((range.split('/')[1]||''), 10);
+
+    if(total && total > rows.length){
+      const pagesNeeded = Math.ceil((total - rows.length) / pageSize);
+      const jobs = [];
+      for(let p=1; p<=pagesNeeded; p++){
+        jobs.push(
+          fetch(`${baseUrl}&limit=${pageSize}&offset=${p*pageSize}`, {headers:H})
+            .then(r=>r.ok ? r.json().catch(()=>[]) : [])
+            .catch(()=>[])
+        );
+      }
+      const pages = await Promise.all(jobs);
+      pages.forEach(pg=>{ if(Array.isArray(pg)) rows = rows.concat(pg); });
+    }
+  }catch(e){ console.error('[sciLoadMt2026]', e); rows = []; }
+  return rows;
+  })();
+  const rows = await _sciMt2026LoadingPromise;
   _sciMt2026Cache = rows;
   _sciMtCustomerMap = {};
   rows.forEach(r=>{
@@ -25688,6 +25743,7 @@ function sciBuildPdbIndex(){
 
 async function sciOnClientChange(){
   const client = document.getElementById('sci-client')?.value || '';
+  _sciCurrentClientRaw = client;
   _sciCurrentClient = client === '__ALL__' ? 'كل العملاء' : client;
   const statsEl   = document.getElementById('sci-stats');
   const cardEl    = document.getElementById('sci-results-card');
@@ -25699,6 +25755,8 @@ async function sciOnClientChange(){
     if(statsEl) statsEl.style.display = 'none';
     if(cardEl) cardEl.style.display = 'none';
     if(emptyEl){ emptyEl.style.display = ''; emptyEl.textContent = 'اختر عميل من القائمة فوق لعرض الأصناف اللي بيشتغل فيها'; }
+    const hiddenBtn0 = document.getElementById('sci-hidden-btn');
+    if(hiddenBtn0) hiddenBtn0.style.display = 'none';
     return;
   }
 
@@ -25758,6 +25816,22 @@ async function sciOnClientChange(){
     });
   }catch(e){ console.error('[sciOnClientChange MT merge]', e); }
 
+  // الأصناف اللي الأدمن أخفاها يدويًا لهذا العميل بالذات (زرار الحذف/الإخفاء) — بتتشال من القائمة
+  _sciShowActions = !isAll;
+  _sciHiddenSet = new Set();
+  if(!isAll){
+    try{
+      const hres = await fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?select=item_name&client_name=eq.${encodeURIComponent(client)}`, H);
+      const hrows = hres.ok ? await hres.json().catch(()=>[]) : [];
+      (Array.isArray(hrows)?hrows:[]).forEach(r=>{ if(r.item_name) _sciHiddenSet.add(r.item_name); });
+    }catch(e){ console.error('[sciOnClientChange hidden]', e); }
+    _sciHiddenSet.forEach(name=>{ delete seen[name]; });
+  }
+  const hiddenBtn = document.getElementById('sci-hidden-btn');
+  const hiddenCountEl = document.getElementById('sci-hidden-count');
+  if(hiddenCountEl) hiddenCountEl.textContent = _sciHiddenSet.size;
+  if(hiddenBtn) hiddenBtn.style.display = (!isAll && _sciHiddenSet.size) ? '' : 'none';
+
   // أصناف العميل الفريدة، مع الباركود (من تحليل فواتير عملاء MT) والفئة/التصنيف (من قاعدة الأصناف الكاملة) لو موجودين
   // الترتيب: حسب التصنيف الأول (كل تصنيف مجموعة مع بعض)، وجوه كل تصنيف أبجديًا بالاسم.
   // الأصناف اللي مالهاش تصنيف معروف بتتحط في الآخر كمجموعة واحدة.
@@ -25784,6 +25858,8 @@ async function sciOnClientChange(){
   }
   const barcodeHintEl = document.getElementById('sci-barcode-hint');
   if(barcodeHintEl) barcodeHintEl.style.display = _sciBarcodeIdxLocked ? '' : 'none';
+  const actionsTh = document.getElementById('sci-actions-th');
+  if(actionsTh) actionsTh.style.display = _sciShowActions ? '' : 'none';
   sciRenderTable();
 }
 
@@ -25793,8 +25869,9 @@ function sciRenderTable(){
   if(!tbody) return;
   const filtered = q ? _sciAllRows.filter(r=>r.name.includes(q)) : _sciAllRows;
   _sciCurrentRows = filtered;
+  const colCount = _sciShowActions ? 6 : 5;
   if(!filtered.length){
-    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:20px;color:#aaa">لا توجد نتائج</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${colCount}" style="text-align:center;padding:20px;color:#aaa">لا توجد نتائج</td></tr>`;
     return;
   }
   tbody.innerHTML = filtered.map((r,i)=>`
@@ -25808,7 +25885,75 @@ function sciRenderTable(){
       <td style="padding:7px 12px;font-weight:600">${r.name}</td>
       <td style="padding:7px 12px;text-align:center">${r.fea?`<span class="badge b-blue">${r.fea}</span>`:'<span style="color:#ccc">—</span>'}</td>
       <td style="padding:7px 12px;text-align:center;font-size:11.5px">${r.cat||'<span style="color:#ccc">—</span>'}</td>
+      ${_sciShowActions ? `<td style="padding:7px 12px;text-align:center">
+        <button title="إخفاء الصنف من قائمة العميل ده" onclick="sciHideItem('${r.name.replace(/'/g,"\\'")}')" style="border:none;background:none;cursor:pointer;color:#C0392B;font-size:14px">
+          <i class="ti ti-trash"></i>
+        </button>
+      </td>` : ''}
     </tr>
+  `).join('');
+}
+
+// ── إخفاء صنف من قائمة العميل الحالي (مش حذف من الفواتير — بس إخفاء من العرض) ──
+async function sciHideItem(itemName){
+  if(!_sciCurrentClientRaw || _sciCurrentClientRaw==='__ALL__') return;
+  if(!confirm(`تأكيد إخفاء "${itemName}" من قائمة أصناف ${_sciCurrentClientRaw}؟\nمش هيتحذف من الفواتير، وممكن ترجعه تاني من "الأصناف المخفية".`)) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates'};
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?on_conflict=client_name,item_name`, {
+      method:'POST', headers:H,
+      body: JSON.stringify([{client_name:_sciCurrentClientRaw, item_name:itemName}])
+    });
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    _sciHiddenSet.add(itemName);
+    _sciAllRows = _sciAllRows.filter(r=>r.name!==itemName);
+    const hiddenCountEl = document.getElementById('sci-hidden-count');
+    if(hiddenCountEl) hiddenCountEl.textContent = _sciHiddenSet.size;
+    const hiddenBtn = document.getElementById('sci-hidden-btn');
+    if(hiddenBtn) hiddenBtn.style.display = _sciHiddenSet.size ? '' : 'none';
+    sciRenderTable();
+  }catch(e){
+    console.error('[sciHideItem]', e);
+    alert('حصل خطأ أثناء الإخفاء، حاول تاني');
+  }
+}
+
+// ── استرجاع صنف مخفي (يشيله من قائمة الإخفاء ويعيد تحميل أصناف العميل) ──
+async function sciRestoreItem(itemName){
+  if(!_sciCurrentClientRaw || _sciCurrentClientRaw==='__ALL__') return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?client_name=eq.${encodeURIComponent(_sciCurrentClientRaw)}&item_name=eq.${encodeURIComponent(itemName)}`, {method:'DELETE', headers:H});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    _sciHiddenSet.delete(itemName);
+    sciRenderHiddenList();
+    await sciOnClientChange();
+  }catch(e){
+    console.error('[sciRestoreItem]', e);
+    alert('حصل خطأ أثناء الاسترجاع، حاول تاني');
+  }
+}
+
+function sciOpenHiddenModal(){
+  const nameEl = document.getElementById('sh-client-name');
+  if(nameEl) nameEl.textContent = _sciCurrentClientRaw;
+  sciRenderHiddenList();
+  openModal('modal-sci-hidden');
+}
+
+function sciRenderHiddenList(){
+  const listEl = document.getElementById('sh-list');
+  if(!listEl) return;
+  const names = [..._sciHiddenSet].sort((a,b)=>a.localeCompare(b,'ar'));
+  if(!names.length){
+    listEl.innerHTML = '<div style="text-align:center;padding:20px;color:#aaa;font-size:12px">مفيش أصناف مخفية للعميل ده</div>';
+    return;
+  }
+  listEl.innerHTML = names.map(n=>`
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:12.5px">
+      <span>${n}</span>
+      <button class="btn btn-ghost btn-sm" onclick="sciRestoreItem('${n.replace(/'/g,"\\'")}')"><i class="ti ti-rotate"></i> استرجاع</button>
+    </div>
   `).join('');
 }
 
