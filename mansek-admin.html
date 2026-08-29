@@ -25508,7 +25508,9 @@ let _sciCurrentClientRaw = ''; // القيمة الخام المختارة في 
 let _sciCurrentRows    = []; // [{name, fea, cat}] — الأصناف الحالية على الشاشة (بعد الفلترة)
 let _sciAllRows        = []; // [{name, fea, cat}] — كل أصناف العميل قبل فلتر البحث
 let _sciHiddenSet      = new Set(); // أسماء الأصناف المخفية للعميل الحالي بس
-let _sciShowActions    = false; // true لو فيه عميل محدد (مش "كل العملاء") — عشان يظهر زرار الإخفاء
+let _sciGlobalHiddenSet = new Set(); // أسماء الأصناف المخفية عالميًا من كل العملاء
+const SCI_GLOBAL_HIDE_KEY = '__GLOBAL__'; // قيمة خاصة في عمود client_name تعني "إخفاء عام لكل العملاء"
+let _sciShowActions    = false; // true لما يبقى فيه عميل مختار (أي عميل، حتى "كل العملاء") — عشان تظهر أزرار الإخفاء
 
 async function sciInit(){
   await sciLoadClients();
@@ -25816,9 +25818,15 @@ async function sciOnClientChange(){
     });
   }catch(e){ console.error('[sciOnClientChange MT merge]', e); }
 
-  // الأصناف اللي الأدمن أخفاها يدويًا لهذا العميل بالذات (زرار الحذف/الإخفاء) — بتتشال من القائمة
-  _sciShowActions = !isAll;
+  // الأصناف اللي الأدمن أخفاها يدويًا — إما لعميل بعينه، أو عامةً من كل العملاء (client_name = '__GLOBAL__')
+  _sciShowActions = true;
   _sciHiddenSet = new Set();
+  _sciGlobalHiddenSet = new Set();
+  try{
+    const gres = await fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?select=item_name&client_name=eq.${encodeURIComponent(SCI_GLOBAL_HIDE_KEY)}`, H);
+    const grows = gres.ok ? await gres.json().catch(()=>[]) : [];
+    (Array.isArray(grows)?grows:[]).forEach(r=>{ if(r.item_name) _sciGlobalHiddenSet.add(r.item_name); });
+  }catch(e){ console.error('[sciOnClientChange global hidden]', e); }
   if(!isAll){
     try{
       const hres = await fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?select=item_name&client_name=eq.${encodeURIComponent(client)}`, H);
@@ -25827,10 +25835,12 @@ async function sciOnClientChange(){
     }catch(e){ console.error('[sciOnClientChange hidden]', e); }
     _sciHiddenSet.forEach(name=>{ delete seen[name]; });
   }
+  _sciGlobalHiddenSet.forEach(name=>{ delete seen[name]; });
   const hiddenBtn = document.getElementById('sci-hidden-btn');
   const hiddenCountEl = document.getElementById('sci-hidden-count');
-  if(hiddenCountEl) hiddenCountEl.textContent = _sciHiddenSet.size;
-  if(hiddenBtn) hiddenBtn.style.display = (!isAll && _sciHiddenSet.size) ? '' : 'none';
+  const totalHiddenCount = _sciHiddenSet.size + _sciGlobalHiddenSet.size;
+  if(hiddenCountEl) hiddenCountEl.textContent = totalHiddenCount;
+  if(hiddenBtn) hiddenBtn.style.display = totalHiddenCount ? '' : 'none';
 
   // أصناف العميل الفريدة، مع الباركود (من تحليل فواتير عملاء MT) والفئة/التصنيف (من قاعدة الأصناف الكاملة) لو موجودين
   // الترتيب: حسب التصنيف الأول (كل تصنيف مجموعة مع بعض)، وجوه كل تصنيف أبجديًا بالاسم.
@@ -25885,32 +25895,41 @@ function sciRenderTable(){
       <td style="padding:7px 12px;font-weight:600">${r.name}</td>
       <td style="padding:7px 12px;text-align:center">${r.fea?`<span class="badge b-blue">${r.fea}</span>`:'<span style="color:#ccc">—</span>'}</td>
       <td style="padding:7px 12px;text-align:center;font-size:11.5px">${r.cat||'<span style="color:#ccc">—</span>'}</td>
-      ${_sciShowActions ? `<td style="padding:7px 12px;text-align:center">
-        <button title="إخفاء الصنف من قائمة العميل ده" onclick="sciHideItem('${r.name.replace(/'/g,"\\'")}')" style="border:none;background:none;cursor:pointer;color:#C0392B;font-size:14px">
+      ${_sciShowActions ? `<td style="padding:7px 12px;text-align:center;white-space:nowrap">
+        ${(_sciCurrentClientRaw && _sciCurrentClientRaw!=='__ALL__') ? `<button title="إخفاء الصنف من قائمة العميل ده بس" onclick="sciHideItem('${r.name.replace(/'/g,"\\'")}','client')" style="border:none;background:none;cursor:pointer;color:#C0392B;font-size:14px">
           <i class="ti ti-trash"></i>
+        </button>` : ''}
+        <button title="إخفاء الصنف من كل العملاء (عام)" onclick="sciHideItem('${r.name.replace(/'/g,"\\'")}','global')" style="border:none;background:none;cursor:pointer;color:#8B6A1F;font-size:14px">
+          <i class="ti ti-world-off"></i>
         </button>
       </td>` : ''}
     </tr>
   `).join('');
 }
 
-// ── إخفاء صنف من قائمة العميل الحالي (مش حذف من الفواتير — بس إخفاء من العرض) ──
-async function sciHideItem(itemName){
-  if(!_sciCurrentClientRaw || _sciCurrentClientRaw==='__ALL__') return;
-  if(!confirm(`تأكيد إخفاء "${itemName}" من قائمة أصناف ${_sciCurrentClientRaw}؟\nمش هيتحذف من الفواتير، وممكن ترجعه تاني من "الأصناف المخفية".`)) return;
+// ── إخفاء صنف — إما خاص بالعميل الحالي بس (scope='client')، أو عام من كل العملاء (scope='global') ──
+async function sciHideItem(itemName, scope){
+  const isGlobal = scope === 'global';
+  if(!isGlobal && (!_sciCurrentClientRaw || _sciCurrentClientRaw==='__ALL__')) return;
+  const targetKey = isGlobal ? SCI_GLOBAL_HIDE_KEY : _sciCurrentClientRaw;
+  const confirmMsg = isGlobal
+    ? `تأكيد إخفاء "${itemName}" من كل العملاء في النظام؟\nمش هيتحذف من الفواتير، وممكن ترجعه تاني من "الأصناف المخفية".`
+    : `تأكيد إخفاء "${itemName}" من قائمة أصناف ${_sciCurrentClientRaw} بس؟\nمش هيتحذف من الفواتير، وممكن ترجعه تاني من "الأصناف المخفية".`;
+  if(!confirm(confirmMsg)) return;
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates'};
   try{
     const res = await fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?on_conflict=client_name,item_name`, {
       method:'POST', headers:H,
-      body: JSON.stringify([{client_name:_sciCurrentClientRaw, item_name:itemName}])
+      body: JSON.stringify([{client_name:targetKey, item_name:itemName}])
     });
     if(!res.ok) throw new Error('HTTP '+res.status);
-    _sciHiddenSet.add(itemName);
+    if(isGlobal) _sciGlobalHiddenSet.add(itemName); else _sciHiddenSet.add(itemName);
     _sciAllRows = _sciAllRows.filter(r=>r.name!==itemName);
+    const totalHiddenCount = _sciHiddenSet.size + _sciGlobalHiddenSet.size;
     const hiddenCountEl = document.getElementById('sci-hidden-count');
-    if(hiddenCountEl) hiddenCountEl.textContent = _sciHiddenSet.size;
+    if(hiddenCountEl) hiddenCountEl.textContent = totalHiddenCount;
     const hiddenBtn = document.getElementById('sci-hidden-btn');
-    if(hiddenBtn) hiddenBtn.style.display = _sciHiddenSet.size ? '' : 'none';
+    if(hiddenBtn) hiddenBtn.style.display = totalHiddenCount ? '' : 'none';
     sciRenderTable();
   }catch(e){
     console.error('[sciHideItem]', e);
@@ -25918,14 +25937,16 @@ async function sciHideItem(itemName){
   }
 }
 
-// ── استرجاع صنف مخفي (يشيله من قائمة الإخفاء ويعيد تحميل أصناف العميل) ──
-async function sciRestoreItem(itemName){
-  if(!_sciCurrentClientRaw || _sciCurrentClientRaw==='__ALL__') return;
+// ── استرجاع صنف مخفي (خاص أو عام) ويعيد تحميل أصناف العميل ──
+async function sciRestoreItem(itemName, scope){
+  const isGlobal = scope === 'global';
+  const targetKey = isGlobal ? SCI_GLOBAL_HIDE_KEY : _sciCurrentClientRaw;
+  if(!isGlobal && (!targetKey || targetKey==='__ALL__')) return;
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?client_name=eq.${encodeURIComponent(_sciCurrentClientRaw)}&item_name=eq.${encodeURIComponent(itemName)}`, {method:'DELETE', headers:H});
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?client_name=eq.${encodeURIComponent(targetKey)}&item_name=eq.${encodeURIComponent(itemName)}`, {method:'DELETE', headers:H});
     if(!res.ok) throw new Error('HTTP '+res.status);
-    _sciHiddenSet.delete(itemName);
+    if(isGlobal) _sciGlobalHiddenSet.delete(itemName); else _sciHiddenSet.delete(itemName);
     sciRenderHiddenList();
     await sciOnClientChange();
   }catch(e){
@@ -25944,17 +25965,27 @@ function sciOpenHiddenModal(){
 function sciRenderHiddenList(){
   const listEl = document.getElementById('sh-list');
   if(!listEl) return;
-  const names = [..._sciHiddenSet].sort((a,b)=>a.localeCompare(b,'ar'));
-  if(!names.length){
-    listEl.innerHTML = '<div style="text-align:center;padding:20px;color:#aaa;font-size:12px">مفيش أصناف مخفية للعميل ده</div>';
+  const clientNames = [..._sciHiddenSet].sort((a,b)=>a.localeCompare(b,'ar'));
+  const globalNames = [..._sciGlobalHiddenSet].sort((a,b)=>a.localeCompare(b,'ar'));
+  if(!clientNames.length && !globalNames.length){
+    listEl.innerHTML = '<div style="text-align:center;padding:20px;color:#aaa;font-size:12px">مفيش أصناف مخفية</div>';
     return;
   }
-  listEl.innerHTML = names.map(n=>`
+  const rowHtml = (n, scope) => `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:12.5px">
       <span>${n}</span>
-      <button class="btn btn-ghost btn-sm" onclick="sciRestoreItem('${n.replace(/'/g,"\\'")}')"><i class="ti ti-rotate"></i> استرجاع</button>
-    </div>
-  `).join('');
+      <button class="btn btn-ghost btn-sm" onclick="sciRestoreItem('${n.replace(/'/g,"\\'")}','${scope}')"><i class="ti ti-rotate"></i> استرجاع</button>
+    </div>`;
+  let html = '';
+  if(globalNames.length){
+    html += `<div style="font-size:11px;font-weight:700;color:#8B6A1F;margin:8px 0 4px">🌐 مخفية من كل العملاء</div>`;
+    html += globalNames.map(n=>rowHtml(n,'global')).join('');
+  }
+  if(clientNames.length){
+    html += `<div style="font-size:11px;font-weight:700;color:#C0392B;margin:8px 0 4px">مخفية عن ${_sciCurrentClientRaw} بس</div>`;
+    html += clientNames.map(n=>rowHtml(n,'client')).join('');
+  }
+  listEl.innerHTML = html;
 }
 
 function sciExportPDF(){
