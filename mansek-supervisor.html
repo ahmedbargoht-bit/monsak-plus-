@@ -4943,6 +4943,7 @@ async function approvePlan(){
 }
 
 let _allBranchesCache = []; // cache للفروع
+let _piRouteRepMap = {}; // خط سير (منظّف) → اسم المنسق الحقيقي المسؤول عنه دلوقتي (من جدول users، نفس مصدر شاشة "إدارة المنسقين")
 
 async function openPlanItemModal(date, dayName){
   // لو مفيش خطة، أنشئ واحدة تلقائياً
@@ -5011,6 +5012,14 @@ async function openPlanItemModal(date, dayName){
   // إزالة التكرار
   allReps = [...new Map(allReps.map(r=>[r.name,r])).values()];
   allReps.sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
+
+  // خط سير (منظّف) → اسم المنسق — نفس المصدر الحي اللي شاشة "إدارة المنسقين" بتعتمد عليه (users.route)،
+  // بيتستخدم كـ fallback وقت حفظ الفرع لو عمود rep_name القديم على الفرع نفسه فاضي أو قيمة قديمة زي "لايوجد"
+  _piRouteRepMap = {};
+  allReps.forEach(r=>{
+    const norm = (r.route||'').replace(/\s+/g,' ').trim();
+    if(norm && !_piRouteRepMap[norm]) _piRouteRepMap[norm] = r.name;
+  });
 
   // عرض المنسقين كـ checkboxes مش dropdown
   const repSel = document.getElementById('pi-rep');
@@ -5155,11 +5164,20 @@ async function addPlanItem(){
   const targetCoord = parseFloat(document.getElementById('pi-target-coord').value) || 0;
   const selectedRoutes   = [...document.querySelectorAll('#pi-routes-list .chip.selected')].map(c=>c.dataset.route);
   const selectedBranches = [...document.querySelectorAll('#pi-branches-list .chip.selected')].map(c=>c.dataset.branch);
-  // Map branch -> rep_name
+  // Map branch -> rep_name (من عمود rep_name القديم على الفرع نفسه — ممكن يكون فاضي أو قديم)
   const branchRepMap = {};
   document.querySelectorAll('#pi-branches-list .chip[data-branch]').forEach(c=>{
     if(c.dataset.branch && c.dataset.rep) branchRepMap[c.dataset.branch] = c.dataset.rep;
   });
+  // دالة توحّد أي قيمة فاضية أو نص "لايوجد"/"لا يوجد" القديم لحاجة نقدر نتأكد منها
+  const isEmptyRep = v => !v || v==='لايوجد' || v==='لا يوجد';
+  // استخدام خط السير الحقيقي للفرع (من users.route) كـ fallback حي لو القيمة المخزنة على الفرع فاضية أو قديمة
+  const resolveRepForBranch = (branch) => {
+    const stored = branchRepMap[branch];
+    if(!isEmptyRep(stored)) return stored;
+    const branchRoute = (_allBranchesCache.find(b=>b.branch_name===branch)?.route || '').replace(/\s+/g,' ').trim();
+    return (branchRoute && _piRouteRepMap[branchRoute]) || null;
+  };
 
   if(!selectedRoutes.length){ showToast('⚠️ اختر خط السير أولاً'); return; }
   if(!selectedBranches.length){ showToast('⚠️ اختر فرع واحد على الأقل'); return; }
@@ -5191,7 +5209,7 @@ async function addPlanItem(){
           visit_purpose:  visitPurpose|| null,
           area_supervisor:areaSup     || null,
           notes:          goal        || null,
-          rep_name:       branchRepMap[branch] || null
+          rep_name:       resolveRepForBranch(branch)
         })
       });
       if(res.ok){
