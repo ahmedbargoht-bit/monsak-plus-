@@ -5637,6 +5637,13 @@ function renderItems() {
   // (مثلاً "الناقصين بس")، الجدول يفضل مفلتر بيه بدل ما يرجع يعرض كل الصفوف.
   itemQtyApplyFilter();
 
+  // مهلة زمنية لأي عملية حفظ عدد بالكرتونة - لو النت واقع أو Supabase مش بيرد، الزرار يرجع شغال
+  // تاني بعد 20 ثانية بدل ما يفضل واقف على "جاري الحفظ..." للأبد من غير ما اليوزر يعرف في مشكلة.
+  const itemQtyPpcWithTimeout = (promise, ms = 20000) => Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => resolve('__timeout__'), ms))
+  ]);
+
   // خانات/زراير "عدد بالكرتونة" جوه جدول "كل الأصناف - بالكمية" - نفس منطق itemPiecesCell لكن
   // بسكوب محصور في الجدول ده بس (#itemQtyFilterTbody) عشان ميتعارضش مع نفس الأداة في أداة "أصناف عميل معين".
   // + زرار "حفظ الكل" اللي بيحفظ دفعة واحدة كل الأصناف اللي مكتوب فيها رقم ولسه مفتوحة (مش مقفولة).
@@ -5660,7 +5667,22 @@ function renderItems() {
       if (!inputs.length) return;
       const pairs = inputs.map(inp => ({ itemName: inp.closest('.item-ppc-wrap').dataset.item, ppc: inp.value.trim() }));
       itemQtyPpcBulkBtn.disabled = true; itemQtyPpcBulkBtn.textContent = 'جاري الحفظ...';
-      await assignItemPiecesPerCartonBulk(pairs); // ده بيعمل renderAll() في الآخر فترجع كل الأصناف دي مقفولة بـ "تعديل"
+      let result;
+      try {
+        // ده بيعمل renderAll() في الآخر لو نجح فترجع كل الأصناف دي مقفولة بـ "تعديل" (يستبدل الزرار ده بواحد جديد تلقائي)
+        result = await itemQtyPpcWithTimeout(assignItemPiecesPerCartonBulk(pairs));
+      } catch (e) {
+        result = false;
+        console.error('itemQtyPpcBulk save error:', e);
+      }
+      if (result === '__timeout__' || !result) {
+        // فشل الحفظ أو استنى كتير من غير رد (نت واقع/سيرفر بطيء) - نرجّع الزرار شغال بدل ما يفضل واقف على "جاري الحفظ..." للأبد
+        itemQtyPpcBulkBtn.disabled = false;
+        itemQtyPpcBulkBtn.innerHTML = `<i class="ti ti-device-floppy"></i> حفظ الكل (<span id="itemQtyPpcBulkCount">${fmt(itemQtyPendingPpcInputs().length)}</span>)`;
+        alert(result === '__timeout__'
+          ? 'الحفظ باخد وقت طويل من غير رد - تأكد من اتصال الإنترنت وجرب تاني. لو اتحفظ فعلاً هيظهر بعد الرفرش.'
+          : 'تعذر حفظ عدد القطع/الكرتونة. جرب تاني، ولو استمرت المشكلة راجع رسالة الخطأ في سجل رفع البيانات.');
+      }
     });
   }
   el.querySelectorAll('#itemQtyFilterTbody .item-ppc-btn').forEach(btn => {
@@ -5681,8 +5703,22 @@ function renderItems() {
       }
       const val = input.value.trim();
       if (!val) { alert('اكتب عدد القطع جوه الكرتونة الأول'); return; }
-      btn.disabled = true; btn.textContent = '...';
-      await assignItemPiecesPerCarton(itemName, val); // ده بيعمل renderAll() في الآخر فيرجع يقفل الخانة تلقائي
+      btn.disabled = true; btn.textContent = 'جاري الحفظ...';
+      let result;
+      try {
+        // ده بيعمل renderAll() في الآخر لو نجح فيرجع يقفل الخانة تلقائي
+        result = await itemQtyPpcWithTimeout(assignItemPiecesPerCarton(itemName, val));
+      } catch (e) {
+        result = false;
+        console.error('itemQty item-ppc save error:', e);
+      }
+      if (result === '__timeout__' || !result) {
+        // فشل الحفظ أو استنى كتير من غير رد - نرجّع الزرار شغال بدل ما يفضل واقف على "جاري الحفظ..." للأبد
+        btn.disabled = false; btn.textContent = 'حفظ';
+        alert(result === '__timeout__'
+          ? 'الحفظ باخد وقت طويل من غير رد - تأكد من اتصال الإنترنت وجرب تاني. لو اتحفظ فعلاً هيظهر بعد الرفرش.'
+          : 'تعذر حفظ عدد القطع/الكرتونة. جرب تاني، ولو استمرت المشكلة راجع رسالة الخطأ في سجل رفع البيانات.');
+      }
     });
   });
 
