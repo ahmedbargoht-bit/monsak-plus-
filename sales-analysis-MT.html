@@ -4654,7 +4654,7 @@ table.datatable details summary:hover { text-decoration: underline; }
     if (typeof ExcelJS === 'undefined') { alert('مكتبة تصدير الإكسل مش محمّلة - تأكد إن الجهاز متصل بالإنترنت وحاول تاني.'); return; }
     const ex = state.__itemsExport;
     if (!ex || !ex.byItemValue || !ex.byItemValue.length) { alert('مفيش بيانات لتصديرها - اعرض تاب "الأصناف" الأول.'); return; }
-    const { years, itemBmap, byItemValue, hasItemReturns, retYearsShownItems, retItemBmap, retByItemTotal, byItemQty, itemQtyValueOfMap } = ex;
+    const { years, itemBmap, byItemValue, hasItemReturns, retYearsShownItems, retItemBmap, retByItemTotal, byItemQty, itemQtyValueOfMap, itemQtyCartonsTotalMap } = ex;
 
     const wb = new ExcelJS.Workbook();
     wb.creator = 'نظام تحليل مبيعات تمور الطحان';
@@ -4796,24 +4796,29 @@ table.datatable details summary:hover { text-decoration: underline; }
 
     /* ---- شيت 2: بالكمية ---- */
     const ws2 = wb.addWorksheet('الأصناف - بالكمية', { views: [{ rightToLeft: true }] });
-    const headers2 = ['كود الصنف', 'الصنف', 'التصنيف', 'عدد بالكرتونة', 'إجمالي الكمية', 'القيمة'];
-    addLetterhead(ws2, 'تقرير الأصناف - بالكمية', 'F');
+    const headers2 = ['كود الصنف', 'الصنف', 'التصنيف', 'عدد بالكرتونة', 'إجمالي الكمية', 'إجمالي عدد الكراتين', 'القيمة'];
+    addLetterhead(ws2, 'تقرير الأصناف - بالكمية', 'G');
     const headerRow2 = ws2.addRow(headers2);
     styleHeaderRow(headerRow2);
+    let cartonsGrandTotal2 = 0;
     byItemQty.forEach((x, idx) => {
       const ppc2 = resolveItemPiecesPerCarton(x.key);
-      const row = ws2.addRow([resolveItemCode(x.key), x.key, resolveItemCategory(x.key), ppc2 || '-', x.sum, itemQtyValueOfMap.get(x.key) || 0]);
+      const cartonsTotal2 = itemQtyCartonsTotalMap ? itemQtyCartonsTotalMap.get(x.key) : null;
+      cartonsGrandTotal2 += cartonsTotal2 || 0;
+      const row = ws2.addRow([resolveItemCode(x.key), x.key, resolveItemCategory(x.key), ppc2 || '-', x.sum, (cartonsTotal2 || cartonsTotal2 === 0) ? cartonsTotal2 : '-', itemQtyValueOfMap.get(x.key) || 0]);
       if (idx % 2 === 1) row.eachCell(cell => { if (!cell.fill || !cell.fill.fgColor) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
       row.getCell(1).alignment = { horizontal: 'center' };
       row.getCell(2).alignment = { horizontal: 'right' };
       row.getCell(4).alignment = { horizontal: 'center' };
+      row.getCell(6).alignment = { horizontal: 'center' };
       if (!ppc2) row.getCell(4).font = { color: { argb: RED } };
-      row.getCell(5).numFmt = '#,##0'; row.getCell(6).numFmt = '#,##0';
+      if (cartonsTotal2 === null) row.getCell(6).font = { color: { argb: RED } };
+      row.getCell(5).numFmt = '#,##0'; row.getCell(6).numFmt = '#,##0.00'; row.getCell(7).numFmt = '#,##0';
     });
-    const footerRow2 = ws2.addRow(['-', 'الإجمالي', '-', '-', byItemQty.reduce((s, x) => s + x.sum, 0), byItemQty.reduce((s, x) => s + (itemQtyValueOfMap.get(x.key) || 0), 0)]);
+    const footerRow2 = ws2.addRow(['-', 'الإجمالي', '-', '-', byItemQty.reduce((s, x) => s + x.sum, 0), cartonsGrandTotal2, byItemQty.reduce((s, x) => s + (itemQtyValueOfMap.get(x.key) || 0), 0)]);
     styleFooterRow(footerRow2);
-    footerRow2.getCell(5).numFmt = '#,##0'; footerRow2.getCell(6).numFmt = '#,##0';
-    ws2.getColumn(1).width = 14; ws2.getColumn(2).width = 38; ws2.getColumn(3).width = 22; ws2.getColumn(4).width = 14; ws2.getColumn(5).width = 16; ws2.getColumn(6).width = 16;
+    footerRow2.getCell(5).numFmt = '#,##0'; footerRow2.getCell(6).numFmt = '#,##0.00'; footerRow2.getCell(7).numFmt = '#,##0';
+    ws2.getColumn(1).width = 14; ws2.getColumn(2).width = 38; ws2.getColumn(3).width = 22; ws2.getColumn(4).width = 14; ws2.getColumn(5).width = 16; ws2.getColumn(6).width = 18; ws2.getColumn(7).width = 16;
     addSignatures(ws2, headers2.length);
 
     const buf = await wb.xlsx.writeBuffer();
@@ -5274,6 +5279,23 @@ function renderItems() {
   const byItemValue = groupItemsByCategoryDesc(byItemValueSorted);
   const byItemQty = groupItemsByCategoryDesc(groupSum(rows, r => r.item, r => (r.qtyCarton || 0) + (r.qtyPiece || 0)).sort((a, b) => b.sum - a.sum));
 
+  // إجمالي عدد الكراتين الحقيقي لكل صنف - بنجمع أعمدة "كمية بالكرتونة" و"كمية بالقطعة" الخام لكل صنف
+  // على حدة، وبعدين نحوّل القطع لكراتين باستخدام عدد القطع/كرتونة من الكتالوج (بدل جمع رقمين بوحدتين
+  // مختلفتين مع بعض زي عمود "إجمالي الكمية" اللي فوق - ده مجرد رقم تقريبي غير موحّد الوحدة).
+  const itemCartonsRawMap = new Map(), itemPiecesRawMap = new Map();
+  rows.forEach(r => {
+    const k = r.item; if (!k) return;
+    itemCartonsRawMap.set(k, (itemCartonsRawMap.get(k) || 0) + (r.qtyCarton || 0));
+    itemPiecesRawMap.set(k, (itemPiecesRawMap.get(k) || 0) + (r.qtyPiece || 0));
+  });
+  const itemCartonsTotalOf = (itemName) => {
+    const ppc = resolveItemPiecesPerCarton(itemName);
+    const cartons = itemCartonsRawMap.get(itemName) || 0;
+    const pieces = itemPiecesRawMap.get(itemName) || 0;
+    if (ppc) return cartons + pieces / ppc; // تحويل دقيق للقطع الفكة لكراتين وجمعها على الكراتين الكاملة
+    return cartons || null; // من غير عدد قطع/كرتونة، أقصى حاجة نقدر نتأكد منها هي الكراتين الكاملة المسجلة فعلاً (لو موجودة)
+  };
+
   const years = activeYears(rows, r => r.year);
   const itemBmap = yearBreakdownMap(rows, r => r.item, r => r.year, r => r.total);
 
@@ -5365,7 +5387,8 @@ function renderItems() {
   }
 
   const itemQtyValueOf = (key) => groupSum(rows.filter(r => r.item === key), () => 1, r => r.total)[0]?.sum || 0;
-  const itemQtyFooter = ['-', 'الإجمالي', '-', '-', fmt(byItemQty.reduce((s, x) => s + x.sum, 0)), fmtMoney(byItemQty.reduce((s, x) => s + itemQtyValueOf(x.key), 0))];
+  const itemQtyCartonsTotalCell = (v) => v === null ? '<span style="color:var(--bad);">-</span>' : fmt(v, v % 1 ? 2 : 0);
+  const itemQtyFooter = ['-', 'الإجمالي', '-', '-', fmt(byItemQty.reduce((s, x) => s + x.sum, 0)), fmt(byItemQty.reduce((s, x) => s + (itemCartonsTotalOf(x.key) || 0), 0), 2), fmtMoney(byItemQty.reduce((s, x) => s + itemQtyValueOf(x.key), 0))];
   // جدول "كل الأصناف - بالكمية" بشكل مخصوص (مش عن طريق tableHTML العامة) عشان يدعم صف فلاتر بحث
   // (كود الصنف/الصنف/التصنيف) تحت رأس الجدول مباشرة، وخلية كود قابلة للتعديل دايمًا - data-code/data-name/data-cat
   // على كل صف بتُستخدم في itemQtyApplyFilter() للفلترة الفورية جوه المتصفح من غير أي طلب سيرفر.
@@ -5379,6 +5402,7 @@ function renderItems() {
       <td>${itemCategoryCell(x.key)}</td>
       <td>${itemPiecesCell(x.key)}</td>
       <td>${fmt(x.sum)}</td>
+      <td>${itemQtyCartonsTotalCell(itemCartonsTotalOf(x.key))}</td>
       <td>${fmtMoney(itemQtyValueOf(x.key))}</td>
     </tr>`;
   }).join('');
@@ -5386,7 +5410,7 @@ function renderItems() {
   const itemQtyFilterableTableHtml = `<table class="datatable" id="itemQtyFilterTable">
     <thead>
       <tr>
-        <th>كود الصنف</th><th>الصنف</th><th>التصنيف</th><th>عدد بالكرتونة</th><th>إجمالي الكمية</th><th>القيمة</th>
+        <th>كود الصنف</th><th>الصنف</th><th>التصنيف</th><th>عدد بالكرتونة</th><th>إجمالي الكمية</th><th>إجمالي عدد الكراتين</th><th>القيمة</th>
       </tr>
       <tr class="no-print">
         <th><input type="text" id="itemQtyFilterCode" placeholder="فلتر الكود" value="${escapeHtml(state.itemQtyFilters.code)}" style="width:100%; box-sizing:border-box; font-family:inherit; padding:5px 7px; border-radius:6px; border:1.5px solid var(--sand-dark); font-size:12px;"></th>
@@ -5399,7 +5423,7 @@ function renderItems() {
             <option value="has" ${state.itemQtyFilters.ppc === 'has' ? 'selected' : ''}>المدخل لهم بس</option>
           </select>
         </th>
-        <th></th><th></th>
+        <th></th><th></th><th></th>
       </tr>
     </thead>
     <tbody id="itemQtyFilterTbody">${itemQtyTableRowsHtml}</tbody>
@@ -5417,7 +5441,9 @@ function renderItems() {
   const itemQtyValueOfMap = new Map(byItemQty.map(x => [x.key, itemQtyValueOf(x.key)]));
   // خريطة صنف -> إجمالي الكمية (عكس itemQtyValueOfMap) - يستخدمها زرار "تقرير شامل لكل الأصناف" المنفصل
   const itemQtyByItemMap = new Map(byItemQty.map(x => [x.key, x.sum]));
-  state.__itemsExport = { years, itemBmap, byItemValue, hasItemReturns, retYearsShownItems, retItemBmap, retByItemTotal, byItemQty, itemQtyValueOfMap, itemQtyByItemMap };
+  // خريطة صنف -> إجمالي عدد الكراتين الحقيقي (محسوب بدقة عن طريق عدد القطع/كرتونة) - يستخدمها تصدير Excel
+  const itemQtyCartonsTotalMap = new Map(byItemQty.map(x => [x.key, itemCartonsTotalOf(x.key)]));
+  state.__itemsExport = { years, itemBmap, byItemValue, hasItemReturns, retYearsShownItems, retItemBmap, retByItemTotal, byItemQty, itemQtyValueOfMap, itemQtyByItemMap, itemQtyCartonsTotalMap };
 
   // أداة "أصناف عميل معين خلال فترة معينة" - مستقلة تمامًا عن فلاتر الصفحة العلوية، وبتاخد بياناتها
   // من كل بيانات الأصناف المرفوعة (state.itemRows بالكامل) بغض النظر عن أي فلتر شغال فوق الصفحة.
