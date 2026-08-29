@@ -25572,11 +25572,11 @@ async function sciBuildBarcodeIndex(){
   return idx;
 }
 
-// ── دمج أصناف "تحليل فواتير عملاء MT" (عام 2026 بس) مع أصناف فواتير التسليم في تاب أصناف العملاء ──
-// بعض العملاء (خصوصًا سلاسل السوبر ماركت) تاريخهم الأدق مسجل في فواتير MT مش في فواتير التسليم اللحظية،
-// فمن غير الدمج ده القائمة بتطلع ناقصة. الأسماء بين المصدرين ممكن تختلف شكليًا (مسافات مزدوجة/كشيدة)،
-// فبنعمل مطابقة بمفتاح منظّف بدل المطابقة الحرفية.
-let _sciMt2026Cache = null;   // [{customer,item}] لعام 2026 — بيتحمّل مرة واحدة ويتخزّن
+// ── دمج أصناف "تحليل فواتير عملاء MT" (يناير-يونيو 2026 بس) مع أصناف فواتير التسليم في تاب أصناف العملاء ──
+// المناديب بدأوا يسجلوا الأصناف بنفسهم من شهر 7/2026 وطالع (فواتير التسليم بقت مصدر كافي من وقتها)،
+// فالفجوة الوحيدة هي الفترة اللي قبل شهر 7 — وده بيتغطى من فواتير MT بدل ما يفضل ناقص.
+// الأسماء بين المصدرين ممكن تختلف شكليًا (مسافات مزدوجة/كشيدة)، فبنعمل مطابقة بمفتاح منظّف بدل المطابقة الحرفية.
+let _sciMt2026Cache = null;   // [{customer,item}] من يناير لحد يونيو 2026 — بيتحمّل مرة واحدة ويتخزّن
 let _sciMtCustomerMap = null; // {مفتاح_منظّف: اسم_العميل_الخام في فواتير MT}
 
 function sciNormalizeCustomerKey(s){
@@ -25600,31 +25600,26 @@ async function sciLoadMt2026(){
     try{ appSecret = localStorage.getItem('tamr_sales_app_secret_v1') || ''; }catch(e){}
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
     if(appSecret) H['x-app-secret'] = appSecret;
-    const baseUrl = `${SUPABASE_URL}/rest/v1/tamr_sales_items?select=customer,item&year=eq.2026`;
+    // بس من يناير لحد يونيو 2026 (شهر 1-6) — من شهر 7 وطالع المناديب بقوا بيسجلوا الأصناف بنفسهم
+    // من تطبيق التسليم، فمفيش داعي نكرر نفس الفترة من مصدر MT كمان
+    const baseUrl = `${SUPABASE_URL}/rest/v1/tamr_sales_items?select=customer,item&year=eq.2026&month=lt.7`;
     const pageSize = 1000;
 
-    // أول صفحة بيرجع معاها العدد الكلي (Prefer: count=exact)، وبعدين باقي الصفحات كلها بتتجاب مع
-    // بعض بالتوازي (Promise.all) بدل ما نستناها واحدة ورا التانية — بيقلل وقت التحميل الأول بشكل كبير
-    const firstRes = await fetch(`${baseUrl}&limit=${pageSize}&offset=0`, {headers: {...H, 'Prefer':'count=exact'}});
-    if(!firstRes.ok) throw new Error('mt-2026-fetch-failed:'+firstRes.status);
-    const firstPage = await firstRes.json().catch(()=>[]);
-    rows = Array.isArray(firstPage) ? firstPage.slice() : [];
-    const range = firstRes.headers.get('content-range') || '';
-    const total = parseInt((range.split('/')[1]||''), 10);
-
-    if(total && total > rows.length){
-      const pagesNeeded = Math.ceil((total - rows.length) / pageSize);
-      const jobs = [];
-      for(let p=1; p<=pagesNeeded; p++){
-        jobs.push(
-          fetch(`${baseUrl}&limit=${pageSize}&offset=${p*pageSize}`, {headers:H})
-            .then(r=>r.ok ? r.json().catch(()=>[]) : [])
-            .catch(()=>[])
-        );
-      }
-      const pages = await Promise.all(jobs);
-      pages.forEach(pg=>{ if(Array.isArray(pg)) rows = rows.concat(pg); });
+    // بنجيب دفعة كبيرة من الصفحات مع بعض بالتوازي (Promise.all) بدل ما نستناها واحدة ورا التانية —
+    // ملحوظة: ماعتمدناش على هيدر Content-Range لمعرفة العدد الكلي، لأن Supabase مبيكشفهوش دايمًا
+    // للمتصفح (CORS)، فلو اعتمدنا عليه ممكن نوقف التحميل بدري ويفضل جزء من الأصناف مش ظاهر.
+    // بدل كده بنطلق عدد كافي من الصفحات مقدمًا (حتى لو بعضها هيرجع فاضي) ونجمع الغير فاضي منها بس.
+    const maxPages = 60; // 60 × 1000 = 60,000 صف سقف أمان، أكتر من كفاية للبيانات الحالية (~36 ألف صف)
+    const jobs = [];
+    for(let p=0; p<maxPages; p++){
+      jobs.push(
+        fetch(`${baseUrl}&limit=${pageSize}&offset=${p*pageSize}`, {headers:H})
+          .then(r=>r.ok ? r.json().catch(()=>[]) : [])
+          .catch(()=>[])
+      );
     }
+    const pages = await Promise.all(jobs);
+    pages.forEach(pg=>{ if(Array.isArray(pg) && pg.length) rows = rows.concat(pg); });
   }catch(e){ console.error('[sciLoadMt2026]', e); rows = []; }
   return rows;
   })();
@@ -25802,7 +25797,7 @@ async function sciOnClientChange(){
     });
   });
 
-  // دمج أصناف تحليل فواتير عملاء MT لعام 2026 (لو العميل ده عنده فواتير MT مسجلة)
+  // دمج أصناف تحليل فواتير عملاء MT (يناير-يونيو 2026 بس) — تغطية للفترة اللي قبل ما المناديب يبدأوا يسجلوا بنفسهم
   try{
     const mtRows = await sciLoadMt2026();
     let mtMatched = [];
