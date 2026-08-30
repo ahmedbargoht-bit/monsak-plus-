@@ -15014,7 +15014,7 @@ async function renderLocationMap(){
         nogeoEl.innerHTML = '';
       }
     }
-    window._locRouteSnapshot = { grpLabel:gLabel, route, branchCount:branches.length, geoCount:withGeo.length };
+    window._locRouteSnapshot = { grpLabel:gLabel, route, branchCount:branches.length, geoCount:withGeo.length, branchNames: branches.map(b=>b.branch_name||'—') };
   } else if(grpFilter!=='all'){
     // ══ مجموعة كاملة مختارة (من غير منسق معين) — حدود فاصلة لكل خط سير جوه المجموعة، كل خط بلون مختلف ══
     let branches = [];
@@ -15081,7 +15081,7 @@ async function renderLocationMap(){
         nogeoEl.innerHTML = '';
       }
     }
-    window._locRouteSnapshot = { grpLabel:gLabel, route:`${routeNames.length} خط سير`, branchCount:branches.length, geoCount:totalGeo };
+    window._locRouteSnapshot = { grpLabel:gLabel, route:`${routeNames.length} خط سير`, branchCount:branches.length, geoCount:totalGeo, routesList: routeNames.map(rn=>({route:rn, branches:(byRoute.get(rn)||[]).map(b=>b.branch_name||'—')})) };
   } else {
     if(routeInfoEl){ routeInfoEl.style.display='none'; routeInfoEl.innerHTML=''; }
     if(nogeoEl){ nogeoEl.style.display='none'; nogeoEl.innerHTML=''; }
@@ -15091,6 +15091,8 @@ async function renderLocationMap(){
   // (direction:'top') - لو الفرع قريب من حافة الخريطة العلوية، الاسم كان بيتقص/يختفي برا حدود
   // الخريطة. الـ padding الإضافي ده بيضمن مساحة كافية فوق أي نقطة عشان اسمها يفضل ظاهر بالكامل.
   if(bounds.length) _locMapInstance.fitBounds(bounds, {paddingTopLeft:[30,60], paddingBottomRight:[30,30], maxZoom:14});
+  // محفوظة عشان تصدير PDF يقدر يعيد ضبط حدود الخريطة قبل التصوير مباشرة (لو المستخدم كان زوّم/حرّك الخريطة يدويًا بعد آخر رندر)
+  window._locMapBounds = bounds;
 }
 
 // بوب أب أسماء المنسقين لما تضغط على أي من كروت الإحصائيات فوق (إجمالي/حضروا/غائبون/نسبة الحضور)
@@ -15171,9 +15173,38 @@ async function exportLocationPDF(){
   const routeSnap = window._locRouteSnapshot;
   if(routeSnap && typeof html2canvas!=='undefined'){
     try{
+      // إعادة ضبط حدود الخريطة (fitBounds) قبل التصوير مباشرة، عشان لو المستخدم كان زوّم/حرّك
+      // الخريطة يدويًا بعد آخر رندر، الصورة المصدَّرة تفضل شايلة كل الفروع وحدود الخط بالكامل
+      // (بدل ما تطلع مقصوصة أو ناقصة أطراف)
+      if(_locMapInstance && window._locMapBounds && window._locMapBounds.length){
+        _locMapInstance.invalidateSize();
+        _locMapInstance.fitBounds(window._locMapBounds, {paddingTopLeft:[30,60], paddingBottomRight:[30,30], maxZoom:14});
+        await new Promise(res=>setTimeout(res, 350)); // مهلة لإعادة رسم البلاطات والتولتيبس بعد الفِت
+      }
       const mapEl = document.getElementById('loc-map-el');
       const canvas = await html2canvas(mapEl, {useCORS:true, logging:false});
       const imgData = canvas.toDataURL('image/png');
+
+      // قائمة أسماء الفروع مرصوصة تحت بعض (برّه إطار الخريطة نفسه) — إما خط سير واحد، أو أكتر
+      // من خط سير (لما تكون مجموعة كاملة مختارة) وكل خط بعنوانه المستقل فوق قائمته
+      let branchListHtml = '';
+      const buildList = (branches) => branches.map((n,i)=>
+        `<div style="padding:5px 10px;background:${i%2===0?'#fdf5ee':'#fff'};border:1px solid #f0e0cc;border-radius:6px;font-size:11px">${i+1}. ${n}</div>`
+      ).join('');
+      if(routeSnap.branchNames && routeSnap.branchNames.length){
+        branchListHtml = `
+          <div style="margin-bottom:18px">
+            <div style="font-size:13px;font-weight:700;color:#3A0800;margin-bottom:8px">🧭 خط سير ${routeSnap.route||'—'} — ${routeSnap.branchCount} فرع</div>
+            <div style="display:flex;flex-direction:column;gap:4px">${buildList(routeSnap.branchNames)}</div>
+          </div>`;
+      } else if(routeSnap.routesList && routeSnap.routesList.length){
+        branchListHtml = routeSnap.routesList.map(rt => `
+          <div style="margin-bottom:18px">
+            <div style="font-size:13px;font-weight:700;color:#3A0800;margin-bottom:8px">🧭 خط سير ${rt.route} — ${rt.branches.length} فرع</div>
+            <div style="display:flex;flex-direction:column;gap:4px">${buildList(rt.branches)}</div>
+          </div>`).join('');
+      }
+
       mapSectionHtml = `
         <div class="info-bar">
           <span>👥 ${routeSnap.grpLabel}</span>
@@ -15181,6 +15212,7 @@ async function exportLocationPDF(){
           <span>🏪 عدد الفروع: ${routeSnap.branchCount}${routeSnap.geoCount<routeSnap.branchCount?` (${routeSnap.geoCount} محدد الموقع)`:''}</span>
         </div>
         <img src="${imgData}" style="width:100%;border-radius:10px;border:1px solid #e8d5b0;margin-bottom:16px"/>
+        ${branchListHtml}
       `;
     }catch(e){ console.warn('map capture failed', e); }
   }
