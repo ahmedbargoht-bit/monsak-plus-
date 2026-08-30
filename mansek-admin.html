@@ -26365,16 +26365,27 @@ function splFindListById(type, id){
 // - قوائم "خصم %": مفيش أصناف مسجلة جوه القائمة (بس نسبة خصم عامة)، فبنجيب كل أصناف الكتالوج
 //   الأساسي (_splProducts) مع سعرها الأساسي (_splPrices) ونطرح منه نسبة الخصم لكل صنف.
 function splBuildMemberPriceRows(type, pl){
+  // نسبة الضريبة مسجلة على مستوى الصنف نفسه في كتالوج الأسعار الأساسي (sales_prices.tax_pct)،
+  // مش جوه قائمة السعر الخاص - فبنجيبها من هناك بنفس منطق باقي شاشات "الأصناف والأسعار"
+  // (priceWithTax = price × (1 + tax_pct/100))، عشان الضريبة تظهر صح حتى لو الصنف بسعر خاص.
   if(type==='prices'){
-    return (pl.products||[]).map(p=>({name:p.name, price:Number(p.price)||0}))
-      .sort((a,b)=>a.name.localeCompare(b.name,'ar'));
+    return (pl.products||[]).map(p=>{
+      const price = Number(p.price)||0;
+      const pr = _splPrices.find(x=>x.snf_name===p.name);
+      const taxPct = Number(pr?.tax_pct)||0;
+      const priceWithTax = taxPct>0 ? +(price*(1+taxPct/100)).toFixed(2) : price;
+      return {name:p.name, price, taxPct, priceWithTax};
+    }).sort((a,b)=>a.name.localeCompare(b.name,'ar'));
   }
   const pct = Number(pl.discount_pct)||0;
   return _splProducts.map(p=>{
     const pr = _splPrices.find(x=>x.snf_name===p.name);
     if(!pr || pr.price==null) return null;
     const base = Number(pr.price);
-    return {name:p.name, basePrice:base, discountPct:pct, price:+(base*(1-pct/100)).toFixed(2)};
+    const taxPct = Number(pr.tax_pct)||0;
+    const priceAfterDisc = +(base*(1-pct/100)).toFixed(2);
+    const priceWithTax = taxPct>0 ? +(priceAfterDisc*(1+taxPct/100)).toFixed(2) : priceAfterDisc;
+    return {name:p.name, basePrice:base, discountPct:pct, price:priceAfterDisc, taxPct, priceWithTax};
   }).filter(Boolean).sort((a,b)=>a.name.localeCompare(b.name,'ar'));
 }
 
@@ -26398,22 +26409,24 @@ function splExportMemberExcel(member, listName, type, rows){
     border:{top:{style:'thin',color:{rgb:'D9D0C0'}}, bottom:{style:'thin',color:{rgb:'D9D0C0'}}, left:{style:'thin',color:{rgb:'D9D0C0'}}, right:{style:'thin',color:{rgb:'D9D0C0'}}},
   });
   const isDisc = type==='discount';
-  const headers = isDisc ? ['#','الصنف','السعر الأساسي','نسبة الخصم','السعر بعد الخصم'] : ['#','الصنف','السعر'];
+  const headers = isDisc
+    ? ['#','الصنف','السعر الأساسي','نسبة الخصم','السعر بعد الخصم','الضريبة','السعر شامل الضريبة']
+    : ['#','الصنف','السعر','الضريبة','السعر شامل الضريبة'];
   const colCount = headers.length;
   const aoa = [
     [`قائمة أسعار العميل: ${member}`, ...Array(colCount-1).fill('')],
     [`${listName} — الطحان جولدن دايتس — ${new Date().toLocaleString('ar-EG')} — ${rows.length} صنف`, ...Array(colCount-1).fill('')],
     headers,
     ...rows.map((r,i)=> isDisc
-      ? [i+1, r.name, r.basePrice, r.discountPct+'%', r.price]
-      : [i+1, r.name, r.price]),
+      ? [i+1, r.name, r.basePrice, r.discountPct+'%', r.price, r.taxPct>0?r.taxPct+'%':'—', r.priceWithTax]
+      : [i+1, r.name, r.price, r.taxPct>0?r.taxPct+'%':'—', r.priceWithTax]),
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [
     {s:{r:0,c:0}, e:{r:0,c:colCount-1}},
     {s:{r:1,c:0}, e:{r:1,c:colCount-1}},
   ];
-  ws['!cols'] = isDisc ? [{wch:6},{wch:40},{wch:14},{wch:12},{wch:16}] : [{wch:6},{wch:44},{wch:14}];
+  ws['!cols'] = isDisc ? [{wch:6},{wch:40},{wch:14},{wch:12},{wch:16},{wch:12},{wch:18}] : [{wch:6},{wch:44},{wch:14},{wch:12},{wch:18}];
   for(let c=0;c<colCount;c++){
     const t = XLSX.utils.encode_cell({r:0,c});
     if(ws[t]) ws[t].s = S(CARAMEL, CREAM, true, 14, true);
@@ -26444,16 +26457,20 @@ function splExportMemberPDF(member, listName, type, rows){
       <td style="padding:6px 8px;font-weight:700;font-size:12px">${r.name}</td>
       <td style="padding:6px 8px;text-align:center;font-size:11px">${r.basePrice}</td>
       <td style="padding:6px 8px;text-align:center;font-size:11px">${r.discountPct}%</td>
-      <td style="padding:6px 8px;text-align:center;font-size:11px;font-weight:700;color:${C.caramel}">${r.price}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px">${r.price}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px">${r.taxPct>0?r.taxPct+'%':'—'}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px;font-weight:700;color:${C.caramel}">${r.priceWithTax}</td>
     </tr>` : `
     <tr style="${i%2===1?'background:'+C.light:''}">
       <td style="padding:6px 8px;font-size:10.5px;color:#888">${i+1}</td>
       <td style="padding:6px 8px;font-weight:700;font-size:12px">${r.name}</td>
-      <td style="padding:6px 8px;text-align:center;font-size:11px;font-weight:700;color:${C.caramel}">${r.price}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px">${r.price}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px">${r.taxPct>0?r.taxPct+'%':'—'}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px;font-weight:700;color:${C.caramel}">${r.priceWithTax}</td>
     </tr>`).join('');
   const headCells = isDisc
-    ? `<th>#</th><th>الصنف</th><th style="text-align:center">السعر الأساسي</th><th style="text-align:center">نسبة الخصم</th><th style="text-align:center">السعر بعد الخصم</th>`
-    : `<th>#</th><th>الصنف</th><th style="text-align:center">السعر</th>`;
+    ? `<th>#</th><th>الصنف</th><th style="text-align:center">السعر الأساسي</th><th style="text-align:center">نسبة الخصم</th><th style="text-align:center">السعر بعد الخصم</th><th style="text-align:center">الضريبة</th><th style="text-align:center">السعر شامل الضريبة</th>`
+    : `<th>#</th><th>الصنف</th><th style="text-align:center">السعر</th><th style="text-align:center">الضريبة</th><th style="text-align:center">السعر شامل الضريبة</th>`;
 
   const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8"><title>قائمة أسعار ${member}</title>
   <style>
