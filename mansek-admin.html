@@ -15087,7 +15087,10 @@ async function renderLocationMap(){
     if(nogeoEl){ nogeoEl.style.display='none'; nogeoEl.innerHTML=''; }
   }
 
-  if(bounds.length) _locMapInstance.fitBounds(bounds, {padding:[30,30], maxZoom:14});
+  // padding علوي أكبر من الباقي عشان اسم الفرع (permanent tooltip) بيتحط فوق النقطة مباشرة
+  // (direction:'top') - لو الفرع قريب من حافة الخريطة العلوية، الاسم كان بيتقص/يختفي برا حدود
+  // الخريطة. الـ padding الإضافي ده بيضمن مساحة كافية فوق أي نقطة عشان اسمها يفضل ظاهر بالكامل.
+  if(bounds.length) _locMapInstance.fitBounds(bounds, {paddingTopLeft:[30,60], paddingBottomRight:[30,30], maxZoom:14});
 }
 
 // بوب أب أسماء المنسقين لما تضغط على أي من كروت الإحصائيات فوق (إجمالي/حضروا/غائبون/نسبة الحضور)
@@ -19566,6 +19569,32 @@ let _blMapInstance = null;
 let _blMarker = null;
 let _blCtx = null; // {id, branch_name}
 
+// المسافة بالمتر بين نقطتين (خط طول/عرض) - معادلة Haversine القياسية
+function blHaversineMeters(lat1, lng1, lat2, lng2){
+  const R = 6371000;
+  const toRad = x => x * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// بيطابق مجموعة نقط لوكيشن مع بعض ويلاقي أكبر مجموعة نقط قريبة من بعض (جوه thresholdMeters)،
+// عشان نقدر نستبعد أي نقطة شاذة/بعيدة (زي تسجيل حضور غلط من مكان تاني) قبل ما نحسب المتوسط،
+// بدل ما نديها نفس وزن باقي النقط الصحيحة ونسحب الاقتراح للمكان الغلط.
+function blFindBestLocationCluster(points, thresholdMeters){
+  if(points.length<=1) return {points, center: points[0] || {lat:0,lng:0}};
+  let best = [];
+  points.forEach(p=>{
+    const neighbors = points.filter(q=>blHaversineMeters(p.lat,p.lng,q.lat,q.lng) <= thresholdMeters);
+    if(neighbors.length > best.length) best = neighbors;
+  });
+  const center = {
+    lat: best.reduce((s,x)=>s+x.lat,0) / best.length,
+    lng: best.reduce((s,x)=>s+x.lng,0) / best.length,
+  };
+  return {points: best, center};
+}
+
 async function openBranchLocationModal(b){
   _blCtx = { id:b.id, branch_name:b.branch_name };
   document.getElementById('bl-branch-name').textContent = '📍 '+(b.branch_name||'—');
@@ -19598,15 +19627,23 @@ async function openBranchLocationModal(b){
       const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
       const rv = await fetch(`${SUPABASE_URL}/rest/v1/visits?select=lat,lng&branch=eq.${encodeURIComponent(b.branch_name)}&limit=500&order=created_at.desc`, {headers:H});
       const visitPts = (rv.ok ? await rv.json() : [])
-        .filter(v=>v.lat && v.lng && !isNaN(Number(v.lat)) && !isNaN(Number(v.lng)));
+        .filter(v=>v.lat && v.lng && !isNaN(Number(v.lat)) && !isNaN(Number(v.lng)))
+        .map(v=>({lat:Number(v.lat), lng:Number(v.lng)}));
       if(visitPts.length){
-        startLat = visitPts.reduce((s,x)=>s+Number(x.lat),0)/visitPts.length;
-        startLng = visitPts.reduce((s,x)=>s+Number(x.lng),0)/visitPts.length;
+        // بدل ما نعمل متوسط كل النقط على طول (لو فيه زيارة واحدة بإحداثيات غلط، المتوسط بينسحب
+        // للمكان الغلط ده)، بنطابق النقط مع بعض ونلاقي أكبر مجموعة نقط قريبة من بعض (جوه 250 متر)،
+        // ونستبعد أي نقطة بعيدة عن الباقي (شاذة/غلط) قبل ما نحسب المتوسط - ده بيديها دقة أعلى بكتير.
+        const cluster = blFindBestLocationCluster(visitPts, 250);
+        startLat = cluster.center.lat;
+        startLng = cluster.center.lng;
         startZoom = 16;
         usedVisitsSuggestion = true;
+        const excluded = visitPts.length - cluster.points.length;
         if(suggestNoteEl){
           suggestNoteEl.style.display='block';
-          suggestNoteEl.textContent = `💡 الدبوس ده اقتراح تلقائي من متوسط لوكيشن ${visitPts.length} زيارة سابقة فعلية على الفرع ده - راجعه وظبطه لو محتاج قبل ما تحفظ.`;
+          suggestNoteEl.textContent = excluded>0
+            ? `💡 الدبوس ده اقتراح تلقائي من متوسط ${cluster.points.length} من أصل ${visitPts.length} زيارة متقاربة على نفس الفرع (استبعدنا ${excluded} زيارة بعيدة/شاذة عن الباقي) - راجعه وظبطه لو محتاج قبل ما تحفظ.`
+            : `💡 الدبوس ده اقتراح تلقائي من متوسط لوكيشن ${visitPts.length} زيارة سابقة فعلية على الفرع ده (كلها متقاربة من بعض) - راجعه وظبطه لو محتاج قبل ما تحفظ.`;
         }
       }
     }catch(e){}
