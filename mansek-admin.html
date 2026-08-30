@@ -26276,8 +26276,16 @@ function splSpecialRender(){
       ? `<span style="background:#FFF3CD;color:#856404;font-weight:800;font-size:14px;padding:3px 12px;border-radius:20px">${pl.discount_pct}%</span>`
       : `<span style="background:#E8F5E9;color:#2E7D32;font-weight:700;padding:3px 10px;border-radius:20px">${(pl.products||[]).length} صنف</span>`;
     const members = isDisc ? (pl.branches||[]) : (pl.clients||[]);
-    const membersCell = members.slice(0,2).map(m=>`<span style="background:#F0F7FF;color:#1565C0;padding:2px 7px;border-radius:10px;font-size:10px;margin:1px 2px;display:inline-block">${m}</span>`).join('')
-      + (members.length>2?`<span style="font-size:10px;color:#666;margin-right:4px">+${members.length-2} أخرى</span>`:'');
+    // كل عضو (فرع/عميل) بقى ليه مربع اختيار - لو اتحدد، بيظهر جنبه زرارين تصدير (Excel/PDF) لقائمة
+    // أصناف وأسعار العضو ده بالظبط (من نفس القائمة دي)، بألوان وهوية الطحان.
+    const membersCell = members.map(m=>`<span style="display:inline-flex;align-items:center;gap:3px;background:#F0F7FF;color:#1565C0;padding:2px 6px;border-radius:10px;font-size:10px;margin:1px 2px">
+        <input type="checkbox" onchange="splMemberToggle(this)" style="width:12px;height:12px;cursor:pointer;accent-color:#1565C0;margin:0"/>
+        <span>${m}</span>
+        <span class="spl-mem-exp" style="display:none;align-items:center;gap:4px;margin-right:2px;border-right:1px solid #C7DBF5;padding-right:5px">
+          <button type="button" class="spl-mem-exp-btn" data-type="${pl._t}" data-id="${pl.id}" data-member="${splEscAttr(m)}" data-fmt="excel" onclick="splExportMemberPriceList(this)" title="تصدير Excel" style="border:none;background:none;color:#2E7D32;cursor:pointer;padding:0;font-size:12px;line-height:1"><i class="ti ti-file-spreadsheet"></i></button>
+          <button type="button" class="spl-mem-exp-btn" data-type="${pl._t}" data-id="${pl.id}" data-member="${splEscAttr(m)}" data-fmt="pdf" onclick="splExportMemberPriceList(this)" title="تصدير PDF" style="border:none;background:none;color:#B91C1C;cursor:pointer;padding:0;font-size:12px;line-height:1"><i class="ti ti-file-type-pdf"></i></button>
+        </span>
+      </span>`).join('');
     return `<tr style="border-bottom:1px solid var(--border);${i%2===0?'':'background:#FDFAF5'}">
       <td style="padding:10px 14px;font-weight:700;font-size:13px">${pl.name}</td>
       <td style="padding:10px;text-align:center">${typeBadge}</td>
@@ -26296,6 +26304,158 @@ function splSpecialRender(){
       </td>
     </tr>`;
   }).join('');
+}
+
+// بيهرب أي نص هيتحط جوه attribute من نوع "..." في HTML (زي اسم عميل فيه علامة اقتباس)
+function splEscAttr(s){
+  return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// إظهار/إخفاء زراير تصدير Excel/PDF جنب اسم العضو (فرع/عميل) لما تحدد/تلغي مربع الاختيار بتاعه
+function splMemberToggle(cb){
+  const wrap = cb.parentElement;
+  const expBox = wrap ? wrap.querySelector('.spl-mem-exp') : null;
+  if(expBox) expBox.style.display = cb.checked ? 'inline-flex' : 'none';
+}
+
+function splFindListById(type, id){
+  const arr = type==='discount' ? _splSpecialLists : _splClientLists;
+  return arr.find(p=>String(p.id)===String(id));
+}
+
+// بيبني صفوف "الصنف + السعر" الجاهزة للتصدير لعضو معين جوه قائمة معينة:
+// - قوائم "أسعار خاصة": الأصناف والأسعار المخصصة مسجلة جاهزة جوه القائمة نفسها (pl.products).
+// - قوائم "خصم %": مفيش أصناف مسجلة جوه القائمة (بس نسبة خصم عامة)، فبنجيب كل أصناف الكتالوج
+//   الأساسي (_splProducts) مع سعرها الأساسي (_splPrices) ونطرح منه نسبة الخصم لكل صنف.
+function splBuildMemberPriceRows(type, pl){
+  if(type==='prices'){
+    return (pl.products||[]).map(p=>({name:p.name, price:Number(p.price)||0}))
+      .sort((a,b)=>a.name.localeCompare(b.name,'ar'));
+  }
+  const pct = Number(pl.discount_pct)||0;
+  return _splProducts.map(p=>{
+    const pr = _splPrices.find(x=>x.snf_name===p.name);
+    if(!pr || pr.price==null) return null;
+    const base = Number(pr.price);
+    return {name:p.name, basePrice:base, discountPct:pct, price:+(base*(1-pct/100)).toFixed(2)};
+  }).filter(Boolean).sort((a,b)=>a.name.localeCompare(b.name,'ar'));
+}
+
+function splExportMemberPriceList(btn){
+  const type = btn.dataset.type, id = btn.dataset.id, member = btn.dataset.member, fmt = btn.dataset.fmt;
+  const pl = splFindListById(type, id);
+  if(!pl){ alert('تعذر العثور على القائمة'); return; }
+  const rows = splBuildMemberPriceRows(type, pl);
+  if(!rows.length){ alert('مفيش أصناف بسعر متاح للتصدير في القائمة دي - تأكد إن كتالوج الأصناف والأسعار الأساسي محمّل.'); return; }
+  if(fmt==='excel') splExportMemberExcel(member, pl.name, type, rows);
+  else splExportMemberPDF(member, pl.name, type, rows);
+}
+
+function splExportMemberExcel(member, listName, type, rows){
+  if(typeof XLSX === 'undefined'){ showToast('جاري تحميل مكتبة الإكسيل - حاول تاني بعد ثانية', 'info'); return; }
+  const DARK='2C1F0A', CARAMEL='4B3C1A', CREAM='EDE5D8', WHITE='FFFFFF';
+  const S = (bg,fc,bold,sz,right) => ({
+    fill:{fgColor:{rgb:bg}},
+    font:{bold:bold||false, color:{rgb:fc||DARK}, sz:sz||11, name:'Cairo'},
+    alignment:{horizontal:right?'right':'center', vertical:'center', wrapText:true, readingOrder:2},
+    border:{top:{style:'thin',color:{rgb:'D9D0C0'}}, bottom:{style:'thin',color:{rgb:'D9D0C0'}}, left:{style:'thin',color:{rgb:'D9D0C0'}}, right:{style:'thin',color:{rgb:'D9D0C0'}}},
+  });
+  const isDisc = type==='discount';
+  const headers = isDisc ? ['#','الصنف','السعر الأساسي','نسبة الخصم','السعر بعد الخصم'] : ['#','الصنف','السعر'];
+  const colCount = headers.length;
+  const aoa = [
+    [`قائمة أسعار العميل: ${member}`, ...Array(colCount-1).fill('')],
+    [`${listName} — الطحان جولدن دايتس — ${new Date().toLocaleString('ar-EG')} — ${rows.length} صنف`, ...Array(colCount-1).fill('')],
+    headers,
+    ...rows.map((r,i)=> isDisc
+      ? [i+1, r.name, r.basePrice, r.discountPct+'%', r.price]
+      : [i+1, r.name, r.price]),
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [
+    {s:{r:0,c:0}, e:{r:0,c:colCount-1}},
+    {s:{r:1,c:0}, e:{r:1,c:colCount-1}},
+  ];
+  ws['!cols'] = isDisc ? [{wch:6},{wch:40},{wch:14},{wch:12},{wch:16}] : [{wch:6},{wch:44},{wch:14}];
+  for(let c=0;c<colCount;c++){
+    const t = XLSX.utils.encode_cell({r:0,c});
+    if(ws[t]) ws[t].s = S(CARAMEL, CREAM, true, 14, true);
+    const s = XLSX.utils.encode_cell({r:1,c});
+    if(ws[s]) ws[s].s = S(CREAM, CARAMEL, false, 10, true);
+    const h = XLSX.utils.encode_cell({r:2,c});
+    if(ws[h]) ws[h].s = S(CARAMEL, CREAM, true, 11);
+  }
+  rows.forEach((r,i)=>{
+    const rIdx = 3+i;
+    for(let c=0;c<colCount;c++){
+      const cell = XLSX.utils.encode_cell({r:rIdx,c});
+      if(ws[cell]) ws[cell].s = S(i%2===1?'F5F0E8':WHITE, DARK, c===1, 10.5, c===1);
+    }
+  });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'قائمة الأسعار');
+  XLSX.writeFile(wb, `اسعار_${member}.xlsx`);
+}
+
+function splExportMemberPDF(member, listName, type, rows){
+  const C = {dark:'#2C1F0A', caramel:'#4B3C1A', gold:'#C8A96E', cream:'#EDE5D8', light:'#F5F0E8'};
+  const now = new Date().toLocaleString('ar-EG');
+  const isDisc = type==='discount';
+  const tableRows = rows.map((r,i)=> isDisc ? `
+    <tr style="${i%2===1?'background:'+C.light:''}">
+      <td style="padding:6px 8px;font-size:10.5px;color:#888">${i+1}</td>
+      <td style="padding:6px 8px;font-weight:700;font-size:12px">${r.name}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px">${r.basePrice}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px">${r.discountPct}%</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px;font-weight:700;color:${C.caramel}">${r.price}</td>
+    </tr>` : `
+    <tr style="${i%2===1?'background:'+C.light:''}">
+      <td style="padding:6px 8px;font-size:10.5px;color:#888">${i+1}</td>
+      <td style="padding:6px 8px;font-weight:700;font-size:12px">${r.name}</td>
+      <td style="padding:6px 8px;text-align:center;font-size:11px;font-weight:700;color:${C.caramel}">${r.price}</td>
+    </tr>`).join('');
+  const headCells = isDisc
+    ? `<th>#</th><th>الصنف</th><th style="text-align:center">السعر الأساسي</th><th style="text-align:center">نسبة الخصم</th><th style="text-align:center">السعر بعد الخصم</th>`
+    : `<th>#</th><th>الصنف</th><th style="text-align:center">السعر</th>`;
+
+  const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8"><title>قائمة أسعار ${member}</title>
+  <style>
+    *{box-sizing:border-box}
+    body{font-family:Arial,sans-serif;font-size:13px;direction:rtl;margin:0;padding:18px;background:#fff;color:${C.dark}}
+    .header{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,${C.caramel},${C.dark});color:${C.cream};padding:16px 22px;border-radius:12px;margin-bottom:16px}
+    .header-title{font-size:19px;font-weight:800}
+    .header-sub{font-size:12px;opacity:.85;margin-top:3px}
+    .logo{height:56px;background:#fff;border-radius:8px;padding:4px}
+    .info-bar{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+    .info-bar span{background:${C.light};border:1px solid ${C.gold};color:${C.caramel};padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700}
+    table{width:100%;border-collapse:collapse}
+    th{background:${C.caramel};color:${C.cream};padding:8px;text-align:right;font-size:11px}
+    td{border-bottom:0.5px solid #e5e7eb}
+    @media print{body{padding:0}}
+  </style></head><body>
+  <div class="header">
+    <div>
+      <div class="header-title">💲 قائمة أسعار عميل: ${member}</div>
+      <div class="header-sub">الطحان جولدن دايتس — ${listName}</div>
+    </div>
+    <img class="logo" src="data:image/jpeg;base64,${AT_LOGO_B64.split(',')[1]}" alt="Al Tahhan Golden Dates"/>
+  </div>
+  <div class="info-bar">
+    <span>🕐 ${now}</span>
+    <span>📦 ${rows.length} صنف</span>
+  </div>
+  <table>
+    <thead><tr>${headCells}</tr></thead>
+    <tbody>${tableRows}</tbody>
+  </table>
+  <${'script'}>window.onload=()=>window.print();</${'script'}>
+  </body></html>`;
+
+  const blob = new Blob([html], {type:'text/html;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const w = window.open(url, '_blank');
+  if(!w){ const a=document.createElement('a'); a.href=url; a.download=`اسعار_${member}.html`; a.click(); }
+  setTimeout(()=>URL.revokeObjectURL(url), 30000);
 }
 
 async function splSpecialSave(){
