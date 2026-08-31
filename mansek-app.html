@@ -6643,6 +6643,59 @@ window.addEventListener('DOMContentLoaded', () => {
   updateQueueBadge();
   setTimeout(flushOQ, 3000);
 
+  // مزامنة خط السير/المجموعة الفعلية من Supabase في الخلفية بعد استعادة الجلسة المحفوظة —
+  // بدون بلوكينج فتح التطبيق. لو خط السير اتغيّر (تعديل فوري من لوحة التحكم، أو نقل مجدول
+  // اتنفذ تلقائيًا بكرون يومي) وهو مسجل دخول بالفعل، الدالة دي بتحدّث الجلسة المحلية وقايمة
+  // الفروع المعروضة فورًا من غير ما يحتاج يعمل تسجيل خروج/دخول يدوي.
+  async function syncRouteInBackground(savedSession){
+    try{
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(savedSession.name)}&role=eq.rep&select=route,grp,user_type,fixed_branch,status&limit=1`,
+        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+      );
+      if(!res.ok) return;
+      const data = await res.json();
+      const u = Array.isArray(data) ? data[0] : null;
+      if(!u || u.status==='inactive') return;
+
+      const newRoute = u.route||'';
+      const newGroup = u.grp||'';
+      const newType  = u.user_type||'متحرك';
+      const newFixedBranch = u.fixed_branch||'';
+      const changed = newRoute!==cu.route || newGroup!==cu.group || newType!==cu.coordType || newFixedBranch!==cu.fixedBranch;
+      if(!changed) return;
+
+      cu.route = newRoute; cu.group = newGroup; cu.coordType = newType; cu.fixedBranch = newFixedBranch;
+      try{
+        const raw = localStorage.getItem('cu_session') || sessionStorage.getItem('cu_session');
+        if(raw){
+          const s2 = JSON.parse(raw);
+          s2.route = newRoute; s2.group = newGroup; s2.coordType = newType; s2.fixedBranch = newFixedBranch;
+          localStorage.setItem('cu_session', JSON.stringify(s2));
+        }
+      }catch(e){}
+
+      // حدّث قايمة الفروع المعروضة على خط السير الجديد
+      if(typeof popBranches==='function') popBranches(newRoute);
+
+      // حدّث بانر المنسق الثابت لو نوعه أو فرعه اتغير
+      const fbWrap = document.getElementById('fixed-banner-wrap');
+      const feWrap = document.getElementById('fixed-extra-wrap');
+      if(isFixedRep(newType)){
+        if(fbWrap) fbWrap.style.display='block';
+        const _bLabel = newType==='ثابت كبار عملاء' ? 'منسق ثابت كبار عملاء' : 'منسق ثابت';
+        const fbText = document.getElementById('fixed-banner-text');
+        if(fbText) fbText.textContent=_bLabel+' — '+(newFixedBranch||newRoute)+' 🏪';
+        if(feWrap) feWrap.style.display='block';
+      } else {
+        if(fbWrap) fbWrap.style.display='none';
+        if(feWrap) feWrap.style.display='none';
+      }
+
+      if(typeof showToastPWA==='function') showToastPWA('🔄 تم تحديث خط سيرك إلى: '+(newRoute||'—'));
+    }catch(e){ console.warn('syncRouteInBackground error:', e); }
+  }
+
   // استعادة حالة الزيارة الحالية (الفرع + الحضور/الانصراف) — مستقلة تماماً
   // عن باقي خطوات استعادة الجلسة، عشان أي خطأ في سطر تاني ميوقفهاش
   function restoreVisitStateIndependently(){
@@ -6715,6 +6768,12 @@ window.addEventListener('DOMContentLoaded', () => {
         restoreShiftTimer();
       }
       loadRepsFromCloud();
+
+      // مزامنة خط السير/المجموعة الفعلية مع Supabase في الخلفية (من غير ما توقف فتح التطبيق) —
+      // الجلسة المحفوظة فوق بتفضل زي ما هي لحد ما المنسق يعمل تسجيل خروج/دخول يدوي، فلو حصل تغيير
+      // خط سير (فوري من لوحة التحكم، أو نقل مجدول اتنفذ تلقائي) وهو مسجل دخول بالفعل، مكانش
+      // هيوصله أبداً من غير الدالة دي
+      syncRouteInBackground(s);
 
       // شبكة أمان: لو لأي سبب الـ callbacks فوق ما اتنفذتش (مثلاً fetch مش بيرجع promise)
       setTimeout(restoreVisitStateIndependently, 2000);
