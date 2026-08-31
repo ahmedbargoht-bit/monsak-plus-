@@ -3142,7 +3142,9 @@ async function runMissingStepsCheck(){
         أصناف    : prodSet.has(v.id) || prodSet.has(fallKey),
         مرتجعات  : retSet.has(v.id)  || retSet.has(fallKey),
         نواقص    : missSet.has(v.id)  || missSet.has(fallKey),
-        انصراف   : !!v.time_out,
+        // "--" قيمة نصية ثابتة بيسجّلها التطبيق لما المنسق ميعملش انصراف حقيقي — مش فاضية، فلازم
+        // نستبعدها صراحةً وإلا هتتحسب "انصراف = تم" غلط لكل زيارة (زي باقي أماكن الكود في الملفات التانية)
+        انصراف   : !!(v.time_out && v.time_out!=='--'),
       });
     });
 
@@ -3542,7 +3544,8 @@ async function loadRepDetail(){
             {k:'أصناف',  ok:prods>0},
             {k:'مرتجعات',ok:rets>0},
             {k:'نواقص',  ok:miss>0},
-            {k:'انصراف', ok:!!v.time_out},
+            // "--" قيمة نصية ثابتة لما المنسق ميعملش انصراف حقيقي — مش فاضية، فلازم نستبعدها صراحةً
+            {k:'انصراف', ok:!!(v.time_out && v.time_out!=='--')},
           ];
           const allOk = steps.every(s=>s.ok);
           const stepsHTML = steps.map(s=>`
@@ -5152,7 +5155,22 @@ function updateRepSelection(){
   });
 }
 
+let _addPlanItemBusy = false;
 async function addPlanItem(){
+  // حماية من الحفظ المزدوج (دبل كليك أو ضغط سريع مرتين) اللي كان بيسبب تكرار الفروع في الخطة
+  if(_addPlanItemBusy) return;
+  _addPlanItemBusy = true;
+  const confirmBtn = document.querySelector('#modal-plan-item .btn-confirm');
+  if(confirmBtn) confirmBtn.disabled = true;
+  try{
+    await addPlanItemInner();
+  } finally {
+    _addPlanItemBusy = false;
+    if(confirmBtn) confirmBtn.disabled = false;
+  }
+}
+
+async function addPlanItemInner(){
   // قراءة المنسقين المختارين من الـ checkboxes
   const selectedReps = [...document.querySelectorAll('#pi-rep-checkboxes input:checked')].map(i=>i.value);
   const goal        = document.getElementById('pi-goal').value.trim();
@@ -5188,11 +5206,27 @@ async function addPlanItem(){
   const grp   = _allBranchesCache.find(b=>selectedRoutes.includes(b.route))?.grp || cu.groups[0];
   const route = selectedRoutes.join('، ');
 
+  // حماية إضافية: تأكد إن الفرع مش متسجل قبل كده لنفس اليوم في نفس الخطة قبل الحفظ
+  // (لتفادي تكرار الفروع لو الدالة اتنفذت أكتر من مرة لأي سبب)
+  let existingBranches = new Set();
+  try{
+    const existRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/plan_branches?plan_id=eq.${currentPlan.id}&visit_date=eq.${_addingDay.date}&select=branch_name`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
+    );
+    if(existRes.ok){
+      const rows = await existRes.json().catch(()=>[]);
+      (Array.isArray(rows)?rows:[]).forEach(r=>{ if(r.branch_name) existingBranches.add(r.branch_name); });
+    }
+  }catch(e){ console.error('addPlanItem existing-check error:', e); }
+  const skippedBranches = selectedBranches.filter(b=>existingBranches.has(b));
+  const branchesToAdd   = selectedBranches.filter(b=>!existingBranches.has(b));
+
   // أضف زيارة لكل فرع محدد
   let addedCount = 0;
   let failCount  = 0;
 
-  for(const branch of selectedBranches){
+  for(const branch of branchesToAdd){
     try{
       const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches`,{
         method:'POST',
@@ -5249,6 +5283,9 @@ async function addPlanItem(){
   }
   if(failCount > 0){
     showToast(`❌ فشل حفظ ${failCount} زيارة — تحقق من الاتصال`);
+  }
+  if(skippedBranches.length > 0){
+    showToast(`ℹ️ ${skippedBranches.length} فرع كان متسجل مسبقًا لنفس اليوم فاتجاهله (منع تكرار)`);
   }
 }
 
