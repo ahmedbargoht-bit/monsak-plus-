@@ -32,6 +32,9 @@
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css"/>
 <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<!-- Leaflet — خريطة فروع خطوط السير -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 :root{
   /* ══ هوية تمور الطحان — العنابي + الكراميل (مستمدة من اللوجو) ══ */
@@ -453,6 +456,9 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 .geo-badge-outside { background:#731E2E22; color:#731E2E; border:1px solid #731E2E55; border-radius:20px; padding:2px 8px; font-size:10px; font-weight:700; }
 /* Plan status pills */
 .hier-status-pill.submitted { background:rgba(197,91,72,.2); color:#F5B8A0; border:1.5px solid rgba(197,91,72,.4); }
+/* تسمية اسم الفرع الدائمة فوق دبوس الخريطة — خطوط السير */
+.branch-name-label{font-family:Cairo,sans-serif;font-size:10px;font-weight:700;color:#0F6E56;background:#fff;border:1px solid #1A7A4A;padding:1px 6px;border-radius:5px}
+.branch-name-label::before{display:none}
 </style>
 </head>
 <body>
@@ -1775,12 +1781,18 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     <!-- ══ خطوط السير وفروعها ══ -->
     <div class="screen" id="screen-route-branches">
       <div class="card">
+        <div class="card-title"><i class="ti ti-map-pin" style="color:#1A7A4A"></i> خريطة الفروع</div>
+        <div id="rb-map-el" style="height:280px;border-radius:10px;border:1px solid var(--border)"></div>
+        <div id="rb-map-empty" style="display:none;margin-top:8px;font-size:11px;color:var(--text2);text-align:center">لا توجد فروع محدد لها موقع (لوكيشن) على الخط/المجموعة دي حاليًا</div>
+      </div>
+
+      <div class="card">
         <div class="card-title"><i class="ti ti-route" style="color:#4B3C1A"></i> خطوط السير وفروعها</div>
         <div style="font-size:12px;color:var(--text2);margin-bottom:10px">كل خط سير مع فروعه، وحالة تحديد الموقع (لوكيشن) لكل فرع</div>
 
         <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
           <select id="rb-group" onchange="loadRouteBranches()" class="filter-select" style="flex:1;min-width:150px"></select>
-          <select id="rb-route" onchange="rbRenderList()" class="filter-select" style="flex:1;min-width:150px">
+          <select id="rb-route" onchange="rbRenderList();rbRenderMap();" class="filter-select" style="flex:1;min-width:150px">
             <option value="all">كل خطوط السير</option>
           </select>
           <button onclick="loadRouteBranches()" style="padding:8px 12px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">
@@ -10038,8 +10050,83 @@ async function loadRouteBranches(){
     _rbAllData = results;
     rbFillRouteSelect();
     rbRenderList();
+    rbRenderMap();
   }catch(e){
     listEl.innerHTML = '<div class="empty">تعذّر تحميل خطوط السير — تحقق من الاتصال</div>';
+  }
+}
+
+// ══ خريطة فروع خط السير (Leaflet) — دبوس أخضر لكل فرع محدد الموقع + حدود تقريبية حوالين فروع كل خط ══
+let _rbMapInstance = null;
+let _rbMapMarkersLayer = null;
+let _rbMapHullLayer = null;
+const RB_ROUTE_COLORS = ['#1A7A4A','#378ADD','#D97706','#B91C1C','#7C3AED','#DB2777','#0D9488','#EA580C','#4338CA','#0891B2'];
+
+// حساب "الغلاف المحدّب" (convex hull) لمجموعة نقط — بيرجع أصغر مضلّع بيحيط بكل النقط، مستخدم لرسم
+// حدود تقريبية حوالين فروع خط سير معين على الخريطة. خوارزمية Andrew's monotone chain القياسية
+// (نفس الدالة المستخدمة في لوحة التحكم — mansek-admin.html).
+function convexHull(points){
+  const pts = points.slice().sort((a,b)=> a[0]===b[0] ? a[1]-b[1] : a[0]-b[0]);
+  if(pts.length<3) return pts;
+  const cross=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const lower=[];
+  for(const p of pts){
+    while(lower.length>=2 && cross(lower[lower.length-2],lower[lower.length-1],p)<=0) lower.pop();
+    lower.push(p);
+  }
+  const upper=[];
+  for(let i=pts.length-1;i>=0;i--){
+    const p=pts[i];
+    while(upper.length>=2 && cross(upper[upper.length-2],upper[upper.length-1],p)<=0) upper.pop();
+    upper.push(p);
+  }
+  lower.pop(); upper.pop();
+  return lower.concat(upper);
+}
+
+function rbRenderMap(){
+  const mapEl = document.getElementById('rb-map-el');
+  if(!mapEl || typeof L==='undefined') return;
+
+  if(!_rbMapInstance){
+    _rbMapInstance = L.map('rb-map-el').setView([30.0444, 31.2357], 10);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap', maxZoom: 19
+    }).addTo(_rbMapInstance);
+    _rbMapMarkersLayer = L.layerGroup().addTo(_rbMapInstance);
+    _rbMapHullLayer = L.layerGroup().addTo(_rbMapInstance);
+  }
+  setTimeout(()=>{ try{ _rbMapInstance.invalidateSize(); }catch(e){} }, 80);
+
+  _rbMapMarkersLayer.clearLayers();
+  _rbMapHullLayer.clearLayers();
+
+  const data = rbGetFiltered();
+  const bounds = [];
+  data.forEach((rt,i)=>{
+    const color = RB_ROUTE_COLORS[i % RB_ROUTE_COLORS.length];
+    const withGeo = (rt.branches||[]).filter(b=>b.lat&&b.lng);
+    withGeo.forEach(b=>{
+      const lat = Number(b.lat), lng = Number(b.lng);
+      const marker = L.circleMarker([lat,lng], {radius:8, color:'#fff', weight:2, fillColor:color, fillOpacity:1}).addTo(_rbMapMarkersLayer);
+      marker.bindTooltip((b.branch_name||'—'), {permanent:true, direction:'top', offset:[0,-6], className:'branch-name-label'});
+      const safeName = (b.branch_name||'—').replace(/</g,'&lt;');
+      marker.bindPopup(`<div style="font-family:Cairo,sans-serif;text-align:right;min-width:140px"><b>${safeName}</b><br><span style="font-size:11px;color:${color}">خط سير ${rt.route}</span></div>`);
+      bounds.push([lat,lng]);
+    });
+    if(withGeo.length>=3){
+      const hull = convexHull(withGeo.map(b=>[Number(b.lat),Number(b.lng)]));
+      L.polygon(hull, {color, weight:2, dashArray:'6,4', fillColor:color, fillOpacity:0.1}).addTo(_rbMapHullLayer);
+    }
+  });
+
+  const emptyEl = document.getElementById('rb-map-empty');
+  if(bounds.length){
+    if(emptyEl) emptyEl.style.display = 'none';
+    mapEl.style.display = '';
+    try{ _rbMapInstance.fitBounds(bounds, {paddingTopLeft:[30,60], paddingBottomRight:[30,30], maxZoom:14}); }catch(e){}
+  } else {
+    if(emptyEl) emptyEl.style.display = 'block';
   }
 }
 
