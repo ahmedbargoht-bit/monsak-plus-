@@ -448,6 +448,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       <div class="tabgroup" data-maintab="items-branches" style="display:none">
         <button class="tabbtn" data-tab="panel-items" data-label="الأصناف"><i class="ti ti-package" aria-hidden="true"></i><span>الأصناف</span></button>
         <button class="tabbtn" data-tab="panel-itemmerge" data-label="دمج الأصناف"><i class="ti ti-git-merge" aria-hidden="true"></i><span>دمج الأصناف</span></button>
+        <button class="tabbtn" data-tab="panel-itemplan" data-label="خطة الأصناف"><i class="ti ti-target-arrow" aria-hidden="true"></i><span>خطة الأصناف</span></button>
         <div class="tabgroup-cap">الأصناف</div>
       </div>
       <div class="tabgroup" data-maintab="items-branches" style="display:none">
@@ -493,6 +494,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       <div class="tabpanel active" id="panel-overview"></div>
       <div class="tabpanel" id="panel-items"></div>
       <div class="tabpanel" id="panel-itemmerge"></div>
+      <div class="tabpanel" id="panel-itemplan"></div>
       <div class="tabpanel" id="panel-branches"></div>
       <div class="tabpanel" id="panel-customers"></div>
       <div class="tabpanel" id="panel-reps"></div>
@@ -1089,6 +1091,7 @@ table.datatable details summary:hover { text-decoration: underline; }
     dueCollectionsFilter: { year: null, month: null },  // تاب "التحصيلات المستحقة خلال الشهر" - year/month فاضيين = الشهر الحالي الفعلي (تاريخ اليوم)
     itemAliases: new Map(),  // اسم الصنف القديم (منظم) -> الاسم الموحد الجديد بعد الدمج - تاب "دمج الأصناف" (tamr_sales_item_merges)
     itemMergeSelection: [],  // الأصناف المختارة حاليًا للدمج في تاب "دمج الأصناف" (مصفوفة أسماء أصناف - بيانات واجهة مؤقتة، مش محفوظة بالسحابة)
+    itemPlan: { targetYear: null, targetMonth: null, refYear: null, refMonth: null, targetAmount: null, notes: '', savedRow: null, __loadedFor: null, __loading: false },  // تاب "خطة الأصناف" - هدف مبيعات شهري إجمالي بيتوزع على الأصناف حسب نسبة كل صنف من مسحوبات فترة مرجعية يختارها اليوزر يدويًا، وبيتحول نصيب كل صنف لعدد كراتين هدف حسب آخر سعر كرتونة فعلي بيع بيه الصنف (من كل بيانات النظام). محفوظة في جدول mt_item_plans (unique على target_year+target_month)
     customerSearchFilter: '',  // مربع بحث بالاسم في جدول "كل العملاء" (تاب العملاء) - بيضيّق الجدول لعميل/عملاء معينين
     coordBranches: null,  // مصفوفة {branchName, route} من جدول "branches" الحي (تاب "الفروع والعملاء" في لوحة التحكم) - بتتحمل مرة واحدة بس وتتستخدم لاقتراح خط سير تلقائي لعملاء "ربط خطوط السير" الناقصين
     coordBranchesLoading: false,
@@ -5089,6 +5092,7 @@ table.datatable details summary:hover { text-decoration: underline; }
     'panel-overview': renderOverview,
     'panel-items': renderItems,
     'panel-itemmerge': renderItemMerge,
+    'panel-itemplan': renderItemPlan,
     'panel-branches': renderBranches,
     'panel-customers': renderCustomers,
     'panel-reps': renderReps,
@@ -7036,6 +7040,435 @@ function renderItemMerge() {
     });
   }
 }
+
+/* ---------------- خطة الأصناف ---------------- */
+// بتوزع هدف مبيعات شهري إجمالي (يدخله اليوزر) على الأصناف حسب نسبة كل صنف من "المسحوبات" (صافي فواتير MT)
+// في فترة مرجعية يختارها اليوزر يدويًا في كل مرة (مفيش اقتراح تلقائي) - الفترة المرجعية بتحدد نسبة/توزيع
+// الأصناف بس. تحويل نصيب كل صنف من الهدف (بالقيمة) لعدد كراتين هدف بيتم بآخر سعر كرتونة فعلي بيع بيه الصنف
+// (من آخر فاتورة مسجلة له في كل بيانات النظام، مش بالضرورة من الفترة المرجعية نفسها) - عشان لو الفترة
+// المرجعية قديمة والأسعار اتغيرت، تحويل الجنيه لكراتين يفضل بالسعر الحالي مش بسعر قديم.
+// لما بيانات شهر الهدف نفسه تتوفر (فواتيره اتحمّلت)، بيبان عمود "المحقق الفعلي" جنب كل صنف للمقارنة تلقائيًا.
+// الخطة (شهر الهدف/الفترة المرجعية/القيمة/ملاحظات) محفوظة في جدول mt_item_plans (unique على target_year+target_month).
+
+function itemPlanEnsureDefaults() {
+  const ip = state.itemPlan;
+  const now = new Date();
+  if (!ip.targetYear) ip.targetYear = now.getFullYear();
+  if (!ip.targetMonth) ip.targetMonth = now.getMonth() + 1;
+  if (!ip.refYear) ip.refYear = ip.targetYear;
+  if (!ip.refMonth) ip.refMonth = ip.targetMonth;
+}
+
+// بيجمع صفوف الأصناف (state.itemRows) لسنة/شهر معينين: لكل صنف قيمة إجمالية وعدد كراتين محسوب بنفس منطق
+// التحويل المستخدم في باقي الشاشة (كرتونة + قطع مقسومة على عدد قطع/كرتونة لو الصنف له عدد قطع محدد في الكتالوج)
+function itemPlanGroupPeriod(year, month) {
+  const rows = (year && month) ? state.itemRows.filter(r => r.year === year && r.monthNum === month) : [];
+  const byItem = new Map(); // item -> {value, qtyCarton, qtyPiece, cartons, ppc}
+  rows.forEach(r => {
+    if (!r.item) return;
+    if (!byItem.has(r.item)) byItem.set(r.item, { value: 0, qtyCarton: 0, qtyPiece: 0 });
+    const g = byItem.get(r.item);
+    g.value += r.total || 0;
+    g.qtyCarton += r.qtyCarton || 0;
+    g.qtyPiece += r.qtyPiece || 0;
+  });
+  let totalValue = 0;
+  byItem.forEach((g, item) => {
+    const ppc = resolveItemPiecesPerCarton(item);
+    g.ppc = ppc;
+    g.cartons = ppc ? (g.qtyCarton + g.qtyPiece / ppc) : g.qtyCarton;
+    totalValue += g.value;
+  });
+  return { byItem, totalValue, rowCount: rows.length };
+}
+
+// بيدوّر جوه كل صفوف الأصناف (كل الفترات المتاحة، مش بس الفترة المرجعية) على آخر فاتورة فعلية اتباع بيها
+// كل صنف (بأحدث تاريخ)، ويرجّع سعر الكرتونة بتاعها (أو سعر القطعة × عدد قطع/كرتونة لو سعر الكرتونة نفسه
+// مش مسجل في آخر فاتورة) - ده اللي بيتحول بيه المبلغ المستهدف لعدد كراتين، عشان يبقى بأحدث سعر معروف للصنف.
+function itemPlanLastCartonPriceMap() {
+  const m = new Map(); // item -> {date, priceCarton, pricePiece}
+  state.itemRows.forEach(r => {
+    if (!r.item || !r.date) return;
+    const prev = m.get(r.item);
+    if (!prev || r.date > prev.date) {
+      m.set(r.item, { date: r.date, priceCarton: r.priceCarton || 0, pricePiece: r.pricePiece || 0 });
+    }
+  });
+  return m;
+}
+function itemPlanCurrentCartonPrice(item, lastPriceMap) {
+  const lp = lastPriceMap.get(item);
+  if (!lp) return null;
+  if (lp.priceCarton > 0) return lp.priceCarton;
+  const ppc = resolveItemPiecesPerCarton(item);
+  if (lp.pricePiece > 0 && ppc) return lp.pricePiece * ppc;
+  return null;
+}
+
+// بيحسب توزيع الهدف على كل صنف ظاهر في الفترة المرجعية، مع بيانات "المحقق الفعلي" من فترة الهدف (لو متاحة)
+function itemPlanCompute() {
+  const ip = state.itemPlan;
+  const ref = itemPlanGroupPeriod(ip.refYear, ip.refMonth);
+  const actual = itemPlanGroupPeriod(ip.targetYear, ip.targetMonth);
+  const targetAmount = Number(ip.targetAmount) || 0;
+  const lastPriceMap = itemPlanLastCartonPriceMap();
+
+  const results = Array.from(ref.byItem.entries()).map(([item, g]) => {
+    const share = ref.totalValue ? (g.value / ref.totalValue) : 0;
+    const targetValue = targetAmount ? targetAmount * share : null;
+    const currentCartonPrice = itemPlanCurrentCartonPrice(item, lastPriceMap);
+    const targetCartons = (targetValue != null && currentCartonPrice) ? (targetValue / currentCartonPrice) : null;
+    const a = actual.byItem.get(item);
+    const actualValue = a ? a.value : 0;
+    const actualCartons = a ? a.cartons : 0;
+    const achievedValuePct = (targetValue != null && targetValue > 0) ? (actualValue / targetValue) : null;
+    const achievedCartonsPct = (targetCartons != null && targetCartons > 0) ? (actualCartons / targetCartons) : null;
+    return { item, refValue: g.value, refCartons: g.cartons, share, currentCartonPrice, targetValue, targetCartons, actualValue, actualCartons, achievedValuePct, achievedCartonsPct };
+  });
+  results.sort((a, b) => b.refValue - a.refValue);
+  return { results, ref, actual, targetAmount };
+}
+
+async function loadItemPlan(year, month) {
+  if (!sb) return null;
+  try {
+    const { data, error } = await sb.from('mt_item_plans').select('*').eq('target_year', year).eq('target_month', month).maybeSingle();
+    if (error) throw error;
+    return data || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function saveItemPlan() {
+  if (!sb) { logStatus('محتاج تكون مسجل دخول بالسحابة عشان يتحفظ هدف الأصناف.', 'err'); alert('محتاج تكون مسجل دخول بالسحابة عشان يتحفظ هدف الأصناف.'); return false; }
+  const ip = state.itemPlan;
+  itemPlanEnsureDefaults();
+  const targetAmount = Number(ip.targetAmount);
+  if (!targetAmount || targetAmount <= 0) { alert('اكتب قيمة هدف صحيحة أكبر من صفر الأول.'); return false; }
+  try {
+    const payload = {
+      target_year: ip.targetYear, target_month: ip.targetMonth,
+      ref_year: ip.refYear, ref_month: ip.refMonth,
+      target_amount: targetAmount, notes: (ip.notes || '').trim() || null,
+      updated_at: new Date().toISOString()
+    };
+    const { data, error } = await sb.from('mt_item_plans').upsert([payload], { onConflict: 'target_year,target_month' }).select();
+    if (error) throw error;
+    ip.savedRow = (data && data[0]) || payload;
+    logStatus(`تم حفظ خطة أصناف شهر ${MONTH_NAMES_AR[ip.targetMonth - 1]} ${ip.targetYear} ✓`, 'ok');
+    return true;
+  } catch (e) {
+    logStatus('تعذر حفظ خطة الأصناف: ' + (e.message || e), 'err');
+    alert('تعذر حفظ خطة الأصناف: ' + (e.message || e));
+    return false;
+  }
+}
+
+function itemPlanYearOptions() {
+  const now = new Date();
+  const set = new Set(activeYears(state.itemRows, r => r.year));
+  set.add(now.getFullYear()); set.add(now.getFullYear() + 1);
+  if (state.itemPlan.targetYear) set.add(state.itemPlan.targetYear);
+  if (state.itemPlan.refYear) set.add(state.itemPlan.refYear);
+  return Array.from(set).filter(Boolean).sort((a, b) => a - b);
+}
+
+function itemPlanAchColor(pct) {
+  if (pct == null) return 'var(--ink-soft)';
+  if (pct >= 1) return 'var(--good)';
+  if (pct >= 0.7) return '#A9791F';
+  return 'var(--bad)';
+}
+
+function renderItemPlan() {
+  const el = document.getElementById('panel-itemplan');
+  if (!el) return;
+  if (!state.itemRows.length) { el.innerHTML = emptyState('ارفع ملفات فواتير MT الأول عشان تقدر تبني خطة أصناف.'); return; }
+
+  itemPlanEnsureDefaults();
+  const ip = state.itemPlan;
+  const periodKey = ip.targetYear + '-' + ip.targetMonth;
+  if (ip.__loadedFor !== periodKey && !ip.__loading) {
+    ip.__loading = true;
+    loadItemPlan(ip.targetYear, ip.targetMonth).then(saved => {
+      ip.__loading = false;
+      ip.__loadedFor = periodKey;
+      if (saved) {
+        ip.refYear = saved.ref_year || ip.refYear;
+        ip.refMonth = saved.ref_month || ip.refMonth;
+        ip.targetAmount = saved.target_amount;
+        ip.notes = saved.notes || '';
+        ip.savedRow = saved;
+      } else {
+        ip.savedRow = null;
+        ip.targetAmount = null;
+        ip.notes = '';
+      }
+      renderItemPlan();
+    });
+  }
+
+  const years = itemPlanYearOptions();
+  const yearOptionsHtml = (sel) => years.map(y => `<option value="${y}" ${sel === y ? 'selected' : ''}>${y}</option>`).join('');
+  const monthOptionsHtml = (sel) => MONTH_NAMES_AR.map((m, idx) => `<option value="${idx + 1}" ${sel === idx + 1 ? 'selected' : ''}>${m}</option>`).join('');
+
+  const savedNote = ip.savedRow ? `<span style="color:var(--good); font-weight:700;"><i class="ti ti-check"></i> محفوظة</span>` : `<span style="color:var(--ink-soft);"><i class="ti ti-alert-circle"></i> لسه معملتش حفظ للخطة دي</span>`;
+
+  el.innerHTML = `
+    <div class="hint" style="margin-bottom:12px;">حدد شهر الهدف، واختار شهر مرجعي هتتحسب منه نسبة كل صنف من إجمالي "المسحوبات" (صافي فواتير MT)، وبعدين اكتب قيمة الهدف الإجمالي. الأداة هتوزع الهدف على الأصناف حسب نصيبها في الفترة المرجعية، وتحوّل نصيب كل صنف لعدد كراتين هدف حسب آخر سعر كرتونة فعلي بيع بيه الصنف (من كل بيانات النظام). لما فواتير شهر الهدف نفسه تتوفر، هيبان عمود "المحقق الفعلي" هنا تلقائيًا للمقارنة.</div>
+    <div class="card" style="padding:16px 18px; box-shadow:none; border:1.5px solid var(--sand-dark); margin-bottom:16px;">
+      <div class="table-title" style="margin:0 0 12px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+        <span>إعداد الخطة</span>
+        <span id="ipSavedNote" style="font-size:12.5px;">${savedNote}</span>
+      </div>
+      <div style="display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end;">
+        <div>
+          <div class="hint" style="margin:0 0 4px;">شهر الهدف</div>
+          <div style="display:flex; gap:6px;">
+            <select id="ipTargetMonthSel" style="padding:8px; border-radius:8px; border:1.5px solid var(--sand-dark); font-family:inherit;">${monthOptionsHtml(ip.targetMonth)}</select>
+            <select id="ipTargetYearSel" style="padding:8px; border-radius:8px; border:1.5px solid var(--sand-dark); font-family:inherit;">${yearOptionsHtml(ip.targetYear)}</select>
+          </div>
+        </div>
+        <div>
+          <div class="hint" style="margin:0 0 4px;">الفترة المرجعية (توزيع المسحوبات منها)</div>
+          <div style="display:flex; gap:6px;">
+            <select id="ipRefMonthSel" style="padding:8px; border-radius:8px; border:1.5px solid var(--sand-dark); font-family:inherit;">${monthOptionsHtml(ip.refMonth)}</select>
+            <select id="ipRefYearSel" style="padding:8px; border-radius:8px; border:1.5px solid var(--sand-dark); font-family:inherit;">${yearOptionsHtml(ip.refYear)}</select>
+          </div>
+        </div>
+        <div>
+          <div class="hint" style="margin:0 0 4px;">قيمة الهدف الإجمالي</div>
+          <input type="number" id="ipTargetAmountInput" min="0" step="1000" value="${ip.targetAmount || ''}" placeholder="مثلاً 3000000" style="width:180px; font-family:inherit; padding:8px; border-radius:8px; border:1.5px solid var(--sand-dark);">
+        </div>
+        <div style="flex:1 1 220px; min-width:220px;">
+          <div class="hint" style="margin:0 0 4px;">ملاحظات (اختياري)</div>
+          <input type="text" id="ipNotesInput" value="${escapeHtml(ip.notes || '')}" placeholder="أي ملاحظات عن الخطة دي..." style="width:100%; font-family:inherit; padding:8px; border-radius:8px; border:1.5px solid var(--sand-dark);">
+        </div>
+        <button type="button" id="ipSaveBtn" class="btn" style="padding:9px 20px;"><i class="ti ti-device-floppy"></i> حفظ الخطة</button>
+      </div>
+    </div>
+    <div id="itemPlanResults"></div>
+  `;
+
+  itemPlanWireForm(el);
+  itemPlanRenderResults();
+}
+
+function itemPlanWireForm(el) {
+  const ip = state.itemPlan;
+  const targetMonthSel = el.querySelector('#ipTargetMonthSel');
+  const targetYearSel = el.querySelector('#ipTargetYearSel');
+  const refMonthSel = el.querySelector('#ipRefMonthSel');
+  const refYearSel = el.querySelector('#ipRefYearSel');
+  const amountInput = el.querySelector('#ipTargetAmountInput');
+  const notesInput = el.querySelector('#ipNotesInput');
+  const saveBtn = el.querySelector('#ipSaveBtn');
+
+  if (targetMonthSel) targetMonthSel.addEventListener('change', () => { ip.targetMonth = Number(targetMonthSel.value); renderItemPlan(); });
+  if (targetYearSel) targetYearSel.addEventListener('change', () => { ip.targetYear = Number(targetYearSel.value); renderItemPlan(); });
+  if (refMonthSel) refMonthSel.addEventListener('change', () => { ip.refMonth = Number(refMonthSel.value); itemPlanRenderResults(); });
+  if (refYearSel) refYearSel.addEventListener('change', () => { ip.refYear = Number(refYearSel.value); itemPlanRenderResults(); });
+  if (amountInput) amountInput.addEventListener('input', () => { ip.targetAmount = amountInput.value === '' ? null : Number(amountInput.value); itemPlanRenderResults(); });
+  if (notesInput) notesInput.addEventListener('input', () => { ip.notes = notesInput.value; });
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true; saveBtn.textContent = 'جاري الحفظ...';
+      const ok = await saveItemPlan();
+      saveBtn.disabled = false; saveBtn.innerHTML = '<i class="ti ti-device-floppy"></i> حفظ الخطة';
+      if (ok) {
+        const note = document.getElementById('ipSavedNote');
+        if (note) note.innerHTML = `<span style="color:var(--good); font-weight:700;"><i class="ti ti-check"></i> محفوظة</span>`;
+      }
+    });
+  }
+}
+
+function itemPlanRenderResults() {
+  const box = document.getElementById('itemPlanResults');
+  if (!box) return;
+  const ip = state.itemPlan;
+  const { results, ref, actual, targetAmount } = itemPlanCompute();
+
+  if (!ref.totalValue) {
+    box.innerHTML = emptyState(`مفيش بيانات فواتير لشهر ${MONTH_NAMES_AR[ip.refMonth - 1]} ${ip.refYear} (الفترة المرجعية) - اختار فترة تانية ليها بيانات.`);
+    return;
+  }
+
+  const hasActual = actual.rowCount > 0;
+  const totalTargetValue = results.reduce((s, r) => s + (r.targetValue || 0), 0);
+  const totalActualValue = results.reduce((s, r) => s + (r.actualValue || 0), 0);
+  const overallAchPct = totalTargetValue ? (totalActualValue / totalTargetValue) : null;
+
+  const kpis = [
+    `<div class="kpi"><div class="kv">${fmtMoney(ref.totalValue)}</div><div class="kl">إجمالي مسحوبات الفترة المرجعية (${MONTH_NAMES_AR[ip.refMonth - 1]} ${ip.refYear})</div></div>`,
+    `<div class="kpi"><div class="kv">${fmt(results.length)}</div><div class="kl">عدد الأصناف في التوزيع</div></div>`,
+    targetAmount ? `<div class="kpi"><div class="kv">${fmtMoney(targetAmount)}</div><div class="kl">الهدف الإجمالي (${MONTH_NAMES_AR[ip.targetMonth - 1]} ${ip.targetYear})</div></div>` : '',
+  ];
+  if (hasActual && targetAmount) {
+    kpis.push(`<div class="kpi"><div class="kv" style="color:${itemPlanAchColor(overallAchPct)};">${overallAchPct != null ? fmtPct(overallAchPct) : '-'}</div><div class="kl">نسبة التحقيق الإجمالية (قيمة)</div></div>`);
+  }
+
+  const headers = ['الصنف', 'التصنيف', '% من المسحوبات المرجعية', 'مسحوبات الفترة المرجعية', 'كراتين الفترة المرجعية', 'آخر سعر كرتونة فعلي'];
+  if (targetAmount) headers.push('الهدف (قيمة)', 'الهدف (كراتين)');
+  if (hasActual) headers.push('المحقق الفعلي (قيمة)', 'المحقق الفعلي (كراتين)');
+  if (hasActual && targetAmount) headers.push('نسبة التحقيق (قيمة)', 'نسبة التحقيق (كراتين)');
+
+  const rows = results.map(r => {
+    const row = [
+      escapeHtml(r.item), escapeHtml(resolveItemCategory(r.item) || '-'),
+      fmtPct(r.share), fmtMoney(r.refValue), fmt(r.refCartons),
+      r.currentCartonPrice != null ? fmtMoney(r.currentCartonPrice) : '-'
+    ];
+    if (targetAmount) row.push(r.targetValue != null ? `<b>${fmtMoney(r.targetValue)}</b>` : '-', r.targetCartons != null ? `<b>${fmt(r.targetCartons)}</b>` : '-');
+    if (hasActual) row.push(fmtMoney(r.actualValue), fmt(r.actualCartons));
+    if (hasActual && targetAmount) {
+      row.push(r.achievedValuePct != null ? `<span style="color:${itemPlanAchColor(r.achievedValuePct)}; font-weight:700;">${fmtPct(r.achievedValuePct)}</span>` : '-');
+      row.push(r.achievedCartonsPct != null ? `<span style="color:${itemPlanAchColor(r.achievedCartonsPct)}; font-weight:700;">${fmtPct(r.achievedCartonsPct)}</span>` : '-');
+    }
+    return row;
+  });
+
+  const footer = ['الإجمالي', '-', fmtPct(1), fmtMoney(ref.totalValue), fmt(results.reduce((s, r) => s + r.refCartons, 0)), '-'];
+  if (targetAmount) footer.push(fmtMoney(totalTargetValue), fmt(results.reduce((s, r) => s + (r.targetCartons || 0), 0)));
+  if (hasActual) footer.push(fmtMoney(totalActualValue), fmt(results.reduce((s, r) => s + r.actualCartons, 0)));
+  if (hasActual && targetAmount) footer.push(overallAchPct != null ? fmtPct(overallAchPct) : '-', '-');
+
+  box.innerHTML = `
+    ${!targetAmount ? `<div class="pill-note">لسه ماكتبتش قيمة الهدف - الجدول تحت بيوري توزيع المسحوبات في الفترة المرجعية بس (معاينة قبل ما تحدد الهدف).</div>` : ''}
+    ${!hasActual ? `<div class="pill-note">مفيش فواتير محمّلة لشهر الهدف (${MONTH_NAMES_AR[ip.targetMonth - 1]} ${ip.targetYear}) لسه - أول ما ترفعها هيبان عمود "المحقق الفعلي" هنا تلقائيًا.</div>` : ''}
+    <div class="kpi-grid">${kpis.filter(Boolean).join('')}</div>
+    <div class="table-title" style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+      <span>توزيع الأصناف (${fmt(results.length)} صنف) - مرتبة حسب الأكثر طلبًا</span>
+      <span class="no-print" style="display:flex; gap:8px;">
+        <div class="export-dd">
+          <button type="button" class="export-dd-btn" onclick="toggleExportDD(this,event)"><i class="ti ti-download"></i> تصدير <i class="ti ti-chevron-down"></i></button>
+          <div class="export-dd-menu">
+            <button type="button" class="dd-pdf" onclick="printCurrentTab()"><i class="ti ti-file-type-pdf"></i> طباعة PDF</button>
+            <button type="button" class="dd-excel" onclick="exportItemPlanExcel()"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+          </div>
+        </div>
+      </span>
+    </div>
+    <div class="table-wrap">${tableHTML(headers, rows, footer)}</div>
+    <div class="print-signature">
+      <div class="sig-block">مدير مبيعات مودرن تريد<div class="sig-line">الاسم / التوقيع / التاريخ</div></div>
+      <div class="sig-block">مدير عام المبيعات<div class="sig-line">الاسم / التوقيع / التاريخ</div></div>
+    </div>
+  `;
+}
+
+// تصدير Excel ملون بشعار الشركة وتوقيعات لتاب "خطة الأصناف" - نفس أعمدة الجدول الظاهر على الشاشة بالظبط
+window.exportItemPlanExcel = async function () {
+  if (typeof ExcelJS === 'undefined') { alert('مكتبة تصدير الإكسل مش محمّلة - تأكد إن الجهاز متصل بالإنترنت وحاول تاني.'); return; }
+  const ip = state.itemPlan;
+  const { results, ref, actual, targetAmount } = itemPlanCompute();
+  if (!results.length) { alert('مفيش بيانات لتصديرها - اعرض تاب "خطة الأصناف" وحدد فترة مرجعية ليها بيانات الأول.'); return; }
+  const hasActual = actual.rowCount > 0;
+
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'نظام تحليل مبيعات تمور الطحان';
+  wb.created = new Date();
+  const now = new Date();
+  const INK = 'FF3A2417', SAND = 'FFEDE5D8', SAND_DARK = 'FFDCCFBB', BAND = 'FFFAF7F2';
+  const numFmt = '#,##0;[Red]-#,##0';
+
+  const ws = wb.addWorksheet('خطة الأصناف', { views: [{ rightToLeft: true }] });
+  try {
+    const logoEl = document.querySelector('img.logo');
+    const src = logoEl ? logoEl.getAttribute('src') : '';
+    if (src && src.indexOf('base64,') > -1) {
+      const base64 = src.split('base64,')[1];
+      const imgId = wb.addImage({ base64, extension: 'png' });
+      ws.addImage(imgId, { tl: { col: 0.15, row: 0.15 }, ext: { width: 64, height: 64 } });
+    }
+  } catch (e) { /* لو فشل تحميل الشعار، نكمل التصدير من غيره */ }
+
+  const headers = ['الصنف', 'التصنيف', '% من المسحوبات المرجعية', 'مسحوبات الفترة المرجعية', 'كراتين الفترة المرجعية', 'آخر سعر كرتونة فعلي'];
+  let targetValueCol = null, targetCartonsCol = null, actualValueCol = null, actualCartonsCol = null;
+  let col = 6;
+  if (targetAmount) { headers.push('الهدف (قيمة)', 'الهدف (كراتين)'); targetValueCol = ++col; targetCartonsCol = ++col; }
+  if (hasActual) { headers.push('المحقق الفعلي (قيمة)', 'المحقق الفعلي (كراتين)'); actualValueCol = ++col; actualCartonsCol = ++col; }
+  if (hasActual && targetAmount) headers.push('نسبة التحقيق (قيمة)', 'نسبة التحقيق (كراتين)');
+  const lastColLetter = String.fromCharCode(64 + headers.length);
+
+  ws.mergeCells(`B1:${lastColLetter}2`);
+  const titleCell = ws.getCell('B1');
+  titleCell.value = `نظام تحليل مبيعات تمور الطحان - خطة أصناف شهر ${MONTH_NAMES_AR[ip.targetMonth - 1]} ${ip.targetYear} (مرجع: ${MONTH_NAMES_AR[ip.refMonth - 1]} ${ip.refYear})`;
+  titleCell.font = { bold: true, size: 14, color: { argb: INK } };
+  titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  ws.mergeCells(`B3:${lastColLetter}3`);
+  const dateCell = ws.getCell('B3');
+  dateCell.value = 'تاريخ التصدير: ' + String(now.getDate()).padStart(2, '0') + '/' + String(now.getMonth() + 1).padStart(2, '0') + '/' + now.getFullYear();
+  dateCell.font = { size: 11, color: { argb: 'FF6B5647' } };
+  dateCell.alignment = { horizontal: 'center' };
+  ws.addRow([]);
+
+  const headerRow = ws.addRow(headers);
+  headerRow.eachCell(cell => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: INK } };
+    cell.font = { bold: true, color: { argb: SAND } };
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    cell.border = { bottom: { style: 'medium', color: { argb: INK } } };
+  });
+  headerRow.height = 34;
+
+  results.forEach((r, idx) => {
+    const row = [r.item, resolveItemCategory(r.item) || '-', (r.share * 100).toFixed(1) + '%', r.refValue, r.refCartons, r.currentCartonPrice || 0];
+    if (targetAmount) row.push(r.targetValue || 0, r.targetCartons || 0);
+    if (hasActual) row.push(r.actualValue || 0, r.actualCartons || 0);
+    if (hasActual && targetAmount) row.push(r.achievedValuePct != null ? (r.achievedValuePct * 100).toFixed(1) + '%' : '-', r.achievedCartonsPct != null ? (r.achievedCartonsPct * 100).toFixed(1) + '%' : '-');
+    const wsRow = ws.addRow(row);
+    if (idx % 2 === 1) wsRow.eachCell(cell => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
+    for (let c = 4; c <= 6; c++) wsRow.getCell(c).numFmt = numFmt;
+    if (targetValueCol) { wsRow.getCell(targetValueCol).numFmt = numFmt; wsRow.getCell(targetCartonsCol).numFmt = numFmt; }
+    if (actualValueCol) { wsRow.getCell(actualValueCol).numFmt = numFmt; wsRow.getCell(actualCartonsCol).numFmt = numFmt; }
+  });
+
+  const totalTargetValue = results.reduce((s, r) => s + (r.targetValue || 0), 0);
+  const totalTargetCartons = results.reduce((s, r) => s + (r.targetCartons || 0), 0);
+  const totalActualValue = results.reduce((s, r) => s + (r.actualValue || 0), 0);
+  const totalActualCartons = results.reduce((s, r) => s + r.actualCartons, 0);
+  const footerRowArr = ['الإجمالي', '-', '100%', ref.totalValue, results.reduce((s, r) => s + r.refCartons, 0), '-'];
+  if (targetAmount) footerRowArr.push(totalTargetValue, totalTargetCartons);
+  if (hasActual) footerRowArr.push(totalActualValue, totalActualCartons);
+  if (hasActual && targetAmount) footerRowArr.push(totalTargetValue ? ((totalActualValue / totalTargetValue) * 100).toFixed(1) + '%' : '-', '-');
+  const footerRow = ws.addRow(footerRowArr);
+  footerRow.eachCell(cell => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SAND_DARK } };
+    cell.font = { bold: true, color: { argb: INK } };
+    cell.border = { top: { style: 'medium', color: { argb: INK } } };
+  });
+  for (let c = 4; c <= 6; c++) footerRow.getCell(c).numFmt = numFmt;
+  if (targetValueCol) { footerRow.getCell(targetValueCol).numFmt = numFmt; footerRow.getCell(targetCartonsCol).numFmt = numFmt; }
+  if (actualValueCol) { footerRow.getCell(actualValueCol).numFmt = numFmt; footerRow.getCell(actualCartonsCol).numFmt = numFmt; }
+
+  ws.getColumn(1).width = 34; ws.getColumn(2).width = 20;
+  for (let c = 3; c <= headers.length; c++) ws.getColumn(c).width = 20;
+
+  ws.addRow([]); ws.addRow([]);
+  const colCount = headers.length;
+  const mid1 = Math.max(1, Math.floor(colCount * 0.25)), mid2 = Math.max(mid1 + 1, Math.floor(colCount * 0.7));
+  const labelArr = new Array(colCount).fill('');
+  labelArr[mid1 - 1] = 'مدير مبيعات مودرن تريد'; labelArr[mid2 - 1] = 'مدير عام المبيعات';
+  const sigLabelRow = ws.addRow(labelArr);
+  sigLabelRow.eachCell(cell => { if (cell.value) { cell.font = { bold: true, size: 12, color: { argb: INK } }; cell.alignment = { horizontal: 'center' }; } });
+  ws.addRow([]);
+  const lineArr = new Array(colCount).fill('');
+  lineArr[mid1 - 1] = '____________________'; lineArr[mid2 - 1] = '____________________';
+  const sigLineRow = ws.addRow(lineArr);
+  sigLineRow.eachCell(cell => { if (cell.value) { cell.alignment = { horizontal: 'center' }; cell.font = { color: { argb: 'FF6B5647' } }; } });
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const stamp = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+  a.download = 'خطة_الأصناف_' + stamp + '.xlsx';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+};
 
 /* ---------------- الأرباع ---------------- */
 function renderQuarterly() {
