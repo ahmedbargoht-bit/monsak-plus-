@@ -7149,11 +7149,24 @@ h2,h3{color:#2C1F0A}
                 <label style="font-size:10px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">قيمة الهدف الإجمالي</label>
                 <input type="number" id="ipa-target-amount" min="0" step="1000" placeholder="مثلاً 3000000" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:var(--surface-1);color:var(--text-primary);box-sizing:border-box"/>
               </div>
+              <div>
+                <label style="font-size:10px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">الفرع</label>
+                <select id="ipa-branch" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:var(--surface-1);color:var(--text-primary)">
+                  <option value="">كل الفروع</option>
+                </select>
+              </div>
+              <div>
+                <label style="font-size:10px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">خط السير</label>
+                <select id="ipa-route" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:var(--surface-1);color:var(--text-primary)">
+                  <option value="">كل الخطوط</option>
+                </select>
+              </div>
               <div style="grid-column:span 2">
                 <label style="font-size:10px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">ملاحظات (اختياري)</label>
                 <input type="text" id="ipa-notes" placeholder="أي ملاحظات عن الخطة دي..." style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:var(--surface-1);color:var(--text-primary);box-sizing:border-box"/>
               </div>
             </div>
+            <div style="margin-top:8px;font-size:10px;color:var(--text2)"><i class="ti ti-info-circle"></i> اختيار فرع (وخط سير اختياريًا جواه) بيخصص الخطة (المسحوبات، الأسعار، والمحقق الفعلي) على بيانات الفرع/الخط ده بس، وبتتحفظ كخطة منفصلة عن الخطة العامة لكل الشركة لنفس الشهر.</div>
             <div style="margin-top:10px;display:flex;justify-content:flex-end">
               <button onclick="ipaSave()" id="ipa-save-btn" style="padding:9px 20px;background:#D97706;color:#fff;border:none;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;font-weight:700;cursor:pointer"><i class="ti ti-device-floppy"></i> حفظ الخطة</button>
             </div>
@@ -39377,9 +39390,12 @@ function aiSwitchMainTab(tab){
 // جدولين محميين بسر تطبيق تحليل المبيعات (tamr_sales_items / tamr_sales_item_catalog) عن طريق RPCs
 // (SECURITY DEFINER) بترجع بيانات مجمّعة بس (مفيش فاتورة/عميل تفصيلي) عشان لوحة التحكم تقدر تقراها من
 // غير ما تحتاج تعرف السر ده: mt_item_plan_period_agg(year,month) و mt_item_last_carton_price().
-// الخطة نفسها (شهر الهدف/الفترة المرجعية/القيمة/ملاحظات) محفوظة في جدول mt_item_plans (متاح بدون سر).
+// الخطة نفسها (شهر الهدف/الفترة المرجعية/القيمة/ملاحظات/الفرع/خط السير) محفوظة في جدول mt_item_plans
+// (متاح بدون سر) - فريدة على (target_year, target_month, branch, route) عشان يبقى ممكن تتحفظ خطة عامة
+// لكل الشركة وخطط تانية منفصلة لكل فرع/خط سير لنفس الشهر من غير ما يتعارضوا مع بعض.
 // نُقل هنا من تاب مستقل كان في sales-analysis-MT.html بناءً على طلب المستخدم.
-let _ipaState = { targetYear:null, targetMonth:null, refYear:null, refMonth:null, targetAmount:null, notes:'', savedRow:null, initialized:false };
+let _ipaState = { targetYear:null, targetMonth:null, refYear:null, refMonth:null, targetAmount:null, notes:'', branch:'', route:'', savedRow:null, initialized:false };
+let _ipaBranchRoutes = null; // Map(branch -> Set(route)) - كل أزواج الفرع/خط السير المتاحة فعليًا في فواتير MT (تتحمّل مرة واحدة بس)
 
 function ipaMonths(){ return ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر']; }
 
@@ -39411,11 +39427,59 @@ async function itemPlanAdminInit(){
     if(amountEl) amountEl.addEventListener('input', ()=>{ _ipaState.targetAmount = amountEl.value===''?null:Number(amountEl.value); ipaRenderResults(); });
     const notesEl = document.getElementById('ipa-notes');
     if(notesEl) notesEl.addEventListener('input', ()=>{ _ipaState.notes = notesEl.value; });
+    const branchEl = document.getElementById('ipa-branch');
+    if(branchEl) branchEl.addEventListener('change', ipaOnBranchChange);
+    const routeEl = document.getElementById('ipa-route');
+    if(routeEl) routeEl.addEventListener('change', ipaOnRouteChange);
+    await ipaLoadBranchRoutes();
     _ipaState.initialized = true;
     await ipaLoadPlanAndRender();
   } else {
     ipaRenderResults();
   }
+}
+
+// بيجيب كل أزواج (فرع، خط سير) المتاحة فعليًا في فواتير MT مرة واحدة بس، وبيملى دروب داون الفرع بيها.
+// خط السير تابع للفرع (كل فرع له خطوطه بتاعته)، فبيتعبى/يتحدّث حسب الفرع المختار (ipaOnBranchChange).
+async function ipaLoadBranchRoutes(){
+  const branchSel = document.getElementById('ipa-branch');
+  if(!branchSel) return;
+  if(!_ipaBranchRoutes){
+    const rows = await ipaRpc('mt_item_plan_branches_routes', {});
+    _ipaBranchRoutes = new Map();
+    (rows||[]).forEach(r=>{
+      if(!r.branch) return;
+      if(!_ipaBranchRoutes.has(r.branch)) _ipaBranchRoutes.set(r.branch, new Set());
+      if(r.route) _ipaBranchRoutes.get(r.branch).add(r.route);
+    });
+  }
+  const branches = Array.from(_ipaBranchRoutes.keys()).sort((a,b)=>a.localeCompare(b,'ar'));
+  branchSel.innerHTML = '<option value="">كل الفروع</option>' + branches.map(b=>`<option value="${ipaEsc(b)}">${ipaEsc(b)}</option>`).join('');
+  ipaRefreshRouteOptions();
+}
+
+function ipaRefreshRouteOptions(){
+  const routeSel = document.getElementById('ipa-route');
+  if(!routeSel) return;
+  const branch = _ipaState.branch;
+  const routes = (branch && _ipaBranchRoutes && _ipaBranchRoutes.has(branch))
+    ? Array.from(_ipaBranchRoutes.get(branch)).sort((a,b)=>a.localeCompare(b,'ar'))
+    : [];
+  routeSel.innerHTML = '<option value="">كل الخطوط</option>' + routes.map(r=>`<option value="${ipaEsc(r)}">${ipaEsc(r)}</option>`).join('');
+  routeSel.disabled = !branch;
+  routeSel.value = _ipaState.route && routes.includes(_ipaState.route) ? _ipaState.route : '';
+  if(!routes.includes(_ipaState.route)) _ipaState.route = '';
+}
+
+async function ipaOnBranchChange(){
+  _ipaState.branch = document.getElementById('ipa-branch').value || '';
+  _ipaState.route = '';
+  ipaRefreshRouteOptions();
+  await ipaLoadPlanAndRender();
+}
+async function ipaOnRouteChange(){
+  _ipaState.route = document.getElementById('ipa-route').value || '';
+  await ipaLoadPlanAndRender();
 }
 
 async function ipaOnTargetPeriodChange(){
@@ -39432,7 +39496,7 @@ function ipaOnRefPeriodChange(){
 async function ipaLoadPlanAndRender(){
   const box = document.getElementById('ipa-results');
   if(box) box.innerHTML = '<div style="text-align:center;color:var(--text2);font-size:11px;padding:30px 0">جاري التحميل...</div>';
-  const rows = await sb('mt_item_plans', { target_year:'eq.'+_ipaState.targetYear, target_month:'eq.'+_ipaState.targetMonth });
+  const rows = await sb('mt_item_plans', { target_year:'eq.'+_ipaState.targetYear, target_month:'eq.'+_ipaState.targetMonth, branch:'eq.'+_ipaState.branch, route:'eq.'+_ipaState.route });
   const saved = Array.isArray(rows) && rows.length ? rows[0] : null;
   if(saved){
     _ipaState.refYear = saved.ref_year; _ipaState.refMonth = saved.ref_month;
@@ -39469,9 +39533,10 @@ async function ipaSave(){
     target_year:_ipaState.targetYear, target_month:_ipaState.targetMonth,
     ref_year:_ipaState.refYear, ref_month:_ipaState.refMonth,
     target_amount: amount, notes: (_ipaState.notes||'').trim() || null,
+    branch:_ipaState.branch||'', route:_ipaState.route||'',
     updated_at: new Date().toISOString()
   };
-  const ok = await sbUpsert('mt_item_plans', [payload], 'target_year,target_month');
+  const ok = await sbUpsert('mt_item_plans', [payload], 'target_year,target_month,branch,route');
   if(btn){ btn.disabled=false; btn.innerHTML='<i class="ti ti-device-floppy"></i> حفظ الخطة'; }
   if(ok){ _ipaState.savedRow = payload; ipaUpdateSavedNote(); }
   else alert('تعذر حفظ الخطة، حاول تاني.');
@@ -39501,16 +39566,23 @@ function ipaPct(n){ return (n*100).toFixed(1)+'%'; }
 function ipaEsc(s){
   return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+function ipaScopeLabel(){
+  if(_ipaState.branch && _ipaState.route) return `${_ipaState.branch} - ${_ipaState.route}`;
+  if(_ipaState.branch) return _ipaState.branch;
+  return 'كل الفروع';
+}
 
 async function ipaRenderResults(){
   const box = document.getElementById('ipa-results');
   if(!box) return;
   box.innerHTML = '<div style="text-align:center;color:var(--text2);font-size:11px;padding:30px 0">جاري تحميل بيانات الفترة...</div>';
 
+  const pBranch = _ipaState.branch || null;
+  const pRoute = _ipaState.route || null;
   const [refRows, actualRows, priceRows] = await Promise.all([
-    ipaRpc('mt_item_plan_period_agg', {p_year:_ipaState.refYear, p_month:_ipaState.refMonth}),
-    ipaRpc('mt_item_plan_period_agg', {p_year:_ipaState.targetYear, p_month:_ipaState.targetMonth}),
-    ipaRpc('mt_item_last_carton_price', {})
+    ipaRpc('mt_item_plan_period_agg', {p_year:_ipaState.refYear, p_month:_ipaState.refMonth, p_branch:pBranch, p_route:pRoute}),
+    ipaRpc('mt_item_plan_period_agg', {p_year:_ipaState.targetYear, p_month:_ipaState.targetMonth, p_branch:pBranch, p_route:pRoute}),
+    ipaRpc('mt_item_last_carton_price', {p_branch:pBranch, p_route:pRoute})
   ]);
 
   const priceMap = new Map((priceRows||[]).map(r=>[r.item, r]));
@@ -39518,7 +39590,7 @@ async function ipaRenderResults(){
   const refTotal = (refRows||[]).reduce((s,r)=>s+(Number(r.value)||0), 0);
 
   if(!refTotal){
-    box.innerHTML = `<div style="text-align:center;color:var(--text2);font-size:12px;padding:30px 0">مفيش بيانات فواتير MT لشهر ${ipaMonths()[_ipaState.refMonth-1]} ${_ipaState.refYear} (الفترة المرجعية) - اختار فترة تانية ليها بيانات.</div>`;
+    box.innerHTML = `<div style="text-align:center;color:var(--text2);font-size:12px;padding:30px 0">مفيش بيانات فواتير MT لشهر ${ipaMonths()[_ipaState.refMonth-1]} ${_ipaState.refYear} (${ipaScopeLabel()}) - اختار فترة أو فرع/خط سير تاني ليه بيانات.</div>`;
     return;
   }
 
@@ -39590,7 +39662,7 @@ async function ipaRenderResults(){
     <div style="display:grid;grid-template-columns:repeat(${kpisArr.length},1fr);gap:10px;margin-bottom:14px">${kpisArr.join('')}</div>
     <div class="card" style="padding:14px">
       <div style="font-size:12px;font-weight:700;color:var(--text-primary);margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-        <span><i class="ti ti-table" style="color:#D97706"></i> توزيع الأصناف (${results.length} صنف) - مرتبة حسب الأكثر طلبًا</span>
+        <span><i class="ti ti-table" style="color:#D97706"></i> توزيع الأصناف (${results.length} صنف) - ${ipaScopeLabel()} - مرتبة حسب الأكثر طلبًا</span>
         <button onclick="window.print()" style="padding:6px 14px;background:var(--surface-1);color:var(--text-primary);border:1px solid var(--border);border-radius:7px;font-family:Cairo,sans-serif;font-size:11px;cursor:pointer"><i class="ti ti-printer"></i> طباعة</button>
       </div>
       <div style="overflow-x:auto">
