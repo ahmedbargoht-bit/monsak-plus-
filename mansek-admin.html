@@ -2930,7 +2930,7 @@ h2,h3{color:#2C1F0A}
             </div>
           </div>
           <p style="font-size:11px;color:var(--text2);margin-bottom:10px">
-            التقييم بيتحسب من 3 معايير عن فريق كل مشرف: غياب المناديب (أيام من غير أي نشاط تسليم/مرتجع)، حجم المبيعات (مقابل هدف الفريق لو موجود)، حجم المرتجع (نسبة من إجمالي المبيعات).
+            التقييم بيتحسب من 4 معايير: الالتزام بالخطة الأسبوعية وتنفيذها (من تطبيق المشرف نفسه)، غياب المناديب (أيام من غير أي نشاط تسليم/مرتجع)، حجم المبيعات (مقابل هدف الفريق لو موجود)، حجم المرتجع (نسبة من إجمالي المبيعات).
             مستبعد منها تلقائيًا أي حساب اسمه بيبدأ بـ"بيع اداري".
           </p>
           <div id="mse-stats-bar" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px"></div>
@@ -36651,13 +36651,25 @@ async function mseLoadContext(){
     extraSupNames.filter(n=>!foundNames.has(n)).forEach(n=>sups.push({name:n, grp:'', grps:[], user_type:'مشرف مبيعات'}));
   }
 
-  const [deliveries, returns, targets, overrides, holidayRows] = await Promise.all([
+  const [deliveries, returns, targets, overrides, holidayRows, plans] = await Promise.all([
     fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,branch_name,route,total_net,total_tax,delivery_date&delivery_date=gte.${start}&delivery_date=lte.${end}&deleted_at=is.null`, H),
     fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,branch_name,route,total_net,total_tax,return_date&return_date=gte.${start}&return_date=lte.${end}&deleted_at=is.null`, H),
     fetch(`${SUPABASE_URL}/rest/v1/rep_targets?select=*&deleted_at=is.null&limit=2000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?select=*&limit=2000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/holidays?select=date,grp,exceptions&date=gte.${start}&date=lte.${end}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    // الخطة الأسبوعية اللي كل مشرف مبيعات بيقدمها فعليًا من تطبيقه (sales_plans_plus) — أي أسبوع بيتقاطع
+    // مع الفترة المختارة، بغض النظر هل الأسبوع بيبدأ أو بيخلص جوه الفترة بالظبط أو لأ
+    fetch(`${SUPABASE_URL}/rest/v1/sales_plans_plus?week_start=lte.${end}&week_end=gte.${start}&select=id,staff_name,role,week_start,week_end,status,target_amount,achieved_amount,total_branches,total_reps,created_at,approved_at,reject_reason&limit=500`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
   ]);
+
+  // بنود كل خطة (فروع/عملاء الأسبوع) — عشان نحسب نسبة التنفيذ الفعلي، بنجيبها بس للخطط اللي فعلاً اتحمّلت فوق
+  let planItems = [];
+  if(Array.isArray(plans) && plans.length){
+    const ids = plans.map(p=>p.id).filter(Boolean);
+    if(ids.length){
+      planItems = await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_plan_items?plan_id=in.(${ids.join(',')})&select=plan_id,visit_date,client_name,visit_status,rep_name,planned_amount,actual_amount`, H);
+    }
+  }
 
   return {
     start, end, periodLabel, sups, reps,
@@ -36666,6 +36678,8 @@ async function mseLoadContext(){
     targets: Array.isArray(targets)?targets:[],
     overrides: Array.isArray(overrides)?overrides:[],
     holidayRows: Array.isArray(holidayRows)?holidayRows:[],
+    plans: Array.isArray(plans)?plans:[],
+    planItems: Array.isArray(planItems)?planItems:[],
     now: Date.now(),
   };
 }
@@ -36673,6 +36687,39 @@ async function mseLoadContext(){
 // فريق مشرف معين — كل المناديب اللي حقل supervisors بتاعهم فيه اسمه (ممكن يكون فيه أكتر من مشرف مفصولين بفاصلة)
 function mseTeamOf(sup, ctx){
   return ctx.reps.filter(r=>(r.supervisors||'').split(',').map(s=>s.trim()).includes(sup.name));
+}
+
+// 0) الالتزام بالخطة الأسبوعية وتنفيذها — التعامل الفعلي بتاع المشرف مع تطبيقه (تقديم خطة، اعتمادها،
+// وتنفيذ بنودها فعليًا على الأرض) بدل ما نكتفي بأرقام المبيعات بس. مصدرها sales_plans_plus (الخطة نفسها)
+// و sales_plan_items (بنود/فروع كل خطة وحالة تنفيذها).
+function msePlanCriterion(sup, ctx){
+  const supPlans = (ctx.plans||[]).filter(p=>p.staff_name===sup.name);
+  if(!supPlans.length){
+    return { level:'needsWork', text:`لسه محدش قدّم خطة أسبوعية ${ctx.periodLabel}`, details:[] };
+  }
+  const rejected = supPlans.filter(p=>p.status==='rejected').length;
+  const planIds = new Set(supPlans.map(p=>p.id));
+  const myItems = (ctx.planItems||[]).filter(it=>planIds.has(it.plan_id));
+  const done = myItems.filter(it=>it.visit_status==='done').length;
+  const execPct = myItems.length ? Math.round(done/myItems.length*100) : 0;
+  let level = 'good';
+  if(execPct>=80 && rejected===0) level='excellent';
+  else if(execPct<50 || rejected>0) level='needsWork';
+
+  const details = supPlans.map(p=>{
+    const pItems = myItems.filter(it=>it.plan_id===p.id);
+    const pDone = pItems.filter(it=>it.visit_status==='done').length;
+    const pPct = pItems.length ? Math.round(pDone/pItems.length*100) : 0;
+    const statusTxt = p.status==='approved'||p.status==='approved_manager' ? '✅ معتمدة' : p.status==='rejected' ? '❌ مرفوضة' : p.status==='submitted' ? '📤 مقدمة بانتظار الاعتماد' : '⏳ مسودة';
+    const targetTxt = p.target_amount ? ` — هدف ${Number(p.target_amount).toLocaleString()} ج.م` : '';
+    return `أسبوع ${p.week_start||'—'} إلى ${p.week_end||'—'} — ${statusTxt}${targetTxt} — تنفيذ ${pPct}% (${pDone}/${pItems.length} بند)`;
+  });
+
+  return {
+    level,
+    text: `${supPlans.length} خطة أسبوعية ${ctx.periodLabel} — تنفيذ ${execPct}% (${done}/${myItems.length} بند)${rejected?` · ${rejected} خطة مرفوضة`:''}`,
+    details,
+  };
 }
 
 // 1) غياب المناديب — مفيش نظام حضور/انصراف بلوكيشن للمناديب زي المنسقين، فبنستخدم نفس معيار "النشاط"
@@ -36775,6 +36822,7 @@ function mseReturnsCriterion(team, ctx){
 function mseComputeForSup(sup, ctx){
   const team = mseTeamOf(sup, ctx);
   const crits = [
+    {icon:'📋', title:'الالتزام بالخطة الأسبوعية', ...msePlanCriterion(sup, ctx)},
     {icon:'🕒', title:'غياب المناديب', ...mseAbsenceCriterion(team, ctx)},
     {icon:'💰', title:'حجم المبيعات', ...mseSalesCriterion(team, ctx)},
     {icon:'🔄', title:'حجم المرتجع', ...mseReturnsCriterion(team, ctx)},
