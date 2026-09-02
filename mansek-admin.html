@@ -19499,6 +19499,22 @@ async function editUser(){
         },
         body: JSON.stringify(branchPayload)
       });
+
+      // تنظيف تخصيصات الفروع المحددة القديمة (coord_route_assignments) المرتبطة بخط سير سابق مختلف عن الجديد
+      // ده اللي كان بيسبب ظهور فروع خط السير القديم للمنسق (لأن الجدول ده بيتقرا بالاسم بس من غير فلتر خط سير)
+      // بنسيب اللي route فاضي (بتاعة المنسقين الثابتين) عشان مش مرتبطة بخط سير
+      try{
+        const craRows = await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=id,route&rep_name=eq.${encodeURIComponent(matchName)}`,{
+          headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+        }).then(r=>r.ok?r.json():[]);
+        const staleIds = (craRows||[]).filter(c=>(c.route||'')!=='' && c.route!==route).map(c=>c.id);
+        if(staleIds.length){
+          await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?id=in.(${staleIds.join(',')})`,{
+            method:'DELETE',
+            headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'}
+          });
+        }
+      }catch(e){console.warn('coord_route_assignments cleanup failed',e);}
     }
   }catch(e){console.warn('branch route cascade failed',e);}
 
@@ -22538,19 +22554,36 @@ async function loadRoutes(){
     });
     const routesList = routesRes.ok ? await routesRes.json() : [];
 
-    // جيب الفروع من جدول branches (عشان نعد عدد الفروع لكل route)
-    const branchesRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=route,status`,{
+    // جيب الفروع من جدول branches (عشان نعد عدد الفروع لكل route) — النشطة بس، ومع limit عالي عشان محدش يتقطع
+    const branchesRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,status&status=eq.active&limit=10000`,{
       headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
     });
     const branchesList = branchesRes.ok ? await branchesRes.json() : [];
 
-    // بناء map: route → عدد الفروع النشطة
-    const branchCountMap = {};
+    // جيب أيضاً تخصيصات الفروع المحددة للمنسقين المتحركين (coord_route_assignments)
+    // لأن المنسق "المتحرك" اللي معاه تخصيص فروع محدد بيشوف الفروع دي بس (مش كل فروع branches.route)
+    // فلازم نحسب عدد الفروع الحقيقي بدمج المصدرين مع بعض، مش الاعتماد على branches.route لوحده
+    const craRes = await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=route,branch_name&limit=10000`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const craList = craRes.ok ? await craRes.json() : [];
+
+    // بناء map: route → مجموعة أسماء الفروع (دمج branches.route + coord_route_assignments) عشان نعد عدد الفروع الفعلي بدون تكرار
+    const branchSetMap = {};
     branchesList.forEach(b=>{
       const r = (b.route||'').trim();
-      if(!r) return;
-      branchCountMap[r] = (branchCountMap[r]||0) + 1;
+      if(!r || !b.branch_name) return;
+      if(!branchSetMap[r]) branchSetMap[r] = new Set();
+      branchSetMap[r].add(b.branch_name);
     });
+    craList.forEach(c=>{
+      const r = (c.route||'').trim();
+      if(!r || !c.branch_name) return;
+      if(!branchSetMap[r]) branchSetMap[r] = new Set();
+      branchSetMap[r].add(c.branch_name);
+    });
+    const branchCountMap = {};
+    Object.keys(branchSetMap).forEach(r=>{ branchCountMap[r] = branchSetMap[r].size; });
 
     // جيب المنسقين لربطهم بخطوط السير
     let reps = [...(REPS||[])];
