@@ -19228,16 +19228,8 @@ async function euToggleBranchAssign(cb, route){
   try{
     const H={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
     if(cb.checked){
-      await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments`,{
-        method:'POST', headers:H,
-        body: JSON.stringify({grp, route, branch_name:branchName, rep_name:repName, coord_type:type, shift:'كامل'})
-      });
-      // تحديث ملكية الفرع في جدول branches كمان (route/grp/rep_name) عشان جدول "خطوط سير المنسقين"
-      // وأي تقرير تاني بيعتمد على branches.rep_name يفضل متزامن مع التخصيص الفعلي، ومتفضلش الملكية القديمة عالقة
-      await fetch(`${SUPABASE_URL}/rest/v1/branches?branch_name=eq.${encodeURIComponent(branchName)}`,{
-        method:'PATCH', headers:H,
-        body: JSON.stringify({route, grp, rep_name:repName})
-      });
+      // نقل موحد: branches + coord_route_assignments بيتزامنوا مع بعض بضربة واحدة
+      await moveBranchToRoute(null, branchName, route, grp, repName);
     } else {
       await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?rep_name=eq.${encodeURIComponent(repName)}&branch_name=eq.${encodeURIComponent(branchName)}`,{
         method:'DELETE', headers:H
@@ -19310,11 +19302,16 @@ async function euAddRouteBranch(){
         : `الفرع "${name}" موجود في النظام بدون خط سير — هل تريد ربطه بهذا الخط؟`;
       if(!confirm(moveMsg)) return;
       const repNameForLink = document.getElementById('eu-id')?.value||'';
-      const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${existing.id}`,{
-        method:'PATCH',
-        headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-        body: JSON.stringify(repNameForLink ? {route, grp, rep_name:repNameForLink} : {route, grp})
-      });
+      // نقل موحد: بيحدّث branches ويمسح أي تخصيص قديم لنفس الفرع في coord_route_assignments
+      // ويسجّل التخصيص الجديد — عشان الفرع يظهر فوراً وبالكامل عند المنسق الجديد في التطبيق
+      const patchOk = repNameForLink
+        ? await moveBranchToRoute(existing.id, name, route, grp, repNameForLink)
+        : await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${existing.id}`,{
+            method:'PATCH',
+            headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+            body: JSON.stringify({route, grp})
+          }).then(r=>r.ok);
+      const patchRes = {ok: patchOk};
       if(patchRes.ok){
         if(inp) inp.value='';
         if(typeof showToast==='function') showToast('✅ تم ربط الفرع "'+name+'" بهذا الخط');
@@ -19323,8 +19320,7 @@ async function euAddRouteBranch(){
         if(typeof loadBranches==='function') loadBranches();
         if(typeof rebuildBranchesMap==='function') rebuildBranchesMap();
       } else {
-        const err = await patchRes.text();
-        alert('فشل الربط: '+err.substring(0,150));
+        alert('فشل الربط — حاول تاني');
       }
       return;
     }
@@ -22858,12 +22854,9 @@ async function fixConflictMoveBranch(i){
   const c = _rtConflicts[i];
   if(!c) return;
   if(!confirm(`نقل فرع "${c.branchName}" من خط "${c.branchRoute}" لخط "${c.repRoute}" (خط المنسق ${c.repName})؟`)) return;
-  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
   try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${c.branchId}`,{
-      method:'PATCH', headers:H, body: JSON.stringify({route:c.repRoute, grp:c.repGrp||undefined})
-    });
-    if(!r.ok) throw new Error('patch failed');
+    const ok = await moveBranchToRoute(c.branchId, c.branchName, c.repRoute, c.repGrp||undefined, c.repName);
+    if(!ok) throw new Error('move failed');
     _rtConflicts.splice(i,1);
     renderRouteConflicts();
     loadRoutes();
@@ -22871,6 +22864,48 @@ async function fixConflictMoveBranch(i){
     alert('تعذر نقل الفرع — حاول تاني');
     console.warn('fixConflictMoveBranch error:', e);
   }
+}
+
+// ══ نقل فرع بين خطوط السير — دالة موحدة (مصدر واحد) ══
+// أي نقطة في النظام تغيّر منسق/خط سير فرع لازم تعدي من هنا:
+// بتحدّث branches (route/grp/rep_name) وbtمسح أي تخصيص قديم في coord_route_assignments
+// وتسجّل التخصيص الجديد بخط السير الصحيح — عشان التغيير يظهر فوراً في تطبيق المنسق ومشرف التنسيق ولوحة التحكم مع بعض.
+async function moveBranchToRoute(branchId, branchName, newRoute, newGrp, newRepName){
+  const H={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  const HG={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  try{
+    let coordType='متحرك';
+    if(newRepName){
+      const u = await fetch(`${SUPABASE_URL}/rest/v1/users?select=user_type&name=eq.${encodeURIComponent(newRepName)}&limit=1`,{headers:HG}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+      if(u && u[0] && u[0].user_type) coordType=u[0].user_type;
+    }
+    const patch={route:newRoute};
+    if(newGrp) patch.grp=newGrp;
+    if(newRepName!==undefined) patch.rep_name=newRepName||null;
+    const idFilter = branchId ? `id=eq.${branchId}` : `branch_name=eq.${encodeURIComponent(branchName)}`;
+    const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/branches?${idFilter}`,{method:'PATCH',headers:H,body:JSON.stringify(patch)});
+    if(!patchRes.ok) return false;
+
+    // امسح تخصيص المنسق القديم بس لنفس الفرع — من غير ما نلمس منسقين تانيين مشاركين في نفس الفرع
+    // (فروع الثابت ممكن يكون عليها أكتر من منسق في نفس الوقت — rep_name2/rep_name3)
+    const [brNow]=await fetch(`${SUPABASE_URL}/rest/v1/branches?select=rep_name2,rep_name3&branch_name=eq.${encodeURIComponent(branchName)}&limit=1`,{headers:HG}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+    const preserve = [brNow?.rep_name2, brNow?.rep_name3].filter(n=>n && n!==newRepName);
+    const notInFilter = preserve.length ? `&rep_name=not.in.(${preserve.map(n=>`"${n.replace(/"/g,'')}"`).join(',')})` : '';
+    await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?branch_name=eq.${encodeURIComponent(branchName)}${notInFilter}`,{method:'DELETE',headers:H}).catch(()=>{});
+
+    if(newRepName){
+      let grpForCra=newGrp;
+      if(!grpForCra){
+        const b=await fetch(`${SUPABASE_URL}/rest/v1/branches?select=grp&branch_name=eq.${encodeURIComponent(branchName)}&limit=1`,{headers:HG}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+        grpForCra = (b && b[0] && b[0].grp) || null;
+      }
+      await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments`,{
+        method:'POST', headers:H,
+        body: JSON.stringify({grp:grpForCra, route:newRoute, branch_name:branchName, rep_name:newRepName, coord_type:coordType, shift:'كامل'})
+      }).catch(()=>{});
+    }
+    return true;
+  }catch(e){ console.warn('moveBranchToRoute error:', e); return false; }
 }
 
 async function rdEditRepOnBranch(brId, brName, currentRep, routeName){
@@ -22960,30 +22995,44 @@ async function rdSaveRepOnBranch(brId, oldRep, routeName){
   const msg=document.getElementById('rd-rep-msg');
   if(!newRep){msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';msg.textContent='اختر منسق';return;}
 
-  const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+  const HG={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const H={...HG,'Content-Type':'application/json','Prefer':'return=minimal'};
   // جيب بيانات الفرع الحالية
-  const [br]=await fetch(`${SUPABASE_URL}/rest/v1/branches?select=rep_name,rep_name2,rep_name3&id=eq.${brId}`,
-    {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+  const [br]=await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,rep_name,rep_name2,rep_name3&id=eq.${brId}`,
+    {headers:HG}).then(r=>r.ok?r.json():[]).catch(()=>[]);
   if(!br) return;
 
-  const patch={};
+  let slot='rep_name';
   if(oldRep){
-    if(br.rep_name===oldRep)  patch.rep_name=newRep;
-    else if(br.rep_name2===oldRep) patch.rep_name2=newRep;
-    else if(br.rep_name3===oldRep) patch.rep_name3=newRep;
+    if(br.rep_name===oldRep)  slot='rep_name';
+    else if(br.rep_name2===oldRep) slot='rep_name2';
+    else if(br.rep_name3===oldRep) slot='rep_name3';
   } else {
     // إضافة جديدة — أول حقل فاضي
-    if(!br.rep_name)  patch.rep_name=newRep;
-    else if(!br.rep_name2) patch.rep_name2=newRep;
-    else if(!br.rep_name3) patch.rep_name3=newRep;
+    if(!br.rep_name)  slot='rep_name';
+    else if(!br.rep_name2) slot='rep_name2';
+    else if(!br.rep_name3) slot='rep_name3';
     else{msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';msg.textContent='الفرع ممتلئ (3 منسقين)';return;}
   }
 
-  const ok=await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${brId}`,{method:'PATCH',headers:H,body:JSON.stringify(patch)}).then(r=>r.ok).catch(()=>false);
+  let ok;
+  if(slot==='rep_name'){
+    // ده المنسق الأساسي للفرع — لو المنسق الجديد خط سيره مختلف عن الخط المعروض هنا،
+    // اعتبرها "نقل فرع لخط سير تاني" فعلي: الفرع بيتبع خط المنسق الجديد بمنتهى السلاسة
+    // (مصدر واحد: branches + coord_route_assignments بيتزامنوا مع بعض فوراً)
+    const [u]=await fetch(`${SUPABASE_URL}/rest/v1/users?select=route,grp&name=eq.${encodeURIComponent(newRep)}&limit=1`,{headers:HG}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+    const targetRoute = (u && u.route) ? u.route : routeName;
+    const targetGrp = (u && u.grp) ? u.grp : undefined;
+    ok = await moveBranchToRoute(brId, br.branch_name, targetRoute, targetGrp, newRep);
+  } else {
+    ok = await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${brId}`,{method:'PATCH',headers:H,body:JSON.stringify({[slot]:newRep})}).then(r=>r.ok).catch(()=>false);
+  }
+
   if(ok){
     document.getElementById('rd-rep-edit-overlay')?.remove();
     showToast('✅ تم تحديث المنسق');
     openRouteDetail(encodeURIComponent(routeName));
+    if(typeof loadRoutes==='function') loadRoutes();
   } else {
     msg.style.display='block';msg.style.background='#FFEBEE';msg.style.color='#B71C1C';msg.textContent='خطأ في الحفظ';
   }
