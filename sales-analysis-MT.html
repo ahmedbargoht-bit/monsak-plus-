@@ -411,6 +411,17 @@ table.datatable details summary:hover { text-decoration: underline; }
         <input type="file" id="statementInput" accept=".xlsx,.xls" multiple hidden>
         <div class="filelist" id="statementFileList"></div>
       </div>
+      <div>
+        <div class="dropzone" id="customerInvDropzone">
+          <div class="dz-head">
+            <div class="dz-icon"><i class="ti ti-file-search"></i></div>
+            <div class="dz-title">جريد - فواتير عملاء بدون فرع</div>
+          </div>
+          <div class="dz-sub">شيت فواتير مجمّع بالعميل ورقم الفاتورة والتاريخ (زي فواتير الجزء) - بيتحل الفرع تلقائيًا بالمطابقة مع بيانات النظام</div>
+        </div>
+        <input type="file" id="customerInvInput" accept=".xlsx,.xls" multiple hidden>
+        <div class="filelist" id="customerInvFileList"></div>
+      </div>
     </div>
     <div style="margin-top:16px; display:flex; align-items:center; gap:14px;">
       <button class="btn" id="processBtn" disabled><i class="ti ti-settings"></i> معالجة البيانات وعرض التحليل</button>
@@ -455,6 +466,7 @@ table.datatable details summary:hover { text-decoration: underline; }
         <button class="tabbtn" data-tab="panel-customers" data-label="العملاء"><i class="ti ti-users" aria-hidden="true"></i><span>العملاء</span></button>
         <button class="tabbtn" data-tab="panel-customernet" data-label="صافي مسحوبات عملاء MT"><i class="ti ti-report-money" aria-hidden="true"></i><span>صافي مسحوبات عملاء MT</span></button>
         <button class="tabbtn" data-tab="panel-customerdiscounts" data-label="خصومات العملاء"><i class="ti ti-discount-2" aria-hidden="true"></i><span>خصومات العملاء</span></button>
+        <button class="tabbtn" data-tab="panel-customerinvoicematch" data-label="مطابقة فواتير جريد"><i class="ti ti-file-search" aria-hidden="true"></i><span>مطابقة فواتير جريد</span></button>
         <div class="tabgroup-cap">الفروع والعملاء</div>
       </div>
       <div class="tabgroup" data-maintab="items-branches" style="display:none">
@@ -506,6 +518,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       <div class="tabpanel" id="panel-indirect"></div>
       <div class="tabpanel" id="panel-linkindirect"></div>
       <div class="tabpanel" id="panel-customerdiscounts"></div>
+      <div class="tabpanel" id="panel-customerinvoicematch"></div>
       <div class="tabpanel" id="panel-branchindirect"></div>
       <div class="tabpanel" id="panel-collectedchecks"></div>
       <div class="tabpanel" id="panel-debtaging"></div>
@@ -1047,7 +1060,56 @@ table.datatable details summary:hover { text-decoration: underline; }
     return { checks, balances, ledger };
   }
 
-  return { parseSheet, parseRouteSheet, matchRoute, parseReturnsSheet, parseIndirectDiscountSheet, parseAccountStatementSheet, normalizeCustomerKey, BRANCH_ALIAS, FOOTER_LABEL_MAP };
+  // ---------------------------------------------------------------------------
+  // "جريد" - ملف فواتير عملاء مجمّع بدون فرع (تجميع فواتير عملاء مش فواتير فروع): نفس هيكل ملف
+  // المرتجعات تقريبًا (سطر لكل صنف: رقم الفاتورة/تاريخ الفاتورة/إسم العميل/إجمالى الصنف)، وأحيانًا
+  // فيه عمود "الفرع" لكن غالبًا فاضي - لو موجود وممتلئ بناخده زي ما هو، لو فاضي بنسيب الفرع فاضي
+  // عشان يتحل بعدين بمطابقة رقم الفاتورة + التاريخ ضد بيانات النظام (tamr_sales_invoices).
+  // بيرجع مصفوفة مجمّعة على مستوى الفاتورة (مش على مستوى السطر) لأن ده اللي محتاجينه للمطابقة.
+  function parseCustomerInvoiceRawSheet(rows) {
+    let headerRowIdx = -1;
+    for (let i = 0; i < Math.min(rows.length, 10); i++) {
+      const texts = rowTextSet(rows[i]);
+      if (texts.has('رقم الفاتورة') && texts.has('تاريخ الفاتورة') && texts.has('إجمالى الصنف')) { headerRowIdx = i; break; }
+    }
+    if (headerRowIdx === -1) return { invoices: [], errors: [{ type: 'header_not_found' }] };
+
+    const header = rows[headerRowIdx].map(h => (h || '').toString().trim());
+    const idx = {};
+    header.forEach((h, i) => { idx[h] = i; });
+    const cell = (row, key) => {
+      const i = idx[key];
+      if (i === undefined) return null;
+      const v = row[i];
+      return v === undefined ? null : v;
+    };
+
+    const agg = new Map(); // "رقم الفاتورة||تاريخ" -> صف مجمّع
+    for (let r = headerRowIdx + 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row) continue;
+      const invoiceNoRaw = cell(row, 'رقم الفاتورة');
+      if (invoiceNoRaw === null || invoiceNoRaw === undefined || invoiceNoRaw === '') continue;
+      const invoiceNo = String(invoiceNoRaw);
+      const dateVal = cell(row, 'تاريخ الفاتورة');
+      const dateOnly = dateVal instanceof Date ? normalizeDateOnly(dateVal) : null;
+      const key = invoiceNo + '||' + (dateOnly ? dateOnly.getTime() : 'بدون_تاريخ');
+      const customer = (cell(row, 'إسم العميل') || '').toString().trim();
+      const branchRaw = (cell(row, 'الفرع') || '').toString().trim();
+      const lineTotal = Number(cell(row, 'إجمالى الصنف')) || 0;
+      if (!agg.has(key)) {
+        agg.set(key, { invoiceNo, invoiceDate: dateOnly, customer: customer || null, branchRaw: branchRaw || null, total: 0, lines: 0 });
+      }
+      const g = agg.get(key);
+      g.total += lineTotal;
+      g.lines += 1;
+      if (!g.customer && customer) g.customer = customer;
+      if (!g.branchRaw && branchRaw) g.branchRaw = branchRaw;
+    }
+    return { invoices: Array.from(agg.values()), errors: [] };
+  }
+
+  return { parseSheet, parseRouteSheet, matchRoute, parseReturnsSheet, parseIndirectDiscountSheet, parseAccountStatementSheet, parseCustomerInvoiceRawSheet, normalizeCustomerKey, BRANCH_ALIAS, FOOTER_LABEL_MAP };
 });
 
 </script>
@@ -1090,6 +1152,8 @@ table.datatable details summary:hover { text-decoration: underline; }
     debtAgingFilter: { branch: [], search: '', asOfDate: '', invoiceMonth: '' },  // فلاتر تاب أعمار الديون - asOfDate فاضي = آخر تاريخ متاح في البيانات
     dueCollectionsFilter: { year: null, month: null },  // تاب "التحصيلات المستحقة خلال الشهر" - year/month فاضيين = الشهر الحالي الفعلي (تاريخ اليوم)
     itemAliases: new Map(),  // اسم الصنف القديم (منظم) -> الاسم الموحد الجديد بعد الدمج - تاب "دمج الأصناف" (tamr_sales_item_merges)
+    customerInvoicesRaw: [],  // فواتير عملاء مجمّعة بدون فرع (كارت رفع "جريد") - {invoiceNo, invoiceDate, customer, branchRaw, total, lines, fileName} - محفوظة في tamr_customer_invoices_raw، بتتحل بمطابقة رقم الفاتورة+التاريخ ضد state.invoices في تاب "مطابقة فواتير جريد"
+    customerInvoiceMatchSearch: '',  // مربع البحث في تاب مطابقة فواتير جريد
     itemMergeSelection: [],  // الأصناف المختارة حاليًا للدمج في تاب "دمج الأصناف" (مصفوفة أسماء أصناف - بيانات واجهة مؤقتة، مش محفوظة بالسحابة)
     customerSearchFilter: '',  // مربع بحث بالاسم في جدول "كل العملاء" (تاب العملاء) - بيضيّق الجدول لعميل/عملاء معينين
     coordBranches: null,  // مصفوفة {branchName, route} من جدول "branches" الحي (تاب "الفروع والعملاء" في لوحة التحكم) - بتتحمل مرة واحدة بس وتتستخدم لاقتراح خط سير تلقائي لعملاء "ربط خطوط السير" الناقصين
@@ -1302,6 +1366,7 @@ table.datatable details summary:hover { text-decoration: underline; }
   function itemKey(r) { return (r.fileName || '') + '||' + (r.branch || '') + '||' + (r.invoiceNo || '') + '||' + r.lineNo; }
   function returnKey(r) { return (r.__fileName || '') + '||' + (r['رقم_الفاتورة'] || '') + '||' + r.__lineNo; }
   function checkKey(c) { return (c.fileName || '') + '||' + (c.customer || '') + '||' + c.seq; }
+  function customerInvoiceRawKey(r) { return (r.invoiceNo || '') + '||' + (r.invoiceDate ? isoDate(r.invoiceDate) : 'no-date'); }
   function ledgerKey(l) { return (l.fileName || '') + '||' + (l.branch || '') + '||' + (l.customer || '') + '||' + l.seq; }
   function mergeByKey(existingArr, newArr, keyFn) {
     const map = new Map();
@@ -1511,6 +1576,21 @@ table.datatable details summary:hover { text-decoration: underline; }
     };
   }
 
+  function customerInvoiceRawToDbRow(r) {
+    return {
+      file_name: r.fileName || null, invoice_no: r.invoiceNo != null ? String(r.invoiceNo) : null,
+      invoice_date: isoDate(r.invoiceDate), customer: r.customer || null, branch_raw: r.branchRaw || null,
+      total: r.total || 0, lines: r.lines || 0
+    };
+  }
+  function dbRowToCustomerInvoiceRaw(row) {
+    return {
+      fileName: row.file_name, invoiceNo: row.invoice_no,
+      invoiceDate: row.invoice_date ? new Date(row.invoice_date) : null,
+      customer: row.customer, branchRaw: row.branch_raw,
+      total: Number(row.total) || 0, lines: Number(row.lines) || 0
+    };
+  }
   function returnToDbRow(r) {
     return {
       file_name: r.__fileName, invoice_no: r['رقم_الفاتورة'] != null ? String(r['رقم_الفاتورة']) : null, line_no: r.__lineNo,
@@ -2032,8 +2112,8 @@ table.datatable details summary:hover { text-decoration: underline; }
     }
   }
 
-  async function syncToCloud(newInvoices, newItemRows, newReturns, newIndirectDiscounts, newChecks, newLedger) {
-    if (!sb || (!newInvoices.length && !newItemRows.length && !(newReturns && newReturns.length) && !(newIndirectDiscounts && newIndirectDiscounts.length) && !(newChecks && newChecks.length) && !(newLedger && newLedger.length))) return;
+  async function syncToCloud(newInvoices, newItemRows, newReturns, newIndirectDiscounts, newChecks, newLedger, newCustomerInvoicesRaw) {
+    if (!sb || (!newInvoices.length && !newItemRows.length && !(newReturns && newReturns.length) && !(newIndirectDiscounts && newIndirectDiscounts.length) && !(newChecks && newChecks.length) && !(newLedger && newLedger.length) && !(newCustomerInvoicesRaw && newCustomerInvoicesRaw.length))) return;
     try {
       logStatus('جاري حفظ التقرير في السحابة...');
       const invRows = newInvoices.map(invoiceToDbRow);
@@ -2082,7 +2162,16 @@ table.datatable details summary:hover { text-decoration: underline; }
         }
         ledMsg = ` و${ledRows.length} حركة حساب عميل`;
       }
-      logStatus(`تم حفظ ${invRows.length} فاتورة و${itemRowsDb.length} سطر صنف${retMsg}${indMsg}${chkMsg}${ledMsg} في السحابة بنجاح ✓ (لن تُفقد حتى لو رجعت للأداة تاني)`, 'ok');
+      let custInvMsg = '';
+      if (newCustomerInvoicesRaw && newCustomerInvoicesRaw.length) {
+        const custInvRows = newCustomerInvoicesRaw.map(customerInvoiceRawToDbRow);
+        for (const c of chunk(custInvRows, 500)) {
+          const { error } = await sb.from('tamr_customer_invoices_raw').upsert(c, { onConflict: 'invoice_no,invoice_date' });
+          if (error) throw error;
+        }
+        custInvMsg = ` و${custInvRows.length} فاتورة جريد`;
+      }
+      logStatus(`تم حفظ ${invRows.length} فاتورة و${itemRowsDb.length} سطر صنف${retMsg}${indMsg}${chkMsg}${ledMsg}${custInvMsg} في السحابة بنجاح ✓ (لن تُفقد حتى لو رجعت للأداة تاني)`, 'ok');
     } catch (e) {
       logStatus('تعذر الحفظ في السحابة - البيانات معروضة الآن لكنها لن تُحفظ للمرة القادمة (' + (e.message || e) + ')', 'err');
     }
@@ -2183,8 +2272,8 @@ table.datatable details summary:hover { text-decoration: underline; }
     if (!client) return;
     try {
       logStatus('جاري تحميل البيانات المحفوظة من قبل من السحابة...');
-      const [invRows, itemRows, returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows] = await Promise.all([
-        fetchAllRows(client, 'tamr_sales_invoices'), fetchAllRows(client, 'tamr_sales_items'), fetchAllRows(client, 'tamr_sales_returns'), fetchAllRows(client, 'tamr_sales_manual_routes'), fetchAllRows(client, 'tamr_sales_route_catalog'), fetchAllRows(client, 'tamr_sales_indirect_discounts'), fetchAllRows(client, 'tamr_sales_indirect_links'), fetchAllRows(client, 'tamr_sales_item_catalog'), fetchAllRows(client, 'tamr_sales_rep_routes'), fetchAllRows(client, 'tamr_sales_rep_route_site_links'), fetchAllRows(client, 'tamr_sales_collected_checks'), fetchAllRows(client, 'tamr_sales_account_ledger'), fetchAllRows(client, 'tamr_sales_item_merges')
+      const [invRows, itemRows, returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows, customerInvoiceRawRows] = await Promise.all([
+        fetchAllRows(client, 'tamr_sales_invoices'), fetchAllRows(client, 'tamr_sales_items'), fetchAllRows(client, 'tamr_sales_returns'), fetchAllRows(client, 'tamr_sales_manual_routes'), fetchAllRows(client, 'tamr_sales_route_catalog'), fetchAllRows(client, 'tamr_sales_indirect_discounts'), fetchAllRows(client, 'tamr_sales_indirect_links'), fetchAllRows(client, 'tamr_sales_item_catalog'), fetchAllRows(client, 'tamr_sales_rep_routes'), fetchAllRows(client, 'tamr_sales_rep_route_site_links'), fetchAllRows(client, 'tamr_sales_collected_checks'), fetchAllRows(client, 'tamr_sales_account_ledger'), fetchAllRows(client, 'tamr_sales_item_merges'), fetchAllRows(client, 'tamr_customer_invoices_raw')
       ]);
       if (sb !== client) return; // اتعمل تسجيل خروج أثناء التحميل - متجاهلين النتيجة القديمة
       state.manualRoutes = new Map(manualRouteRows.map(r => [r.customer_site, { route: r.route, region: r.region, sector: r.sector }]));
@@ -2198,6 +2287,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       state.accountLedger = ledgerRows.map(dbRowToLedger);
       state.manualIndirectLinks = new Map(indirectLinkRows.map(r => [r.discount_customer, r.matched_customer]));
       state.itemAliases = new Map(itemMergeRows.map(r => [normItemName(r.old_name), r.canonical_name]));
+      state.customerInvoicesRaw = customerInvoiceRawRows.map(dbRowToCustomerInvoiceRaw);
       if (!invRows.length) {
         logStatus('لا توجد بيانات محفوظة سابقًا في السحابة - ارفع الملفات عشان تبدأ.');
         return;
@@ -2255,11 +2345,14 @@ table.datatable details summary:hover { text-decoration: underline; }
   const indirectInput = document.getElementById('indirectInput');
   const statementDz = document.getElementById('statementDzone');
   const statementInput = document.getElementById('statementInput');
+  const customerInvDz = document.getElementById('customerInvDropzone');
+  const customerInvInput = document.getElementById('customerInvInput');
   const invList = document.getElementById('invFileList');
   const routeList = document.getElementById('routeFileList');
   const returnsList = document.getElementById('returnsFileList');
   const indirectList = document.getElementById('indirectFileList');
   const statementList = document.getElementById('statementFileList');
+  const customerInvList = document.getElementById('customerInvFileList');
   const processBtn = document.getElementById('processBtn');
   const statusLog = document.getElementById('statusLog');
 
@@ -2267,6 +2360,7 @@ table.datatable details summary:hover { text-decoration: underline; }
   let returnsFile = null;
   let indirectFiles = [];
   let statementFiles = [];
+  let customerInvFiles = [];
 
   function logStatus(msg, cls) {
     const d = document.createElement('div');
@@ -2315,7 +2409,7 @@ table.datatable details summary:hover { text-decoration: underline; }
         renderInvList();
       });
     });
-    processBtn.disabled = state.queue.filter(q => q.kind === 'invoice').length === 0;
+    processBtn.disabled = state.queue.filter(q => q.kind === 'invoice').length === 0 && customerInvFiles.length === 0;
   }
 
   function renderRouteList() {
@@ -2375,6 +2469,24 @@ table.datatable details summary:hover { text-decoration: underline; }
     });
   }
 
+  function renderCustomerInvFileList() {
+    if (!customerInvList) return;
+    customerInvList.innerHTML = '';
+    customerInvFiles.forEach((f, idx) => {
+      const row = document.createElement('div');
+      row.className = 'fitem';
+      row.innerHTML = `<span class="fname">${f.name}</span><span class="rm" data-idx="${idx}">✕</span>`;
+      customerInvList.appendChild(row);
+    });
+    customerInvList.querySelectorAll('.rm').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        customerInvFiles.splice(Number(e.target.dataset.idx), 1);
+        renderCustomerInvFileList();
+      });
+    });
+    processBtn.disabled = state.queue.filter(q => q.kind === 'invoice').length === 0 && customerInvFiles.length === 0;
+  }
+
   setupDropzone(invDz, invInput, (files) => {
     files.filter(f => /\.(xlsx|xls)$/i.test(f.name)).forEach(f => {
       state.queue.push({ id: uid(), file: f, kind: 'invoice', activity: guessActivity(f.name) });
@@ -2405,6 +2517,13 @@ table.datatable details summary:hover { text-decoration: underline; }
     setupDropzone(statementDz, statementInput, (files) => {
       files.filter(f => /\.(xlsx|xls)$/i.test(f.name)).forEach(f => statementFiles.push(f));
       renderStatementFileList();
+    });
+  }
+
+  if (customerInvDz && customerInvInput) {
+    setupDropzone(customerInvDz, customerInvInput, (files) => {
+      files.filter(f => /\.(xlsx|xls)$/i.test(f.name)).forEach(f => customerInvFiles.push(f));
+      renderCustomerInvFileList();
     });
   }
 
@@ -2518,7 +2637,26 @@ table.datatable details summary:hover { text-decoration: underline; }
       state.accountLedger = mergeByKey(state.accountLedger, newLedger, ledgerKey);
     }
 
-    logStatus(`اكتمل التحليل: ${totalInv} فاتورة جديدة من هذه الدفعة (الإجمالي المعروض الآن: ${state.invoices.length} فاتورة، ${state.returns.length} سطر مرتجع، ${state.indirectDiscounts.length} قيد خصم غير مباشر، ${state.collectedChecks.length} شيك محصل)${totalErr ? '، ' + totalErr + ' سطر لم يتم التعرف عليه' : ''}`, 'ok');
+    let newCustomerInvoicesRaw = [];
+    if (customerInvFiles.length) {
+      for (const f of customerInvFiles) {
+        try {
+          const buf = await f.arrayBuffer();
+          const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
+          const { invoices: rawInvoices, errors } = SalesParser.parseCustomerInvoiceRawSheet(rows);
+          rawInvoices.forEach(r => { r.fileName = f.name; });
+          newCustomerInvoicesRaw = newCustomerInvoicesRaw.concat(rawInvoices);
+          logStatus(`${f.name}: ${rawInvoices.length} فاتورة (جريد)${errors.length ? ' (تعذر التعرف على شكل الملف)' : ''}`, errors.length ? 'err' : 'ok');
+        } catch (e) {
+          logStatus('خطأ في قراءة ' + f.name + ': ' + e.message, 'err');
+        }
+      }
+      state.customerInvoicesRaw = mergeByKey(state.customerInvoicesRaw, newCustomerInvoicesRaw, customerInvoiceRawKey);
+    }
+
+    logStatus(`اكتمل التحليل: ${totalInv} فاتورة جديدة من هذه الدفعة (الإجمالي المعروض الآن: ${state.invoices.length} فاتورة، ${state.returns.length} سطر مرتجع، ${state.indirectDiscounts.length} قيد خصم غير مباشر، ${state.collectedChecks.length} شيك محصل، ${state.customerInvoicesRaw.length} فاتورة جريد)${totalErr ? '، ' + totalErr + ' سطر لم يتم التعرف عليه' : ''}`, 'ok');
 
     state.filters = { activity: [], branch: [], year: [], month: [], rep: [], item: [] };
     state.yoyUpToMonth = null;
@@ -2537,8 +2675,10 @@ table.datatable details summary:hover { text-decoration: underline; }
     renderIndirectFileList();
     statementFiles = [];
     renderStatementFileList();
+    customerInvFiles = [];
+    renderCustomerInvFileList();
 
-    syncToCloud(newInvoices, newItemRows, newReturns, newIndirectDiscounts, newChecks, newLedger);
+    syncToCloud(newInvoices, newItemRows, newReturns, newIndirectDiscounts, newChecks, newLedger, newCustomerInvoicesRaw);
   });
 
   function tagReturn(r, fileName) {
@@ -5103,6 +5243,7 @@ table.datatable details summary:hover { text-decoration: underline; }
     'panel-indirect': renderIndirectDiscounts,
     'panel-linkindirect': renderLinkIndirect,
     'panel-customerdiscounts': renderCustomerDiscounts,
+    'panel-customerinvoicematch': renderCustomerInvoiceMatch,
     'panel-branchindirect': renderBranchIndirect,
     'panel-collectedchecks': renderCollectedChecks,
     'panel-debtaging': renderDebtAging,
@@ -6598,6 +6739,130 @@ function renderCustomerNet() {
     clearBtn.addEventListener('click', () => {
       state.customerNetSearchFilter = '';
       renderCustomerNet();
+    });
+  }
+}
+
+/* ---------------- مطابقة فواتير جريد (فواتير عملاء مجمّعة بدون فرع) ضد بيانات النظام ----------------
+   نفس منطق المطابقة اللي اتعمل يدويًا لملف "فواتير الجزء الاول" (رقم الفاتورة + التاريخ ضد tamr_sales_invoices)
+   لكن جوه الأداة نفسها ومباشرة على أي فاتورة "جريد" جديدة اتحفظت. لو رقم الفاتورة موجود بفرع واحد بس في
+   النظام = تم الحل مباشرة. لو موجود بأكتر من فرع، بنحاول نفرّقهم بالتاريخ. لو اتفرق التاريخ لفرع واحد = تم
+   الحل بالتاريخ. لو فضل أكتر من فرع مرشح = استثناء يحتاج مراجعة يدوية. */
+function sameYMD(d1, d2) {
+  return d1 instanceof Date && d2 instanceof Date && !isNaN(d1) && !isNaN(d2) &&
+    d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
+}
+function computeCustomerInvoiceMatches() {
+  // فهرس: رقم الفاتورة -> كل ظهوره في بيانات النظام (كل الفواتير المحفوظة، بغض النظر عن فلاتر الصفحة العلوية)
+  const bySysInvoiceNo = new Map();
+  state.invoices.forEach(inv => {
+    const no = inv['رقم_الفاتورة'] != null ? String(inv['رقم_الفاتورة']) : null;
+    if (!no) return;
+    if (!bySysInvoiceNo.has(no)) bySysInvoiceNo.set(no, []);
+    bySysInvoiceNo.get(no).push({ branch: inv['الفرع'], date: inv.__date, net: inv.__net, gross: inv.__gross, customer: inv['العميل'] });
+  });
+
+  return state.customerInvoicesRaw.map(r => {
+    if (r.branchRaw) {
+      return Object.assign({}, r, { resolvedBranch: r.branchRaw, matchType: 'from_file', candidateBranches: null });
+    }
+    const candidates = bySysInvoiceNo.get(r.invoiceNo) || [];
+    if (!candidates.length) {
+      return Object.assign({}, r, { resolvedBranch: null, matchType: 'no_match', candidateBranches: null });
+    }
+    const distinctBranches = Array.from(new Set(candidates.map(c => c.branch).filter(Boolean)));
+    if (distinctBranches.length <= 1) {
+      return Object.assign({}, r, { resolvedBranch: distinctBranches[0] || null, matchType: 'unique_branch', candidateBranches: null });
+    }
+    const sameDate = r.invoiceDate ? candidates.filter(c => sameYMD(c.date, r.invoiceDate)) : [];
+    const sameDateBranches = Array.from(new Set(sameDate.map(c => c.branch).filter(Boolean)));
+    if (sameDateBranches.length === 1) {
+      return Object.assign({}, r, { resolvedBranch: sameDateBranches[0], matchType: 'resolved_by_date', candidateBranches: null });
+    }
+    if (sameDateBranches.length > 1) {
+      return Object.assign({}, r, { resolvedBranch: null, matchType: 'ambiguous_same_date', candidateBranches: sameDateBranches });
+    }
+    return Object.assign({}, r, { resolvedBranch: null, matchType: 'ambiguous_no_date_match', candidateBranches: distinctBranches });
+  });
+}
+
+const CUSTOMER_INVOICE_MATCH_LABELS = {
+  from_file: 'الفرع موجود في الملف نفسه',
+  unique_branch: 'تم الحل - فرع واحد مؤكد',
+  resolved_by_date: 'تم الحل - بالتاريخ',
+  ambiguous_same_date: 'رقم مكرر بين فروع في نفس اليوم - محتاج مراجعة يدوية',
+  ambiguous_no_date_match: 'الفرع مش موجود بنفس تاريخ الفاتورة (رقم مكرر بين فروع)',
+  no_match: 'رقم الفاتورة غير موجود في النظام لهذه الفترة',
+};
+
+function renderCustomerInvoiceMatch() {
+  const el = document.getElementById('panel-customerinvoicematch');
+  if (!state.customerInvoicesRaw.length) { el.innerHTML = emptyState('ارفع ملف "جريد" (فواتير عملاء بدون فرع) الأول من كارت رفع البيانات فوق.'); return; }
+
+  const matched = computeCustomerInvoiceMatches();
+  const searchTerm = (state.customerInvoiceMatchSearch || '').trim();
+  const filtered = searchTerm ? matched.filter(r => String(r.invoiceNo).includes(searchTerm) || (r.customer || '').includes(searchTerm)) : matched;
+
+  const counts = {};
+  matched.forEach(r => { counts[r.matchType] = (counts[r.matchType] || 0) + 1; });
+  const resolvedCount = (counts.from_file || 0) + (counts.unique_branch || 0) + (counts.resolved_by_date || 0);
+  const exceptionsCount = (counts.ambiguous_same_date || 0) + (counts.ambiguous_no_date_match || 0) + (counts.no_match || 0);
+
+  const summaryHtml = `
+    <div class="grid2" style="margin-bottom:14px;">
+      <div class="pill-note" style="background:#E1EFE4;color:#2f6b45;">✅ تم حل الفرع لـ ${fmt(resolvedCount)} فاتورة من ${fmt(matched.length)} (${fmtPct(matched.length ? resolvedCount / matched.length : 0)})</div>
+      <div class="pill-note" style="background:${exceptionsCount ? '#FCEBEA' : '#E1EFE4'};color:${exceptionsCount ? '#b3261e' : '#2f6b45'};">${exceptionsCount ? '⚠' : '✅'} ${fmt(exceptionsCount)} فاتورة محتاجة مراجعة يدوية</div>
+    </div>
+  `;
+
+  const exceptions = filtered.filter(r => r.matchType === 'ambiguous_same_date' || r.matchType === 'ambiguous_no_date_match' || r.matchType === 'no_match');
+  exceptions.sort((a, b) => (b.total || 0) - (a.total || 0));
+  const exceptionRows = exceptions.map(r => [
+    escapeHtml(r.invoiceNo), r.invoiceDate ? fmtDateDMY(r.invoiceDate) : '-', escapeHtml(r.customer || '-'), fmtMoney(r.total),
+    CUSTOMER_INVOICE_MATCH_LABELS[r.matchType] || r.matchType,
+    r.candidateBranches && r.candidateBranches.length ? escapeHtml(r.candidateBranches.join(' | ')) : '-'
+  ]);
+  const exceptionsTotal = exceptions.reduce((s, r) => s + (r.total || 0), 0);
+
+  const resolved = filtered.filter(r => r.matchType !== 'ambiguous_same_date' && r.matchType !== 'ambiguous_no_date_match' && r.matchType !== 'no_match');
+  resolved.sort((a, b) => (b.total || 0) - (a.total || 0));
+  const resolvedRows = resolved.slice(0, 500).map(r => [
+    escapeHtml(r.invoiceNo), r.invoiceDate ? fmtDateDMY(r.invoiceDate) : '-', escapeHtml(r.customer || '-'), fmtMoney(r.total),
+    escapeHtml(r.resolvedBranch || '-'), CUSTOMER_INVOICE_MATCH_LABELS[r.matchType] || r.matchType
+  ]);
+
+  const searchHtml = `
+    <div class="no-print" style="margin-bottom:10px;">
+      <input type="text" id="custInvMatchSearchInput" placeholder="دور برقم فاتورة أو اسم عميل..." value="${escapeHtml(searchTerm)}"
+        style="width:280px; font-family:inherit; padding:7px 10px; border-radius:8px; border:1.5px solid var(--sand-dark); font-size:12.5px;">
+      ${searchTerm ? `<button type="button" id="custInvMatchClearBtn" class="btn secondary" style="padding:6px 12px; font-size:11.5px; margin-inline-start:6px;">✕ مسح البحث</button>` : ''}
+    </div>
+  `;
+
+  el.innerHTML = `
+    <div class="table-title">مطابقة فواتير جريد (${fmt(matched.length)} فاتورة)</div>
+    ${summaryHtml}
+    ${searchHtml}
+    <div class="table-title">⚠ الاستثناءات المحتاجة مراجعة يدوية (${fmt(exceptions.length)} فاتورة، إجمالي ${fmtMoney(exceptionsTotal)})</div>
+    <div class="table-wrap">${tableHTML(['رقم الفاتورة', 'تاريخ الفاتورة', 'العميل', 'الاجمالي', 'الحالة', 'الفروع المحتملة'], exceptionRows)}</div>
+    <div class="table-title" style="margin-top:18px;">الفواتير المحلولة (أول 500 مرتبة بالقيمة)</div>
+    <div class="table-wrap">${tableHTML(['رقم الفاتورة', 'تاريخ الفاتورة', 'العميل', 'الاجمالي', 'الفرع', 'طريقة الحل'], resolvedRows)}</div>
+  `;
+
+  const searchInput = el.querySelector('#custInvMatchSearchInput');
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      state.customerInvoiceMatchSearch = searchInput.value;
+      renderCustomerInvoiceMatch();
+    });
+    searchInput.focus();
+    searchInput.setSelectionRange(searchInput.value.length, searchInput.value.length);
+  }
+  const clearBtn = el.querySelector('#custInvMatchClearBtn');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      state.customerInvoiceMatchSearch = '';
+      renderCustomerInvoiceMatch();
     });
   }
 }
