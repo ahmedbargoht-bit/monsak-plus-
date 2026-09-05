@@ -453,6 +453,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       <div class="tabgroup" data-maintab="items-branches" style="display:none">
         <button class="tabbtn" data-tab="panel-branches" data-label="الفروع"><i class="ti ti-building-store" aria-hidden="true"></i><span>الفروع</span></button>
         <button class="tabbtn" data-tab="panel-customers" data-label="العملاء"><i class="ti ti-users" aria-hidden="true"></i><span>العملاء</span></button>
+        <button class="tabbtn" data-tab="panel-customernet" data-label="صافي مسحوبات عملاء MT"><i class="ti ti-report-money" aria-hidden="true"></i><span>صافي مسحوبات عملاء MT</span></button>
         <button class="tabbtn" data-tab="panel-customerdiscounts" data-label="خصومات العملاء"><i class="ti ti-discount-2" aria-hidden="true"></i><span>خصومات العملاء</span></button>
         <div class="tabgroup-cap">الفروع والعملاء</div>
       </div>
@@ -495,6 +496,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       <div class="tabpanel" id="panel-itemmerge"></div>
       <div class="tabpanel" id="panel-branches"></div>
       <div class="tabpanel" id="panel-customers"></div>
+      <div class="tabpanel" id="panel-customernet"></div>
       <div class="tabpanel" id="panel-reps"></div>
       <div class="tabpanel" id="panel-reproutes"></div>
       <div class="tabpanel" id="panel-quarterly"></div>
@@ -5091,6 +5093,7 @@ table.datatable details summary:hover { text-decoration: underline; }
     'panel-itemmerge': renderItemMerge,
     'panel-branches': renderBranches,
     'panel-customers': renderCustomers,
+    'panel-customernet': renderCustomerNet,
     'panel-reps': renderReps,
     'panel-reproutes': renderRepRoutes,
     'panel-quarterly': renderQuarterly,
@@ -6466,6 +6469,135 @@ function renderCustomers() {
         const reopened = document.getElementById('custColPanel');
         if (reopened) reopened.classList.add('open');
       });
+    });
+  }
+}
+
+/* ---------------- صافي مسحوبات عملاء MT (مبيعات - مرتجعات = صافي مضبوط لكل عميل، على مستوى العميل ككل مش فروعه) ---------------- */
+function renderCustomerNet() {
+  const inv = filteredInvoices();
+  const el = document.getElementById('panel-customernet');
+  if (!inv.length) { el.innerHTML = emptyState('لا توجد بيانات عملاء'); return; }
+
+  const returnRows = filteredReturns();
+  const hasReturns = returnRows.length > 0;
+
+  const byCustomer = groupSum(inv, i => i['العميل'], i => i.__net);
+  byCustomer.sort((a, b) => b.sum - a.sum);
+
+  const custNetSearchTerm = (state.customerNetSearchFilter || '').trim();
+  const top = custNetSearchTerm ? byCustomer.filter(x => String(x.key).includes(custNetSearchTerm)) : byCustomer;
+
+  const years = activeYears(inv, i => i.__year);
+  const multiYear = years.length >= 2;
+
+  // إجمالي المرتجع لكل عميل (على مستوى العميل ككل - المطابقة بالاسم بعد التطبيع، مش لكل فرع)
+  const retByCustNorm = new Map();
+  returnRows.forEach(r => {
+    const k = r.__عميل_مطابق;
+    retByCustNorm.set(k, (retByCustNorm.get(k) || 0) + (r['الإجمالي'] || 0));
+  });
+
+  // لو فيه أكتر من سنة في الفلتر الحالي: "صافي المبيعات" بيتفصل لعمود لكل سنة + الفرق ونسبة النمو
+  // (نفس أسلوب المقارنة المستخدم في تاب "العملاء" وتاب "مقارنة سنوية") عشان تبقى دي أداة المقارنة "ما بين" المطلوبة
+  const netAfterReturnBmap = new Map(); // اسم العميل -> Map(سنة -> صافي بعد المرتجع)
+  if (multiYear) {
+    const netByCustYear = yearBreakdownMap(inv, i => i['العميل'], i => i.__year, i => i.__net);
+    const retByCustYear = yearBreakdownMap(returnRows, r => r.__عميل_مطابق, r => r.__year, r => r['الإجمالي']);
+    byCustomer.forEach(x => {
+      const normKey = SalesParser.normalizeCustomerKey(x.key);
+      const salesYm = netByCustYear.get(x.key) || new Map();
+      const retYm = retByCustYear.get(normKey) || new Map();
+      const ym = new Map();
+      years.forEach(y => ym.set(y, (salesYm.get(y) || 0) - (retYm.get(y) || 0)));
+      netAfterReturnBmap.set(x.key, ym);
+    });
+  }
+
+  const headers = ['اسم العميل', 'عدد الفروع', 'صافي بعد الخصم المباشر', 'مبيعات', 'مرتجعات'];
+  headers.push(...(multiYear ? yearColumnHeaders(years, 'صافي المبيعات ') : ['صافي المبيعات']));
+
+  const rowsHtml = top.map(x => {
+    const invs = inv.filter(i => i['العميل'] === x.key);
+    const grossX = invs.reduce((s, i) => s + i.__gross, 0);
+
+    const sitesX = new Set(invs.map(i => (i['فرع_العميل'] || '').toString().trim()).filter(Boolean));
+
+    const normKey = SalesParser.normalizeCustomerKey(x.key);
+    const retValTotal = retByCustNorm.get(normKey) || 0;
+    const netAfterReturn = x.sum - retValTotal;
+
+    const row = [
+      x.key,
+      fmt(sitesX.size),
+      fmtMoney(x.sum),
+      fmtMoney(grossX),
+      retValTotal ? `<span style="color:var(--bad); font-weight:700;">-${fmtMoney(retValTotal)}</span>` : fmtMoney(0),
+    ];
+    if (multiYear) {
+      row.push(...yearColumnCells(netAfterReturnBmap, x.key, years, fmtMoney));
+    } else {
+      row.push(`<b>${fmtMoney(netAfterReturn)}</b>`);
+    }
+    return row;
+  });
+
+  // صف الإجمالي لكل العملاء المعروضين في الجدول
+  const topKeys = top.map(x => x.key);
+  const topInvs = inv.filter(i => topKeys.includes(i['العميل']));
+  const topGross = topInvs.reduce((s, i) => s + i.__gross, 0);
+  const topNet = top.reduce((s, x) => s + x.sum, 0);
+  const topSitesCount = new Set(topInvs.map(i => i['فرع_العميل']).filter(Boolean)).size;
+  const topNormKeys = topKeys.map(k => SalesParser.normalizeCustomerKey(k));
+  const topReturnsTotal = topNormKeys.reduce((s, k) => s + (retByCustNorm.get(k) || 0), 0);
+  const topNetAfterReturn = topNet - topReturnsTotal;
+
+  const footer = [
+    'الإجمالي (كل العملاء)',
+    fmt(topSitesCount),
+    fmtMoney(topNet),
+    fmtMoney(topGross),
+    topReturnsTotal ? `<span style="color:var(--bad); font-weight:700;">-${fmtMoney(topReturnsTotal)}</span>` : fmtMoney(0),
+  ];
+  if (multiYear) {
+    footer.push(...yearColumnCells(sumYearTotalsBmap(netAfterReturnBmap, topKeys, years), '__TOTAL__', years, fmtMoney));
+  } else {
+    footer.push(`<b>${fmtMoney(topNetAfterReturn)}</b>`);
+  }
+
+  const custNetSearchHtml = `
+    <div class="no-print" style="margin-bottom:10px;">
+      <input type="text" id="custNetSearchInput" placeholder="دور عن عميل بالاسم..." value="${escapeHtml(custNetSearchTerm)}"
+        style="width:280px; font-family:inherit; padding:7px 10px; border-radius:8px; border:1.5px solid var(--sand-dark); font-size:12.5px;">
+      ${custNetSearchTerm ? `<button type="button" id="custNetSearchClearBtn" class="btn secondary" style="padding:6px 12px; font-size:11.5px; margin-inline-start:6px;">✕ مسح البحث</button>` : ''}
+    </div>
+  `;
+
+  const noteHtml = hasReturns
+    ? `<div class="pill-note" style="background:#E1EFE4;color:#2f6b45;">✅ صافي المبيعات = مبيعات (بعد الخصم المباشر) - مرتجعات، محسوبة على مستوى العميل (الشركة) ككل مش على مستوى فروعه، عشان تدي صافي مضبوط تشتغل عليه.</div>`
+    : `<div class="pill-note">⚠ لا توجد بيانات مرتجعات مطابقة للفلتر الحالي - عمود "صافي المبيعات" هيبقى نفس "صافي بعد الخصم المباشر" لحد ما ترفع/تفلتر بيانات مرتجع.</div>`;
+
+  el.innerHTML = `
+    <div class="table-title">صافي مسحوبات عملاء MT (${fmt(top.length)} عميل)${multiYear ? ' - مقارنة بين السنوات: ' + years.join('، ') : ''}</div>
+    ${noteHtml}
+    ${custNetSearchHtml}
+    <div class="table-wrap">${tableHTML(headers, rowsHtml, footer)}</div>
+  `;
+
+  const searchInput = el.querySelector('#custNetSearchInput');
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      state.customerNetSearchFilter = searchInput.value;
+      renderCustomerNet();
+    });
+    searchInput.focus();
+    searchInput.setSelectionRange(searchInput.value.length, searchInput.value.length);
+  }
+  const clearBtn = el.querySelector('#custNetSearchClearBtn');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      state.customerNetSearchFilter = '';
+      renderCustomerNet();
     });
   }
 }
