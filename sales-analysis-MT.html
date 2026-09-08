@@ -2469,24 +2469,35 @@ table.datatable details summary:hover { text-decoration: underline; }
     let quickDone = false;
     try {
       if (!usedCache) {
-        // مرحلة سريعة: نجيب بس آخر شهر فيه بيانات فواتير/أصناف (+ كل الجداول الصغيرة كاملة) عشان
-        // الأداة تفتح خلال ثواني بدل ما تستنى كل الـ190 ألف سطر - وده اللي بيخليها "لحظية" فعلًا
-        // مهما كبر التاريخ الكلي مستقبلًا، لأن حجم الاستعلام ده ثابت (شهر واحد بس).
+        // المرحلة (1): فواتير + أصناف آخر شهر بس - استعلام مفلتر بفهرس year/month، حجمه صغير وثابت
+        // تقريبًا (بضع آلاف سطر) مهما كبر التاريخ الكلي مستقبلًا، فبيرجع خلال ثوانٍ معدودة. مهم:
+        // ده لوحده من غير أي جدول تاني معاه (عكس المحاولة اللي قبل كده) عشان أي بطء في جدول تاني
+        // (زي كشف الحساب أو فواتير جريد) ميأخرش أول عرض للشاشة خالص.
         try {
           logStatus('جاري تحميل بيانات آخر شهر عشان تفتح الأداة بسرعة...');
           const period = await fetchLatestInvoicePeriod(client);
           if (period) {
-            const [invPeriodRows, itemPeriodRows, otherRows] = await Promise.all([
+            const [invPeriodRows, itemPeriodRows] = await Promise.all([
               fetchTablePeriodRows(client, 'tamr_sales_invoices', period.year, period.month),
               fetchTablePeriodRows(client, 'tamr_sales_items', period.year, period.month),
-              fetchOtherTablesRows(client)
             ]);
             if (sb !== client) return;
-            const quickRawRows = { invRows: invPeriodRows, itemRows: itemPeriodRows, ...otherRows };
-            const hasInv = applyCloudRowsToState(quickRawRows);
+            const emptyOtherRows = { returnRows: [], manualRouteRows: [], routeCatalogRows: [], indirectRows: [], indirectLinkRows: [], itemCatalogRows: [], repRouteRows: [], repRouteSiteLinkRows: [], checkRows: [], ledgerRows: [], itemMergeRows: [], customerInvoiceRawRows: [] };
+            const hasInv = applyCloudRowsToState({ invRows: invPeriodRows, itemRows: itemPeriodRows, ...emptyOtherRows });
             finishCloudRender(hasInv);
-            logStatus(`تم فتح الأداة ببيانات شهر ${period.month}/${period.year} (${state.invoices.length} فاتورة) - جاري تحميل باقي التاريخ في الخلفية عشان باقي الشاشات (الأرباع، المقارنة السنوية...) تشتغل صح...`, 'ok');
+            logStatus(`تم فتح الأداة ببيانات شهر ${period.month}/${period.year} (${state.invoices.length} فاتورة) - جاري تحميل باقي البيانات...`, 'ok');
             quickDone = true;
+
+            // المرحلة (2): باقي الجداول الصغيرة (مرتجعات/كشف حساب/شيكات/فواتير جريد...) - أحجامها
+            // معقولة (أكبرها ~18 ألف سطر) فمش هتاخد وقت طويل، بنكمّل بيها الشاشة اللي ظهرت بالفعل
+            // من غير ما نأخّر عليها عرض المرحلة (1).
+            try {
+              const otherRows = await fetchOtherTablesRows(client);
+              if (sb !== client) return;
+              applyCloudRowsToState({ invRows: invPeriodRows, itemRows: itemPeriodRows, ...otherRows });
+              finishCloudRender(true);
+              logStatus(`تم فتح الأداة ببيانات شهر ${period.month}/${period.year} (${state.invoices.length} فاتورة) - جاري تحميل باقي التاريخ في الخلفية عشان باقي الشاشات (الأرباع، المقارنة السنوية...) تشتغل صح...`, 'ok');
+            } catch (e2) { /* فشلت المرحلة دي بس - البيانات الأساسية لسه ظاهرة وهنحاول تكميلها في التحميل الكامل تحت */ }
           }
         } catch (e) { /* فشلت المرحلة السريعة لأي سبب - مش مشكلة، هنكمل بالطريقة الكاملة العادية تحت */ }
       }
