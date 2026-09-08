@@ -821,8 +821,9 @@ function today(){
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-// عروض الأسعار — بتتخزن كـ {value, type}. type='fixed' يبقى value هو السعر النهائي مباشرة،
-// type='percent' يبقى value نسبة خصم % لازم تتحسب على السعر الأساسي وقت العرض/الحفظ.
+// عروض الأسعار — بتتخزن كـ {value, type}. type='fixed' يبقى value هو السعر النهائي مباشرة (بيطغى
+// على أي خصم عادي — ده سعر مقطوع). type='percent' يبقى value نسبة خصم % لازم تتجمّع مع خصم العميل
+// العادي (الفئة/الاستثنائي) بدل ما تلغيه — عشان العميل ياخد الخصمين مع بعض زي ما المفروض.
 function resolvePromoPrice(promo, basePrice){
   if(!promo) return null;
   if(promo.type==='percent') return +((+basePrice||0)*(1-(+promo.value||0)/100)).toFixed(2);
@@ -830,6 +831,25 @@ function resolvePromoPrice(promo, basePrice){
 }
 function promoLabel(p){
   return p.promo_type==='percent' ? `${p.promo_price}% خصم` : `${p.promo_price} ج`;
+}
+// يحسب السعر النهائي لصنف. الأولوية بين "قائمة أسعار خاصة بالعميل" و"العرض" بتختلف حسب مكان
+// الاستخدام (promoFirst) — نفس التفاوت اللي كان موجود أصلاً في الكود قبل التعديل، محافظين عليه
+// عشان منغيّرش سلوك موجود مقصود. العرض بنسبة خصم بيتجمّع مع خصم العميل العادي (فئة/استثنائي)
+// بدل ما يلغيه — عرض السعر الثابت لسه بيطغى على أي خصم (سعر مقطوع).
+function computeItemPricing(basePrice, clientSpecialPrice, promoEntry, catDiscPct, promoFirst){
+  const trySpecial=()=> clientSpecialPrice!=null ? {finalPrice:+clientSpecialPrice, discPct:0, isPromo:false, isSpecial:true} : null;
+  const tryPromo=()=>{
+    if(!promoEntry) return null;
+    if(promoEntry.type!=='percent') return {finalPrice:+promoEntry.value, discPct:0, isPromo:true, isSpecial:false};
+    const discPct=Math.min(100,(+catDiscPct||0)+(+promoEntry.value||0));
+    const finalPrice=+((+basePrice||0)*(1-discPct/100)).toFixed(2);
+    return {finalPrice, discPct, isPromo:true, isSpecial:false};
+  };
+  const result = promoFirst ? (tryPromo()||trySpecial()) : (trySpecial()||tryPromo());
+  if(result) return result;
+  const discPct=+catDiscPct||0;
+  const finalPrice=discPct>0?+((+basePrice||0)*(1-discPct/100)).toFixed(2):(+basePrice||0);
+  return {finalPrice, discPct, isPromo:false, isSpecial:false};
 }
 
 // ══ اختيار تاريخ فاتورة سابق (نفس الشهر) — يتحكم فيه الأدمن من لوحة التحكم ══
@@ -2045,21 +2065,21 @@ function selectCat(cat,grpData){
       const key=iname.replace(/[^a-zA-Z0-9]/g,'_');
       const p=prices[iname];
       const basePrice=p?p.price:0;
-      // العرض (ثابت أو نسبة خصم) يطغى على السعر الأساسي
       const promoEntry=(visitState.promos&&visitState.promos[iname])||null;
-      const promoPrice=promoEntry?resolvePromoPrice(promoEntry, basePrice):null;
       const promoNote=(visitState.promoNotes&&visitState.promoNotes[iname])||'';
-      const isPromoActive=promoPrice!==null;
-      const price=isPromoActive?promoPrice:basePrice;
       const clientSpecialPrice=(visitState.clientPL&&visitState.clientPL[iname]!==undefined)?visitState.clientPL[iname]:null;
-      const effectiveDisc=(clientSpecialPrice!==null||isPromoActive)?0:disc;
-      const priceAfterDisc=clientSpecialPrice!==null?clientSpecialPrice:(effectiveDisc>0?(price*(1-effectiveDisc/100)).toFixed(2):price);
+      // عرض السعر الثابت يطغى على الخصم العادي (سعر مقطوع) — عرض نسبة الخصم بيتجمّع مع خصم
+      // العميل العادي (الفئة/الاستثنائي) بدل ما يلغيه
+      const pricing=computeItemPricing(basePrice, clientSpecialPrice, promoEntry, disc);
+      const isPromoActive=pricing.isPromo;
+      const price=pricing.finalPrice;
+      const effectiveDisc=pricing.discPct;
       const noteTag=promoNote?`<span style="font-size:9px;color:#E65100;display:block;margin-top:1px">${promoNote}</span>`:'';
-      const priceDisplay=clientSpecialPrice!==null
-        ?`<span style="color:#2E7D32;font-weight:800">${clientSpecialPrice} ج</span> <span style="font-size:9px;background:#E8F5E9;color:#2E7D32;padding:1px 5px;border-radius:6px">💲خاص</span>`
+      const priceDisplay=pricing.isSpecial
+        ?`<span style="color:#2E7D32;font-weight:800">${price} ج</span> <span style="font-size:9px;background:#E8F5E9;color:#2E7D32;padding:1px 5px;border-radius:6px">💲خاص</span>`
         :isPromoActive
-        ?`<span style="color:#E65100;font-weight:800">${promoPrice} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض</span>${noteTag}`
-        :(effectiveDisc>0?`${priceAfterDisc} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span>`:`${price} ج`);
+        ?`<span style="color:#E65100;font-weight:800">${price} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض${effectiveDisc>0?' + خصم':''}</span>${noteTag}`
+        :(effectiveDisc>0?`${price} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${basePrice}</span>`:`${price} ج`);
       html+=`<div class="prod-row">
         <div class="prod-name">${iname}<br><small style="color:var(--c);font-weight:700">${priceDisplay}</small></div>
         <div class="qty-ctrl">
@@ -2139,13 +2159,14 @@ async function openInvoiceReview(mode){
     const p=prices[name]||{price:0,tax_pct:0};
     const clientSpecial=clientPLPrices[name];
     const promoEntry=statePromos[name]||null;
-    const promoBasePrice=p.price||clientSpecial||0;
-    const promoFallback=promoEntry?resolvePromoPrice(promoEntry, promoBasePrice):null;
     const promoNote=(state.promoNotes&&state.promoNotes[name])||'';
-    // العرض (ثابت أو نسبة خصم) يطغى على كل شيء — ثم القائمة الخاصة — ثم السعر الأساسي
-    const finalPrice=promoFallback!==null?promoFallback:(clientSpecial!==undefined?clientSpecial:p.price);
-    const isClientPL=clientSpecial!==undefined&&promoFallback===null;
-    const isPromo=promoFallback!==null;
+    // عرض السعر الثابت يطغى على كل شيء (سعر مقطوع) — عرض نسبة الخصم بيتجمّع مع خصم العميل
+    // العادي بدل ما يلغيه — ثم القائمة الخاصة — ثم السعر الأساسي مع خصم العميل العادي لو موجود
+    const catDisc=isReturn?getRetDiscount(name):getDiscount(name);
+    const pricing=computeItemPricing(p.price, clientSpecial!==undefined?clientSpecial:null, promoEntry, catDisc, true);
+    const finalPrice=pricing.finalPrice;
+    const isClientPL=pricing.isSpecial;
+    const isPromo=pricing.isPromo;
     invoiceState.items.push({name,qty,price:finalPrice,tax_pct:p.tax_pct,total:finalPrice*qty,isClientPL,isPromo,promoNote,cat:isReturn?(returnState.itemCats[name]||returnState.cat||''):''});
   });
 
@@ -2648,15 +2669,14 @@ function selectRetCat(cat,grpData){
       const p=prices[iname];
       const basePrice=p?p.price:0;
       const promoEntry=(returnState.promos&&returnState.promos[iname])||null;
-      const promoPrice=promoEntry?resolvePromoPrice(promoEntry, basePrice):null;
       const promoNote=(returnState.promoNotes&&returnState.promoNotes[iname])||'';
-      const isPromoActive=promoPrice!==null;
-      const price=isPromoActive?promoPrice:basePrice;
-      const priceAfterDisc=(!isPromoActive&&disc>0)?(price*(1-disc/100)).toFixed(2):price;
-      const noteTag=promoNote?`<span style="font-size:9px;color:#E65100;display:block;margin-top:1px">${promoNote}</span>`:'';
+      const pricing=computeItemPricing(basePrice, null, promoEntry, disc);
+      const isPromoActive=pricing.isPromo;
+      const price=pricing.finalPrice;
+      const effectiveDisc=pricing.discPct;
       const priceDisplay=isPromoActive
-        ?`<span style="color:#E65100;font-weight:800">${promoPrice} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض</span>${noteTag}`
-        :(disc>0?`${priceAfterDisc} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${price}</span>`:`${price} ج`);
+        ?`<span style="color:#E65100;font-weight:800">${price} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض${effectiveDisc>0?' + خصم':''}</span>${noteTag}`
+        :(effectiveDisc>0?`${price} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${basePrice}</span>`:`${price} ج`);
       html+=`<div class="prod-row">
         <div class="prod-name">${iname}<br><small style="color:#8B2635;font-weight:700">${priceDisplay}</small></div>
         <div class="qty-ctrl">
