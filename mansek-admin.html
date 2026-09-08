@@ -29967,17 +29967,25 @@ function sinvFilterRowsByItems(rows){
 // ثم ضريبة الصنف نفسه (tax_pct) فوق السعر بعد الخصم.
 // بيرجع { items: [أسماء الأصناف المختارة بترتيب اختيارها], branches: [{branch, qtyByItem:{اسم الصنف: عدد}, totalQty, net}] }
 // — كل صنف مختار بيبقى عمود لوحده في جدول التصدير بدل عمود نصي واحد يلخبط كل الأسماء مع بعض.
+// وضع "فرع" (الافتراضي): صف لكل فرع لوحده (مع عمود العميل بتاعه للعلم بس).
+// وضع "عميل": صف واحد لكل عميل بيجمع كل فروعه مع بعض — إجمالي الكمية والصافي عبر كل الفروع.
 function sinvBuildItemBranchReport(rows){
   const sel = [...sinvGetSelectedItemsSet()];
   if(!sel.length) return null;
   const selSet = new Set(sel);
-  const byBranch = {};
+  const groupByClient = _sinvCBMode==='client';
+  const byGroup = {};
   (rows||[]).forEach(r=>{
     const items = Array.isArray(r.items) ? r.items : [];
     const hits = items.filter(it => selSet.has(((it && it.name) || '').trim()));
     if(!hits.length) return;
-    const branch = r.branch_name || '—';
-    if(!byBranch[branch]) byBranch[branch] = { branch, qtyByItem: {}, totalQty: 0, net: 0 };
+    const groupKey = groupByClient ? (r.client_name||'—') : (r.branch_name||'—');
+    if(!byGroup[groupKey]){
+      byGroup[groupKey] = groupByClient
+        ? { client: groupKey, branchSet: new Set(), qtyByItem: {}, totalQty: 0, net: 0 }
+        : { branch: groupKey, client: r.client_name||'—', qtyByItem: {}, totalQty: 0, net: 0 };
+    }
+    if(groupByClient) byGroup[groupKey].branchSet.add(r.branch_name||'—');
     const disc = Number(r.discount_pct)||0;
     hits.forEach(it=>{
       const name = (it.name||'').trim();
@@ -29986,42 +29994,53 @@ function sinvBuildItemBranchReport(rows){
       const taxPct = Number(it.tax_pct)||0;
       const afterDisc = it.isPromo ? base : base*(1-disc/100);
       const net = afterDisc*(1+taxPct/100);
-      byBranch[branch].qtyByItem[name] = (byBranch[branch].qtyByItem[name]||0) + q;
-      byBranch[branch].totalQty += q;
-      byBranch[branch].net += net;
+      byGroup[groupKey].qtyByItem[name] = (byGroup[groupKey].qtyByItem[name]||0) + q;
+      byGroup[groupKey].totalQty += q;
+      byGroup[groupKey].net += net;
     });
   });
-  const branches = Object.values(byBranch).sort((a,b)=>b.net-a.net);
-  return { items: sel, branches };
+  const branches = Object.values(byGroup).sort((a,b)=>b.net-a.net);
+  return { items: sel, branches, groupByClient };
 }
 
 // بيبني الجدول (كروت + رأس + صفوف + صف إجمالي) لتقرير الفرع/الأصناف — كل صنف عمود لوحده
 function sinvRenderPivotTable(report, tabColor, altBg){
-  const { items, branches } = report;
+  const { items, branches, groupByClient } = report;
   const totalQty = branches.reduce((s,b)=>s+b.totalQty,0);
   const totalNet = branches.reduce((s,b)=>s+b.net,0);
   const perItemTotals = items.map(name=>branches.reduce((s,b)=>s+(b.qtyByItem[name]||0),0));
+  const cardLabel1 = groupByClient ? 'عدد العملاء' : 'عدد الفروع';
   const statsHtml = `
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">
-      ${[['عدد الفروع',branches.length,tabColor],['إجمالي الكمية',totalQty.toLocaleString('en-US'),'#854F0B'],['الصافي بعد الخصم والضريبة',totalNet.toLocaleString('en-US',{maximumFractionDigits:2})+' ج',tabColor]].map(([l,v,c])=>`
+      ${[[cardLabel1,branches.length,tabColor],['إجمالي الكمية',totalQty.toLocaleString('en-US'),'#854F0B'],['الصافي بعد الخصم والضريبة',totalNet.toLocaleString('en-US',{maximumFractionDigits:2})+' ج',tabColor]].map(([l,v,c])=>`
       <div style="background:${altBg};border:1px solid #E8D9C0;border-radius:10px;padding:12px;text-align:center">
         <div style="font-size:10px;color:#8B6F47">${l}</div>
         <div style="font-size:18px;font-weight:800;color:${c};margin-top:4px">${v}</div>
       </div>`).join('')}
     </div>`;
+  // عمودين أوليين بيختلفوا حسب المفتاح: عميل+فرع لما يكون التجميع بالفرع، أو عميل+عدد فروعه لما التجميع بالعميل
+  const leadHead = groupByClient
+    ? `<th style="padding:8px 10px;text-align:right;white-space:nowrap">العميل</th><th style="padding:8px 8px;text-align:center;white-space:nowrap">عدد الفروع</th>`
+    : `<th style="padding:8px 10px;text-align:right;white-space:nowrap">الفرع</th><th style="padding:8px 10px;text-align:right;white-space:nowrap">العميل</th>`;
   const tableHead = `<tr style="background:${tabColor};color:#EDE5D8">
-    <th style="padding:8px 10px;text-align:right;white-space:nowrap">الفرع</th>
+    ${leadHead}
     ${items.map(name=>`<th style="padding:8px 3px;text-align:center;font-size:9px;width:44px;max-width:44px;white-space:normal;word-break:break-word;line-height:1.3">${name.trim().split(/\s+/).join('<br>')}</th>`).join('')}
     <th style="padding:8px 8px;text-align:center;white-space:nowrap">اجمالي القطع</th>
     <th style="padding:8px 10px;text-align:center;white-space:nowrap">الصافي بعد الخصم والضريبة</th></tr>`;
-  const rowsHtml = branches.map((b,i)=>`<tr style="background:${i%2===0?'#fff':altBg};border-bottom:0.5px solid #F0E8D8">
-    <td style="padding:7px 10px;font-weight:700;color:${tabColor}">${b.branch}</td>
+  const rowsHtml = branches.map((b,i)=>{
+    const leadCells = groupByClient
+      ? `<td style="padding:7px 10px;font-weight:700;color:${tabColor}">${b.client}</td><td style="padding:7px 8px;text-align:center">${b.branchSet.size}</td>`
+      : `<td style="padding:7px 10px;font-weight:700;color:${tabColor}">${b.branch}</td><td style="padding:7px 10px;font-size:11px">${b.client||'—'}</td>`;
+    return `<tr style="background:${i%2===0?'#fff':altBg};border-bottom:0.5px solid #F0E8D8">
+    ${leadCells}
     ${items.map(name=>`<td style="padding:7px 6px;text-align:center">${(b.qtyByItem[name]||0).toLocaleString('en-US')}</td>`).join('')}
     <td style="padding:7px 8px;text-align:center;font-weight:700">${b.totalQty.toLocaleString('en-US')}</td>
     <td style="padding:7px 10px;text-align:center;font-weight:700;color:#065F46">${b.net.toLocaleString('en-US',{maximumFractionDigits:2})} ج</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
   const totalRowHtml = `<tr style="background:${tabColor};color:#EDE5D8;font-weight:700">
     <td style="padding:7px 10px">الإجمالي</td>
+    <td style="padding:7px 10px"></td>
     ${perItemTotals.map(v=>`<td style="padding:7px 6px;text-align:center">${v.toLocaleString('en-US')}</td>`).join('')}
     <td style="padding:7px 8px;text-align:center">${totalQty.toLocaleString('en-US')}</td>
     <td style="padding:7px 10px;text-align:center">${totalNet.toLocaleString('en-US',{maximumFractionDigits:2})} ج</td>
