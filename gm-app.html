@@ -3528,7 +3528,7 @@ function renderLocations(){
 }
 
 async function filterLocations(){
-  const visible=CU.groups;
+  const visible=CU.level==='gm' ? Object.keys(GROUPS) : CU.groups;
   const grp=document.getElementById('loc-filter-group')?.value||'all';
   const status=document.getElementById('loc-filter-status')?.value||'all';
   const range=locGetDateRange();
@@ -4546,14 +4546,12 @@ async function euToggleFixedBranchAssign(cb){
     const Hh={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
     if(cb.checked){
       _euFixedAssignedSet.add(branchName);
+      // ملحوظة: بنكتب في coord_route_assignments بس — ده المصدر الوحيد لفرع المنسق الثابت في
+      // النظام كله دلوقتي. قبل كده كنا بنحدّث branches.rep_name كمان "عشان التزامن"، بس ده كان
+      // بالظبط سبب تعارضات زي ظهور فرع غلط/قديم لمنسق في شاشة وصح في شاشة تانية — فاتشالت.
       await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments`,{
         method:'POST', headers:Hh,
         body: JSON.stringify({grp, route:'', branch_name:branchName, rep_name:repName, coord_type:type, shift:'كامل'})
-      });
-      // تحديث ملكية الفرع في جدول branches كمان (rep_name/grp) عشان يفضل متزامن مع التخصيص الفعلي
-      await fetch(`${SUPABASE_URL}/rest/v1/branches?branch_name=eq.${encodeURIComponent(branchName)}`,{
-        method:'PATCH', headers:Hh,
-        body: JSON.stringify({grp, rep_name:repName})
       });
     } else {
       _euFixedAssignedSet.delete(branchName);
@@ -4934,7 +4932,9 @@ async function editUser(){
   try{
     const matchName = oldName || name;
     const pgOrValLocal = v => encodeURIComponent('"' + String(v==null?'':v).replace(/\\/g,'\\\\').replace(/"/g,'\\"') + '"');
-    if(matchName && route){
+    // للمنسق الثابت مفيش خط سير بالمعنى ده — تخصيصه بيتسجل في coord_route_assignments بس،
+    // فلازم نتجنب إننا نلمس أي صفوف قديمة/legacy في branches.rep_name/2/3 بتاعته من هنا.
+    if(matchName && route && !isFixed){
       const orFilter = ['rep_name','rep_name2','rep_name3'].map(f=>`${f}.eq.${pgOrValLocal(matchName)}`).join(',');
       const branchPayload = group ? {route, grp:group} : {route};
       await fetch(`${SUPABASE_URL}/rest/v1/branches?or=(${orFilter})&status=eq.active`,{
@@ -7047,7 +7047,7 @@ async function qbInitReps(){
 
   try{
     const res=await fetch(
-      `${SUPABASE_URL}/rest/v1/users?select=name,route,grp&role=eq.rep&status=eq.active&order=name.asc&limit=500`,
+      `${SUPABASE_URL}/rest/v1/users?select=name,route,grp,user_type&role=eq.rep&status=eq.active&order=name.asc&limit=500`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
     );
     const data=res.ok?await res.json():[];
@@ -7062,15 +7062,17 @@ async function qbInitReps(){
       o.textContent=r.name+' — '+(r.route||'');
       o.dataset.route=r.route||'';
       o.dataset.grp=r.grp||'';
+      o.dataset.type=r.user_type||'';
       sel.appendChild(o);
     });
   }catch(e){
     sel.innerHTML='<option value="">اختر المنسق</option>';
-    REPS.filter(r=>!CU?.groups||CU.groups.includes(r.group)).forEach(r=>{
+    REPS.filter(r=>CU?.level==='gm'||!CU?.groups||CU.groups.includes(r.group)).forEach(r=>{
       const o=document.createElement('option');
       o.value=r.name;
       o.textContent=r.name+' — '+(r.route||'');
       o.dataset.route=r.route||'';
+      o.dataset.type=r.type||'';
       sel.appendChild(o);
     });
   }
@@ -7081,6 +7083,8 @@ async function qbOnRepChange(){
   const opt=sel.options[sel.selectedIndex];
   const route=opt?.dataset?.route||'';
   const grp=opt?.dataset?.grp||'';
+  const repType=opt?.dataset?.type||'';
+  const isFixed=repType.startsWith('ثابت');
   const repName=sel.value;
 
   document.getElementById('qb-route').value=route;
@@ -7102,36 +7106,65 @@ async function qbOnRepChange(){
   const H2={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
   const enc=encodeURIComponent(repName);
 
-  const [byRep1,byRep2,byRep3,byCoord]=await Promise.all([
-    fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,client_type,status&rep_name=eq.${enc}&status=neq.inactive`,{headers:H2}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,client_type,status&rep_name2=eq.${enc}&status=neq.inactive`,{headers:H2}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,client_type,status&rep_name3=eq.${enc}&status=neq.inactive`,{headers:H2}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=id,branch_name&rep_name=eq.${enc}`,{headers:H2}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-  ]);
+  let repBranches=[];
 
-  const seen=new Set();
-  const repBranches=[...byRep1,...byRep2,...byRep3].filter(b=>{
-    if(!b.branch_name||seen.has(b.branch_name)) return false;
-    seen.add(b.branch_name); return true;
-  }).sort((a,b)=>a.branch_name.localeCompare(b.branch_name,'ar'));
+  if(isFixed){
+    // منسق ثابت/ثابت كبار عملاء: المصدر الوحيد هو coord_route_assignments — مفيش قراءة من branches.rep_name/2/3
+    const byCoord=await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=id,branch_name&rep_name=eq.${enc}`,{headers:H2}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+    const seen=new Set();
+    repBranches=byCoord.filter(b=>{
+      if(!b.branch_name||seen.has(b.branch_name)) return false;
+      seen.add(b.branch_name); return true;
+    }).sort((a,b)=>a.branch_name.localeCompare(b.branch_name,'ar'));
 
-  count.textContent=`(${repBranches.length} فرع)`;
+    count.textContent=`(${repBranches.length} فرع)`;
 
-  if(!repBranches.length){
-    list.innerHTML='<span style="color:#aaa;font-size:11px">لا توجد فروع مسجلة بعد — أضف من الأسفل</span>';
+    if(!repBranches.length){
+      list.innerHTML='<span style="color:#aaa;font-size:11px">لا توجد فروع مسجلة بعد — أضف من الأسفل</span>';
+    } else {
+      list.innerHTML=repBranches.map(b=>{
+        return `<span style="display:inline-flex;align-items:center;gap:5px;background:#EEF6FF;
+          color:#003A80;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600;
+          border:1px solid #C8DDF8">
+          ${b.branch_name}
+          <button onclick="qbRemoveFixedBranch('${b.branch_name.replace(/'/g,"\\'")}','${repName.replace(/'/g,"\\'")}')"
+            style="background:#FFEBEE;border:none;color:#B71C1C;border-radius:4px;padding:1px 5px;
+            cursor:pointer;font-size:11px;font-weight:700;line-height:1.2" title="إزالة من المنسق">×</button>
+        </span>`;
+      }).join('');
+    }
   } else {
-    list.innerHTML=repBranches.map(b=>{
-      const tc=b.client_type==='A'?'#1A7A4A':b.client_type==='C'?'#B71C1C':'#005CBF';
-      return `<span style="display:inline-flex;align-items:center;gap:5px;background:#EEF6FF;
-        color:#003A80;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600;
-        border:1px solid #C8DDF8">
-        ${b.branch_name}
-        <span style="background:${tc}22;color:${tc};padding:0 4px;border-radius:3px;font-size:10px">${b.client_type||'B'}</span>
-        <button onclick="qbRemoveBranch(${b.id},'${b.branch_name.replace(/'/g,"\\'")}','${repName.replace(/'/g,"\\'")}')"
-          style="background:#FFEBEE;border:none;color:#B71C1C;border-radius:4px;padding:1px 5px;
-          cursor:pointer;font-size:11px;font-weight:700;line-height:1.2" title="إزالة من المنسق">×</button>
-      </span>`;
-    }).join('');
+    // منسق متحرك: خط السير بيتحدد من فروع branches.rep_name/rep_name2/rep_name3 — الآلية الأصلية زي ما هي
+    const [byRep1,byRep2,byRep3]=await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,client_type,status&rep_name=eq.${enc}&status=neq.inactive`,{headers:H2}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,client_type,status&rep_name2=eq.${enc}&status=neq.inactive`,{headers:H2}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,branch_name,client_type,status&rep_name3=eq.${enc}&status=neq.inactive`,{headers:H2}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    ]);
+
+    const seen=new Set();
+    repBranches=[...byRep1,...byRep2,...byRep3].filter(b=>{
+      if(!b.branch_name||seen.has(b.branch_name)) return false;
+      seen.add(b.branch_name); return true;
+    }).sort((a,b)=>a.branch_name.localeCompare(b.branch_name,'ar'));
+
+    count.textContent=`(${repBranches.length} فرع)`;
+
+    if(!repBranches.length){
+      list.innerHTML='<span style="color:#aaa;font-size:11px">لا توجد فروع مسجلة بعد — أضف من الأسفل</span>';
+    } else {
+      list.innerHTML=repBranches.map(b=>{
+        const tc=b.client_type==='A'?'#1A7A4A':b.client_type==='C'?'#B71C1C':'#005CBF';
+        return `<span style="display:inline-flex;align-items:center;gap:5px;background:#EEF6FF;
+          color:#003A80;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600;
+          border:1px solid #C8DDF8">
+          ${b.branch_name}
+          <span style="background:${tc}22;color:${tc};padding:0 4px;border-radius:3px;font-size:10px">${b.client_type||'B'}</span>
+          <button onclick="qbRemoveBranch(${b.id},'${b.branch_name.replace(/'/g,"\\'")}','${repName.replace(/'/g,"\\'")}')"
+            style="background:#FFEBEE;border:none;color:#B71C1C;border-radius:4px;padding:1px 5px;
+            cursor:pointer;font-size:11px;font-weight:700;line-height:1.2" title="إزالة من المنسق">×</button>
+        </span>`;
+      }).join('');
+    }
   }
 
   await qbLoadGrpBranches(grp, repName, repBranches.map(b=>b.branch_name));
@@ -7157,7 +7190,11 @@ async function qbLoadGrpBranches(grp, repName, existingBranches){
 
 async function qbAssignBranch(){
   const repSel=document.getElementById('qb-rep');
+  const repOpt=repSel.options[repSel.selectedIndex];
   const repName=repSel.value;
+  const repType=repOpt?.dataset?.type||'';
+  const repGrp=repOpt?.dataset?.grp||'';
+  const isFixed=repType.startsWith('ثابت');
   const brSel=document.getElementById('qb-grp-branches');
   const brOpt=brSel.options[brSel.selectedIndex];
   const brId=brSel.value;
@@ -7170,6 +7207,25 @@ async function qbAssignBranch(){
   if(!brId){err.textContent='اختر فرع من القائمة';err.style.display='block';return;}
 
   const H2={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+
+  if(isFixed){
+    // منسق ثابت/ثابت كبار عملاء: التخصيص بيتكتب في coord_route_assignments بس — المصدر الوحيد في النظام
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments`,{
+      method:'POST',
+      headers:{...H2,'Content-Type':'application/json','Prefer':'return=minimal'},
+      body:JSON.stringify({grp:repGrp||'giza', route:'', branch_name:brName, rep_name:repName, coord_type:repType, shift:'كامل'})
+    });
+    if(res.ok){
+      ok.textContent=`✅ تم تعيين "${brName}" للمنسق`;
+      ok.style.display='block';
+      await qbOnRepChange();
+      loadBranches();
+    } else {
+      err.textContent='خطأ في التعيين';err.style.display='block';
+    }
+    return;
+  }
+
   const [brData]=await fetch(
     `${SUPABASE_URL}/rest/v1/branches?select=id,rep_name,rep_name2,rep_name3&id=eq.${brId}`,
     {headers:H2}).then(r=>r.ok?r.json():[]).catch(()=>[]);
@@ -7195,6 +7251,21 @@ async function qbAssignBranch(){
     loadBranches();
   } else {
     err.textContent='خطأ في التعيين';err.style.display='block';
+  }
+}
+
+async function qbRemoveFixedBranch(brName, repName){
+  if(!confirm(`إزالة "${brName}" من المنسق "${repName}"؟`)) return;
+  const H2={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const res=await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?rep_name=eq.${encodeURIComponent(repName)}&branch_name=eq.${encodeURIComponent(brName)}`,{
+    method:'DELETE', headers:H2
+  });
+  if(res.ok){
+    showToast(`🗑️ تم إزالة "${brName}" من المنسق`);
+    await qbOnRepChange();
+    loadBranches();
+  } else {
+    showToast('❌ خطأ في الإزالة');
   }
 }
 
