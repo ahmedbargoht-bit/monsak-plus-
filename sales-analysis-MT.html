@@ -2273,54 +2273,165 @@ table.datatable details summary:hover { text-decoration: underline; }
     }
   }
 
+  // بيجيب مجموعة functions بترجع Promise ويشغّلهم على دفعات (batchSize في نفس الوقت) بدل كلهم مرة
+  // واحدة - عشان منضغطش على السحابة بعدد اتصالات كبير أوي في نفس اللحظة (14 جدول × 3 buckets لكل
+  // واحد = لحد 42 استعلام متوازي لو اتشغلوا كلهم مع بعض، وده كان بيسبب "canceling statement due to
+  // statement timeout" أحيانًا مع نمو حجم البيانات). تقسيمهم لدفعات بيقلل الذروة من غير ما يبطّئ
+  // الإجمالي كتير (لسه فيه توازي جوه كل دفعة).
+  async function runTasksBatched(taskFns, batchSize) {
+    const results = [];
+    for (let i = 0; i < taskFns.length; i += batchSize) {
+      const batch = taskFns.slice(i, i + batchSize);
+      results.push(...await Promise.all(batch.map(fn => fn())));
+    }
+    return results;
+  }
+
+  // ---------------------------------------------------------------------------
+  // تخزين مؤقت محلي (IndexedDB - مش localStorage عشان حجم البيانات بقى كبير أوي، ممكن يتخطى حد
+  // الـ localStorage بسهولة) لآخر نسخة نجح تحميلها من السحابة. الهدف: (1) الأداة تفتح فورًا بالبيانات
+  // القديمة بدل ما تقف على "جاري التحميل..." لحد ما السحابة ترد، و(2) لو حصل تايم أوت أو أي مشكلة شبكة
+  // وقت التحديث، الأداة تفضل شغالة بآخر نسخة مضبوطة بدل ما توقف تمامًا وتطلب رفع الملفات من الأول.
+  // مهم: التحديث الفعلي من السحابة (fetchAllCloudRows) بيحصل دايمًا في الخلفية بعد كده عشان أي تعديل/حذف
+  // حصل من مكان تاني يتلقط صح - الكاش ده بس لتحسين سرعة أول فتح ومرجع احتياطي وقت المشاكل، مش بديل دائم.
+  const CLOUD_CACHE_DB_NAME = 'tamr_sales_cloud_cache';
+  const CLOUD_CACHE_STORE = 'snapshot';
+  function openCloudCacheDB() {
+    return new Promise((resolve, reject) => {
+      if (!window.indexedDB) { reject(new Error('indexedDB غير متاح')); return; }
+      const req = indexedDB.open(CLOUD_CACHE_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(CLOUD_CACHE_STORE)) db.createObjectStore(CLOUD_CACHE_STORE);
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async function saveCloudCache(rawRows) {
+    try {
+      const db = await openCloudCacheDB();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(CLOUD_CACHE_STORE, 'readwrite');
+        tx.objectStore(CLOUD_CACHE_STORE).put({ savedAt: Date.now(), rawRows }, 'latest');
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+      db.close();
+    } catch (e) { /* التخزين المحلي مش متاح أو فشل - مش مشكلة، البيانات لسه موجودة في السحابة عادي */ }
+  }
+  async function loadCloudCache() {
+    try {
+      const db = await openCloudCacheDB();
+      const result = await new Promise((resolve, reject) => {
+        const tx = db.transaction(CLOUD_CACHE_STORE, 'readonly');
+        const req = tx.objectStore(CLOUD_CACHE_STORE).get('latest');
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+      db.close();
+      return result;
+    } catch (e) { return null; }
+  }
+
+  // بيجيب كل صفوف كل الجداول الخام من السحابة (من غير أي تحويل) - نفس الاستدعاءات اللي كانت جوه
+  // loadFromCloud قبل كده بالظبط، لكن دلوقتي مقسّمة على دفعات (batches) بدل استدعاء كله مرة واحدة،
+  // ومفصولة في function مستقلة عشان تتنادى برضو وقت حفظ الكاش المحلي وقت تحميله.
+  async function fetchAllCloudRows(client) {
+    const tableNames = ['tamr_sales_invoices', 'tamr_sales_items', 'tamr_sales_returns', 'tamr_sales_manual_routes', 'tamr_sales_route_catalog', 'tamr_sales_indirect_discounts', 'tamr_sales_indirect_links', 'tamr_sales_item_catalog', 'tamr_sales_rep_routes', 'tamr_sales_rep_route_site_links', 'tamr_sales_collected_checks', 'tamr_sales_account_ledger', 'tamr_sales_item_merges', 'tamr_customer_invoices_raw'];
+    const taskFns = tableNames.map(t => () => fetchAllRows(client, t));
+    const [invRows, itemRows, returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows, customerInvoiceRawRows] = await runTasksBatched(taskFns, 4);
+    return { invRows, itemRows, returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows, customerInvoiceRawRows };
+  }
+
+  // بياخد الصفوف الخام (من السحابة مباشرة أو من الكاش المحلي - نفس الشكل بالظبط) ويحوّلها ويحطها في
+  // state. بيرجع true لو فيه فواتير فعلية اتحطت، false لو الداتا فاضية تمامًا (حساب جديد لسه من غير رفع).
+  function applyCloudRowsToState(rows) {
+    const { invRows, itemRows, returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows, customerInvoiceRawRows } = rows;
+    state.manualRoutes = new Map(manualRouteRows.map(r => [r.customer_site, { route: r.route, region: r.region, sector: r.sector }]));
+    state.routeCatalog = new Map(routeCatalogRows.map(r => [r.route, { branch: r.branch, type: r.type, region: r.region, sector: r.sector }]));
+    state.itemCatalog = new Map(itemCatalogRows.map(r => [normItemName(r.item_name), { code: r.item_code, category: r.category, piecesPerCarton: r.pieces_per_carton || null, name: r.item_name }]));
+    state.repRoutes = new Map(repRouteRows.map(r => [normItemName(r.branch_name), { route: r.route, group: r.group_name, branchName: r.branch_name }]));
+    state.repRouteSiteLinks = new Map(repRouteSiteLinkRows.map(r => [normItemName(r.site_name), r.branch_name]));
+    state.returns = returnRows.map(dbRowToReturn);
+    state.indirectDiscounts = indirectRows.map(dbRowToIndirectDiscount);
+    state.collectedChecks = checkRows.map(dbRowToCheck);
+    state.accountLedger = ledgerRows.map(dbRowToLedger);
+    state.manualIndirectLinks = new Map(indirectLinkRows.map(r => [r.discount_customer, r.matched_customer]));
+    state.itemAliases = new Map(itemMergeRows.map(r => [normItemName(r.old_name), r.canonical_name]));
+    state.customerInvoicesRaw = customerInvoiceRawRows.map(dbRowToCustomerInvoiceRaw);
+    if (!invRows.length) { state.invoices = []; state.itemRows = []; return false; }
+    // استبعاد فواتير البضاعة المجانية/العروض الترويجية (خصم = قيمة الفاتورة بالكامل) حتى من البيانات
+    // القديمة المتزامنة سابقًا - نفس الاستبعاد اللي بيحصل وقت رفع ملفات جديدة.
+    const isFreeGoodsRow = (row) => { const g = Number(row.gross) || 0, d = Number(row.discount) || 0; return g > 0 && Math.abs(g - d) < 0.01; };
+    const excludedInvKeys = new Set();
+    const keptInvRows = invRows.filter(row => {
+      if (isFreeGoodsRow(row)) { excludedInvKeys.add((row.file_name || '') + '||' + (row.branch || '') + '||' + (row.invoice_no || '')); return false; }
+      return true;
+    });
+    state.invoices = keptInvRows.map(dbRowToInvoice);
+    state.itemRows = itemRows.filter(row => !excludedInvKeys.has((row.file_name || '') + '||' + (row.branch || '') + '||' + (row.invoice_no || ''))).map(dbRowToItemRow);
+    reapplyManualRoutesToState();
+    applyItemAliasesToState();
+    rebuildInvoiceCustomerIndex();
+    return true;
+  }
+
+  function finishCloudRender(hasInvoices) {
+    if (!hasInvoices) {
+      document.getElementById('dashboardSection').style.display = 'none';
+      return;
+    }
+    populateFilters();
+    document.getElementById('dashboardSection').style.display = 'block';
+    const uc0 = document.getElementById('uploadCard');
+    if (uc0) uc0.style.display = 'none';
+    renderAll();
+  }
+
   async function loadFromCloud() {
     // بناخد نسخة محلية ثابتة من عميل السحابة عشان لو المستخدم عمل تسجيل خروج
     // أثناء التحميل (sb بترجع null)، العملية الجارية تكمل بأمان من غير ما تنهار بخطأ.
     const client = sb;
     if (!client) return;
+
+    // خطوة 1 (اختيارية): لو فيه نسخة محفوظة محليًا من تحميل سابق ناجح، نعرضها فورًا من غير أي انتظار
+    // على الشبكة - الأداة تبقى شغالة وعليها بيانات (ولو مش أحدث نسخة) في أقل من ثانية بدل ما تقف على
+    // "جاري التحميل..." لحد ما كل الجداول (~175 ألف سطر حاليًا) تتحمّل من السحابة.
+    let usedCache = false;
     try {
-      logStatus('جاري تحميل البيانات المحفوظة من قبل من السحابة...');
-      const [invRows, itemRows, returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows, customerInvoiceRawRows] = await Promise.all([
-        fetchAllRows(client, 'tamr_sales_invoices'), fetchAllRows(client, 'tamr_sales_items'), fetchAllRows(client, 'tamr_sales_returns'), fetchAllRows(client, 'tamr_sales_manual_routes'), fetchAllRows(client, 'tamr_sales_route_catalog'), fetchAllRows(client, 'tamr_sales_indirect_discounts'), fetchAllRows(client, 'tamr_sales_indirect_links'), fetchAllRows(client, 'tamr_sales_item_catalog'), fetchAllRows(client, 'tamr_sales_rep_routes'), fetchAllRows(client, 'tamr_sales_rep_route_site_links'), fetchAllRows(client, 'tamr_sales_collected_checks'), fetchAllRows(client, 'tamr_sales_account_ledger'), fetchAllRows(client, 'tamr_sales_item_merges'), fetchAllRows(client, 'tamr_customer_invoices_raw')
-      ]);
-      if (sb !== client) return; // اتعمل تسجيل خروج أثناء التحميل - متجاهلين النتيجة القديمة
-      state.manualRoutes = new Map(manualRouteRows.map(r => [r.customer_site, { route: r.route, region: r.region, sector: r.sector }]));
-      state.routeCatalog = new Map(routeCatalogRows.map(r => [r.route, { branch: r.branch, type: r.type, region: r.region, sector: r.sector }]));
-      state.itemCatalog = new Map(itemCatalogRows.map(r => [normItemName(r.item_name), { code: r.item_code, category: r.category, piecesPerCarton: r.pieces_per_carton || null, name: r.item_name }]));
-      state.repRoutes = new Map(repRouteRows.map(r => [normItemName(r.branch_name), { route: r.route, group: r.group_name, branchName: r.branch_name }]));
-      state.repRouteSiteLinks = new Map(repRouteSiteLinkRows.map(r => [normItemName(r.site_name), r.branch_name]));
-      state.returns = returnRows.map(dbRowToReturn);
-      state.indirectDiscounts = indirectRows.map(dbRowToIndirectDiscount);
-      state.collectedChecks = checkRows.map(dbRowToCheck);
-      state.accountLedger = ledgerRows.map(dbRowToLedger);
-      state.manualIndirectLinks = new Map(indirectLinkRows.map(r => [r.discount_customer, r.matched_customer]));
-      state.itemAliases = new Map(itemMergeRows.map(r => [normItemName(r.old_name), r.canonical_name]));
-      state.customerInvoicesRaw = customerInvoiceRawRows.map(dbRowToCustomerInvoiceRaw);
-      if (!invRows.length) {
-        logStatus('لا توجد بيانات محفوظة سابقًا في السحابة - ارفع الملفات عشان تبدأ.');
-        return;
+      const cached = await loadCloudCache();
+      if (cached && cached.rawRows) {
+        const hasInv = applyCloudRowsToState(cached.rawRows);
+        usedCache = true;
+        finishCloudRender(hasInv);
+        const savedDate = new Date(cached.savedAt);
+        logStatus(`عرض فوري لآخر نسخة محفوظة محليًا (${savedDate.toLocaleString('ar-EG')}) - جاري تحديثها من السحابة في الخلفية...`, 'ok');
       }
-      // استبعاد فواتير البضاعة المجانية/العروض الترويجية (خصم = قيمة الفاتورة بالكامل) حتى من البيانات
-      // القديمة المتزامنة سابقًا - نفس الاستبعاد اللي بيحصل وقت رفع ملفات جديدة.
-      const isFreeGoodsRow = (row) => { const g = Number(row.gross) || 0, d = Number(row.discount) || 0; return g > 0 && Math.abs(g - d) < 0.01; };
-      const excludedInvKeys = new Set();
-      const keptInvRows = invRows.filter(row => {
-        if (isFreeGoodsRow(row)) { excludedInvKeys.add((row.file_name || '') + '||' + (row.branch || '') + '||' + (row.invoice_no || '')); return false; }
-        return true;
-      });
-      state.invoices = keptInvRows.map(dbRowToInvoice);
-      state.itemRows = itemRows.filter(row => !excludedInvKeys.has((row.file_name || '') + '||' + (row.branch || '') + '||' + (row.invoice_no || ''))).map(dbRowToItemRow);
-      reapplyManualRoutesToState();
-      applyItemAliasesToState();
-      rebuildInvoiceCustomerIndex();
-      logStatus(`تم تحميل ${state.invoices.length} فاتورة و${state.returns.length} سطر مرتجع و${state.indirectDiscounts.length} قيد خصم غير مباشر و${state.collectedChecks.length} شيك محصل محفوظين من قبل من السحابة ✓`, 'ok');
-      populateFilters();
-      document.getElementById('dashboardSection').style.display = 'block';
-      const uc0 = document.getElementById('uploadCard');
-      if (uc0) uc0.style.display = 'none';
-      renderAll();
+    } catch (e) { /* أي مشكلة في الكاش المحلي - نتجاهلها ونكمل عادي على التحميل من السحابة تحت */ }
+
+    // خطوة 2: تحميل فعلي من السحابة - بيحصل دايمًا حتى لو الكاش المحلي اتعرض، عشان أي تعديل أو حذف
+    // حصل من جهاز/جلسة تانية (زي حذف عميل كامل أو تصحيح فرع فاتورة) يتلقط ويتحدّث صح مش يفضل قديم.
+    try {
+      if (!usedCache) logStatus('جاري تحميل البيانات المحفوظة من قبل من السحابة...');
+      const rawRows = await fetchAllCloudRows(client);
+      if (sb !== client) return; // اتعمل تسجيل خروج أثناء التحميل - متجاهلين النتيجة القديمة
+      const hasInv = applyCloudRowsToState(rawRows);
+      finishCloudRender(hasInv);
+      if (!hasInv) {
+        logStatus('لا توجد بيانات محفوظة سابقًا في السحابة - ارفع الملفات عشان تبدأ.');
+      } else {
+        logStatus(usedCache
+          ? `تم تحديث البيانات من السحابة ✓ (${state.invoices.length} فاتورة، ${state.returns.length} سطر مرتجع)`
+          : `تم تحميل ${state.invoices.length} فاتورة و${state.returns.length} سطر مرتجع و${state.indirectDiscounts.length} قيد خصم غير مباشر و${state.collectedChecks.length} شيك محصل محفوظين من قبل من السحابة ✓`, 'ok');
+      }
+      saveCloudCache(rawRows); // بعد نجاح التحديث الكامل، نحدّث النسخة المحلية عشان المرة الجاية تفتح بيها
     } catch (e) {
-      logStatus('تعذر تحميل البيانات المحفوظة من السحابة (' + (e.message || e) + ') - تقدر ترفع الملفات براحتك وهتشتغل الأداة عادي.', 'err');
+      if (usedCache) {
+        logStatus('تعذر تحديث البيانات من السحابة الآن (' + (e.message || e) + ') - البيانات المعروضة من آخر نسخة محفوظة محليًا (مش بالضرورة أحدث نسخة). جرّب تحدّث الصفحة تاني بعد شوية.', 'err');
+      } else {
+        logStatus('تعذر تحميل البيانات المحفوظة من السحابة (' + (e.message || e) + ') - تقدر ترفع الملفات براحتك وهتشتغل الأداة عادي.', 'err');
+      }
     }
   }
 
