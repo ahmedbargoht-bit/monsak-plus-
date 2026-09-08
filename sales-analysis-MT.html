@@ -2412,9 +2412,29 @@ table.datatable details summary:hover { text-decoration: underline; }
 
     // خطوة 2: تحميل فعلي من السحابة - بيحصل دايمًا حتى لو الكاش المحلي اتعرض، عشان أي تعديل أو حذف
     // حصل من جهاز/جلسة تانية (زي حذف عميل كامل أو تصحيح فرع فاتورة) يتلقط ويتحدّث صح مش يفضل قديم.
+    // تحميل الجداول كلها ممكن يفشل بلحظة تايم أوت عابرة على السحابة (خصوصًا مع نمو حجم البيانات)
+    // حتى بعد محاولة الـ keyset والرجوع للطريقة القديمة جوه كل جدول - ده بيبان للمستخدم كرسالة خطأ
+    // مرعبة رغم إن مجرد إعادة المحاولة بعد شوية بتنجح عادي. فبنعيد تحميل كل الجداول من الأول (مش
+    // جدول واحد بس) لحد 3 مرات مع مهلة متزايدة قبل ما نعتبرها فشلت فعلًا ونوريها للمستخدم.
+    async function fetchAllCloudRowsWithRetry(client, attempts = 3) {
+      let lastErr;
+      for (let i = 0; i < attempts; i++) {
+        try {
+          return await fetchAllCloudRows(client);
+        } catch (e) {
+          lastErr = e;
+          if (i < attempts - 1) {
+            if (!usedCache) logStatus(`حصل إبطاء مؤقت في السحابة - جاري إعادة المحاولة (${i + 2}/${attempts})...`);
+            await new Promise(r => setTimeout(r, 3000 * (i + 1)));
+          }
+        }
+      }
+      throw lastErr;
+    }
+
     try {
       if (!usedCache) logStatus('جاري تحميل البيانات المحفوظة من قبل من السحابة...');
-      const rawRows = await fetchAllCloudRows(client);
+      const rawRows = await fetchAllCloudRowsWithRetry(client);
       if (sb !== client) return; // اتعمل تسجيل خروج أثناء التحميل - متجاهلين النتيجة القديمة
       const hasInv = applyCloudRowsToState(rawRows);
       finishCloudRender(hasInv);
