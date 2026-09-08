@@ -821,6 +821,17 @@ function today(){
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
+// عروض الأسعار — بتتخزن كـ {value, type}. type='fixed' يبقى value هو السعر النهائي مباشرة،
+// type='percent' يبقى value نسبة خصم % لازم تتحسب على السعر الأساسي وقت العرض/الحفظ.
+function resolvePromoPrice(promo, basePrice){
+  if(!promo) return null;
+  if(promo.type==='percent') return +((+basePrice||0)*(1-(+promo.value||0)/100)).toFixed(2);
+  return promo.value;
+}
+function promoLabel(p){
+  return p.promo_type==='percent' ? `${p.promo_price}% خصم` : `${p.promo_price} ج`;
+}
+
 // ══ اختيار تاريخ فاتورة سابق (نفس الشهر) — يتحكم فيه الأدمن من لوحة التحكم ══
 async function checkBackdateEnabled(){
   try{
@@ -1848,7 +1859,7 @@ async function openDelVisit(branch){
     try{
       const [disc, promos] = await Promise.all([
         sbFetch('client_category_discounts','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&select=cat,discount_pct'),
-        sbFetch('sales_promotions','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&active=eq.true&deleted_at=is.null&date_from=lte.'+today()+'&date_to=gte.'+today()+'&select=snf_name,promo_price,notes,date_from,date_to')
+        sbFetch('sales_promotions','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&active=eq.true&deleted_at=is.null&date_from=lte.'+today()+'&date_to=gte.'+today()+'&select=snf_name,promo_price,promo_type,notes,date_from,date_to')
       ]);
 
       // خصومات التصنيفات
@@ -1862,13 +1873,13 @@ async function openDelVisit(branch){
         }
       }
 
-      // عروض الأسعار الثابتة — احفظها في visitState للاستخدام في renderCatalog
+      // عروض الأسعار الثابتة/نسبة الخصم — احفظها في visitState للاستخدام في renderCatalog
       if(Array.isArray(promos) && promos.length){
         visitState.promos = {};
         visitState.promoNotes = {};
-        promos.forEach(p=>{ if(p.snf_name){ visitState.promos[p.snf_name]=p.promo_price; visitState.promoNotes[p.snf_name]=p.notes||''; } });
+        promos.forEach(p=>{ if(p.snf_name){ visitState.promos[p.snf_name]={value:p.promo_price, type:p.promo_type||'fixed'}; visitState.promoNotes[p.snf_name]=p.notes||''; } });
         $('v-promos').innerHTML = promos.map(p=>
-          `🔖 عرض على ${p.snf_name} — ${p.promo_price} ج (${p.date_from} → ${p.date_to})`
+          `🔖 عرض على ${p.snf_name} — ${promoLabel(p)} (${p.date_from} → ${p.date_to})`
         ).join('<br>');
       } else {
         visitState.promos = {};
@@ -1947,8 +1958,10 @@ function buildClientPLProducts(pdb, prices){
   filtered.forEach(([name,specialPrice])=>{
     const qty=visitState.quantities[name]||0;
     const key=name.replace(/[^a-zA-Z0-9]/g,'_');
-    // العرض الثابت يطغى على سعر القائمة الخاصة
-    const promoPrice=(visitState.promos&&visitState.promos[name]!=null)?visitState.promos[name]:null;
+    // العرض (ثابت أو نسبة خصم) يطغى على سعر القائمة الخاصة
+    const promoEntry=(visitState.promos&&visitState.promos[name])||null;
+    const promoBasePrice=(prices[name]&&prices[name].price!=null)?prices[name].price:specialPrice;
+    const promoPrice=promoEntry?resolvePromoPrice(promoEntry, promoBasePrice):null;
     const promoNote=(visitState.promoNotes&&visitState.promoNotes[name])||'';
     const isPromoActive=promoPrice!==null;
     const noteTag=promoNote?`<span style="font-size:9px;color:#E65100;display:block;margin-top:1px">${promoNote}</span>`:'';
@@ -2032,8 +2045,9 @@ function selectCat(cat,grpData){
       const key=iname.replace(/[^a-zA-Z0-9]/g,'_');
       const p=prices[iname];
       const basePrice=p?p.price:0;
-      // العرض الثابت يطغى على السعر الأساسي
-      const promoPrice=(visitState.promos&&visitState.promos[iname]!=null)?visitState.promos[iname]:null;
+      // العرض (ثابت أو نسبة خصم) يطغى على السعر الأساسي
+      const promoEntry=(visitState.promos&&visitState.promos[iname])||null;
+      const promoPrice=promoEntry?resolvePromoPrice(promoEntry, basePrice):null;
       const promoNote=(visitState.promoNotes&&visitState.promoNotes[iname])||'';
       const isPromoActive=promoPrice!==null;
       const price=isPromoActive?promoPrice:basePrice;
@@ -2124,9 +2138,11 @@ async function openInvoiceReview(mode){
   Object.entries(state.quantities).filter(([k,v])=>v>0).forEach(([name,qty])=>{
     const p=prices[name]||{price:0,tax_pct:0};
     const clientSpecial=clientPLPrices[name];
-    const promoFallback=(statePromos[name]!=null)?statePromos[name]:null;
+    const promoEntry=statePromos[name]||null;
+    const promoBasePrice=p.price||clientSpecial||0;
+    const promoFallback=promoEntry?resolvePromoPrice(promoEntry, promoBasePrice):null;
     const promoNote=(state.promoNotes&&state.promoNotes[name])||'';
-    // العرض يطغى على كل شيء — ثم القائمة الخاصة — ثم السعر الأساسي
+    // العرض (ثابت أو نسبة خصم) يطغى على كل شيء — ثم القائمة الخاصة — ثم السعر الأساسي
     const finalPrice=promoFallback!==null?promoFallback:(clientSpecial!==undefined?clientSpecial:p.price);
     const isClientPL=clientSpecial!==undefined&&promoFallback===null;
     const isPromo=promoFallback!==null;
@@ -2477,7 +2493,7 @@ async function openRetVisit(branch){
     try{
       const [disc, promos] = await Promise.all([
         sbFetch('client_category_discounts','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&select=cat,discount_pct'),
-        sbFetch('sales_promotions','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&active=eq.true&deleted_at=is.null&date_from=lte.'+today()+'&date_to=gte.'+today()+'&select=snf_name,promo_price,notes,date_from,date_to')
+        sbFetch('sales_promotions','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&active=eq.true&deleted_at=is.null&date_from=lte.'+today()+'&date_to=gte.'+today()+'&select=snf_name,promo_price,promo_type,notes,date_from,date_to')
       ]);
       disc.forEach(d=>{returnState.discounts[d.cat]=d.discount_pct||0;});
       const discEntries=disc.filter(d=>d.discount_pct>0);
@@ -2486,8 +2502,8 @@ async function openRetVisit(branch){
       if(Array.isArray(promos)&&promos.length){
         returnState.promos={};
         returnState.promoNotes={};
-        promos.forEach(p=>{ if(p.snf_name){ returnState.promos[p.snf_name]=p.promo_price; returnState.promoNotes[p.snf_name]=p.notes||''; } });
-        $('rv-promos').innerHTML=promos.map(p=>`🔖 عرض على ${p.snf_name} — ${p.promo_price} ج (${p.date_from} → ${p.date_to})`).join('<br>');
+        promos.forEach(p=>{ if(p.snf_name){ returnState.promos[p.snf_name]={value:p.promo_price, type:p.promo_type||'fixed'}; returnState.promoNotes[p.snf_name]=p.notes||''; } });
+        $('rv-promos').innerHTML=promos.map(p=>`🔖 عرض على ${p.snf_name} — ${promoLabel(p)} (${p.date_from} → ${p.date_to})`).join('<br>');
       } else {
         returnState.promos={};
         returnState.promoNotes={};
@@ -2631,7 +2647,8 @@ function selectRetCat(cat,grpData){
       const key=iname.replace(/[^a-zA-Z0-9]/g,'_');
       const p=prices[iname];
       const basePrice=p?p.price:0;
-      const promoPrice=(returnState.promos&&returnState.promos[iname]!=null)?returnState.promos[iname]:null;
+      const promoEntry=(returnState.promos&&returnState.promos[iname])||null;
+      const promoPrice=promoEntry?resolvePromoPrice(promoEntry, basePrice):null;
       const promoNote=(returnState.promoNotes&&returnState.promoNotes[iname])||'';
       const isPromoActive=promoPrice!==null;
       const price=isPromoActive?promoPrice:basePrice;
