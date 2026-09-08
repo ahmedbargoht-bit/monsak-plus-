@@ -33690,6 +33690,11 @@ async function sdLoad(){
 
   const now = new Date();
   const [y,m] = month.split('-').map(Number);
+  // آخر يوم فعلي في الشهر (مش دايمًا 31 — لو استخدمنا "31" ثابت في شهر زي سبتمبر/أبريل/يونيو/نوفمبر
+  // أو فبراير، الفلتر بيبقى تاريخ مش موجود زي "2026-09-31" وSupabase بيرفض الطلب بالكامل، فترجع
+  // البيانات فاضية والمحقق يطلع صفر رغم وجود فواتير فعلية)
+  const monthLastDay = new Date(y,m,0).getDate();
+  const monthEndStr = `${month}-${String(monthLastDay).padStart(2,'0')}`;
   const isCurrentMonth = (now.getFullYear()===y && now.getMonth()+1===m);
   // اليوم المحدد: إما من الفلتر أو اليوم الحالي
   const selectedDay = dayFilter==='today'
@@ -33785,7 +33790,7 @@ async function sdLoad(){
     deliveries = [];
     try {
       deliveries = await fetchAllRows(
-        `${SUPABASE_URL}/rest/v1/sales_deliveries?delivery_date=gte.${month}-01&delivery_date=lte.${month}-31&deleted_at=is.null&select=rep_name,total_net,total_tax,delivery_date`,
+        `${SUPABASE_URL}/rest/v1/sales_deliveries?delivery_date=gte.${month}-01&delivery_date=lte.${monthEndStr}&deleted_at=is.null&select=rep_name,total_net,total_tax,delivery_date`,
         H
       );
       if(!Array.isArray(deliveries)) deliveries=[]; else sdCacheSet(deliveriesCacheKey, deliveries);
@@ -33799,7 +33804,7 @@ async function sdLoad(){
     sdReturnsData = [];
     try {
       sdReturnsData = await fetchAllRows(
-        `${SUPABASE_URL}/rest/v1/sales_returns?return_date=gte.${month}-01&return_date=lte.${month}-31&deleted_at=is.null&select=rep_name,total_net,total_tax,return_date`,
+        `${SUPABASE_URL}/rest/v1/sales_returns?return_date=gte.${month}-01&return_date=lte.${monthEndStr}&deleted_at=is.null&select=rep_name,total_net,total_tax,return_date`,
         H
       );
       if(!Array.isArray(sdReturnsData)) sdReturnsData=[]; else sdCacheSet(returnsCacheKey, sdReturnsData);
@@ -33909,7 +33914,7 @@ async function sdLoad(){
       if(ovrRes.ok){ sdRepOverrides = await ovrRes.json(); if(!Array.isArray(sdRepOverrides)) sdRepOverrides=[]; else sdCacheSet(sdOverridesCacheKey, sdRepOverrides); }
     }catch(e){}
   }
-  const sdMonthEnd = `${month}-31`;
+  const sdMonthEnd = monthEndStr;
   (Array.isArray(sdRepOverrides)?sdRepOverrides:[]).forEach(o=>{
     const cutoff = o.range_to || sdMonthEnd;
     let afterCutoff = 0;
@@ -34521,8 +34526,11 @@ async function stLoad(){
 
   // أضف المحقق من فواتير المناديب (sales_deliveries)
   try{
+    const [stY,stM] = month.split('-').map(Number);
     const monthStart = month+'-01';
-    const monthEnd   = month+'-31';
+    // آخر يوم فعلي في الشهر مش دايمًا 31 (سبتمبر/أبريل/يونيو/نوفمبر/فبراير) — لو ثبّتناها 31 بيبقى
+    // تاريخ مش موجود والفلتر يفشل بصمت فيرجع المحقق صفر رغم وجود فواتير فعلية
+    const monthEnd   = `${month}-${String(new Date(stY,stM,0).getDate()).padStart(2,'0')}`;
     const r3 = await fetch(
       `${SUPABASE_URL}/rest/v1/sales_deliveries?delivery_date=gte.${monthStart}&delivery_date=lte.${monthEnd}&deleted_at=is.null&select=rep_name,total_net,delivery_date&limit=5000`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
