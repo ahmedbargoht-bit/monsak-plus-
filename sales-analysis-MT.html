@@ -2485,6 +2485,28 @@ table.datatable details summary:hover { text-decoration: underline; }
     }
     return { invRows: allInv, itemRows: allItem };
   }
+  // لما نعرض نسخة كاش محفوظة محليًا فورًا (بدل ما نستنى السحابة)، لازم نحدّثها في الخلفية عشان أي
+  // تعديل حصل من جهاز/جلسة تانية (كود صنف جديد، عدد قطع بالكرتونة، مرتجع جديد...) يتلقط - مش يفضل
+  // واقف على نفس النسخة المحفوظة للأبد. بنحدّث كتالوج الأصناف + الجداول الصغيرة + الشهور المحمّلة
+  // فعليًا بس (مش كل التاريخ - ده هيتحمّل عند الطلب زي العادة).
+  async function refreshLoadedDataInBackground(client) {
+    try {
+      const periodsToRefresh = Array.from(loadedPeriodKeys).map(k => {
+        const idx = k.lastIndexOf('-'); return { year: Number(k.slice(0, idx)), month: Number(k.slice(idx + 1)) };
+      });
+      const [catalogAndMerges, otherRows, invItem] = await Promise.all([
+        fetchItemCatalogAndMerges(client),
+        fetchOtherTablesRows(client),
+        periodsToRefresh.length ? fetchAllPeriodsInvoiceItemRows(client, periodsToRefresh) : Promise.resolve(null),
+      ]);
+      if (sb !== client || !cloudRawAccum) return;
+      Object.assign(cloudRawAccum, catalogAndMerges, otherRows);
+      if (invItem) { cloudRawAccum.invRows = invItem.invRows; cloudRawAccum.itemRows = invItem.itemRows; }
+      applyCloudRowsToState(cloudRawAccum);
+      finishCloudRender(true);
+      saveCloudCache(cloudRawAccum);
+    } catch (e) { /* فشل التحديث الخلفي - مش مشكلة، البيانات المعروضة من الكاش تفضل شغالة، وهيتحاول تاني المرة الجاية */ }
+  }
   // كل الجداول الصغيرة (مش الفواتير/الأصناف) - بيتحمّلوا كاملين على طول لأن حجمهم مش هو سبب البطء
   // (أكبرهم حاليًا حوالي 18 ألف سطر بس، عكس الأصناف اللي بقت +110 ألف)
   // ملحوظة: تاب_الأصناف/تاب_دمج الأصناف اتشالوا من هنا لأنهم بيتحمّلوا فورًا مع آخر شهر في المرحلة
@@ -2599,7 +2621,14 @@ table.datatable details summary:hover { text-decoration: underline; }
       }
     } catch (e) { /* أي مشكلة في الكاش المحلي - نتجاهلها ونكمل عادي على التحميل من السحابة تحت */ }
 
-    if (usedCache) { ensureAllKnownPeriodsFetched(); return; } // الكاش المحفوظ عنده كل التاريخ بالفعل
+    if (usedCache) {
+      ensureAllKnownPeriodsFetched();
+      // مهم: من غير الخطوة دي، أي نسخة كاش محفوظة (حتى لو قديمة أو كتالوج الأصناف فيها فاضي من
+      // مشكلة سابقة) كانت هتفضل هي المعروضة للأبد من غير أي تحديث تلقائي من السحابة - عكس التصميم
+      // الأصلي اللي بيضمن إن أي تعديل (كود صنف جديد، مرتجع جديد...) من جهاز/جلسة تانية يتلقط دايمًا.
+      refreshLoadedDataInBackground(client);
+      return;
+    }
 
     // مفيش كاش - نجيب بس آخر شهر فيه بيانات فورًا (استعلام صغير وسريع)، وباقي الشهور تتحمّل شهر
     // بشهر بس وقت ما المستخدم فعلاً محتاجها (فلتر سنة/شهر، أو تاب محتاج مدى أوسع) - مش تلقائيًا.
