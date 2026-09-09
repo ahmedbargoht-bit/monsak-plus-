@@ -2389,139 +2389,231 @@ table.datatable details summary:hover { text-decoration: underline; }
     renderAll();
   }
 
+  // =================== تحميل بالفترة عند الطلب (شهر بشهر) ===================
+  // بدل ما نحمّل كل تاريخ الفواتير/الأصناف تلقائيًا في الخلفية (وده كان بيرجّع نفس مشكلة التايم أوت
+  // مع نمو البيانات)، بقينا نحمّل بس الشهر اللي المستخدم شغال عليه فعلاً، وأي شهر تاني يحمّل وقت
+  // ما يتطلب (يتم اختياره من فلتر السنة/الشهر، أو تفتح شاشة محتاجة مدى زمني أوسع).
+  let cloudRawAccum = null;         // كل الصفوف الخام المتجمّعة لحد دلوقتي - المصدر اللي بنبني منه state
+  let loadedPeriodKeys = new Set(); // 'year-month' لكل شهر فواتير/أصناف اتحمّل فعليًا لحد دلوقتي
+  let allKnownPeriods = [];         // كل الشهور الموجودة في السحابة (بدون صفوفها) - لتعبئة فلتر السنة/الشهر
+  let periodsLoadInFlight = null;   // طلب تحميل شغال حاليًا (عشان منكررش نفس الطلب لو المستخدم دوس بسرعة)
+
+  function emptyOtherTablesShape() {
+    return { returnRows: [], manualRouteRows: [], routeCatalogRows: [], indirectRows: [], indirectLinkRows: [], itemCatalogRows: [], repRouteRows: [], repRouteSiteLinkRows: [], checkRows: [], ledgerRows: [], itemMergeRows: [], customerInvoiceRawRows: [] };
+  }
+  // بيحدد آخر سنة/شهر موجودين فعليًا في الفواتير - استعلام على عمود واحد بس (year) مرتّب وبحد أقصى
+  // صف واحد، بيستخدم فهرس year_idx مباشرة فبيرجع فورًا مهما كان حجم الجدول الكلي (110+ ألف سطر أو أكتر
+  // مستقبلًا) لأنه مش بيقرا ولا صف بيانات فعلي غير الصف ده.
+  async function fetchLatestInvoicePeriod(client) {
+    const { data: yRows, error: ye } = await client.from('tamr_sales_invoices').select('year').order('year', { ascending: false }).limit(1);
+    if (ye || !yRows || !yRows.length) return null;
+    const year = yRows[0].year;
+    const { data: mRows, error: me } = await client.from('tamr_sales_invoices').select('month').eq('year', year).order('month', { ascending: false }).limit(1);
+    if (me || !mRows || !mRows.length) return null;
+    return { year, month: mRows[0].month };
+  }
+  // بيجيب كل صفوف جدول معين لسنة/شهر محددين بس (بالاستفادة من فهرس year_idx) - حجم الاستعلام ده ثابت
+  // تقريبًا (شهر واحد) مهما كبر الجدول الكلي مستقبلًا، عكس تحميل الجدول بالكامل اللي بيبطأ مع الوقت.
+  // فيها 3 محاولات (زي باقي نقاط التحميل) عشان تقاوم أي إبطاء عابر بسيط.
+  async function fetchTablePeriodRows(client, table, year, month) {
+    const pageSize = 1000;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        let from = 0, all = [];
+        while (true) {
+          const { data, error } = await client.from(table).select('*').eq('year', year).eq('month', month).range(from, from + pageSize - 1);
+          if (error) throw error;
+          all = all.concat(data || []);
+          if (!data || data.length < pageSize) break;
+          from += pageSize;
+        }
+        return all;
+      } catch (e) {
+        if (attempt === 2) throw e;
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+  }
+  // بيرجع كل السنوات/الشهور اللي فيها بيانات فواتير فعلاً (مش الصفوف نفسها) - استعلام بعمودين بس
+  // (year, month) مغطّى بالكامل بفهرس year_idx (index-only scan)، فبيرجع سريع جدًا حتى لو الجدول
+  // نفسه بقى مليون سطر، لأن حجم البيانات المنقولة صغير جدًا (رقمين لكل صف بس مش الفاتورة كاملة).
+  async function fetchAllInvoicePeriods(client) {
+    const { data, error } = await client.from('tamr_sales_invoices').select('year, month');
+    if (error) throw error;
+    const seen = new Set(), periods = [];
+    (data || []).forEach(r => {
+      const k = r.year + '-' + r.month;
+      if (!seen.has(k)) { seen.add(k); periods.push({ year: r.year, month: r.month }); }
+    });
+    periods.sort((a, b) => (a.year - b.year) || (a.month - b.month));
+    return periods;
+  }
+  // بيجيب فواتير + أصناف مجموعة شهور، شهر بشهر (مش الجدول كله دفعة واحدة) - كل شهر استعلام صغير
+  // سريع بيستخدم فهرس year_idx، فمفيش استعلام واحد ضخم يقدر يضرب سقف الوقت المسموح بيه في السحابة
+  // مهما كبر التاريخ الكلي. بنجيب 3 شهور مع بعض في نفس الوقت عشان نوازن بين السرعة والضغط على السحابة.
+  async function fetchAllPeriodsInvoiceItemRows(client, periods) {
+    let allInv = [], allItem = [];
+    const CONCURRENCY = 3;
+    for (let i = 0; i < periods.length; i += CONCURRENCY) {
+      const batch = periods.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(batch.map(p => Promise.all([
+        fetchTablePeriodRows(client, 'tamr_sales_invoices', p.year, p.month),
+        fetchTablePeriodRows(client, 'tamr_sales_items', p.year, p.month),
+      ])));
+      results.forEach(([inv, item]) => { allInv = allInv.concat(inv); allItem = allItem.concat(item); });
+    }
+    return { invRows: allInv, itemRows: allItem };
+  }
+  // كل الجداول الصغيرة (مش الفواتير/الأصناف) - بيتحمّلوا كاملين على طول لأن حجمهم مش هو سبب البطء
+  // (أكبرهم حاليًا حوالي 18 ألف سطر بس، عكس الأصناف اللي بقت +110 ألف)
+  async function fetchOtherTablesRows(client) {
+    const tableNames = ['tamr_sales_returns', 'tamr_sales_manual_routes', 'tamr_sales_route_catalog', 'tamr_sales_indirect_discounts', 'tamr_sales_indirect_links', 'tamr_sales_item_catalog', 'tamr_sales_rep_routes', 'tamr_sales_rep_route_site_links', 'tamr_sales_collected_checks', 'tamr_sales_account_ledger', 'tamr_sales_item_merges', 'tamr_customer_invoices_raw'];
+    const taskFns = tableNames.map(t => () => fetchAllRows(client, t));
+    const [returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows, customerInvoiceRawRows] = await runTasksBatched(taskFns, 4);
+    return { returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows, customerInvoiceRawRows };
+  }
+  // بيجيب أسماء كل الشهور الموجودة في السحابة (من غير صفوفها) عشان فلتر السنة/الشهر يقدر يعرض كل
+  // التاريخ للاختيار حتى قبل ما نحمّله فعليًا.
+  async function ensureAllKnownPeriodsFetched() {
+    if (allKnownPeriods.length || !sb) return;
+    try {
+      allKnownPeriods = await fetchAllInvoicePeriods(sb);
+      // بعد ما نعرف كل الشهور الموجودة فعلاً، نحدّث دروب داون فلتر السنة/الشهر عشان يعرضها كلها
+      // للاختيار (كانت قبل كده مقتصرة على الشهر اللي فتحنا بيه الأداة بس).
+      if (typeof populateFilters === 'function' && document.getElementById('dashboardSection') && document.getElementById('dashboardSection').style.display !== 'none') {
+        populateFilters();
+      }
+    } catch (e) { /* هيتحاول تاني في أول استخدام محتاجها */ }
+  }
+  // الشهور اللي الفلتر الحالي (سنة/شهر) بيقصدها فعلاً - لو الفلترين "الكل" بيرجع كل الشهور المعروفة.
+  function currentlySelectedPeriods() {
+    const yearsSel = state.filters.year, monthsSel = state.filters.month;
+    return allKnownPeriods.filter(p =>
+      (yearsSel.length === 0 || yearsSel.includes(String(p.year))) &&
+      (monthsSel.length === 0 || monthsSel.includes(String(p.month)))
+    );
+  }
+  // بيتأكد إن كل الشهور اللي الفلتر الحالي محتاجها فعلاً محمّلة في الذاكرة - أي شهر ناقص بيتحمّل دلوقتي
+  // بس (استعلام صغير سريع لكل شهر)، من غير ما يحمّل أي شهر تاني مش مطلوب. بتتنادى لما الفلتر يتغيّر
+  // أو لما تاب محتاج مدى زمني أوسع (زي الأرباع/المقارنة السنوية) يتفتح.
+  async function ensureSelectedPeriodsLoaded() {
+    if (!sb) return;
+    await ensureAllKnownPeriodsFetched();
+    const periods = currentlySelectedPeriods();
+    const missing = periods.filter(p => !loadedPeriodKeys.has(p.year + '-' + p.month));
+    if (!missing.length) return;
+    if (periodsLoadInFlight) { await periodsLoadInFlight; return ensureSelectedPeriodsLoaded(); }
+    periodsLoadInFlight = (async () => {
+      try {
+        logStatus(missing.length === 1 ? 'جاري تحميل بيانات الشهر المطلوب...' : `جاري تحميل بيانات ${missing.length} شهر...`);
+        const { invRows, itemRows } = await fetchAllPeriodsInvoiceItemRows(sb, missing);
+        if (!cloudRawAccum) cloudRawAccum = { invRows: [], itemRows: [], ...emptyOtherTablesShape() };
+        cloudRawAccum.invRows = cloudRawAccum.invRows.concat(invRows);
+        cloudRawAccum.itemRows = cloudRawAccum.itemRows.concat(itemRows);
+        missing.forEach(p => loadedPeriodKeys.add(p.year + '-' + p.month));
+        applyCloudRowsToState(cloudRawAccum);
+        finishCloudRender(true);
+        logStatus('تم تحميل البيانات المطلوبة ✓', 'ok');
+        saveCloudCache(cloudRawAccum);
+      } catch (e) {
+        logStatus('تعذر تحميل بيانات الفترة المطلوبة الآن (' + (e.message || e) + ')', 'err');
+      } finally {
+        periodsLoadInFlight = null;
+      }
+    })();
+    return periodsLoadInFlight;
+  }
+  // بعض التابات بطبيعتها بتقارن أكتر من فترة مع بعض (الأرباع، المقارنة السنوية، أعمار الديون،
+  // المتحصلات المستحقة) - دي محتاجة كل التاريخ بغض النظر عن فلتر السنة/الشهر الحالي (لو فيه فلتر
+  // محدد، شاشات زي "مقارنة سنوية" أصلاً بتوضح إنها محتاجة سنتين على الأقل فمش هتتأثر بمنطقها).
+  const PERIOD_HEAVY_TABS = new Set(['panel-quarterly', 'panel-monthly', 'panel-yoy', 'panel-debtaging', 'panel-duecollections']);
+  async function ensureAllHistoryLoaded() {
+    if (!sb) return;
+    await ensureAllKnownPeriodsFetched();
+    const missing = allKnownPeriods.filter(p => !loadedPeriodKeys.has(p.year + '-' + p.month));
+    if (!missing.length) return;
+    if (periodsLoadInFlight) { await periodsLoadInFlight; return ensureAllHistoryLoaded(); }
+    periodsLoadInFlight = (async () => {
+      try {
+        logStatus(`جاري تحميل باقي التاريخ (${missing.length} شهر) عشان الشاشة دي تشتغل صح...`);
+        const { invRows, itemRows } = await fetchAllPeriodsInvoiceItemRows(sb, missing);
+        if (!cloudRawAccum) cloudRawAccum = { invRows: [], itemRows: [], ...emptyOtherTablesShape() };
+        cloudRawAccum.invRows = cloudRawAccum.invRows.concat(invRows);
+        cloudRawAccum.itemRows = cloudRawAccum.itemRows.concat(itemRows);
+        missing.forEach(p => loadedPeriodKeys.add(p.year + '-' + p.month));
+        applyCloudRowsToState(cloudRawAccum);
+        finishCloudRender(true);
+        logStatus('تم تحميل كل التاريخ ✓', 'ok');
+        saveCloudCache(cloudRawAccum);
+      } catch (e) {
+        logStatus('تعذر تحميل باقي التاريخ الآن (' + (e.message || e) + ')', 'err');
+      } finally {
+        periodsLoadInFlight = null;
+      }
+    })();
+    return periodsLoadInFlight;
+  }
+
   async function loadFromCloud() {
     // بناخد نسخة محلية ثابتة من عميل السحابة عشان لو المستخدم عمل تسجيل خروج
     // أثناء التحميل (sb بترجع null)، العملية الجارية تكمل بأمان من غير ما تنهار بخطأ.
     const client = sb;
     if (!client) return;
 
-    // خطوة 1 (اختيارية): لو فيه نسخة محفوظة محليًا من تحميل سابق ناجح، نعرضها فورًا من غير أي انتظار
-    // على الشبكة - الأداة تبقى شغالة وعليها بيانات (ولو مش أحدث نسخة) في أقل من ثانية بدل ما تقف على
-    // "جاري التحميل..." لحد ما كل الجداول (~175 ألف سطر حاليًا) تتحمّل من السحابة.
+    // خطوة 1 (اختيارية): لو فيه نسخة محفوظة محليًا من تحميل سابق ناجح (وهو دايمًا تحميل كامل - الكاش
+    // مش بيتحفظ إلا بعد تحميل كل التاريخ)، نعرضها فورًا من غير أي انتظار على الشبكة.
     let usedCache = false;
     try {
       const cached = await loadCloudCache();
       if (cached && cached.rawRows) {
-        const hasInv = applyCloudRowsToState(cached.rawRows);
+        cloudRawAccum = cached.rawRows;
+        loadedPeriodKeys = new Set((cached.rawRows.invRows || []).map(r => r.year + '-' + r.month));
+        const hasInv = applyCloudRowsToState(cloudRawAccum);
         usedCache = true;
         finishCloudRender(hasInv);
         const savedDate = new Date(cached.savedAt);
-        logStatus(`عرض فوري لآخر نسخة محفوظة محليًا (${savedDate.toLocaleString('ar-EG')}) - جاري تحديثها من السحابة في الخلفية...`, 'ok');
+        logStatus(`عرض فوري لآخر نسخة محفوظة محليًا (${savedDate.toLocaleString('ar-EG')})`, 'ok');
       }
     } catch (e) { /* أي مشكلة في الكاش المحلي - نتجاهلها ونكمل عادي على التحميل من السحابة تحت */ }
 
-    // خطوة 2: تحميل فعلي من السحابة - بيحصل دايمًا حتى لو الكاش المحلي اتعرض، عشان أي تعديل أو حذف
-    // حصل من جهاز/جلسة تانية (زي حذف عميل كامل أو تصحيح فرع فاتورة) يتلقط ويتحدّث صح مش يفضل قديم.
-    // تحميل الجداول كلها ممكن يفشل بلحظة تايم أوت عابرة على السحابة (خصوصًا مع نمو حجم البيانات)
-    // حتى بعد محاولة الـ keyset والرجوع للطريقة القديمة جوه كل جدول - ده بيبان للمستخدم كرسالة خطأ
-    // مرعبة رغم إن مجرد إعادة المحاولة بعد شوية بتنجح عادي. فبنعيد تحميل كل الجداول من الأول (مش
-    // جدول واحد بس) لحد 3 مرات مع مهلة متزايدة قبل ما نعتبرها فشلت فعلًا ونوريها للمستخدم.
-    async function fetchAllCloudRowsWithRetry(client, attempts = 3) {
-      let lastErr;
-      for (let i = 0; i < attempts; i++) {
-        try {
-          return await fetchAllCloudRows(client);
-        } catch (e) {
-          lastErr = e;
-          if (i < attempts - 1) {
-            if (!usedCache) logStatus(`حصل إبطاء مؤقت في السحابة - جاري إعادة المحاولة (${i + 2}/${attempts})...`);
-            await new Promise(r => setTimeout(r, 3000 * (i + 1)));
-          }
-        }
-      }
-      throw lastErr;
-    }
+    if (usedCache) { ensureAllKnownPeriodsFetched(); return; } // الكاش المحفوظ عنده كل التاريخ بالفعل
 
-    // بيحدد آخر سنة/شهر موجودين فعليًا في الفواتير - استعلام على عمود واحد بس (year) مرتّب وبحد أقصى
-    // صف واحد، بيستخدم فهرس year_idx مباشرة فبيرجع فورًا مهما كان حجم الجدول الكلي (110+ ألف سطر أو أكتر
-    // مستقبلًا) لأنه مش بيقرا ولا صف بيانات فعلي غير الصف ده.
-    async function fetchLatestInvoicePeriod(client) {
-      const { data: yRows, error: ye } = await client.from('tamr_sales_invoices').select('year').order('year', { ascending: false }).limit(1);
-      if (ye || !yRows || !yRows.length) return null;
-      const year = yRows[0].year;
-      const { data: mRows, error: me } = await client.from('tamr_sales_invoices').select('month').eq('year', year).order('month', { ascending: false }).limit(1);
-      if (me || !mRows || !mRows.length) return null;
-      return { year, month: mRows[0].month };
-    }
-    // بيجيب كل صفوف جدول معين لسنة/شهر محددين بس (بالاستفادة من فهرس year_idx) - حجم الاستعلام ده ثابت
-    // تقريبًا (شهر واحد) مهما كبر الجدول الكلي مستقبلًا، عكس تحميل الجدول بالكامل اللي بيبطأ مع الوقت.
-    async function fetchTablePeriodRows(client, table, year, month) {
-      const pageSize = 1000;
-      let from = 0, all = [];
-      while (true) {
-        const { data, error } = await client.from(table).select('*').eq('year', year).eq('month', month).range(from, from + pageSize - 1);
-        if (error) throw error;
-        all = all.concat(data || []);
-        if (!data || data.length < pageSize) break;
-        from += pageSize;
-      }
-      return all;
-    }
-    // كل الجداول الصغيرة (مش الفواتير/الأصناف) - بيتحمّلوا كاملين على طول لأن حجمهم مش هو سبب البطء
-    // (أكبرهم حاليًا حوالي 18 ألف سطر بس، عكس الأصناف اللي بقت +110 ألف)
-    async function fetchOtherTablesRows(client) {
-      const tableNames = ['tamr_sales_returns', 'tamr_sales_manual_routes', 'tamr_sales_route_catalog', 'tamr_sales_indirect_discounts', 'tamr_sales_indirect_links', 'tamr_sales_item_catalog', 'tamr_sales_rep_routes', 'tamr_sales_rep_route_site_links', 'tamr_sales_collected_checks', 'tamr_sales_account_ledger', 'tamr_sales_item_merges', 'tamr_customer_invoices_raw'];
-      const taskFns = tableNames.map(t => () => fetchAllRows(client, t));
-      const [returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows, customerInvoiceRawRows] = await runTasksBatched(taskFns, 4);
-      return { returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows, customerInvoiceRawRows };
-    }
-
-    let quickDone = false;
+    // مفيش كاش - نجيب بس آخر شهر فيه بيانات فورًا (استعلام صغير وسريع)، وباقي الشهور تتحمّل شهر
+    // بشهر بس وقت ما المستخدم فعلاً محتاجها (فلتر سنة/شهر، أو تاب محتاج مدى أوسع) - مش تلقائيًا.
     try {
-      if (!usedCache) {
-        // المرحلة (1): فواتير + أصناف آخر شهر بس - استعلام مفلتر بفهرس year/month، حجمه صغير وثابت
-        // تقريبًا (بضع آلاف سطر) مهما كبر التاريخ الكلي مستقبلًا، فبيرجع خلال ثوانٍ معدودة. مهم:
-        // ده لوحده من غير أي جدول تاني معاه (عكس المحاولة اللي قبل كده) عشان أي بطء في جدول تاني
-        // (زي كشف الحساب أو فواتير جريد) ميأخرش أول عرض للشاشة خالص.
-        try {
-          logStatus('جاري تحميل بيانات آخر شهر عشان تفتح الأداة بسرعة...');
-          const period = await fetchLatestInvoicePeriod(client);
-          if (period) {
-            const [invPeriodRows, itemPeriodRows] = await Promise.all([
-              fetchTablePeriodRows(client, 'tamr_sales_invoices', period.year, period.month),
-              fetchTablePeriodRows(client, 'tamr_sales_items', period.year, period.month),
-            ]);
-            if (sb !== client) return;
-            const emptyOtherRows = { returnRows: [], manualRouteRows: [], routeCatalogRows: [], indirectRows: [], indirectLinkRows: [], itemCatalogRows: [], repRouteRows: [], repRouteSiteLinkRows: [], checkRows: [], ledgerRows: [], itemMergeRows: [], customerInvoiceRawRows: [] };
-            const hasInv = applyCloudRowsToState({ invRows: invPeriodRows, itemRows: itemPeriodRows, ...emptyOtherRows });
-            finishCloudRender(hasInv);
-            logStatus(`تم فتح الأداة ببيانات شهر ${period.month}/${period.year} (${state.invoices.length} فاتورة) - جاري تحميل باقي البيانات...`, 'ok');
-            quickDone = true;
-
-            // المرحلة (2): باقي الجداول الصغيرة (مرتجعات/كشف حساب/شيكات/فواتير جريد...) - أحجامها
-            // معقولة (أكبرها ~18 ألف سطر) فمش هتاخد وقت طويل، بنكمّل بيها الشاشة اللي ظهرت بالفعل
-            // من غير ما نأخّر عليها عرض المرحلة (1).
-            try {
-              const otherRows = await fetchOtherTablesRows(client);
-              if (sb !== client) return;
-              applyCloudRowsToState({ invRows: invPeriodRows, itemRows: itemPeriodRows, ...otherRows });
-              finishCloudRender(true);
-              logStatus(`تم فتح الأداة ببيانات شهر ${period.month}/${period.year} (${state.invoices.length} فاتورة) - جاري تحميل باقي التاريخ في الخلفية عشان باقي الشاشات (الأرباع، المقارنة السنوية...) تشتغل صح...`, 'ok');
-            } catch (e2) { /* فشلت المرحلة دي بس - البيانات الأساسية لسه ظاهرة وهنحاول تكميلها في التحميل الكامل تحت */ }
-          }
-        } catch (e) { /* فشلت المرحلة السريعة لأي سبب - مش مشكلة، هنكمل بالطريقة الكاملة العادية تحت */ }
-      }
-
-      const rawRows = await fetchAllCloudRowsWithRetry(client);
-      if (sb !== client) return; // اتعمل تسجيل خروج أثناء التحميل - متجاهلين النتيجة القديمة
-      const hasInv = applyCloudRowsToState(rawRows);
-      finishCloudRender(hasInv);
-      if (!hasInv) {
+      logStatus('جاري تحميل بيانات آخر شهر عشان تفتح الأداة بسرعة...');
+      const period = await fetchLatestInvoicePeriod(client);
+      if (!period) {
+        finishCloudRender(false);
         logStatus('لا توجد بيانات محفوظة سابقًا في السحابة - ارفع الملفات عشان تبدأ.');
-      } else {
-        logStatus((usedCache || quickDone)
-          ? `تم تحميل كل التاريخ ✓ (${state.invoices.length} فاتورة، ${state.returns.length} سطر مرتجع)`
-          : `تم تحميل ${state.invoices.length} فاتورة و${state.returns.length} سطر مرتجع و${state.indirectDiscounts.length} قيد خصم غير مباشر و${state.collectedChecks.length} شيك محصل محفوظين من قبل من السحابة ✓`, 'ok');
+        return;
       }
-      saveCloudCache(rawRows); // بعد نجاح التحديث الكامل، نحدّث النسخة المحلية عشان المرة الجاية تفتح بيها
+      const [invPeriodRows, itemPeriodRows] = await Promise.all([
+        fetchTablePeriodRows(client, 'tamr_sales_invoices', period.year, period.month),
+        fetchTablePeriodRows(client, 'tamr_sales_items', period.year, period.month),
+      ]);
+      if (sb !== client) return;
+      cloudRawAccum = { invRows: invPeriodRows, itemRows: itemPeriodRows, ...emptyOtherTablesShape() };
+      loadedPeriodKeys.add(period.year + '-' + period.month);
+      const hasInv = applyCloudRowsToState(cloudRawAccum);
+      finishCloudRender(hasInv);
+      logStatus(`تم فتح الأداة ببيانات شهر ${period.month}/${period.year} (${state.invoices.length} فاتورة) - جاري تحميل باقي البيانات...`, 'ok');
+
+      // باقي الجداول الصغيرة (مرتجعات/كشف حساب/شيكات/فواتير جريد...) - أحجامها معقولة فمش هتاخد
+      // وقت طويل، بنكمّل بيها الشاشة اللي ظهرت بالفعل من غير ما نأخّر عليها عرض آخر شهر.
+      try {
+        const otherRows = await fetchOtherTablesRows(client);
+        if (sb !== client) return;
+        Object.assign(cloudRawAccum, otherRows);
+        applyCloudRowsToState(cloudRawAccum);
+        finishCloudRender(true);
+        logStatus(`تم فتح الأداة ببيانات شهر ${period.month}/${period.year} (${state.invoices.length} فاتورة) ✓`, 'ok');
+        saveCloudCache(cloudRawAccum);
+      } catch (e2) { /* فشلت المرحلة دي بس - بيانات آخر شهر لسه ظاهرة، وهتتحاول تكمل وقت أول استخدام محتاج بيانات كاملة */ }
+
+      ensureAllKnownPeriodsFetched(); // عشان فلتر السنة/الشهر يعرض كل التاريخ للاختيار من دلوقتي
     } catch (e) {
-      if (usedCache) {
-        logStatus('تعذر تحديث البيانات من السحابة الآن (' + (e.message || e) + ') - البيانات المعروضة من آخر نسخة محفوظة محليًا (مش بالضرورة أحدث نسخة). جرّب تحدّث الصفحة تاني بعد شوية.', 'err');
-      } else if (quickDone) {
-        logStatus('تم فتح الأداة ببيانات آخر شهر بنجاح، لكن تعذر تحميل باقي التاريخ الآن (' + (e.message || e) + ') - شاشات زي الأرباع والمقارنة السنوية ممكن تبقى ناقصة لحد ما تحدّث الصفحة وتنجح المحاولة.', 'err');
-      } else {
-        logStatus('تعذر تحميل البيانات المحفوظة من السحابة (' + (e.message || e) + ') - تقدر ترفع الملفات براحتك وهتشتغل الأداة عادي.', 'err');
-      }
+      logStatus('تعذر تحميل بيانات آخر شهر (' + (e.message || e) + ') - تقدر ترفع الملفات براحتك وهتشتغل الأداة عادي.', 'err');
     }
   }
 
@@ -3371,8 +3463,11 @@ table.datatable details summary:hover { text-decoration: underline; }
     switch (key) {
       case 'activity': return uniq(state.invoices.map(i => i.__activity));
       case 'branch': return uniq(state.invoices.map(i => i['الفرع']));
-      case 'year': return uniq(state.invoices.map(i => i.__year)).sort((a, b) => a - b);
-      case 'month': return uniq(state.invoices.map(i => i.__month)).sort((a, b) => a - b);
+      // فلتر السنة/الشهر بيعرض كل الشهور الموجودة فعلاً في السحابة (allKnownPeriods) مش بس اللي
+      // اتحمّل لحد دلوقتي في الذاكرة - عشان تقدر تختار أي شهر قديم حتى لو لسه ما اتحملش، وهيتحمّل
+      // وقت الاختيار (شهر بشهر عند الطلب - شوف ensureSelectedPeriodsLoaded).
+      case 'year': return (allKnownPeriods.length ? uniq(allKnownPeriods.map(p => p.year)) : uniq(state.invoices.map(i => i.__year))).sort((a, b) => a - b);
+      case 'month': return (allKnownPeriods.length ? uniq(allKnownPeriods.map(p => p.month)) : uniq(state.invoices.map(i => i.__month))).sort((a, b) => a - b);
       case 'rep': return uniq(state.invoices.map(i => i['المندوب']));
       case 'item': return uniq(state.itemRows.map(r => r.item)).sort((a, b) => String(a).localeCompare(String(b), 'ar'));
       default: return [];
@@ -3412,6 +3507,10 @@ table.datatable details summary:hover { text-decoration: underline; }
     // للمستخدم وهو بيختار أكتر من قيمة من غير ما تقفل بعد كل اختيار.
     const panelId = panel.id;
     const reopenPanel = () => { if (panelId) { const p = document.getElementById(panelId); if (p) p.classList.add('open'); } };
+    // لو الفلتر اللي اتغيّر هو السنة أو الشهر، محتاجين نتأكد إن الشهور المطلوبة اتحمّلت فعليًا من
+    // السحابة (شهر بشهر عند الطلب) قبل/أثناء إعادة الرسم - لو فيه شهر ناقص، renderAll() هيرسم
+    // بس اللي متاح دلوقتي، وبعد ما ensureSelectedPeriodsLoaded() تخلص هترسم تاني تلقائيًا بالكامل.
+    const maybeLoadPeriods = () => { if (key === 'year' || key === 'month') ensureSelectedPeriodsLoaded(); };
     allCb.addEventListener('change', () => {
       state.filters[key] = [];
       panel.querySelectorAll('input[type=checkbox]:not(.ms-all-cb)').forEach(cb => cb.checked = false);
@@ -3420,6 +3519,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       refreshFilterKey(key);
       renderAll();
       reopenPanel();
+      maybeLoadPeriods();
     });
     panel.querySelectorAll('input[type=checkbox]:not(.ms-all-cb)').forEach(cb => {
       cb.addEventListener('change', () => {
@@ -3431,6 +3531,7 @@ table.datatable details summary:hover { text-decoration: underline; }
         refreshFilterKey(key);
         renderAll();
         reopenPanel();
+        maybeLoadPeriods();
       });
     });
     setLabel();
@@ -3727,6 +3828,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       const grp = btn.closest('.tabgroup');
       if (grp && grp.dataset.maintab) mtShowMainTabGroups(grp.dataset.maintab);
       renderTabLazy(btn.dataset.tab); // ارسم التاب ده بس لو لسه محتاج إعادة رسم (تحسين سرعة)
+      if (PERIOD_HEAVY_TABS.has(btn.dataset.tab)) ensureAllHistoryLoaded();
       updatePrintBtnLabel();
     });
   });
