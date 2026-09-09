@@ -26606,16 +26606,18 @@ async function sciLoadMt2026(){
     try{ appSecret = localStorage.getItem('tamr_sales_app_secret_v1') || ''; }catch(e){}
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
     if(appSecret) H['x-app-secret'] = appSecret;
-    // بس من يناير لحد يونيو 2026 (شهر 1-6) — من شهر 7 وطالع المناديب بقوا بيسجلوا الأصناف بنفسهم
-    // من تطبيق التسليم، فمفيش داعي نكرر نفس الفترة من مصدر MT كمان
-    const baseUrl = `${SUPABASE_URL}/rest/v1/tamr_sales_items?select=customer,item&year=eq.2026&month=lt.7`;
+    // كل تاريخ tamr_sales_items من غير أي تحديد سنة/شهر — لأن أنشطة زي "تمراتي" مش بتتسجل أصلاً في
+    // تطبيق التسليم اللايف (sales_deliveries)، فلو حددنا الفترة (زي ما كان قبل كده: يناير-يونيو 2026
+    // بس) كنا بنسيب برة أي صنف اتباع قبل يناير 2026 (زي فواتير ديسمبر 2025) للأبد، حتى لو موجود
+    // فعليًا في قاعدة البيانات - وده كان بيبان زي إن الصنف "مش موجود" رغم إنه موجود ومسجّل صح.
+    const baseUrl = `${SUPABASE_URL}/rest/v1/tamr_sales_items?select=customer,item`;
     const pageSize = 1000;
 
     // بنجيب دفعة كبيرة من الصفحات مع بعض بالتوازي (Promise.all) بدل ما نستناها واحدة ورا التانية —
     // ملحوظة: ماعتمدناش على هيدر Content-Range لمعرفة العدد الكلي، لأن Supabase مبيكشفهوش دايمًا
     // للمتصفح (CORS)، فلو اعتمدنا عليه ممكن نوقف التحميل بدري ويفضل جزء من الأصناف مش ظاهر.
     // بدل كده بنطلق عدد كافي من الصفحات مقدمًا (حتى لو بعضها هيرجع فاضي) ونجمع الغير فاضي منها بس.
-    const maxPages = 60; // 60 × 1000 = 60,000 صف سقف أمان، أكتر من كفاية للبيانات الحالية (~36 ألف صف)
+    const maxPages = 150; // 150 × 1000 = 150,000 صف سقف أمان - كل تاريخ tamr_sales_items (~110 ألف صف حاليًا) وهامش نمو
     const jobs = [];
     for(let p=0; p<maxPages; p++){
       jobs.push(
@@ -26634,9 +26636,13 @@ async function sciLoadMt2026(){
   _sciMtCustomerMap = {};
   rows.forEach(r=>{
     const raw = (r.customer||'').trim();
+    // بنحسب مفتاح الاسم الموحّد مرة واحدة هنا ونخزّنه على الصف نفسه (r.__custKey) - عشان المطابقة
+    // في sciOnClientChange تبقى بمقارنة المفتاح الموحّد (يتجاهل فروق زي "ة/ه" و"ي/ى") بدل المقارنة
+    // بالنص الحرفي اللي كانت بتفوّت أي عميل مسجّل بإملاء مختلف شوية بين نشاط والتاني (زي "تمراتي"
+    // بتاعة عميل مسجّل "…والتجارة…" بينما "الطحان" بتاعة نفس العميل مسجّل "…والتجاره…").
+    r.__custKey = sciNormalizeCustomerKey(raw);
     if(!raw) return;
-    const key = sciNormalizeCustomerKey(raw);
-    if(key && !_sciMtCustomerMap[key]) _sciMtCustomerMap[key] = raw;
+    if(r.__custKey && !_sciMtCustomerMap[r.__custKey]) _sciMtCustomerMap[r.__custKey] = raw;
   });
   return _sciMt2026Cache;
 }
@@ -26803,15 +26809,18 @@ async function sciOnClientChange(){
     });
   });
 
-  // دمج أصناف تحليل فواتير عملاء MT (يناير-يونيو 2026 بس) — تغطية للفترة اللي قبل ما المناديب يبدأوا يسجلوا بنفسهم
+  // دمج أصناف تحليل فواتير عملاء MT (كل التاريخ) — تغطية لأي صنف اتباع للعميل قبل ما المناديب يبدأوا
+  // يسجلوا بنفسهم في تطبيق التسليم، أو أي نشاط (زي "تمراتي") مش بيتسجل في تطبيق التسليم أصلاً.
   try{
     const mtRows = await sciLoadMt2026();
     let mtMatched = [];
     if(isAll){
       mtMatched = mtRows;
     } else {
-      const rawCustomer = _sciMtCustomerMap[sciNormalizeCustomerKey(client)];
-      if(rawCustomer) mtMatched = mtRows.filter(r=>r.customer===rawCustomer);
+      // مطابقة بالمفتاح الموحّد (r.__custKey) مش بالنص الحرفي - عشان لو نفس العميل مسجّل بإملاء
+      // مختلف شوية بين نشاط والتاني (زي "التجارة"/"التجاره")، فواتيره كلها تتجمع صح مع بعض.
+      const clientKey = sciNormalizeCustomerKey(client);
+      if(clientKey) mtMatched = mtRows.filter(r=>r.__custKey===clientKey);
     }
     mtMatched.forEach(r=>{
       const name = (r.item||'').trim();
@@ -40220,6 +40229,7 @@ function aiSwitchMainTab(tab){
 // نُقل هنا من تاب مستقل كان في sales-analysis-MT.html بناءً على طلب المستخدم.
 let _ipaState = { targetYear:null, targetMonth:null, refYear:null, refMonth:null, targetAmount:null, notes:'', branch:'', route:'', savedRow:null, initialized:false };
 let _ipaBranchRoutes = null; // Map(branch -> Set(route)) - كل أزواج الفرع/خط السير المتاحة فعليًا في فواتير MT (تتحمّل مرة واحدة بس)
+let _ipaLastExport = null; // آخر جدول نتايج اتعرض فعليًا - بيتخزن هنا عشان زرار "تصدير Excel" يصدّر نفس البيانات المعروضة بالظبط من غير ما يعيد حسابها
 
 function ipaMonths(){ return ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر']; }
 
@@ -40456,6 +40466,9 @@ async function ipaRenderResults(){
   const totalActualValue = results.reduce((s,r)=>s+(r.actualValue||0),0);
   const overallAchPct = totalTargetValue ? totalActualValue/totalTargetValue : null;
 
+  // نخزّن نفس بيانات الجدول المعروض هنا عشان زرار "تصدير Excel" يصدّرها زي ما هي بالظبط
+  _ipaLastExport = { results, showTarget: !!targetAmount, hasActual, refYear:_ipaState.refYear, refMonth:_ipaState.refMonth, scopeLabel: ipaScopeLabel() };
+
   const kpisArr = [
     `<div style="background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:12px 14px"><div style="font-size:18px;font-weight:800;color:var(--text-primary)">${ipaFmt(refTotal)}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">إجمالي مسحوبات الفترة المرجعية (${ipaMonths()[_ipaState.refMonth-1]} ${_ipaState.refYear})</div></div>`,
     `<div style="background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:12px 14px"><div style="font-size:18px;font-weight:800;color:var(--text-primary)">${results.length}</div><div style="font-size:10px;color:var(--text2);margin-top:2px">عدد الأصناف في التوزيع</div></div>`
@@ -40494,7 +40507,10 @@ async function ipaRenderResults(){
     <div class="card" style="padding:14px">
       <div style="font-size:12px;font-weight:700;color:var(--text-primary);margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
         <span><i class="ti ti-table" style="color:#D97706"></i> توزيع الأصناف (${results.length} صنف) - ${ipaScopeLabel()} - مرتبة حسب الأكثر طلبًا</span>
-        <button onclick="window.print()" style="padding:6px 14px;background:var(--surface-1);color:var(--text-primary);border:1px solid var(--border);border-radius:7px;font-family:Cairo,sans-serif;font-size:11px;cursor:pointer"><i class="ti ti-printer"></i> طباعة</button>
+        <span style="display:flex;gap:8px">
+          <button onclick="ipaExportExcel()" style="padding:6px 14px;background:var(--caramel);color:#fff;border:none;border-radius:7px;font-family:Cairo,sans-serif;font-size:11px;font-weight:700;cursor:pointer"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+          <button onclick="window.print()" style="padding:6px 14px;background:var(--surface-1);color:var(--text-primary);border:1px solid var(--border);border-radius:7px;font-family:Cairo,sans-serif;font-size:11px;cursor:pointer"><i class="ti ti-printer"></i> طباعة</button>
+        </span>
       </div>
       <div style="overflow-x:auto">
         <table style="width:100%;border-collapse:collapse;font-family:Cairo,sans-serif;font-size:12px">
@@ -40504,6 +40520,94 @@ async function ipaRenderResults(){
       </div>
     </div>
   `;
+}
+
+// بيصدّر نفس جدول "توزيع الأصناف" المعروض فعليًا (نفس الأعمدة الظاهرة بالظبط حسب وجود هدف/محقق فعلي
+// من عدمه) لملف Excel مبرند بهوية الطحان (لون الكراميل للهيدر، تظليل متبادل بلون الرمل، تلوين نسب
+// التحقيق أخضر/برتقالي/أحمر زي الشاشة بالظبط).
+async function ipaExportExcel(){
+  if(typeof XLSX === 'undefined'){ if(typeof showToast==='function') showToast('جاري تحميل المكتبة', 'info'); else alert('جاري تحميل المكتبة، حاول تاني بعد لحظة'); return; }
+  const ex = _ipaLastExport;
+  if(!ex || !ex.results || !ex.results.length){ if(typeof showToast==='function') showToast('لا توجد بيانات للتصدير', 'err'); else alert('لا توجد بيانات للتصدير'); return; }
+  const { results, showTarget, hasActual } = ex;
+
+  const colDefs = [
+    { h:'الصنف', type:'text', get:r=>r.item },
+    { h:'التصنيف', type:'text', get:r=>r.category||'-' },
+    { h:'% من المسحوبات المرجعية', type:'pct', get:r=>r.share },
+    { h:'مسحوبات الفترة المرجعية', type:'money', get:r=>r.refValue },
+    { h:'كراتين الفترة المرجعية', type:'num1', get:r=>r.refCartons },
+    { h:'آخر سعر كرتونة فعلي', type:'money', get:r=>r.currentCartonPrice },
+  ];
+  if(showTarget){
+    colDefs.push({ h:'الهدف (قيمة)', type:'money', highlight:true, get:r=>r.targetValue });
+    colDefs.push({ h:'الهدف (كراتين)', type:'num1', highlight:true, get:r=>r.targetCartons });
+  }
+  if(hasActual){
+    colDefs.push({ h:'المحقق الفعلي (قيمة)', type:'money', get:r=>r.actualValue });
+    colDefs.push({ h:'المحقق الفعلي (كراتين)', type:'num1', get:r=>r.actualCartons });
+  }
+  if(hasActual && showTarget){
+    colDefs.push({ h:'نسبة التحقيق (قيمة)', type:'pct', achv:true, get:r=>r.achievedValuePct });
+    colDefs.push({ h:'نسبة التحقيق (كراتين)', type:'pct', achv:true, get:r=>r.achievedCartonsPct });
+  }
+
+  // ألوان هوية الطحان (نفس متغيرات CSS الأساسية في الأداة: --caramel, --sand)
+  const CARAMEL='C55B48', CARAMEL_DARK='8C3E2F', SAND='EDE5D8', SAND_DARK='DCCFBB', WHITE='FFFFFF', TEXT='4A3A2E';
+  const GREEN='0E7A3D', ORANGE='B45309', RED='C0392B';
+  const thinBorder = { top:{style:'thin',color:{rgb:SAND_DARK}}, bottom:{style:'thin',color:{rgb:SAND_DARK}}, left:{style:'thin',color:{rgb:SAND_DARK}}, right:{style:'thin',color:{rgb:SAND_DARK}} };
+  const nCols = colDefs.length;
+
+  const titleTxt = `توزيع الأصناف (${results.length} صنف) - ${ex.scopeLabel} - ${ipaMonths()[ex.refMonth-1]} ${ex.refYear}`;
+  const aoa = [
+    [titleTxt, ...Array(nCols-1).fill('')],
+    colDefs.map(c=>c.h),
+    ...results.map(r=>colDefs.map(c=>{ const v = c.get(r); return (v===null||v===undefined) ? '-' : v; }))
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [{ s:{r:0,c:0}, e:{r:0,c:nCols-1} }];
+  ws['!cols'] = colDefs.map((c,i)=> i===0 ? {wch:34} : (i===1 ? {wch:20} : {wch:16}));
+  ws['!rows'] = [{hpt:24}];
+
+  const titleRef = XLSX.utils.encode_cell({r:0,c:0});
+  if(ws[titleRef]) ws[titleRef].s = { fill:{fgColor:{rgb:CARAMEL_DARK}}, font:{bold:true,color:{rgb:WHITE},sz:13,name:'Cairo'}, alignment:{horizontal:'center',vertical:'center',readingOrder:2} };
+
+  colDefs.forEach((c,ci)=>{
+    const ref = XLSX.utils.encode_cell({r:1,c:ci});
+    if(ws[ref]) ws[ref].s = { fill:{fgColor:{rgb:CARAMEL}}, font:{bold:true,color:{rgb:WHITE},sz:11,name:'Cairo'}, alignment:{horizontal:'center',vertical:'center',readingOrder:2,wrapText:true}, border:thinBorder };
+  });
+
+  results.forEach((r,ri)=>{
+    const rowIdx = ri+2; // 0=العنوان، 1=رأس الأعمدة، 2 وبعدها=بيانات
+    const zebra = ri%2===0 ? WHITE : SAND;
+    colDefs.forEach((c,ci)=>{
+      const ref = XLSX.utils.encode_cell({r:rowIdx,c:ci});
+      const cell = ws[ref];
+      if(!cell) return;
+      const v = c.get(r);
+      let fontColor = TEXT, bold = false;
+      if(c.highlight){ fontColor = CARAMEL_DARK; bold = true; }
+      if(c.achv && v!=null){ fontColor = v>=1 ? GREEN : (v>=0.7 ? ORANGE : RED); bold = true; }
+      if(typeof cell.v === 'number'){
+        if(c.type==='pct') cell.z = '0.0%';
+        else if(c.type==='money') cell.z = '#,##0';
+        else if(c.type==='num1') cell.z = '#,##0.0';
+      }
+      cell.s = {
+        fill:{fgColor:{rgb:zebra}},
+        font:{color:{rgb:fontColor}, bold, sz:10.5, name:'Cairo'},
+        alignment:{horizontal: c.type==='text' ? 'right':'center', vertical:'center', readingOrder:2},
+        border: thinBorder
+      };
+    });
+  });
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'خطة الأصناف');
+  const safeScopeName = String(ex.scopeLabel||'').replace(/[\\/:*?"<>|]+/g,'_');
+  XLSX.writeFile(wb, `خطة_الأصناف_${safeScopeName}_${ipaMonths()[ex.refMonth-1]}_${ex.refYear}.xlsx`);
+  if(typeof showToast==='function') showToast('✅ تم تصدير الملف');
 }
 
 // ══ تبديل sub-tab السلاسل ═══════════════════════════
