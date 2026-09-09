@@ -2401,6 +2401,17 @@ table.datatable details summary:hover { text-decoration: underline; }
   function emptyOtherTablesShape() {
     return { returnRows: [], manualRouteRows: [], routeCatalogRows: [], indirectRows: [], indirectLinkRows: [], itemCatalogRows: [], repRouteRows: [], repRouteSiteLinkRows: [], checkRows: [], ledgerRows: [], itemMergeRows: [], customerInvoiceRawRows: [] };
   }
+  // كتالوج الأصناف (كود/تصنيف/عدد قطع بالكرتونة) ودمج أسماء الأصناف - جدولين صغيرين جدًا (281 و6
+  // صفوف بس) لكنهم أساسيين لعرض كود كل صنف صح، فبنجيبهم مع فواتير/أصناف آخر شهر في نفس اللحظة
+  // (مش مؤجلين لمرحلة الجداول الصغيرة التانية) عشان الكود يبان ثابت جنب كل صنف من أول لحظة فتح
+  // بدل ما يبان فاضي لثانية أو اتنين وبعدين يظهر (وده كان بيبان زي إنه "مش ثابت").
+  async function fetchItemCatalogAndMerges(client) {
+    const [itemCatalogRows, itemMergeRows] = await Promise.all([
+      fetchAllRows(client, 'tamr_sales_item_catalog'),
+      fetchAllRows(client, 'tamr_sales_item_merges'),
+    ]);
+    return { itemCatalogRows, itemMergeRows };
+  }
   // بيحدد آخر سنة/شهر موجودين فعليًا في الفواتير - استعلام على عمود واحد بس (year) مرتّب وبحد أقصى
   // صف واحد، بيستخدم فهرس year_idx مباشرة فبيرجع فورًا مهما كان حجم الجدول الكلي (110+ ألف سطر أو أكتر
   // مستقبلًا) لأنه مش بيقرا ولا صف بيانات فعلي غير الصف ده.
@@ -2476,11 +2487,13 @@ table.datatable details summary:hover { text-decoration: underline; }
   }
   // كل الجداول الصغيرة (مش الفواتير/الأصناف) - بيتحمّلوا كاملين على طول لأن حجمهم مش هو سبب البطء
   // (أكبرهم حاليًا حوالي 18 ألف سطر بس، عكس الأصناف اللي بقت +110 ألف)
+  // ملحوظة: تاب_الأصناف/تاب_دمج الأصناف اتشالوا من هنا لأنهم بيتحمّلوا فورًا مع آخر شهر في المرحلة
+  // (1) - شوف fetchItemCatalogAndMerges.
   async function fetchOtherTablesRows(client) {
-    const tableNames = ['tamr_sales_returns', 'tamr_sales_manual_routes', 'tamr_sales_route_catalog', 'tamr_sales_indirect_discounts', 'tamr_sales_indirect_links', 'tamr_sales_item_catalog', 'tamr_sales_rep_routes', 'tamr_sales_rep_route_site_links', 'tamr_sales_collected_checks', 'tamr_sales_account_ledger', 'tamr_sales_item_merges', 'tamr_customer_invoices_raw'];
+    const tableNames = ['tamr_sales_returns', 'tamr_sales_manual_routes', 'tamr_sales_route_catalog', 'tamr_sales_indirect_discounts', 'tamr_sales_indirect_links', 'tamr_sales_rep_routes', 'tamr_sales_rep_route_site_links', 'tamr_sales_collected_checks', 'tamr_sales_account_ledger', 'tamr_customer_invoices_raw'];
     const taskFns = tableNames.map(t => () => fetchAllRows(client, t));
-    const [returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows, customerInvoiceRawRows] = await runTasksBatched(taskFns, 4);
-    return { returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, itemCatalogRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, itemMergeRows, customerInvoiceRawRows };
+    const [returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, customerInvoiceRawRows] = await runTasksBatched(taskFns, 4);
+    return { returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, customerInvoiceRawRows };
   }
   // بيجيب أسماء كل الشهور الموجودة في السحابة (من غير صفوفها) عشان فلتر السنة/الشهر يقدر يعرض كل
   // التاريخ للاختيار حتى قبل ما نحمّله فعليًا.
@@ -2598,12 +2611,13 @@ table.datatable details summary:hover { text-decoration: underline; }
         logStatus('لا توجد بيانات محفوظة سابقًا في السحابة - ارفع الملفات عشان تبدأ.');
         return;
       }
-      const [invPeriodRows, itemPeriodRows] = await Promise.all([
+      const [invPeriodRows, itemPeriodRows, catalogAndMerges] = await Promise.all([
         fetchTablePeriodRows(client, 'tamr_sales_invoices', period.year, period.month),
         fetchTablePeriodRows(client, 'tamr_sales_items', period.year, period.month),
+        fetchItemCatalogAndMerges(client).catch(() => ({ itemCatalogRows: [], itemMergeRows: [] })), // فشلها منفصل عن فشل الفواتير/الأصناف
       ]);
       if (sb !== client) return;
-      cloudRawAccum = { invRows: invPeriodRows, itemRows: itemPeriodRows, ...emptyOtherTablesShape() };
+      cloudRawAccum = { invRows: invPeriodRows, itemRows: itemPeriodRows, ...emptyOtherTablesShape(), ...catalogAndMerges };
       loadedPeriodKeys.add(period.year + '-' + period.month);
       const hasInv = applyCloudRowsToState(cloudRawAccum);
       finishCloudRender(hasInv);
