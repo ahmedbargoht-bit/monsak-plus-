@@ -2201,16 +2201,25 @@ table.datatable details summary:hover { text-decoration: underline; }
 
   async function fetchAllRows(client, table) {
     const pageSize = 1000;
-    const CONCURRENCY = 3; // متحفظين في العدد عشان منزودش الضغط على السحابة ونسبب تايم أوت
+    const CONCURRENCY = 2; // متحفظين في العدد عشان منزودش الضغط على السحابة - لاحظنا إن سيرفر
+    // الـ PostgREST نفسه (مش بس قاعدة البيانات) بيقفل أي طلب واقف كتير تحت ضغط ("Warp server error:
+    // Thread killed by timeout manager")، فتقليل عدد الطلبات المتوازية بيقلل احتمال حصول ده.
     const orderCol = fetchOrderCol(table);
 
-    // الطريقة القديمة المضمونة (OFFSET تتابعي) - شبكة أمان أخيرة بس
+    // الطريقة القديمة المضمونة (OFFSET تتابعي) - شبكة أمان أخيرة بس. مضاف ليها 3 محاولات (كانت من
+    // غير أي إعادة محاولة - أي فشل عابر فيها كان بيسقط تحميل الجدول كله فورًا).
     const fetchSequential = async () => {
       let from = 0, all = [];
       while (true) {
-        const { data, error } = await client.from(table).select('*').range(from, from + pageSize - 1);
-        if (error) throw error;
-        all = all.concat(data || []);
+        let data = null, lastErr;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const res = await client.from(table).select('*').range(from, from + pageSize - 1);
+          if (!res.error) { data = res.data || []; break; }
+          lastErr = res.error;
+          await new Promise(r => setTimeout(r, 700 * (attempt + 1)));
+        }
+        if (data === null) throw lastErr;
+        all = all.concat(data);
         if (!data || data.length < pageSize) break;
         from += pageSize;
       }
@@ -2265,12 +2274,22 @@ table.datatable details summary:hover { text-decoration: underline; }
       return results.flat();
     };
 
-    try {
-      return await fetchKeysetParallel();
-    } catch (e) {
-      // أي مشكلة في الطريقة السريعة - نرجع فورًا للطريقة القديمة المضمونة بدل ما نوقف التحميل خالص
-      return fetchSequential();
+    // محاولتين كاملتين (keyset فالقديمة، مرتين) قبل ما نستسلم تمامًا - عشان لو السيرفر واقع تحت
+    // ضغط لحظي (thread timeout) في المحاولة الأولى، تاني محاولة بعد شوية غالبًا تنجح عادي.
+    let lastErr;
+    for (let round = 0; round < 2; round++) {
+      try {
+        return await fetchKeysetParallel();
+      } catch (e) {
+        try {
+          return await fetchSequential();
+        } catch (e2) {
+          lastErr = e2;
+          if (round === 0) await new Promise(r => setTimeout(r, 1500));
+        }
+      }
     }
+    throw lastErr;
   }
 
   // بيجيب مجموعة functions بترجع Promise ويشغّلهم على دفعات (batchSize في نفس الوقت) بدل كلهم مرة
@@ -2406,9 +2425,11 @@ table.datatable details summary:hover { text-decoration: underline; }
   // (مش مؤجلين لمرحلة الجداول الصغيرة التانية) عشان الكود يبان ثابت جنب كل صنف من أول لحظة فتح
   // بدل ما يبان فاضي لثانية أو اتنين وبعدين يظهر (وده كان بيبان زي إنه "مش ثابت").
   async function fetchItemCatalogAndMerges(client) {
+    // كل جدول بيتلقط فشله لوحده - عشان لو "دمج الأصناف" (صغير جدًا وناذر يفشل) اتعطل، ميمنعش كتالوج
+    // الأصناف (الأهم بكتير) من الظهور، والعكس.
     const [itemCatalogRows, itemMergeRows] = await Promise.all([
-      fetchAllRows(client, 'tamr_sales_item_catalog'),
-      fetchAllRows(client, 'tamr_sales_item_merges'),
+      fetchAllRows(client, 'tamr_sales_item_catalog').catch(() => []),
+      fetchAllRows(client, 'tamr_sales_item_merges').catch(() => []),
     ]);
     return { itemCatalogRows, itemMergeRows };
   }
@@ -2474,7 +2495,7 @@ table.datatable details summary:hover { text-decoration: underline; }
   // مهما كبر التاريخ الكلي. بنجيب 3 شهور مع بعض في نفس الوقت عشان نوازن بين السرعة والضغط على السحابة.
   async function fetchAllPeriodsInvoiceItemRows(client, periods) {
     let allInv = [], allItem = [];
-    const CONCURRENCY = 3;
+    const CONCURRENCY = 2; // مخفّضة عشان السيرفر بيقفل الطلبات المتزاحمة تحت ضغط (Warp thread timeout)
     for (let i = 0; i < periods.length; i += CONCURRENCY) {
       const batch = periods.slice(i, i + CONCURRENCY);
       const results = await Promise.all(batch.map(p => Promise.all([
@@ -2513,9 +2534,15 @@ table.datatable details summary:hover { text-decoration: underline; }
   // (1) - شوف fetchItemCatalogAndMerges.
   async function fetchOtherTablesRows(client) {
     const tableNames = ['tamr_sales_returns', 'tamr_sales_manual_routes', 'tamr_sales_route_catalog', 'tamr_sales_indirect_discounts', 'tamr_sales_indirect_links', 'tamr_sales_rep_routes', 'tamr_sales_rep_route_site_links', 'tamr_sales_collected_checks', 'tamr_sales_account_ledger', 'tamr_customer_invoices_raw'];
-    const taskFns = tableNames.map(t => () => fetchAllRows(client, t));
-    const [returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, customerInvoiceRawRows] = await runTasksBatched(taskFns, 4);
-    return { returnRows, manualRouteRows, routeCatalogRows, indirectRows, indirectLinkRows, repRouteRows, repRouteSiteLinkRows, checkRows, ledgerRows, customerInvoiceRawRows };
+    const keys = ['returnRows', 'manualRouteRows', 'routeCatalogRows', 'indirectRows', 'indirectLinkRows', 'repRouteRows', 'repRouteSiteLinkRows', 'checkRows', 'ledgerRows', 'customerInvoiceRawRows'];
+    // مهم: كل جدول بيتلقط فشله لوحده (بدل ما فشل جدول واحد بس يسقط نتيجة كل الجداول التانية معاه،
+    // زي ما كان بيحصل قبل كده - جدول "فواتير جريد" كان بيفشل أحيانًا بسبب ضغط على السيرفر، وده كان
+    // بيمنع حتى كتالوج الأصناف/المرتجعات/كشف الحساب من الظهور رغم إنهم اتحمّلوا بنجاح فعليًا).
+    const taskFns = tableNames.map(t => () => fetchAllRows(client, t).catch(e => { logStatus(`تعذر تحميل "${t}" الآن (${e.message || e}) - باقي البيانات هتظهر عادي`, 'err'); return []; }));
+    const results = await runTasksBatched(taskFns, 2);
+    const out = {};
+    keys.forEach((k, i) => { out[k] = results[i]; });
+    return out;
   }
   // بيجيب أسماء كل الشهور الموجودة في السحابة (من غير صفوفها) عشان فلتر السنة/الشهر يقدر يعرض كل
   // التاريخ للاختيار حتى قبل ما نحمّله فعليًا.
