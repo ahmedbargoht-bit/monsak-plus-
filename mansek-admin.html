@@ -5062,8 +5062,8 @@ h2,h3{color:#2C1F0A}
               <div style="font-size:11.5px;color:#8B6A1F;font-weight:600;margin-bottom:6px">أول مرة بس: اكتب كلمة سر تحليل فواتير MT عشان يتحفظ الكارت</div>
               <input type="password" id="dbi-secret" placeholder="كلمة سر MT" style="font-family:monospace" dir="ltr"/>
             </div>
-            <div id="dbi-msg" style="font-size:12px;margin-top:10px"></div>
-            <div class="modal-footer">
+            <div id="dbi-msg" style="font-size:12px;margin-top:10px;min-height:16px"></div>
+            <div class="modal-footer" style="position:sticky;bottom:-24px;margin:16px -24px -24px -24px;padding:12px 24px;background:#FFFDF8;box-shadow:0 -4px 10px rgba(75,60,26,.08);border-radius:0 0 16px 16px">
               <button class="btn btn-ghost" id="dbi-delete-btn" style="display:none;color:#C0392B" onclick="dbItemDelete()"><i class="ti ti-trash"></i> حذف</button>
               <button class="btn btn-ghost" onclick="closeModal('modal-db-item')">إلغاء</button>
               <button class="btn btn-blue" id="dbi-save-btn" onclick="dbItemSave()">
@@ -27310,7 +27310,7 @@ function dbItemOpen(itemName){
   document.getElementById('dbi-modal-title').textContent = isNew ? 'إضافة منتج تمر جديد' : 'تعديل بيانات المنتج';
   const nameInput = document.getElementById('dbi-name');
   nameInput.value = row ? row.name : '';
-  nameInput.disabled = !!row; // الاسم ثابت عند التعديل، يتغير فقط عند الإضافة
+  nameInput.disabled = false; // الاسم قابل للتعديل دايمًا (حتى في وضع التعديل — يعمل rename)
   document.getElementById('dbi-image').value = row ? row.imgLink : '';
   document.getElementById('dbi-image-file').value = '';
   document.getElementById('dbi-image-msg').innerHTML = '';
@@ -27345,9 +27345,11 @@ async function dbItemSave(){
   const secretInput = document.getElementById('dbi-secret');
 
   if(!name){ msgEl.innerHTML = '<span style="color:#C0392B">اكتب اسم المنتج الأول</span>'; return; }
-  if(isNew && (_dbItems||[]).some(r=>r.name===name)){
+  const nameTaken = (_dbItems||[]).some(r=>r.name===name && r.name!==_dbEditingItem);
+  if(nameTaken){
     msgEl.innerHTML = '<span style="color:#C0392B">في منتج بنفس الاسم موجود بالفعل</span>'; return;
   }
+  const isRename = !isNew && name !== _dbEditingItem;
 
   let appSecret = '';
   try{ appSecret = localStorage.getItem('tamr_sales_app_secret_v1') || ''; }catch(e){}
@@ -27364,29 +27366,51 @@ async function dbItemSave(){
   btn.disabled = true;
   msgEl.innerHTML = '<span style="color:var(--text2)">جارٍ الحفظ...</span>';
   try{
-    const H = {
-      'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
-      'Content-Type': 'application/json',
-      'Prefer': 'resolution=merge-duplicates,return=representation',
-      'x-app-secret': appSecret
+    const bodyObj = {
+      name: name,
+      image_link: image,
+      description: description,
+      benefits: benefits,
+      nutrition_info: nutrition,
+      usage_tips: usageTips
     };
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/date_benefit_products?on_conflict=name`, {
-      method: 'POST',
-      headers: H,
-      body: JSON.stringify([{
-        name: name,
-        image_link: image,
-        description: description,
-        benefits: benefits,
-        nutrition_info: nutrition,
-        usage_tips: usageTips
-      }])
-    });
+    let res;
+    if(isNew){
+      const H = {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=representation',
+        'x-app-secret': appSecret
+      };
+      res = await fetch(`${SUPABASE_URL}/rest/v1/date_benefit_products?on_conflict=name`, {
+        method: 'POST',
+        headers: H,
+        body: JSON.stringify([bodyObj])
+      });
+    } else {
+      // تعديل صنف موجود — PATCH بمفتاح الاسم الأصلي، بيسمح كمان بتغيير الاسم نفسه (rename)
+      const H = {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation',
+        'x-app-secret': appSecret
+      };
+      res = await fetch(`${SUPABASE_URL}/rest/v1/date_benefit_products?name=eq.${encodeURIComponent(_dbEditingItem)}`, {
+        method: 'PATCH',
+        headers: H,
+        body: JSON.stringify(bodyObj)
+      });
+    }
     if(!res.ok){
       let errText = '';
       try{ errText = (await res.json())?.message || ''; }catch(e){}
       throw new Error(errText || `HTTP ${res.status}`);
+    }
+    const savedRows = await res.json().catch(()=>[]);
+    if(!isNew && Array.isArray(savedRows) && savedRows.length===0){
+      throw new Error('لم يتم العثور على الصنف الأصلي للتعديل — جرّب تحدّث الصفحة');
     }
     try{ localStorage.setItem('tamr_sales_app_secret_v1', appSecret); }catch(e){}
 
@@ -27396,9 +27420,11 @@ async function dbItemSave(){
     } else {
       const idx = _dbItems.findIndex(r=>r.name===_dbEditingItem);
       if(idx>-1) _dbItems[idx] = newRow; else _dbItems.push(newRow);
+      _dbEditingItem = name;
     }
     dbRenderCards();
     msgEl.innerHTML = '<span style="color:#2E7D32">✓ اتحفظ بنجاح</span>';
+    if(typeof showToast==='function') showToast('✅ اتحفظ التعديل بنجاح');
     setTimeout(()=>closeModal('modal-db-item'), 500);
   }catch(e){
     console.error('[dbItemSave]', e);
@@ -27407,8 +27433,10 @@ async function dbItemSave(){
       secretWrap.style.display = '';
       msgEl.innerHTML = '<span style="color:#C0392B">كلمة السر غلط أو مش متسجل دخول MT — جرّب تاني</span>';
       try{ localStorage.removeItem('tamr_sales_app_secret_v1'); }catch(err){}
+      if(typeof showToast==='function') showToast('❌ كلمة السر غلط — اكتبها تاني وجرّب الحفظ');
     } else {
       msgEl.innerHTML = `<span style="color:#C0392B">حصل خطأ: ${e.message||'حاول تاني'}</span>`;
+      if(typeof showToast==='function') showToast(`❌ فشل الحفظ: ${e.message||'حاول تاني'}`);
     }
   }finally{
     btn.disabled = false;
@@ -27455,6 +27483,7 @@ async function dbItemDelete(){
     try{ localStorage.setItem('tamr_sales_app_secret_v1', appSecret); }catch(e){}
     _dbItems = _dbItems.filter(r=>r.name!==itemName);
     dbRenderCards();
+    if(typeof showToast==='function') showToast('🗑️ اتحذف المنتج');
     closeModal('modal-db-item');
   }catch(e){
     console.error('[dbItemDelete]', e);
@@ -27463,8 +27492,10 @@ async function dbItemDelete(){
       secretWrap.style.display = '';
       msgEl.innerHTML = '<span style="color:#C0392B">كلمة السر غلط أو مش متسجل دخول MT — جرّب تاني</span>';
       try{ localStorage.removeItem('tamr_sales_app_secret_v1'); }catch(err){}
+      if(typeof showToast==='function') showToast('❌ كلمة السر غلط — اكتبها تاني وجرّب الحذف');
     } else {
       msgEl.innerHTML = `<span style="color:#C0392B">حصل خطأ: ${e.message||'حاول تاني'}</span>`;
+      if(typeof showToast==='function') showToast(`❌ فشل الحذف: ${e.message||'حاول تاني'}`);
     }
   }finally{
     delBtn.disabled = false;
