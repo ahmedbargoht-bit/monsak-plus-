@@ -803,15 +803,35 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
 
     <!-- Leaderboard -->
     <div class="screen" id="screen-leaderboard">
-      <div class="filter-row">
-        <select class="filter-select" id="lb-period" onchange="renderLeaderboard()">
-          <option value="today">اليوم</option>
-          <option value="week">هذا الأسبوع</option>
-          <option value="month">هذا الشهر</option>
-          <option value="all">الكل</option>
-        </select>
+      <div class="filter-row" style="flex-wrap:wrap;gap:6px">
+        <div style="display:flex;gap:6px" id="lb-type-tabs">
+          <button class="filter-select lb-type-btn" data-type="متحرك" onclick="lbSwitchType('متحرك')" style="background:#C55B48;color:#fff;font-weight:700;cursor:pointer;border:none">منسق متحرك</button>
+          <button class="filter-select lb-type-btn" data-type="ثابت" onclick="lbSwitchType('ثابت')" style="background:#eee;color:#2C1F0A;font-weight:400;cursor:pointer;border:none">منسق ثابت (هايبر)</button>
+          <button class="filter-select lb-type-btn" data-type="ثابت كبار عملاء" onclick="lbSwitchType('ثابت كبار عملاء')" style="background:#eee;color:#2C1F0A;font-weight:400;cursor:pointer;border:none">ثابت كبار عملاء</button>
+        </div>
+        <select class="filter-select" id="lb-filter-group" onchange="renderLB()"></select>
+        <button class="filter-select" onclick="renderLB(true)" style="cursor:pointer;border:none;background:#eee"><i class="ti ti-refresh"></i> تحديث</button>
+      </div>
+      <div style="text-align:center;margin:10px 0">
+        <div style="font-size:16px;font-weight:900;color:#C55B48">🏆 لوحة شرف المنسقين</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:2px" id="lb-date"></div>
+        <div style="font-size:10px;color:var(--text2);margin-top:2px">ترتيب تراكمي منذ بداية التسجيل</div>
       </div>
       <div id="lb-list" class="loading"><div class="spinner"></div><br>جاري التحميل...</div>
+      <div id="lb-legend" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;padding:8px;font-size:10px;color:var(--text2)"></div>
+
+      <!-- ══ تقييم المشرف الأسبوعي (يتراكم شهرياً في معيار "تقييم المشرف" أعلاه) ══ -->
+      <div style="margin-top:20px;background:#fff;border:1px solid #eee;border-radius:12px;padding:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+          <div style="font-size:13px;font-weight:700;color:#2C1F0A">⭐ تقييمك الأسبوعي للمنسقين</div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <button class="filter-select" onclick="lbRatingWeekNav(-1)" style="padding:4px 10px;cursor:pointer;border:none;background:#eee">‹</button>
+            <div id="lb-rating-week-label" style="font-size:11px;color:var(--text2);min-width:120px;text-align:center"></div>
+            <button class="filter-select" onclick="lbRatingWeekNav(1)" style="padding:4px 10px;cursor:pointer;border:none;background:#eee">›</button>
+          </div>
+        </div>
+        <div id="lb-rating-list"></div>
+      </div>
     </div>
 
     <!-- Visits -->
@@ -2812,7 +2832,8 @@ async function loadAllData(){
 
   await loadBranchCoords(); // (v2.2) تحميل إحداثيات الفروع للـ Geofencing
   renderDashboard();
-  renderLeaderboard();
+  // renderLB() بتتنفذ عند فتح تاب "لوحة الشرف" فعلياً (case 'leaderboard' في showTab) — مش هنا،
+  // عشان بتجيب بيانات إضافية تقيلة (returns/ratings/branches كاملة) مش محتاجينها لحد ما التاب يتفتح
   renderVisits();
   renderAttendance();
   renderLogs();
@@ -2931,7 +2952,7 @@ function _refreshActiveTab(tab){
       renderRepCards();
       break;
     case 'leaderboard':
-      renderLeaderboard();
+      renderLB();
       break;
     case 'visits':
       renderVisits();
@@ -3918,58 +3939,292 @@ async function loadRepLocations(){
 }
 
 // ══════════════════════════════════════════════════════════════
-function renderLeaderboard(){
-  const period = document.getElementById('lb-period').value;
-  const now = new Date();
-  let filtered = cachedVisits;
+// ══════════════════════════════════════════════════════════════
+// LEADERBOARD — لوحة شرف المنسقين (نفس منطق النظام في لوحة التحكم mansek-admin.html)
+// 3 لوحات منفصلة حسب coord_type: متحرك / ثابت (هايبر) / ثابت كبار عملاء — تراكمي منذ بداية التسجيل
+// ══════════════════════════════════════════════════════════════
+let _lbActiveType = 'متحرك';
+let _lbRepsTyped  = null;  // [{name,route,grp,type}] — من users، بيتحمّل مرة
+let _lbVisitsAll  = null;  // كل الزيارات (بدون سقف الـ500 المستخدم في التابات التانية)
+let _lbAttAll     = null;
+let _lbMissingAll = null;
+let _lbReturnsAll = null;
+let _lbRatingsAll = null;
+let _lbBranchesAll= null;  // [{branch_name,route,lat,lng}]
 
-  if(period==='today'){
-    const todayStr = localISO(now);
-    filtered = cachedVisits.filter(v=>v.created_at?.startsWith(todayStr));
-  } else if(period==='week'){
-    const weekAgo = new Date(now - 7*24*60*60*1000).toISOString();
-    filtered = cachedVisits.filter(v=>v.created_at>=weekAgo);
-  } else if(period==='month'){
-    const monthAgo = new Date(now - 30*24*60*60*1000).toISOString();
-    filtered = cachedVisits.filter(v=>v.created_at>=monthAgo);
-  }
+const LB_WEIGHTS = {
+  'متحرك':            {quality:.20, attendance:.15, shiftClose:.08, speed:.12, toOrder:.10, completeness:.10, coverage:.10, gps:.08, rating:.07},
+  'ثابت':             {quality:.22, attendance:.18, shiftClose:.08, speed:.12, toOrder:.10, completeness:.10, variety:.10, rating:.10},
+  'ثابت كبار عملاء':  {quality:.25, attendance:.20, shiftClose:.10, speed:.13, toOrder:.12, completeness:.10, rating:.10},
+};
+const LB_CRIT_LABELS = {
+  quality:'جودة التنفيذ', attendance:'الانتظام والحضور', shiftClose:'إغلاق الشيفت بدون نسيان',
+  speed:'سرعة حل النواقص/المرتجعات', toOrder:'تحويل النواقص لتوريد فعلي', completeness:'اكتمال الزيارة',
+  coverage:'تغطية خط السير', gps:'نزاهة الموقع (GPS)', variety:'تنوع نوع العرض', rating:'تقييم المشرف الأسبوعي'
+};
 
-  // تجميع النقاط
-  const scores = {};
-  const visits_count = {};
-  filtered.forEach(v=>{
-    if(!v.name) return;
-    scores[v.name]=(scores[v.name]||0)+(+v.points||0);
-    visits_count[v.name]=(visits_count[v.name]||0)+1;
+function lbSwitchType(type){
+  _lbActiveType = type;
+  document.querySelectorAll('.lb-type-btn').forEach(b=>{
+    const active = b.dataset.type===type;
+    b.style.background = active ? '#C55B48' : '#eee';
+    b.style.color       = active ? '#fff' : '#2C1F0A';
+    b.style.fontWeight  = active ? '700' : '400';
   });
+  renderLB();
+}
 
-  // ترتيب
-  const sorted = repNames
-    .map(n=>({name:n, pts:scores[n]||0, vc:visits_count[n]||0}))
-    .sort((a,b)=>b.pts-a.pts);
+// جلب كل بيانات الليدربورد (منسقين بالنوع + زيارات/حضور/نواقص/مرتجعات/تقييمات كاملة بدون سقف الـ500) — مرة واحدة إلا لو forceRefresh
+async function lbFetchAll(forceRefresh){
+  if(_lbRepsTyped && !forceRefresh) return;
+  const grps = cu.groups || [];
 
-  const maxPts = Math.max(...sorted.map(s=>s.pts), 1);
+  const repsPromises = grps.map(grp =>
+    fetch(`${SUPABASE_URL}/rest/v1/users?select=name,route,grp,user_type&role=eq.rep&grp=eq.${encodeURIComponent(grp)}&status=eq.active&limit=300`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.ok?r.json():[]).catch(()=>[])
+  );
+  const visitsPromises = grps.map(grp => sbGet('visits',{grp},{limit:5000}));
+  const attPromises    = grps.map(grp => sbGet('attendance',{grp},{limit:5000}));
+  const missingPromises= grps.map(grp => sbGet('missing',{grp},{limit:5000}));
+  const returnsPromises= grps.map(grp => sbGet('returns',{grp},{limit:5000}));
+  const branchesPromises= grps.map(grp => sbGet('branches',{grp},{limit:5000}));
 
-  if(!sorted.length){
-    document.getElementById('lb-list').innerHTML='<div class="empty">لا توجد بيانات</div>';
+  const [repsArrs, visitsArrs, attArrs, missingArrs, returnsArrs, branchesArrs, ratings] = await Promise.all([
+    Promise.all(repsPromises), Promise.all(visitsPromises), Promise.all(attPromises),
+    Promise.all(missingPromises), Promise.all(returnsPromises), Promise.all(branchesPromises),
+    sbGet('coordinator_weekly_ratings',{},{limit:5000}),
+  ]);
+
+  _lbRepsTyped  = [].concat(...repsArrs).map(u=>({name:u.name, route:u.route||'', grp:u.grp||'', type:u.user_type||'متحرك'}));
+  _lbVisitsAll  = [].concat(...visitsArrs);
+  _lbAttAll     = [].concat(...attArrs);
+  _lbMissingAll = [].concat(...missingArrs);
+  _lbReturnsAll = [].concat(...returnsArrs);
+  _lbBranchesAll= [].concat(...branchesArrs);
+  _lbRatingsAll = Array.isArray(ratings) ? ratings : [];
+}
+
+async function renderLB(forceRefresh){
+  await lbFetchAll(forceRefresh);
+
+  document.getElementById('lb-date').textContent = new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+
+  // فلتر المجموعة (لو المشرف بيغطي أكتر من مجموعة)
+  const grpSel = document.getElementById('lb-filter-group');
+  if(grpSel && !grpSel.dataset.filled){
+    grpSel.innerHTML = '<option value="all">كل المجموعات</option>' +
+      (cu.groups||[]).map(g=>`<option value="${g}">${GROUPS[g]?.label||g}</option>`).join('');
+    grpSel.dataset.filled='1';
+  }
+  const filterGrp = grpSel?.value || 'all';
+
+  const weights = LB_WEIGHTS[_lbActiveType];
+  let reps = (_lbRepsTyped||[]).filter(r=>r.type===_lbActiveType && r.name!=='تحت التعيين');
+  if(filterGrp!=='all') reps = reps.filter(r=>r.grp===filterGrp);
+
+  const lb = reps.map(rep=>{
+    const name = rep.name;
+    const myVisits  = (_lbVisitsAll||[]).filter(v=>v.name===name);
+    const myAtt     = (_lbAttAll||[]).filter(a=>a.name===name);
+    const myMissing = (_lbMissingAll||[]).filter(m=>m.name===name);
+    const myReturns = (_lbReturnsAll||[]).filter(r=>r.name===name);
+    const myRatings = (_lbRatingsAll||[]).filter(r=>r.coordinator_name===name);
+
+    const crit = {};
+
+    if(_lbActiveType==='متحرك'){
+      const avgSku = myVisits.length ? myVisits.reduce((s,v)=>s+(+v.sku_on||0),0)/myVisits.length : 0;
+      crit.quality = Math.min(100, Math.round(avgSku/25*100));
+    } else {
+      const avgKpi = myVisits.length ? myVisits.reduce((s,v)=>s+(+v.kpi_pts||0),0)/myVisits.length : 0;
+      crit.quality = Math.min(100, Math.round(avgKpi/70*100));
+    }
+
+    crit.attendance  = myAtt.length ? Math.round(myAtt.filter(a=>a.time_in).length/myAtt.length*100) : 0;
+    crit.shiftClose  = myAtt.length ? Math.round(myAtt.filter(a=>a.time_out).length/myAtt.length*100) : 0;
+
+    const speedSamples = [];
+    myMissing.forEach(m=>{
+      if(m.confirmed_at && m.created_at){
+        const h=(new Date(m.confirmed_at)-new Date(m.created_at))/36e5;
+        if(h>=0) speedSamples.push(h);
+      }
+    });
+    myReturns.forEach(r=>{
+      const doneAt = r.confirmed_at || r.pulled_at;
+      if(doneAt && r.created_at){
+        const h=(new Date(doneAt)-new Date(r.created_at))/36e5;
+        if(h>=0) speedSamples.push(h);
+      }
+    });
+    crit.speed = speedSamples.length
+      ? Math.max(0, Math.round(100 - Math.max(0,(speedSamples.reduce((a,b)=>a+b,0)/speedSamples.length)-24)/(120-24)*100))
+      : 0;
+
+    crit.toOrder = myMissing.length ? Math.round(myMissing.filter(m=>m.confirmed).length/myMissing.length*100) : 0;
+    crit.completeness = myVisits.length ? Math.round(myVisits.filter(v=>v.time_out && v.time_out!=='--').length/myVisits.length*100) : 0;
+
+    if(_lbActiveType==='متحرك'){
+      // تغطية خط السير: عدد الفروع الفعلية اللي اتزارت من إجمالي فروع خط السير (نفس منطق لوحة التحكم)
+      const routeBranches = new Set((_lbBranchesAll||[]).filter(b=>b.route===rep.route).map(b=>b.branch_name));
+      const visitedBranches = new Set(myVisits.map(v=>v.branch).filter(Boolean));
+      let covered=0; visitedBranches.forEach(b=>{ if(routeBranches.has(b)) covered++; });
+      crit.coverage = routeBranches.size ? Math.min(100, Math.round(covered/routeBranches.size*100)) : 0;
+
+      // نزاهة الموقع: مطابقة لوكيشن الزيارة مع لوكيشن الفرع (هافرساين) — نفس عتبات لوحة التحكم
+      const branchByName = {};
+      (_lbBranchesAll||[]).forEach(b=>{ if(b.branch_name) branchByName[b.branch_name]=b; });
+      const gpsSamples = [];
+      myVisits.forEach(v=>{
+        const br = branchByName[v.branch];
+        if(!br || !br.lat || !br.lng || !v.lat || !v.lng) return;
+        const d = haversineMeters(+v.lat, +v.lng, +br.lat, +br.lng);
+        gpsSamples.push(d<=150 ? 100 : d<=400 ? 60 : 0);
+      });
+      crit.gps = gpsSamples.length ? Math.round(gpsSamples.reduce((a,b)=>a+b,0)/gpsSamples.length) : 0;
+    } else if(_lbActiveType==='ثابت'){
+      const types = new Set();
+      myVisits.forEach(v=>(v.display_type||'').split(/[,،]/).forEach(t=>{ t=t.trim(); if(t) types.add(t); }));
+      crit.variety = Math.min(100, types.size*34);
+    }
+
+    crit.rating = myRatings.length ? Math.round(myRatings.reduce((s,r)=>s+(+r.rating||0),0)/myRatings.length/5*100) : 0;
+
+    let total=0;
+    Object.keys(weights).forEach(k=>{ total += (crit[k]||0)*(weights[k]||0); });
+
+    return {name, route:rep.route||'', score:Math.round(total), crit, visitsCount:myVisits.length};
+  }).sort((a,b)=>b.score-a.score);
+
+  renderLBList(lb, weights);
+  lbRenderRatingList(reps);
+}
+
+function renderLBList(lb, weights){
+  if(!lb.length){
+    document.getElementById('lb-list').innerHTML='<div class="empty">لا يوجد منسقين من هذا النوع</div>';
+    document.getElementById('lb-legend').innerHTML='';
     return;
   }
-
+  const maxPts = Math.max(...lb.map(s=>s.score), 1);
   const rankClass = i => i===0?'rank-1':i===1?'rank-2':i===2?'rank-3':'rank-other';
   const rankIcon  = i => i===0?'🥇':i===1?'🥈':i===2?'🥉':i+1;
 
-  document.getElementById('lb-list').innerHTML = sorted.map((r,i)=>`
-    <div class="leader-item">
-      <div class="leader-rank ${rankClass(i)}">${rankIcon(i)}</div>
-      <div class="leader-info">
-        <div class="leader-name">${r.name}</div>
-        <div class="leader-route">${r.vc} زيارة</div>
-        <div class="leader-bar-wrap">
-          <div class="leader-bar" style="width:${Math.round(r.pts/maxPts*100)}%"></div>
+  document.getElementById('lb-list').innerHTML = lb.map((r,i)=>{
+    const breakdown = Object.keys(weights).map(k=>{
+      const v = r.crit[k]||0;
+      return `<div style="display:flex;align-items:center;gap:4px;font-size:9px;color:var(--text2)">
+        <span style="width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0">${LB_CRIT_LABELS[k]}</span>
+        <div style="flex:1;height:4px;background:rgba(0,0,0,.08);border-radius:2px;overflow:hidden">
+          <div style="width:${v}%;height:100%;background:#C55B48"></div>
         </div>
+        <span style="width:28px;text-align:left;flex-shrink:0">${v}%</span>
+      </div>`;
+    }).join('');
+    return `
+    <div class="leader-item" style="flex-direction:column;align-items:stretch;gap:6px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="leader-rank ${rankClass(i)}">${rankIcon(i)}</div>
+        <div class="leader-info">
+          <div class="leader-name">${r.name}</div>
+          <div class="leader-route">${r.route||''} · ${r.visitsCount} زيارة</div>
+          <div class="leader-bar-wrap">
+            <div class="leader-bar" style="width:${Math.round(r.score/maxPts*100)}%"></div>
+          </div>
+        </div>
+        <div class="leader-pts">${r.score} <span style="font-size:11px;color:var(--text2)">نقطة</span></div>
       </div>
-      <div class="leader-pts">${r.pts} <span style="font-size:11px;color:var(--text2)">نقطة</span></div>
-    </div>`).join('');
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:4px 14px;padding-right:38px">${breakdown}</div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('lb-legend').innerHTML = Object.keys(weights).map(k=>
+    `<div>${LB_CRIT_LABELS[k]}: <b>${Math.round(weights[k]*100)}%</b></div>`
+  ).join('<div style="opacity:.3">|</div>');
+}
+
+// ══════════════════════════════════════════════════════════════
+// تقييم المشرف الأسبوعي — 1 لـ 5 نجوم لكل منسق، بيتراكم شهرياً (متوسط كل الأسابيع)
+// في معيار "تقييم المشرف" جوه لوحة الشرف فوق
+// ══════════════════════════════════════════════════════════════
+let _lbRatingWeek = null; // ISO date (السبت — بداية الأسبوع بمصر)
+
+function lbGetWeekStart(d){
+  const dt = new Date(d);
+  const day = dt.getDay(); // 0=أحد..6=سبت
+  const diff = (day+1)%7; // المسافة بالأيام من السبت اللي فات
+  dt.setDate(dt.getDate()-diff);
+  return dt.toISOString().slice(0,10);
+}
+
+function lbRatingWeekNav(delta){
+  const dt = new Date(_lbRatingWeek || lbGetWeekStart(new Date()));
+  dt.setDate(dt.getDate() + delta*7);
+  _lbRatingWeek = lbGetWeekStart(dt);
+  lbRenderRatingList();
+}
+
+function lbRenderRatingList(reps){
+  if(!_lbRatingWeek) _lbRatingWeek = lbGetWeekStart(new Date());
+  const wStart = new Date(_lbRatingWeek);
+  const wEnd = new Date(wStart); wEnd.setDate(wEnd.getDate()+6);
+  const fmt = d=>d.toLocaleDateString('ar-EG',{day:'numeric',month:'short'});
+  document.getElementById('lb-rating-week-label').textContent = `${fmt(wStart)} — ${fmt(wEnd)}`;
+
+  const list = reps || (_lbRepsTyped||[]).filter(r=>r.type===_lbActiveType && r.name!=='تحت التعيين');
+  const box = document.getElementById('lb-rating-list');
+  if(!box) return;
+
+  box.innerHTML = list.map(rep=>{
+    const existing = (_lbRatingsAll||[]).find(r=>r.coordinator_name===rep.name && r.week_start===_lbRatingWeek);
+    const curRating = existing?.rating || 0;
+    const stars = [1,2,3,4,5].map(n=>
+      `<span onclick="lbSetStar('${rep.name.replace(/'/g,"\\'")}',${n})" style="cursor:pointer;font-size:18px;color:${n<=curRating?'#F5A623':'#ddd'}" data-star="${n}">★</span>`
+    ).join('');
+    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #f2f2f2" data-rep-row="${rep.name.replace(/"/g,'&quot;')}">
+      <div style="flex:1;min-width:0;font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rep.name}</div>
+      <div class="lb-stars" data-rep="${rep.name.replace(/"/g,'&quot;')}">${stars}</div>
+      <input type="text" placeholder="سبب (اختياري)" value="${(existing?.reason||'').replace(/"/g,'&quot;')}" id="lb-rating-reason-${rep.name.replace(/[^a-zA-Z0-9؀-ۿ]/g,'_')}"
+        style="width:120px;font-size:10px;padding:4px 6px;border:1px solid #ddd;border-radius:6px;font-family:Cairo,sans-serif"/>
+      <button onclick="lbSaveRating('${rep.name.replace(/'/g,"\\'")}')" style="font-size:10px;padding:5px 10px;border:none;border-radius:6px;background:#C55B48;color:#fff;cursor:pointer">حفظ</button>
+    </div>`;
+  }).join('') || '<div class="empty">لا يوجد منسقين</div>';
+}
+
+function lbSetStar(name, n){
+  const row = document.querySelector(`.lb-stars[data-rep="${CSS.escape(name)}"]`);
+  if(!row) return;
+  row.querySelectorAll('span').forEach(s=>{
+    s.style.color = (+s.dataset.star<=n) ? '#F5A623' : '#ddd';
+  });
+  row.dataset.selected = n;
+}
+
+async function lbSaveRating(name){
+  const row = document.querySelector(`.lb-stars[data-rep="${CSS.escape(name)}"]`);
+  const selected = row?.dataset.selected;
+  const existing = (_lbRatingsAll||[]).find(r=>r.coordinator_name===name && r.week_start===_lbRatingWeek);
+  const rating = selected ? +selected : (existing?.rating||0);
+  if(!rating){ alert('اختار تقييم بالنجوم الأول'); return; }
+  const reasonEl = document.getElementById('lb-rating-reason-'+name.replace(/[^a-zA-Z0-9؀-ۿ]/g,'_'));
+  const reason = reasonEl?.value || '';
+
+  let ok;
+  if(existing){
+    ok = await sbPatch('coordinator_weekly_ratings', `id=eq.${existing.id}`, {rating, reason, rated_by:cu.name, updated_at:new Date().toISOString()});
+    if(ok){ existing.rating=rating; existing.reason=reason; }
+  } else {
+    ok = await sbPost('coordinator_weekly_ratings', {
+      coordinator_name:name, coord_type:_lbActiveType, week_start:_lbRatingWeek,
+      rating, reason, rated_by:cu.name
+    });
+    if(ok){
+      const fresh = await sbGet('coordinator_weekly_ratings',{coordinator_name:name, week_start:_lbRatingWeek},{limit:1});
+      if(Array.isArray(fresh) && fresh[0]) (_lbRatingsAll||(_lbRatingsAll=[])).push(fresh[0]);
+    }
+  }
+  if(ok){ showRefreshToast?.('جاري الحفظ...'); hideRefreshToast?.('تم حفظ التقييم ✓'); renderLB(); }
+  else alert('فشل حفظ التقييم — تأكد من الاتصال');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -4427,8 +4682,9 @@ async function confirmPtsAction(){
   closePtsModal();
 
   // 5. تحديث العرض
+  // (تنويه: تعديل نقاط زيارة واحدة هنا بقى بدون تأثير على ترتيب لوحة الشرف الجديدة —
+  // الترتيب بقى بيتحسب من معايير مركّبة متعددة مش من points بس)
   renderVisits();
-  renderLeaderboard();
   renderDashboard();
   renderLogs();
 

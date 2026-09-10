@@ -1159,7 +1159,12 @@ h2,h3{color:#2C1F0A}
 
         <!-- ══ LEADERBOARD ════════════════════════════════════ -->
         <div id="panel-leaderboard" class="panel">
-          <div class="filter-bar">
+          <div class="filter-bar" style="flex-wrap:wrap;gap:8px">
+            <div style="display:flex;gap:6px" id="lb-type-tabs">
+              <button class="btn btn-sm lb-type-btn" data-type="متحرك" onclick="lbSwitchType('متحرك')" style="background:var(--yellow);color:#1a1a1a;font-weight:700">منسق متحرك</button>
+              <button class="btn btn-sm lb-type-btn" data-type="ثابت" onclick="lbSwitchType('ثابت')" style="background:rgba(255,255,255,.08);color:#fff">منسق ثابت (هايبر)</button>
+              <button class="btn btn-sm lb-type-btn" data-type="ثابت كبار عملاء" onclick="lbSwitchType('ثابت كبار عملاء')" style="background:rgba(255,255,255,.08);color:#fff">ثابت كبار عملاء</button>
+            </div>
             <select id="lb-filter-group" onchange="renderLB()">
               <option value="all">كل المجموعات</option>
               <option value="giza">مجموعة الجيزة</option>
@@ -1174,20 +1179,17 @@ h2,h3{color:#2C1F0A}
               <option value="private_cairo">أسواق خاصة القاهرة</option>
               <option value="private_alex">أسواق خاصة الإسكندرية</option>
             </select>
-            <select id="lb-filter-period" onchange="renderLB()">
-              <option value="all">كل الوقت</option>
-              <option value="today">اليوم</option>
-              <option value="week">هذا الأسبوع</option>
-              <option value="month">هذا الشهر</option>
-            </select>
+            <button class="btn btn-sm" onclick="renderLB(true)" style="background:rgba(255,255,255,.08);color:#fff"><i class="ti ti-refresh"></i> تحديث</button>
           </div>
           <div class="lb-display">
             <div style="text-align:center;margin-bottom:16px">
-              <div style="font-size:18px;font-weight:900;color:var(--yellow)">🏆 ليدربورد المنسقين</div>
+              <div style="font-size:18px;font-weight:900;color:var(--yellow)">🏆 لوحة شرف المنسقين</div>
               <div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:4px" id="lb-date"></div>
+              <div style="font-size:10px;color:rgba(255,255,255,.3);margin-top:2px">ترتيب تراكمي منذ بداية التسجيل</div>
             </div>
             <div class="lb-top3" id="lb-top3"></div>
-            <div id="lb-rows" style="max-height:400px;overflow-y:auto;padding:0 4px"></div>
+            <div id="lb-rows" style="max-height:500px;overflow-y:auto;padding:0 4px"></div>
+            <div id="lb-legend" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;padding:10px;font-size:10px;color:rgba(255,255,255,.55)"></div>
           </div>
         </div>
 
@@ -14877,31 +14879,174 @@ function renderDashboard(){
 }
 
 // ══════════════════════════════════════════════════════════════
-// LEADERBOARD
+// LEADERBOARD — لوحة شرف المنسقين (نظام نقاط مركّب، تراكمي منذ بداية التسجيل)
+// 3 لوحات منفصلة حسب coord_type: متحرك / ثابت (هايبر) / ثابت كبار عملاء
 // ══════════════════════════════════════════════════════════════
-function renderLB(){
-  const filterGrp=document.getElementById('lb-filter-group')?.value||'all';
-  const {visits}=cachedData;
-  const visible=CU.level==='gm' ? Object.keys(GROUPS) : CU.groups;
-  let data=visits.filter(v=>visible.includes(v.grp||''));
-  if(filterGrp!=='all') data=data.filter(v=>v.grp===filterGrp);
+let _lbActiveType = 'متحرك';
+let _lbReturns    = null;   // كاش returns — بيتحمّل مرة، يتحدّث بزرار "تحديث" بس
+let _lbRatings    = null;   // كاش coordinator_weekly_ratings
 
-  const scores={},vc={},meta={};
-  data.forEach(v=>{
-    scores[v.name]=(scores[v.name]||0)+(+v.points||0);
-    vc[v.name]=(vc[v.name]||0)+1;
-    if(!meta[v.name])meta[v.name]={route:v.route||'',group:v.grp||''};
+// جدول الأوزان المعتمد من الأدمن لكل نوع منسق (المجموع = 100% لكل عمود)
+const LB_WEIGHTS = {
+  'متحرك':            {quality:.20, attendance:.15, shiftClose:.08, speed:.12, toOrder:.10, completeness:.10, coverage:.10, gps:.08, rating:.07},
+  'ثابت':             {quality:.22, attendance:.18, shiftClose:.08, speed:.12, toOrder:.10, completeness:.10, variety:.10, rating:.10},
+  'ثابت كبار عملاء':  {quality:.25, attendance:.20, shiftClose:.10, speed:.13, toOrder:.12, completeness:.10, rating:.10},
+};
+const LB_CRIT_LABELS = {
+  quality:'جودة التنفيذ', attendance:'الانتظام والحضور', shiftClose:'إغلاق الشيفت بدون نسيان',
+  speed:'سرعة حل النواقص/المرتجعات', toOrder:'تحويل النواقص لتوريد فعلي', completeness:'اكتمال الزيارة',
+  coverage:'تغطية خط السير', gps:'نزاهة الموقع (GPS)', variety:'تنوع نوع العرض', rating:'تقييم المشرف الأسبوعي'
+};
+
+function lbSwitchType(type){
+  _lbActiveType = type;
+  document.querySelectorAll('.lb-type-btn').forEach(b=>{
+    const active = b.dataset.type===type;
+    b.style.background   = active ? 'var(--yellow)' : 'rgba(255,255,255,.08)';
+    b.style.color         = active ? '#1a1a1a' : '#fff';
+    b.style.fontWeight    = active ? '700' : '400';
   });
-  const lb=Object.entries(scores).map(([name,score])=>({name,score,visits:vc[name],...meta[name]})).sort((a,b)=>b.score-a.score);
-  const max=lb[0]?.score||1;
+  renderLB();
+}
 
+// المسافة بالمتر بين نقطتين (هافرساين) — لمعيار نزاهة الموقع
+function lbHaversine(lat1,lng1,lat2,lng2){
+  if(!lat1||!lng1||!lat2||!lng2) return null;
+  const R=6371000, toRad=d=>d*Math.PI/180;
+  const dLat=toRad(lat2-lat1), dLng=toRad(lng2-lng1);
+  const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLng/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
+// جلب returns + coordinator_weekly_ratings (مش موجودين في cachedData العام) — مرة واحدة إلا لو forceRefresh
+async function lbFetchExtra(forceRefresh){
+  if(_lbReturns && _lbRatings && !forceRefresh) return;
+  const [ret, rat] = await Promise.all([
+    sb('returns', {}, {limit:1000, allPages:true}).catch(()=>[]),
+    sb('coordinator_weekly_ratings', {}, {limit:1000, allPages:true}).catch(()=>[]),
+  ]);
+  _lbReturns = Array.isArray(ret) ? ret : [];
+  _lbRatings = Array.isArray(rat) ? rat : [];
+}
+
+async function renderLB(forceRefresh){
+  await lbFetchExtra(forceRefresh);
+
+  const filterGrp   = document.getElementById('lb-filter-group')?.value || 'all';
+  const visible      = CU.level==='gm' ? Object.keys(GROUPS) : CU.groups;
+  const {visits, missing, attendance, branches} = cachedData;
+  const weights = LB_WEIGHTS[_lbActiveType];
+
+  // قائمة المنسقين من النوع المختار فقط (المصدر: REPS — مصدر user_type المعتمد في كل النظام)
+  let reps = (REPS||[]).filter(r=>r.type===_lbActiveType && r.name!=='تحت التعيين' && r.status!=='inactive');
+  reps = reps.filter(r=>visible.includes(r.group||''));
+  if(filterGrp!=='all') reps = reps.filter(r=>r.group===filterGrp);
+
+  const branchByName = {};
+  (branches||[]).forEach(b=>{ if(b.branch_name) branchByName[b.branch_name]=b; });
+
+  const lb = reps.map(rep=>{
+    const name = rep.name;
+    const myVisits  = (visits||[]).filter(v=>v.name===name);
+    const myAtt     = (attendance||[]).filter(a=>a.name===name);
+    const myMissing = (missing||[]).filter(m=>m.name===name);
+    const myReturns = (_lbReturns||[]).filter(r=>r.name===name);
+    const myRatings = (_lbRatings||[]).filter(r=>r.coordinator_name===name);
+
+    const crit = {};
+
+    // ── جودة التنفيذ الفعلي ──
+    if(_lbActiveType==='متحرك'){
+      // متوسط عدد الأصناف الموجودة على الرف لكل زيارة (sku_on) — 25 صنف أو أكتر = 100%
+      const avgSku = myVisits.length ? myVisits.reduce((s,v)=>s+(+v.sku_on||0),0)/myVisits.length : 0;
+      crit.quality = Math.min(100, Math.round(avgSku/25*100));
+    } else {
+      // متوسط نقاط الـKPI المصوّرة (من 7 بنود × 10 = 70) لكل زيارة
+      const avgKpi = myVisits.length ? myVisits.reduce((s,v)=>s+(+v.kpi_pts||0),0)/myVisits.length : 0;
+      crit.quality = Math.min(100, Math.round(avgKpi/70*100));
+    }
+
+    // ── الانتظام والحضور: نسبة أيام الحضور اللي فيها وقت حضور فعلي مسجل ──
+    crit.attendance = myAtt.length ? Math.round(myAtt.filter(a=>a.time_in).length/myAtt.length*100) : 0;
+
+    // ── إغلاق الشيفت بدون نسيان: نسبة أيام الحضور اللي اتسجل فيها انصراف (مفيش حضور فاضل مفتوح) ──
+    crit.shiftClose = myAtt.length ? Math.round(myAtt.filter(a=>a.time_out).length/myAtt.length*100) : 0;
+
+    // ── سرعة حل النواقص والمرتجعات: من وقت التسجيل لحد وقت الحل، كل ما أسرع كل ما أعلى ──
+    // (تنويه: نواقص "confirmed_at" هتتفعّل فعلياً مع زرار "استلمت التوريد" الجديد في تطبيق المنسق)
+    const speedSamples = [];
+    myMissing.forEach(m=>{
+      if(m.confirmed_at && m.created_at){
+        const h=(new Date(m.confirmed_at)-new Date(m.created_at))/36e5;
+        if(h>=0) speedSamples.push(h);
+      }
+    });
+    myReturns.forEach(r=>{
+      const doneAt = r.confirmed_at || r.pulled_at;
+      if(doneAt && r.created_at){
+        const h=(new Date(doneAt)-new Date(r.created_at))/36e5;
+        if(h>=0) speedSamples.push(h);
+      }
+    });
+    if(speedSamples.length){
+      const avgH = speedSamples.reduce((a,b)=>a+b,0)/speedSamples.length;
+      // 24 ساعة أو أقل = 100%، بعدها بينزل تدريجياً لحد 0 عند 120 ساعة (5 أيام)
+      crit.speed = Math.max(0, Math.round(100 - Math.max(0,avgH-24)/(120-24)*100));
+    } else crit.speed = 0;
+
+    // ── تحويل النواقص لطلب توريد فعلي: نسبة النواقص اللي اتأكد استلامها فعلياً ──
+    crit.toOrder = myMissing.length ? Math.round(myMissing.filter(m=>m.confirmed).length/myMissing.length*100) : 0;
+
+    // ── اكتمال الزيارة: نسبة الزيارات اللي اتقفلت بوقت انصراف (مفيش زيارة ناقصة/منسية) ──
+    crit.completeness = myVisits.length ? Math.round(myVisits.filter(v=>v.time_out && v.time_out!=='--').length/myVisits.length*100) : 0;
+
+    if(_lbActiveType==='متحرك'){
+      // ── تغطية خط السير: عدد الفروع الفعلية اللي اتزارت من إجمالي فروع خط السير ──
+      const routeBranches = new Set((branches||[]).filter(b=>b.route===rep.route).map(b=>b.branch_name));
+      const visitedBranches = new Set(myVisits.map(v=>v.branch).filter(Boolean));
+      let covered=0; visitedBranches.forEach(b=>{ if(routeBranches.has(b)) covered++; });
+      crit.coverage = routeBranches.size ? Math.min(100, Math.round(covered/routeBranches.size*100)) : 0;
+
+      // ── نزاهة الموقع: مطابقة لوكيشن الزيارة مع لوكيشن الفرع (هافرساين) — 150م=كامل، 400م=نص، أكتر=صفر ──
+      const gpsSamples = [];
+      myVisits.forEach(v=>{
+        const br = branchByName[v.branch];
+        if(!br || !br.lat || !br.lng || !v.lat || !v.lng) return;
+        const d = lbHaversine(+v.lat, +v.lng, +br.lat, +br.lng);
+        if(d===null) return;
+        gpsSamples.push(d<=150 ? 100 : d<=400 ? 60 : 0);
+      });
+      crit.gps = gpsSamples.length ? Math.round(gpsSamples.reduce((a,b)=>a+b,0)/gpsSamples.length) : 0;
+    } else if(_lbActiveType==='ثابت'){
+      // ── تنوع نوع العرض المستخدم (هايبر ماركت فقط) ──
+      const types = new Set();
+      myVisits.forEach(v=>(v.display_type||'').split(/[,،]/).forEach(t=>{ t=t.trim(); if(t) types.add(t); }));
+      crit.variety = Math.min(100, types.size*34); // 3 أنواع أو أكتر = 100%
+    }
+
+    // ── تقييم المشرف الأسبوعي (تراكمي، متوسط كل الأسابيع المسجّلة من 5) ──
+    crit.rating = myRatings.length ? Math.round(myRatings.reduce((s,r)=>s+(+r.rating||0),0)/myRatings.length/5*100) : 0;
+
+    // ── المجموع المرجّح ──
+    let total=0;
+    Object.keys(weights).forEach(k=>{ total += (crit[k]||0)*(weights[k]||0); });
+
+    return {name, route:rep.route||'', group:rep.group||'', score:Math.round(total), crit, visitsCount:myVisits.length};
+  }).sort((a,b)=>b.score-a.score);
+
+  renderLBUI(lb, weights);
+}
+
+function renderLBUI(lb, weights){
   document.getElementById('lb-date').textContent=new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+
+  const max=lb[0]?.score||1;
 
   // Top 3
   const top3=lb.slice(0,3);
   const order=[top3[1],top3[0],top3[2]].filter(Boolean);
   const pos=['lb-pos-2','lb-pos-1','lb-pos-3'],nums=['2','1','3'];
-  document.getElementById('lb-top3').innerHTML=order.map((r,i)=>{
+  document.getElementById('lb-top3').innerHTML = lb.length ? order.map((r,i)=>{
     const ini=r.name.split(' ').map(w=>w[0]).join('').slice(0,2);
     const gc=GROUPS[r.group]?.color||'#005CBF';
     return`<div class="lb-pos ${pos[i]}">
@@ -14910,26 +15055,44 @@ function renderLB(){
       <div class="lb-pos-pts">${r.score} نقطة</div>
       <div class="lb-block">${nums[i]}</div>
     </div>`;
-  }).join('');
+  }).join('') : '';
 
-  // Rows
+  // Rows + تفصيل المعايير
   const rowCls=['top1','top2','top3'];
-  document.getElementById('lb-rows').innerHTML=lb.map((r,i)=>{
+  document.getElementById('lb-rows').innerHTML = lb.length ? lb.map((r,i)=>{
     const gc=GROUPS[r.group]?.color||'#005CBF';
     const ini=r.name.split(' ').map(w=>w[0]).join('').slice(0,2);
     const pct=Math.round(r.score/max*100);
     const medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
-    return`<div class="lb-row-item ${rowCls[i]||'others'}">
-      <div class="lb-rank-badge" style="background:${i<3?'transparent':'rgba(255,255,255,.05)'};color:${i===0?'#FFD700':i===1?'#C0C0C0':i===2?'#CD7F32':'rgba(255,255,255,.4)'}">${medal||i+1}</div>
-      <div style="width:28px;height:28px;border-radius:6px;background:${gc}33;color:${gc};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">${ini}</div>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name}</div>
-        <div style="font-size:10px;color:rgba(255,255,255,.35)">${r.route||''} · ${r.visits} زيارة</div>
+    const breakdown = Object.keys(weights).map(k=>{
+      const v = r.crit[k]||0;
+      return `<div style="display:flex;align-items:center;gap:4px;font-size:9px;color:rgba(255,255,255,.4)">
+        <span style="width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0">${LB_CRIT_LABELS[k]}</span>
+        <div style="flex:1;height:4px;background:rgba(255,255,255,.08);border-radius:2px;overflow:hidden">
+          <div style="width:${v}%;height:100%;background:${gc}"></div>
+        </div>
+        <span style="width:28px;text-align:left;flex-shrink:0">${v}%</span>
+      </div>`;
+    }).join('');
+    return`<div class="lb-row-item ${rowCls[i]||'others'}" style="flex-direction:column;align-items:stretch;gap:6px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="lb-rank-badge" style="background:${i<3?'transparent':'rgba(255,255,255,.05)'};color:${i===0?'#FFD700':i===1?'#C0C0C0':i===2?'#CD7F32':'rgba(255,255,255,.4)'}">${medal||i+1}</div>
+        <div style="width:28px;height:28px;border-radius:6px;background:${gc}33;color:${gc};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">${ini}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name}</div>
+          <div style="font-size:10px;color:rgba(255,255,255,.35)">${r.route||''} · ${r.visitsCount} زيارة</div>
+        </div>
+        <div class="lb-bar-bg"><div class="lb-bar-fill" style="width:${pct}%;background:${gc}"></div></div>
+        <div class="lb-pts-badge" style="color:${i===0?'#FFD700':i===1?'#C0C0C0':i===2?'#CD7F32':'rgba(255,255,255,.7)'}">${r.score}</div>
       </div>
-      <div class="lb-bar-bg"><div class="lb-bar-fill" style="width:${pct}%;background:${gc}"></div></div>
-      <div class="lb-pts-badge" style="color:${i===0?'#FFD700':i===1?'#C0C0C0':i===2?'#CD7F32':'rgba(255,255,255,.7)'}">${r.score}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:4px 14px;padding-right:38px">${breakdown}</div>
     </div>`;
-  }).join('');
+  }).join('') : '<div style="text-align:center;padding:30px;color:rgba(255,255,255,.3);font-size:12px">لا يوجد منسقين من هذا النوع في المجموعة المختارة</div>';
+
+  // Legend
+  document.getElementById('lb-legend').innerHTML = Object.keys(weights).map(k=>
+    `<div>${LB_CRIT_LABELS[k]}: <b style="color:#fff">${Math.round(weights[k]*100)}%</b></div>`
+  ).join('<div style="color:rgba(255,255,255,.15)">|</div>');
 }
 
 // ══════════════════════════════════════════════════════════════
