@@ -4736,6 +4736,7 @@ h2,h3{color:#2C1F0A}
                       <th style="padding:9px 12px;text-align:center">السعر بعد الضريبة</th>
                       <th style="padding:9px 12px;text-align:center">الفئة</th>
                       <th style="padding:9px 12px;text-align:center">التصنيف</th>
+                      <th style="padding:9px 12px;text-align:center">لينك الصورة</th>
                       <th id="sci-actions-th" style="padding:9px 12px;text-align:center;display:none"></th>
                     </tr>
                   </thead>
@@ -4916,6 +4917,36 @@ h2,h3{color:#2C1F0A}
           </div>
         </div>
         <!-- ══ END MODAL: تعديل باركود الصنف ══════════════════════════ -->
+
+        <!-- ══ MODAL: تعديل لينك صورة الصنف (أصناف العملاء) ══════════════ -->
+        <div class="modal-overlay" id="modal-edit-imglink">
+          <div class="modal" style="max-width:420px">
+            <div class="modal-title">
+              <span>لينك صورة الصنف</span>
+              <button class="modal-close" onclick="closeModal('modal-edit-imglink')">✕</button>
+            </div>
+            <div class="form-fld" style="margin-bottom:10px">
+              <label class="form-lbl">الصنف</label>
+              <div id="mlnk-item-name" style="font-weight:700;color:var(--navy);font-size:13.5px;padding:6px 2px"></div>
+            </div>
+            <div class="form-fld" style="margin-bottom:6px">
+              <label class="form-lbl">لينك الصورة (جوجل درايف)</label>
+              <input type="text" id="mlnk-url" placeholder="https://drive.google.com/..." dir="ltr"/>
+            </div>
+            <div id="mlnk-secret-wrap" style="display:none;background:#FFF7E8;border:1px solid #E8C88A;border-radius:8px;padding:10px;margin-top:10px">
+              <div style="font-size:11.5px;color:#8B6A1F;font-weight:600;margin-bottom:6px">أول مرة بس: اكتب كلمة سر تحليل فواتير MT عشان يتحفظ اللينك</div>
+              <input type="password" id="mlnk-secret" placeholder="كلمة سر MT" style="font-family:monospace" dir="ltr"/>
+            </div>
+            <div id="mlnk-msg" style="font-size:12px;margin-top:10px"></div>
+            <div class="modal-footer">
+              <button class="btn btn-ghost" onclick="closeModal('modal-edit-imglink')">إلغاء</button>
+              <button class="btn btn-blue" id="mlnk-save-btn" onclick="mlnkSave()">
+                <i class="ti ti-device-floppy"></i> حفظ
+              </button>
+            </div>
+          </div>
+        </div>
+        <!-- ══ END MODAL: تعديل لينك صورة الصنف ═══════════════════════ -->
 
         <!-- ══ MODAL: الأصناف المخفية (أصناف العملاء) ══════════════════ -->
         <div class="modal-overlay" id="modal-sci-hidden">
@@ -26572,12 +26603,15 @@ async function sciLoadClients(){
   }catch(e){ console.error('[sciLoadClients]', e); }
 }
 
-// ── يبني فهرس (اسم الصنف → باركود) من كتالوج أصناف تحليل فواتير عملاء MT (tamr_sales_item_catalog) ──
+// ── يبني فهرس (اسم الصنف → باركود) ومعاه فهرس (اسم الصنف → لينك صورة جوجل درايف) من كتالوج أصناف
+// تحليل فواتير عملاء MT (tamr_sales_item_catalog) — نفس الجدول، عمود image_link ══════════════════
 let _sciBarcodeIdx = null; // بيتحمّل مرة واحدة ويتخزّن (170 صنف بس، مفيش داعي نعيد الجلب كل مرة)
+let _sciImageLinkIdx = null; // اسم الصنف → لينك صورته (جوجل درايف)
 let _sciBarcodeIdxLocked = false; // true = مقفول لأن مفيش سر دخول محفوظ لتحليل فواتير عملاء MT في المتصفح ده
 async function sciBuildBarcodeIndex(){
   if(_sciBarcodeIdx) return _sciBarcodeIdx;
   const idx = {};
+  const linkIdx = {};
   try{
     // جدول تحليل فواتير عملاء MT محمي بسر دخول خاص (x-app-secret) — نفس السر
     // اللي بيتحفظ في localStorage لما الأدمن يدخل شاشة "تحليل فواتير عملاء MT"
@@ -26585,15 +26619,17 @@ async function sciBuildBarcodeIndex(){
     try{ appSecret = localStorage.getItem('tamr_sales_app_secret_v1') || ''; }catch(e){}
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
     if(appSecret) H['x-app-secret'] = appSecret;
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?select=item_name,item_code`, {headers:H});
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?select=item_name,item_code,image_link`, {headers:H});
     const rows = res.ok ? await res.json() : [];
     (Array.isArray(rows)?rows:[]).forEach(r=>{
       const name = (r.item_name||'').trim();
       if(name && r.item_code) idx[name] = String(r.item_code);
+      if(name && r.image_link) linkIdx[name] = String(r.image_link);
     });
     _sciBarcodeIdxLocked = !appSecret;
   }catch(e){ console.error('[sciBuildBarcodeIndex]', e); }
   _sciBarcodeIdx = idx;
+  _sciImageLinkIdx = linkIdx;
   return idx;
 }
 
@@ -26752,6 +26788,92 @@ async function mebcSave(){
   }
 }
 
+// ══ تعديل لينك صورة الصنف (Google Drive) — نفس جدول tamr_sales_item_catalog، عمود image_link ══
+let _mlnkCurrentItem = '';
+function mlnkOpen(itemName){
+  _mlnkCurrentItem = itemName;
+  document.getElementById('mlnk-item-name').textContent = itemName;
+  document.getElementById('mlnk-url').value = (_sciImageLinkIdx && _sciImageLinkIdx[itemName]) || '';
+  document.getElementById('mlnk-msg').innerHTML = '';
+  let appSecret = '';
+  try{ appSecret = localStorage.getItem('tamr_sales_app_secret_v1') || ''; }catch(e){}
+  document.getElementById('mlnk-secret-wrap').style.display = appSecret ? 'none' : '';
+  document.getElementById('mlnk-secret').value = '';
+  openModal('modal-edit-imglink');
+  setTimeout(()=>document.getElementById('mlnk-url')?.focus(), 50);
+}
+
+async function sciSaveImageLinkToMT(itemName, link, appSecret){
+  const H = {
+    'apikey': SUPABASE_KEY,
+    'Authorization': `Bearer ${SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+    'Prefer': 'resolution=merge-duplicates,return=representation',
+    'x-app-secret': appSecret
+  };
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?on_conflict=item_name`, {
+    method: 'POST',
+    headers: H,
+    body: JSON.stringify([{ item_name: itemName, image_link: link }])
+  });
+  if(!res.ok){
+    let errText = '';
+    try{ errText = (await res.json())?.message || ''; }catch(e){}
+    throw new Error(errText || `HTTP ${res.status}`);
+  }
+  return true;
+}
+
+async function mlnkSave(){
+  const itemName = _mlnkCurrentItem;
+  const link = (document.getElementById('mlnk-url').value || '').trim();
+  const msgEl = document.getElementById('mlnk-msg');
+  const secretWrap = document.getElementById('mlnk-secret-wrap');
+  const secretInput = document.getElementById('mlnk-secret');
+  if(!link){ msgEl.innerHTML = '<span style="color:#C0392B">الصق لينك الصورة الأول</span>'; return; }
+  if(!/^https?:\/\//i.test(link)){ msgEl.innerHTML = '<span style="color:#C0392B">اللينك لازم يبدأ بـ http:// أو https://</span>'; return; }
+
+  let appSecret = '';
+  try{ appSecret = localStorage.getItem('tamr_sales_app_secret_v1') || ''; }catch(e){}
+  if(!appSecret){
+    appSecret = (secretInput.value || '').trim();
+    if(!appSecret){
+      secretWrap.style.display = '';
+      msgEl.innerHTML = '<span style="color:#C0392B">اكتب كلمة سر تحليل فواتير MT الأول</span>';
+      return;
+    }
+  }
+
+  const btn = document.getElementById('mlnk-save-btn');
+  btn.disabled = true;
+  msgEl.innerHTML = '<span style="color:var(--text2)">جارٍ الحفظ...</span>';
+  try{
+    await sciSaveImageLinkToMT(itemName, link, appSecret);
+    try{ localStorage.setItem('tamr_sales_app_secret_v1', appSecret); }catch(e){}
+    if(!_sciImageLinkIdx) _sciImageLinkIdx = {};
+    _sciImageLinkIdx[itemName] = link;
+    const hintEl = document.getElementById('sci-barcode-hint');
+    if(hintEl) hintEl.style.display = 'none';
+    _sciAllRows.forEach(r=>{ if(r.name === itemName) r.imgLink = link; });
+    _sciCurrentRows.forEach(r=>{ if(r.name === itemName) r.imgLink = link; });
+    if(typeof sciRenderTable === 'function') sciRenderTable();
+    msgEl.innerHTML = '<span style="color:#2E7D32">✓ اتحفظ بنجاح</span>';
+    setTimeout(()=>closeModal('modal-edit-imglink'), 500);
+  }catch(e){
+    console.error('[mlnkSave]', e);
+    const denied = /permission|policy|rls|403|401/i.test(String(e.message||''));
+    if(denied){
+      secretWrap.style.display = '';
+      msgEl.innerHTML = '<span style="color:#C0392B">كلمة السر غلط أو مش متسجل دخول MT — جرّب تاني</span>';
+      try{ localStorage.removeItem('tamr_sales_app_secret_v1'); }catch(err){}
+    } else {
+      msgEl.innerHTML = `<span style="color:#C0392B">حصل خطأ: ${e.message||'حاول تاني'}</span>`;
+    }
+  }finally{
+    btn.disabled = false;
+  }
+}
+
 // ── يبني فهرس (اسم الصنف → {fea,cat}) من قاعدة الأصناف الكاملة (PDB) المحمّلة أصلاً في التطبيق ──
 function sciBuildPdbIndex(){
   const idx = {};
@@ -26878,7 +27000,7 @@ async function sciOnClientChange(){
   // الأصناف اللي مالهاش تصنيف معروف بتتحط في الآخر كمجموعة واحدة.
   _sciAllRows = Object.keys(seen).map(name=>{
     const meta = pdbIdx[name] || {};
-    return {name, barcode: barcodeIdx[name] || '', fea: meta.fea||'', cat: meta.cat||''};
+    return {name, barcode: barcodeIdx[name] || '', imgLink: (_sciImageLinkIdx && _sciImageLinkIdx[name]) || '', fea: meta.fea||'', cat: meta.cat||''};
   }).sort((a,b)=>{
     if(!a.cat && b.cat) return 1;
     if(a.cat && !b.cat) return -1;
@@ -26921,7 +27043,7 @@ function sciRenderTable(){
   let filtered = feaVal ? _sciAllRows.filter(r=>r.fea===feaVal) : _sciAllRows;
   if(q) filtered = filtered.filter(r=>r.name.includes(q));
   _sciCurrentRows = filtered;
-  const colCount = _sciShowActions ? 9 : 8;
+  const colCount = _sciShowActions ? 10 : 9;
   if(!filtered.length){
     tbody.innerHTML = `<tr><td colspan="${colCount}" style="text-align:center;padding:20px;color:#aaa">لا توجد نتائج</td></tr>`;
     return;
@@ -26947,6 +27069,11 @@ function sciRenderTable(){
       <td style="padding:7px 12px;text-align:center;font-weight:700;color:${price>0?'#1A7A4A':'#ccc'}">${price>0?priceWithTax.toFixed(2):'—'}</td>
       <td style="padding:7px 12px;text-align:center">${r.fea?`<span class="badge b-blue">${r.fea}</span>`:'<span style="color:#ccc">—</span>'}</td>
       <td style="padding:7px 12px;text-align:center;font-size:11.5px">${r.cat||'<span style="color:#ccc">—</span>'}</td>
+      <td style="padding:7px 12px;text-align:center;white-space:nowrap">
+        ${r.imgLink
+          ? `<a href="${r.imgLink}" target="_blank" rel="noopener" style="color:#1A7A4A;font-weight:600;text-decoration:none"><i class="ti ti-photo"></i> فتح</a> <button title="تعديل لينك الصورة" onclick="mlnkOpen('${r.name.replace(/'/g,"\\'")}')" style="border:none;background:none;cursor:pointer;color:var(--caramel);font-size:12px;vertical-align:middle"><i class="ti ti-pencil"></i></button>`
+          : `<button onclick="mlnkOpen('${r.name.replace(/'/g,"\\'")}')" style="border:1px solid var(--border);background:#F9F6F1;border-radius:6px;padding:1px 8px;cursor:pointer;color:var(--caramel);font-family:Cairo,sans-serif;font-size:11px;font-weight:600">+ إضافة رابط</button>`}
+      </td>
       ${_sciShowActions ? `<td style="padding:7px 12px;text-align:center;white-space:nowrap">
         ${(_sciCurrentClientRaw && _sciCurrentClientRaw!=='__ALL__') ? `<button title="إخفاء الصنف من قائمة العميل ده بس" onclick="sciHideItem('${r.name.replace(/'/g,"\\'")}','client')" style="border:none;background:none;cursor:pointer;color:#C0392B;font-size:14px">
           <i class="ti ti-trash"></i>
@@ -27139,21 +27266,21 @@ function sciExportExcel(){
     return {price, taxPct, priceWithTax};
   };
   const aoa = [
-    [sciXlsTitle, '', '', '', '', '', ''],
-    [`الطحان جولدن دايتس — ${new Date().toLocaleString('ar-EG')} — ${rows.length} صنف`, '', '', '', '', '', ''],
-    ['#', 'الباركود', 'الصنف', 'السعر', 'الضريبة', 'السعر بعد الضريبة', 'الفئة', 'التصنيف'],
+    [sciXlsTitle, '', '', '', '', '', '', ''],
+    [`الطحان جولدن دايتس — ${new Date().toLocaleString('ar-EG')} — ${rows.length} صنف`, '', '', '', '', '', '', ''],
+    ['#', 'الباركود', 'الصنف', 'السعر', 'الضريبة', 'السعر بعد الضريبة', 'الفئة', 'التصنيف', 'لينك الصورة'],
     ...rows.map((r,i)=>{
       const {price, taxPct, priceWithTax} = priceInfoOf(r.name);
-      return [i+1, r.barcode||'—', r.name, price>0?price:'—', taxPct>0?(taxPct+'%'):'—', price>0?+priceWithTax.toFixed(2):'—', r.fea||'—', r.cat||'—'];
+      return [i+1, r.barcode||'—', r.name, price>0?price:'—', taxPct>0?(taxPct+'%'):'—', price>0?+priceWithTax.toFixed(2):'—', r.fea||'—', r.cat||'—', r.imgLink?'فتح الصورة':'—'];
     }),
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [
-    {s:{r:0,c:0}, e:{r:0,c:7}},
-    {s:{r:1,c:0}, e:{r:1,c:7}},
+    {s:{r:0,c:0}, e:{r:0,c:8}},
+    {s:{r:1,c:0}, e:{r:1,c:8}},
   ];
-  ws['!cols'] = [{wch:6},{wch:16},{wch:44},{wch:12},{wch:10},{wch:16},{wch:16},{wch:22}];
-  for(let c=0;c<8;c++){
+  ws['!cols'] = [{wch:6},{wch:16},{wch:44},{wch:12},{wch:10},{wch:16},{wch:16},{wch:22},{wch:18}];
+  for(let c=0;c<9;c++){
     const t = XLSX.utils.encode_cell({r:0,c});
     if(ws[t]) ws[t].s = S(CARAMEL, CREAM, true, 14, true);
     const s = XLSX.utils.encode_cell({r:1,c});
@@ -27163,9 +27290,14 @@ function sciExportExcel(){
   }
   rows.forEach((r,i)=>{
     const rIdx = 3+i;
-    for(let c=0;c<8;c++){
+    for(let c=0;c<9;c++){
       const cell = XLSX.utils.encode_cell({r:rIdx,c});
-      if(ws[cell]) ws[cell].s = S(i%2===1?'F5F0E8':WHITE, DARK, c===2, 10.5, c===2);
+      if(ws[cell]) ws[cell].s = S(i%2===1?'F5F0E8':WHITE, c===8&&r.imgLink?'1A7A4A':DARK, c===2, 10.5, c===2);
+    }
+    // لينك حقيقي قابل للنقر في عمود "لينك الصورة" (عمود i=8) لو الصنف عنده رابط صورة محفوظ
+    if(r.imgLink){
+      const linkCell = XLSX.utils.encode_cell({r:rIdx,c:8});
+      if(ws[linkCell]) ws[linkCell].l = {Target: r.imgLink, Tooltip: 'فتح صورة الصنف'};
     }
   });
   const wb = XLSX.utils.book_new();
