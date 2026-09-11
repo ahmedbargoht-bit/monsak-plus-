@@ -2852,15 +2852,27 @@ async function sptLoad(){
     records = r2.ok ? await r2.json().catch(()=>[]) : [];
   }catch(e){ records = []; }
 
-  // بادج بعدد الأصناف اللي لسه محتاجة تسجيل (مفيهاش رصيد افتتاحي أو مفيهاش مبيع فعلي)
+  // بادج: هدف لسه محتاج استلام = بند واحد معلّق، وإلا عدد الأصناف اللي محتاجة تسجيل (رصيد/مبيع)
   let pendingCount = 0;
-  targets.forEach(t=>(t.items||[]).forEach(it=>{
-    const rec = records.find(r=>r.target_id===t.id && r.item_name===it.name);
-    if(!rec || rec.opening_qty==null || rec.sold_qty==null) pendingCount++;
-  }));
+  targets.forEach(t=>{
+    if(!t.received_at){ pendingCount++; return; }
+    (t.items||[]).forEach(it=>{
+      const rec = records.find(r=>r.target_id===t.id && r.item_name===it.name);
+      if(!rec || rec.opening_qty==null || rec.sold_qty==null) pendingCount++;
+    });
+  });
   if(badge){ badge.textContent = pendingCount; badge.style.display = pendingCount ? '' : 'none'; }
 
   listEl.innerHTML = targets.map(t=>{
+    // شرط أساسي: المنسق لازم يضغط "استلام" الأول قبل ما يقدر يسجل أي رصيد/مبيع
+    if(!t.received_at){
+      const itemsChips = (t.items||[]).map(it=>`<span style="background:#FFF3E0;color:#B45309;border-radius:999px;padding:2px 8px;font-size:10.5px;margin:2px;display:inline-block">${it.name}</span>`).join('');
+      return `<div class="card" style="margin-bottom:12px">
+        <div class="card-title" style="margin-bottom:4px"><i class="ti ti-target-arrow"></i> هدف جديد من ${t.date_from} إلى ${t.date_to}</div>
+        <div style="margin-bottom:10px">${itemsChips}</div>
+        <button class="btn btn-sm btn-blue" style="width:100%" onclick="sptReceiveTarget(${t.id},this)"><i class="ti ti-check"></i> استلام الهدف</button>
+      </div>`;
+    }
     const rowsHtml = (t.items||[]).map(it=>{
       const rec = records.find(r=>r.target_id===t.id && r.item_name===it.name);
       const opening = (rec && rec.opening_qty!=null) ? rec.opening_qty : null;
@@ -2896,6 +2908,18 @@ async function sptLoad(){
       <div style="border:1.5px solid var(--border);border-radius:10px;overflow:hidden">${rowsHtml}</div>
     </div>`;
   }).join('');
+}
+
+async function sptReceiveTarget(targetId, btn){
+  if(btn){ btn.disabled=true; btn.textContent='جاري الاستلام...'; }
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/special_targets?id=eq.${targetId}`,{
+      method:'PATCH', headers:H, body: JSON.stringify({received_at: new Date().toISOString()})
+    });
+    if(r.ok){ showToast('✅ تم الاستلام'); sptLoad(); }
+    else { alert('❌ حصل خطأ أثناء الاستلام، حاول تاني'); if(btn){ btn.disabled=false; btn.textContent='استلام الهدف'; } }
+  }catch(e){ alert('❌ حصل خطأ في الاتصال'); if(btn){ btn.disabled=false; btn.textContent='استلام الهدف'; } }
 }
 
 function sptSaveOpening(targetId, itemName, btn){

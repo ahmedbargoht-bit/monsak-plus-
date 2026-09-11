@@ -689,6 +689,10 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     <div class="tab" onclick="showTab('tamr-benefits')" id="tab-tamr-benefits">
       <i class="ti ti-apple"></i>فوائد التمر
     </div>
+    <div class="tab" onclick="showTab('spt')" id="tab-spt" style="position:relative">
+      <i class="ti ti-target-arrow"></i>الأهداف الخاصة
+      <span id="spt-badge" style="display:none;position:absolute;top:4px;right:calc(50% - 14px);background:#B71C1C;color:#fff;border-radius:999px;font-size:9px;padding:1px 5px;font-weight:700;min-width:16px;text-align:center"></span>
+    </div>
   </div>
 
   <!-- Content -->
@@ -1840,6 +1844,43 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     <!-- ══ END: خطوط السير وفروعها ══ -->
 
     <!-- فوائد التمر -->
+    <!-- الأهداف الخاصة -->
+    <div class="screen" id="screen-spt">
+
+      <!-- إرسال حملة جديدة — لمدير التنسيق (dm) والـ gm بس -->
+      <div class="card" id="spt-send-card" style="display:none">
+        <div class="card-title"><i class="ti ti-send"></i> إرسال حملة جديدة</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+          <input type="date" id="spt-send-from" style="flex:1;min-width:140px;padding:8px;border:1.5px solid var(--border);border-radius:8px;font-size:12px"/>
+          <input type="date" id="spt-send-to" style="flex:1;min-width:140px;padding:8px;border:1.5px solid var(--border);border-radius:8px;font-size:12px"/>
+        </div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:6px">المجموعات المستهدفة (من مجموعاتك)</div>
+        <div id="spt-send-groups" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px"></div>
+        <input type="text" id="spt-send-item-search" placeholder="🔍 ابحث عن صنف لإضافته..." oninput="sptSendRenderItemList()"
+          style="width:100%;padding:9px 10px;border:1.5px solid var(--border);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif;margin-bottom:8px"/>
+        <div id="spt-send-item-list" style="max-height:200px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px;margin-bottom:8px"></div>
+        <div id="spt-send-selected-items" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>
+        <button onclick="sptSendCampaign()" style="width:100%;padding:11px;border:none;border-radius:10px;font-family:Cairo,sans-serif;font-weight:700;cursor:pointer;background:var(--navy,#1A3A5C);color:#fff"><i class="ti ti-send"></i> إرسال الحملة</button>
+      </div>
+
+      <!-- حملات واردة لمجموعتك محتاجة استلام -->
+      <div class="card">
+        <div class="card-title"><i class="ti ti-inbox"></i> حملات واردة</div>
+        <div id="spt-incoming-list"></div>
+      </div>
+
+      <!-- توزيع الحملات المستلمة على فريقك + متابعة الرصيد والمبيع -->
+      <div class="card">
+        <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <span><i class="ti ti-users-group"></i> توزيع ومتابعة فريقي</span>
+          <span style="display:flex;align-items:center;gap:6px;font-weight:400;font-size:12px">
+            عرض يوم: <input type="date" id="spt-view-date" onchange="sptRenderMyCampaigns()" style="padding:5px;border:1.5px solid var(--border);border-radius:6px"/>
+          </span>
+        </div>
+        <div id="spt-my-campaigns-list"></div>
+      </div>
+    </div>
+
     <div class="screen" id="screen-tamr-benefits">
       <div class="card">
         <div class="card-title"><i class="ti ti-apple" style="color:#8B4513"></i> فوائد التمر</div>
@@ -3029,6 +3070,14 @@ function showTab(tab){
   if(tab==='team-plans') { teamPlansLoadSup(); }
   if(tab==='route-branches') { loadRouteBranches(); }
   if(tab==='tamr-benefits') { tbLoad(); }
+  if(tab==='spt'){
+    sptOnOpenTab();
+    if(window._sptPolling) clearInterval(window._sptPolling);
+    window._sptPolling = setInterval(()=>{
+      if(document.getElementById('screen-spt')?.classList.contains('active')) sptOnOpenTab(true);
+      else clearInterval(window._sptPolling);
+    }, 30000);
+  }
 }
 
 // ── فوائد التمر (تاب مشرف التنسيق) ────────────────────────────────
@@ -10068,6 +10117,341 @@ function setupTabsByRole(){
   if(teamTab){
     teamTab.style.display = (level === 'dm' || level === 'gm') ? 'flex' : 'none';
   }
+}
+
+// ════════════════════════════════════════════════════════════════
+// الأهداف الخاصة (special targets) — مشرف/مدير التنسيق:
+// 1) مدير التنسيق (dm) أو gm بس يقدر "يرسل حملة" (أصناف+فترة) لمجموعاته
+// 2) أي مشرف تنسيق (sup/dm) تابع لمجموعة من مجموعات الحملة يشوفها "واردة" ويضغط استلام
+// 3) بعد الاستلام، المشرف يوزّع الحملة على منسقين بعينهم من فريقه (بالاسم + الفرع)
+// 4) المنسق بعدين يستلم في تطبيقه (شرط أساسي) ويسجّل الرصيد الافتتاحي/المباع
+// ════════════════════════════════════════════════════════════════
+let _sptSendGroups = new Set();
+let _sptSendItems = new Set();
+let _sptSendCatalogFlat = null; // null = لسه ما اتحملش
+let _sptMyReps = null;
+
+async function sptOnOpenTab(isPoll){
+  const dEl = document.getElementById('spt-view-date');
+  if(dEl && !dEl.value) dEl.value = localISO();
+  const isSender = cu?.level==='dm' || cu?.level==='gm';
+  const sendCard = document.getElementById('spt-send-card');
+  if(sendCard) sendCard.style.display = isSender ? 'block' : 'none';
+  if(isSender && !isPoll){
+    sptSendRenderGroups();
+    if(!_sptSendCatalogFlat) await sptSendLoadCatalog();
+    sptSendRenderItemList(); sptSendRenderSelectedChips();
+  }
+  if(!isPoll || !_sptMyReps) await sptLoadMyReps();
+  await sptLoadIncoming();
+  await sptRenderMyCampaigns();
+}
+
+// ── إرسال حملة (dm/gm) ──────────────────────────────────────────
+function sptSendRenderGroups(){
+  const el = document.getElementById('spt-send-groups');
+  if(!el) return;
+  const myGroups = cu?.groups||[];
+  el.innerHTML = myGroups.map(key=>{
+    const g = GROUPS[key];
+    const checked = _sptSendGroups.has(key) ? 'checked' : '';
+    return `<label style="display:flex;align-items:center;gap:5px;background:#FFFBF5;border:1.5px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer">
+      <input type="checkbox" ${checked} onchange="sptSendToggleGroup('${key}', this.checked)"/> ${g?.label||key}
+    </label>`;
+  }).join('') || `<span style="font-size:11px;color:#aaa">مفيش مجموعات مرتبطة بحسابك</span>`;
+}
+function sptSendToggleGroup(key, checked){
+  if(checked) _sptSendGroups.add(key); else _sptSendGroups.delete(key);
+}
+
+async function sptSendLoadCatalog(){
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const out = [];
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/products_db?select=value&key=eq.pdb`,{headers:H});
+    if(r.ok){
+      const data = await r.json();
+      if(data && data[0] && data[0].value){
+        const pdb = JSON.parse(data[0].value);
+        const seen = new Set();
+        Object.entries(pdb).forEach(([fea,cats])=>{
+          Object.entries(cats||{}).forEach(([cat,grps])=>{
+            Object.values(grps||{}).forEach(arr=>{
+              (arr||[]).forEach(item=>{
+                const name = typeof item==='object' ? (item.name||'') : String(item||'');
+                if(name && !seen.has(name)){ seen.add(name); out.push({name,fea,cat}); }
+              });
+            });
+          });
+        });
+      }
+    }
+  }catch(e){}
+  out.sort((a,b)=>a.name.localeCompare(b.name,'ar'));
+  _sptSendCatalogFlat = out;
+}
+
+function sptSendRenderItemList(){
+  const q = (document.getElementById('spt-send-item-search')?.value||'').trim();
+  const listEl = document.getElementById('spt-send-item-list');
+  if(!listEl) return;
+  const items = (_sptSendCatalogFlat||[]).filter(it=>!q || it.name.includes(q));
+  listEl.innerHTML = items.slice(0,200).map(it=>{
+    const checked = _sptSendItems.has(it.name) ? 'checked' : '';
+    const safe = it.name.replace(/'/g,"\\'");
+    return `<label style="display:flex;align-items:center;gap:6px;padding:4px 2px;font-size:12px;cursor:pointer">
+      <input type="checkbox" ${checked} onchange="sptSendToggleItem('${safe}', this.checked)"/> ${it.name}
+      <span style="color:var(--text2);font-size:10px">${it.cat||''}</span>
+    </label>`;
+  }).join('') || `<div style="padding:10px;text-align:center;color:#aaa;font-size:12px">${q?'مفيش نتائج':'اكتب في البحث عشان تختار أصناف'}</div>`;
+}
+function sptSendToggleItem(name, checked){
+  if(checked) _sptSendItems.add(name); else _sptSendItems.delete(name);
+  sptSendRenderSelectedChips();
+}
+function sptSendRenderSelectedChips(){
+  const el = document.getElementById('spt-send-selected-items');
+  if(!el) return;
+  el.innerHTML = [..._sptSendItems].map(n=>{
+    const safe = n.replace(/'/g,"\\'");
+    return `<span style="background:#FFF3E0;color:#B45309;border-radius:999px;padding:3px 10px;font-size:11px;display:flex;align-items:center;gap:4px">${n} <i class="ti ti-x" style="cursor:pointer" onclick="sptSendToggleItem('${safe}',false);sptSendRenderItemList()"></i></span>`;
+  }).join('') || `<span style="color:#aaa;font-size:11px">لسه مفيش أصناف متحددة</span>`;
+}
+
+async function sptSendCampaign(){
+  const from = document.getElementById('spt-send-from').value;
+  const to = document.getElementById('spt-send-to').value;
+  const groups = [..._sptSendGroups];
+  const items = [..._sptSendItems];
+  if(!from||!to){ alert('لازم تحدد تاريخ من وإلى'); return; }
+  if(to < from){ alert('تاريخ "إلى" لازم يكون بعد أو يساوي تاريخ "من"'); return; }
+  if(!groups.length){ alert('لازم تختار مجموعة واحدة على الأقل'); return; }
+  if(!items.length){ alert('لازم تختار صنف واحد على الأقل'); return; }
+  const flat = _sptSendCatalogFlat||[];
+  const itemsData = items.map(n=>{
+    const f = flat.find(it=>it.name===n);
+    return {name:n, fea:f?.fea||'', cat:f?.cat||''};
+  });
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/special_campaigns`,{
+      method:'POST', headers:H,
+      body: JSON.stringify({items:itemsData, date_from:from, date_to:to, groups, status:'active', created_by:cu?.name||'', created_by_level:cu?.level||'dm'})
+    });
+    if(r.ok){
+      alert('✅ اتبعتت الحملة لمشرفي التنسيق في المجموعات المختارة');
+      _sptSendItems = new Set(); _sptSendGroups = new Set();
+      document.getElementById('spt-send-item-search').value='';
+      sptSendRenderItemList(); sptSendRenderSelectedChips(); sptSendRenderGroups();
+      document.getElementById('spt-send-from').value=''; document.getElementById('spt-send-to').value='';
+      sptLoadIncoming(); sptRenderMyCampaigns();
+    } else { alert('❌ حصل خطأ أثناء إرسال الحملة'); }
+  }catch(e){ alert('❌ حصل خطأ في الاتصال'); }
+}
+
+// ── الحملات الواردة + الاستلام ───────────────────────────────────
+async function sptLoadIncoming(){
+  const listEl = document.getElementById('spt-incoming-list');
+  if(!listEl) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const myGroups = cu?.groups||[];
+  let campaigns = [], myAcks = [];
+  try{
+    const [cr, ar] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/special_campaigns?select=*&status=eq.active&order=created_at.desc&limit=200`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/special_campaign_acks?select=campaign_id&supervisor_name=eq.${encodeURIComponent(cu?.name||'')}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    ]);
+    campaigns = cr; myAcks = ar;
+  }catch(e){}
+  const ackedIds = new Set(myAcks.map(a=>a.campaign_id));
+  const pending = campaigns.filter(c=>(c.groups||[]).some(g=>myGroups.includes(g)) && !ackedIds.has(c.id));
+
+  const badge = document.getElementById('spt-badge');
+  if(badge){ badge.textContent = pending.length; badge.style.display = pending.length ? '' : 'none'; }
+
+  if(!pending.length){
+    listEl.innerHTML = `<div style="padding:16px;text-align:center;color:#aaa;font-size:12px">مفيش حملات واردة جديدة</div>`;
+    return;
+  }
+  listEl.innerHTML = pending.map(c=>{
+    const groupsLbl = (c.groups||[]).map(g=>GROUPS[g]?.label||g).join('، ');
+    const itemsLbl = (c.items||[]).map(it=>`<span style="background:#FFF3E0;color:#B45309;border-radius:999px;padding:2px 8px;font-size:10.5px;margin:2px">${it.name}</span>`).join('');
+    return `<div style="border:1.5px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px">
+      <div style="font-weight:700;font-size:12.5px">${groupsLbl}</div>
+      <div style="font-size:11px;color:var(--text2);margin:4px 0">من ${c.date_from} إلى ${c.date_to} · بعتها ${c.created_by||''}</div>
+      <div style="margin-bottom:8px">${itemsLbl}</div>
+      <button onclick="sptAckCampaign(${c.id},this)" style="width:100%;padding:8px;border:none;border-radius:8px;background:#1A7A4A;color:#fff;font-family:Cairo,sans-serif;font-weight:700;cursor:pointer"><i class="ti ti-check"></i> استلام</button>
+    </div>`;
+  }).join('');
+}
+
+async function sptAckCampaign(id, btn){
+  if(btn){ btn.disabled=true; btn.textContent='جاري الاستلام...'; }
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+  try{
+    await fetch(`${SUPABASE_URL}/rest/v1/special_campaign_acks`,{
+      method:'POST', headers:H,
+      body: JSON.stringify({campaign_id:id, supervisor_name: cu?.name||''})
+    });
+  }catch(e){}
+  await sptLoadIncoming();
+  await sptRenderMyCampaigns();
+}
+
+// ── فريقي (منسقيني) ─────────────────────────────────────────────
+async function sptLoadMyReps(){
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  let reps = [];
+  try{
+    for(const grp of (cu?.groups||[])){
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/users?select=name,route,user_type,grp,fixed_branch,status&role=eq.rep&grp=eq.${encodeURIComponent(grp)}&status=eq.active&limit=300`,{headers:H});
+      const json = r.ok ? await r.json().catch(()=>[]) : [];
+      if(Array.isArray(json)) reps.push(...json);
+    }
+  }catch(e){}
+  const seen = new Set();
+  reps = reps.filter(r=>{ const k=r.name; if(seen.has(k)||k==='تحت التعيين') return false; seen.add(k); return true; });
+  reps.sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
+  _sptMyReps = reps;
+}
+
+// نفس منطق الفرع الفعلي المستخدم في لوحة التحكم وتطبيق المنسق (coord_route_assignments أولاً)
+async function sptGetRepBranches(repName){
+  const rep = (_sptMyReps||[]).find(r=>r.name===repName);
+  if(!rep) return [];
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  let branchNames = [];
+  try{
+    const enc = encodeURIComponent(repName);
+    const assigned = await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+    branchNames = assigned.map(a=>a.branch_name).filter(Boolean);
+    if(!branchNames.length && rep.fixed_branch) branchNames = [rep.fixed_branch];
+    if(!branchNames.length && rep.route){
+      const data = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${encodeURIComponent(rep.route)}&status=neq.inactive&order=branch_name.asc`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+      branchNames = data.map(b=>b.branch_name).filter(Boolean);
+    }
+  }catch(e){}
+  return [...new Set(branchNames)].sort((a,b)=>a.localeCompare(b,'ar'));
+}
+
+async function sptOnDistRepChange(campaignId){
+  const repSel = document.getElementById(`spt-dist-rep-${campaignId}`);
+  const branchSel = document.getElementById(`spt-dist-branch-${campaignId}`);
+  if(!repSel || !branchSel) return;
+  branchSel.innerHTML = '<option value="">اختر الفرع</option>';
+  branchSel.disabled = true;
+  if(!repSel.value) return;
+  const branches = await sptGetRepBranches(repSel.value);
+  branches.forEach(bn=>{
+    const o=document.createElement('option'); o.value=bn; o.textContent=bn; branchSel.appendChild(o);
+  });
+  branchSel.disabled = branches.length===0;
+  if(branches.length===1) branchSel.value = branches[0];
+}
+
+// ── توزيع + متابعة الحملات المستلمة ──────────────────────────────
+async function sptRenderMyCampaigns(){
+  const listEl = document.getElementById('spt-my-campaigns-list');
+  if(!listEl) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const viewDate = document.getElementById('spt-view-date')?.value || localISO();
+  let myAcks = [], campaigns = [];
+  try{
+    myAcks = await fetch(`${SUPABASE_URL}/rest/v1/special_campaign_acks?select=campaign_id&supervisor_name=eq.${encodeURIComponent(cu?.name||'')}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+  }catch(e){}
+  const ids = [...new Set(myAcks.map(a=>a.campaign_id))];
+  if(!ids.length){
+    listEl.innerHTML = `<div style="padding:16px;text-align:center;color:#aaa;font-size:12px">لسه مستلمتش أي حملة</div>`;
+    return;
+  }
+  try{
+    campaigns = await fetch(`${SUPABASE_URL}/rest/v1/special_campaigns?select=*&status=eq.active&id=in.(${ids.join(',')})&order=created_at.desc`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+  }catch(e){ campaigns = []; }
+  if(!campaigns.length){
+    listEl.innerHTML = `<div style="padding:16px;text-align:center;color:#aaa;font-size:12px">مفيش حملات نشطة مستلمة حاليًا</div>`;
+    return;
+  }
+
+  let myTargets = [], records = [];
+  try{
+    myTargets = await fetch(`${SUPABASE_URL}/rest/v1/special_targets?select=*&campaign_id=in.(${campaigns.map(c=>c.id).join(',')})&assigned_by=eq.${encodeURIComponent(cu?.name||'')}&status=eq.active`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+    if(myTargets.length){
+      const tids = myTargets.map(t=>t.id).join(',');
+      records = await fetch(`${SUPABASE_URL}/rest/v1/special_target_records?select=*&record_date=eq.${viewDate}&target_id=in.(${tids})`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+    }
+  }catch(e){}
+
+  const repOptions = (_sptMyReps||[]).map(r=>`<option value="${r.name}">${r.name}${r.route?' — '+r.route:''}</option>`).join('');
+
+  listEl.innerHTML = campaigns.map(c=>{
+    const groupsLbl = (c.groups||[]).map(g=>GROUPS[g]?.label||g).join('، ');
+    const itemsLbl = (c.items||[]).map(it=>`<span style="background:#FFF3E0;color:#B45309;border-radius:999px;padding:2px 8px;font-size:10.5px;margin:2px">${it.name}</span>`).join('');
+    const campTargets = myTargets.filter(t=>t.campaign_id===c.id);
+    const rowsHtml = campTargets.map(t=>{
+      const recs = records.filter(r=>r.target_id===t.id);
+      const openSum = recs.reduce((s,r)=>s+(r.opening_qty!=null?+r.opening_qty:0),0);
+      const soldSum = recs.reduce((s,r)=>s+(r.sold_qty!=null?+r.sold_qty:0),0);
+      const recvd = t.received_at ? '✅ استلم' : '⏳ لسه';
+      return `<tr><td>${t.rep_name}</td><td>${t.branch_name}</td><td>${recvd}</td><td>${openSum||0}</td><td>${soldSum||0}</td></tr>`;
+    }).join('');
+    return `<div style="border:1.5px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:12.5px">${groupsLbl}</div>
+      <div style="font-size:11px;color:var(--text2);margin:4px 0">من ${c.date_from} إلى ${c.date_to}</div>
+      <div style="margin-bottom:8px">${itemsLbl}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <select id="spt-dist-rep-${c.id}" onchange="sptOnDistRepChange(${c.id})" style="flex:1;min-width:140px;padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12px">
+          <option value="">اختر منسق من فريقك</option>${repOptions}
+        </select>
+        <select id="spt-dist-branch-${c.id}" disabled style="flex:1;min-width:140px;padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12px">
+          <option value="">اختر الفرع</option>
+        </select>
+        <button onclick="sptDistribute(${c.id},this)" style="padding:7px 14px;border:none;border-radius:8px;background:var(--navy,#1A3A5C);color:#fff;font-family:Cairo,sans-serif;font-weight:700;cursor:pointer">توزيع</button>
+      </div>
+      ${campTargets.length ? `<div class="table-wrap" style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+          <thead><tr><th>المنسق</th><th>الفرع</th><th>استلام المنسق</th><th>افتتاحي (${viewDate})</th><th>مباع (${viewDate})</th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>` : `<div style="font-size:11px;color:#aaa">لسه ما وزّعتش الحملة دي على حد</div>`}
+    </div>`;
+  }).join('');
+}
+
+async function sptDistribute(campaignId, btn){
+  const repSel = document.getElementById(`spt-dist-rep-${campaignId}`);
+  const branchSel = document.getElementById(`spt-dist-branch-${campaignId}`);
+  const repName = repSel?.value, branchName = branchSel?.value;
+  if(!repName){ alert('اختار منسق الأول'); return; }
+  if(!branchName){ alert('لازم تختار فرع للمنسق ده'); return; }
+  const rep = (_sptMyReps||[]).find(r=>r.name===repName);
+  let campaign;
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/special_campaigns?select=*&id=eq.${campaignId}&limit=1`,{headers:H});
+    const j = r.ok ? await r.json().catch(()=>[]) : [];
+    campaign = j[0];
+  }catch(e){}
+  if(!campaign){ alert('❌ تعذر جلب بيانات الحملة'); return; }
+  if(btn){ btn.disabled=true; btn.textContent='جاري التوزيع...'; }
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/special_targets`,{
+      method:'POST', headers:H,
+      body: JSON.stringify({
+        campaign_id: campaignId,
+        coord_type: rep?.user_type||'متحرك',
+        rep_name: repName, branch_name: branchName,
+        date_from: campaign.date_from, date_to: campaign.date_to,
+        items: campaign.items, status:'active',
+        created_by: cu?.name||'', assigned_by: cu?.name||''
+      })
+    });
+    if(r.ok){
+      if(repSel) repSel.value=''; if(branchSel){ branchSel.innerHTML='<option value="">اختر الفرع</option>'; branchSel.disabled=true; }
+      sptRenderMyCampaigns();
+    } else { alert('❌ حصل خطأ أثناء التوزيع'); }
+  }catch(e){ alert('❌ حصل خطأ في الاتصال'); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent='توزيع'; } }
 }
 
 // ════════════════════════════════════════════════════════════════
