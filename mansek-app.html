@@ -362,6 +362,7 @@ input[type=number] { -moz-appearance:textfield; }
     <button class="nav-btn" id="nav-visit" onclick="showTab('visit')"><i class="ti ti-map-pin"></i><span>الزيارة</span><span class="nav-badge" id="visit-badge" style="display:none">0</span></button>
     <button class="nav-btn" id="nav-products" onclick="showTab('products')"><i class="ti ti-package"></i><span>أصناف</span><span class="nav-badge" id="prod-badge" style="display:none">0</span></button>
     <button class="nav-btn" id="nav-tamr-benefits" onclick="showTab('tamr-benefits')"><i class="ti ti-apple"></i><span>فوائد التمر</span></button>
+    <button class="nav-btn" id="nav-spt" onclick="showTab('spt')"><i class="ti ti-target-arrow"></i><span>أهداف خاصة</span><span class="nav-badge" id="spt-badge" style="display:none">0</span></button>
     <button class="nav-btn" id="nav-missing" onclick="showTab('missing')"><i class="ti ti-alert-triangle"></i><span>نواقص</span><span class="nav-badge" id="miss-badge" style="display:none">0</span></button>
     <button class="nav-btn" id="nav-returns" onclick="showTab('returns')"><i class="ti ti-arrow-back-up"></i><span>مرتجعات</span><span class="nav-badge" id="ret-badge" style="display:none">0</span></button>
     <button class="nav-btn" id="nav-orders" onclick="showTab('orders')"><i class="ti ti-truck-delivery"></i><span>طلبيات</span><span class="nav-badge" id="ord-badge" style="display:none">0</span></button>
@@ -642,6 +643,15 @@ input[type=number] { -moz-appearance:textfield; }
       <input type="text" id="tb-search" placeholder="🔍 ابحث باسم المنتج..." oninput="tbOnSearch(this.value)"
         style="width:100%;padding:9px 10px;border:1.5px solid var(--border);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif;margin-bottom:10px"/>
       <div id="tb-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:10px"></div>
+    </div>
+
+    <!-- أهداف خاصة -->
+    <div id="tab-spt" class="tab">
+      <div id="spt-empty" style="display:none;padding:30px 10px;text-align:center;color:#aaa;font-size:13px">
+        <i class="ti ti-target-off" style="font-size:34px;display:block;margin-bottom:8px"></i>
+        مفيش أهداف خاصة متعينة لحضرتك في الفرع ده النهاردة
+      </div>
+      <div id="spt-list"></div>
     </div>
 
     <!-- نواقص -->
@@ -2780,6 +2790,14 @@ function showTab(tab){
     sciRefreshLiveCatalogForTab('products');
   }
   if(tab==='tamr-benefits') tbLoad();
+  if(tab==='spt'){
+    sptLoad();
+    if(window._sptPolling) clearInterval(window._sptPolling);
+    window._sptPolling = setInterval(()=>{
+      if(document.getElementById('tab-spt')?.classList.contains('active')) sptLoad();
+      else clearInterval(window._sptPolling);
+    }, 30000);
+  }
   if(tab==='msgs')        { fetchMessages(); fetchAssignments(); }
   if(tab==='supply-req'){
     srInitFea();
@@ -2794,6 +2812,121 @@ function showTab(tab){
       else clearInterval(window._supplyPolling);
     }, 30000);
   }
+}
+
+// ── أهداف خاصة (تاب المنسق) ──────────────────────────────────────
+// بتجيب من special_targets أي هدف متعين للمنسق ده في فرعه الحالي وتاريخه (من-إلى) يشمل النهاردة،
+// وبتعرض لكل صنف فيه: خانة تسجيل الرصيد الافتتاحي (أول الشيفت) ثم خانة تسجيل الكمية المباعة فعليًا
+// (آخر الشيفت) — كل تسجيل بيتبعت فورًا لـ special_target_records عشان يوصل لحظيًا للوحة التحكم.
+async function sptLoad(){
+  const branch = document.getElementById('f-branch')?.value;
+  const listEl = document.getElementById('spt-list');
+  const emptyEl = document.getElementById('spt-empty');
+  if(!listEl || !emptyEl) return;
+  if(!cu || !branch){
+    listEl.innerHTML=''; emptyEl.style.display='block';
+    const badge0 = document.getElementById('spt-badge'); if(badge0) badge0.style.display='none';
+    return;
+  }
+  const today = localDateStr();
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  let targets = [];
+  try{
+    const enc = encodeURIComponent(cu.name), encB = encodeURIComponent(branch);
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/special_targets?select=*&rep_name=eq.${enc}&branch_name=eq.${encB}&status=eq.active&date_from=lte.${today}&date_to=gte.${today}`,{headers:H});
+    targets = r.ok ? await r.json().catch(()=>[]) : [];
+  }catch(e){ targets = []; }
+
+  const badge = document.getElementById('spt-badge');
+  if(!targets.length){
+    listEl.innerHTML=''; emptyEl.style.display='block';
+    if(badge) badge.style.display='none';
+    return;
+  }
+  emptyEl.style.display='none';
+
+  let records = [];
+  try{
+    const ids = targets.map(t=>t.id).join(',');
+    const r2 = await fetch(`${SUPABASE_URL}/rest/v1/special_target_records?select=*&record_date=eq.${today}&target_id=in.(${ids})`,{headers:H});
+    records = r2.ok ? await r2.json().catch(()=>[]) : [];
+  }catch(e){ records = []; }
+
+  // بادج بعدد الأصناف اللي لسه محتاجة تسجيل (مفيهاش رصيد افتتاحي أو مفيهاش مبيع فعلي)
+  let pendingCount = 0;
+  targets.forEach(t=>(t.items||[]).forEach(it=>{
+    const rec = records.find(r=>r.target_id===t.id && r.item_name===it.name);
+    if(!rec || rec.opening_qty==null || rec.sold_qty==null) pendingCount++;
+  }));
+  if(badge){ badge.textContent = pendingCount; badge.style.display = pendingCount ? '' : 'none'; }
+
+  listEl.innerHTML = targets.map(t=>{
+    const rowsHtml = (t.items||[]).map(it=>{
+      const rec = records.find(r=>r.target_id===t.id && r.item_name===it.name);
+      const opening = (rec && rec.opening_qty!=null) ? rec.opening_qty : null;
+      const sold = (rec && rec.sold_qty!=null) ? rec.sold_qty : null;
+      const safeName = it.name.replace(/'/g,"\\'").replace(/"/g,'&quot;');
+      let actionHtml;
+      if(opening===null){
+        actionHtml = `<div style="display:flex;gap:6px;align-items:center">
+          <input type="number" min="0" step="1" placeholder="الرصيد الافتتاحي" style="flex:1;padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12px"/>
+          <button class="btn btn-sm btn-blue" onclick="sptSaveOpening(${t.id},'${safeName}',this)">تسجيل</button>
+        </div>`;
+      } else if(sold===null){
+        actionHtml = `<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap">
+          <span style="font-size:11px;color:#1A7A4A;white-space:nowrap">✅ افتتاحي: ${opening}</span>
+          <div style="display:flex;gap:6px;align-items:center;flex:1;min-width:160px">
+            <input type="number" min="0" step="1" placeholder="الكمية المباعة فعليًا" style="flex:1;padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12px"/>
+            <button class="btn btn-sm btn-blue" onclick="sptSaveSold(${t.id},'${safeName}',this)">تسجيل</button>
+          </div>
+        </div>`;
+      } else {
+        actionHtml = `<div style="display:flex;gap:14px;font-size:11px">
+          <span style="color:#1A7A4A">✅ افتتاحي: ${opening}</span>
+          <span style="color:#003A80">✅ مباع فعلي: ${sold}</span>
+        </div>`;
+      }
+      return `<div style="padding:10px;border-bottom:1px solid var(--border)">
+        <div style="font-weight:700;font-size:12.5px;margin-bottom:6px">${it.name}</div>
+        ${actionHtml}
+      </div>`;
+    }).join('');
+    return `<div class="card" style="margin-bottom:12px">
+      <div class="card-title" style="margin-bottom:4px"><i class="ti ti-target-arrow"></i> هدف من ${t.date_from} إلى ${t.date_to}</div>
+      <div style="border:1.5px solid var(--border);border-radius:10px;overflow:hidden">${rowsHtml}</div>
+    </div>`;
+  }).join('');
+}
+
+function sptSaveOpening(targetId, itemName, btn){
+  const input = btn.previousElementSibling;
+  const val = parseFloat(input?.value);
+  if(isNaN(val) || val<0){ alert('⚠️ اكتب رقم صحيح للرصيد الافتتاحي'); return; }
+  sptUpsertRecord(targetId, itemName, {opening_qty: val, opening_at: new Date().toISOString()});
+}
+function sptSaveSold(targetId, itemName, btn){
+  const input = btn.previousElementSibling;
+  const val = parseFloat(input?.value);
+  if(isNaN(val) || val<0){ alert('⚠️ اكتب رقم صحيح للكمية المباعة'); return; }
+  sptUpsertRecord(targetId, itemName, {sold_qty: val, sold_at: new Date().toISOString()});
+}
+async function sptUpsertRecord(targetId, itemName, patch){
+  const branch = document.getElementById('f-branch')?.value;
+  const today = localDateStr();
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=minimal'};
+  const body = {
+    target_id: targetId, record_date: today, item_name: itemName,
+    rep_name: cu?.name||'', branch_name: branch||'',
+    updated_at: new Date().toISOString(),
+    ...patch
+  };
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/special_target_records?on_conflict=target_id,record_date,item_name`,{
+      method:'POST', headers:H, body: JSON.stringify(body)
+    });
+    if(r.ok){ showToast('✅ اتسجل بنجاح'); sptLoad(); }
+    else { alert('❌ حصل خطأ أثناء التسجيل، حاول تاني'); }
+  }catch(e){ alert('❌ حصل خطأ في الاتصال، حاول تاني'); }
 }
 
 // ── فوائد التمر (تاب المنسق) ────────────────────────────────────
@@ -2927,6 +3060,7 @@ async function sciOnBranchChanged(branch){
   if(typeof rFillS1==='function') rFillS1();
   if(typeof mFillS1==='function') mFillS1();
   if(typeof srInitFea==='function') srInitFea();
+  if(typeof sptLoad==='function') sptLoad();
   sciUpdateClientHintBanner('p-client-hint');
   sciUpdateClientHintBanner('r-client-hint');
   sciUpdateClientHintBanner('m-client-hint');
