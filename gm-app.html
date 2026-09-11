@@ -14045,7 +14045,6 @@ function switchTab(tab){
   document.getElementById('panel-'+tab).classList.add('active');
   document.getElementById('tab-'+tab).classList.add('active');
   if(tab==='reps'   && !REPS.length)   loadReps();
-  if(tab==='sups'   && !SUPS.length)   loadSups();
   if(tab==='routes' && !ROUTES_DATA.length) loadRoutesPanel();
 }
 
@@ -14244,141 +14243,18 @@ async function toggleRep(i){
 }
 
 // ══════════════════════════════════════════════════════════════
-// SUPS — المشرفون والمديرون
+// ملحوظة: كان هنا نظام مكرر وميت تماماً لإدارة "المشرفين" (SUPS/loadSups/renderSups/
+// openEditSup/saveSup/deleteSup/toggleSup) — بيعتمد على tab='sups' وpanel-sups وجدول
+// sups-table، ولا واحد فيهم موجود فعلياً في الـ HTML (مفيش أي زرار أو تاب بيوديله).
+// كان بيسبب مشكلة حقيقية رغم إنه ميت: تعريفاته لـ openEditSup/deleteSup كانت بتجي بعد
+// تعريفات renderSupervisors/supEditDispatch/supDeleteDispatch (اللي هي فعلاً الشغالة)
+// وبالتالي بتطغى عليها في جافاسكريبت — فلو حصل يوماً إن مشرف مش مصدره جدول staff
+// (source!=='staff')، كان الديسباتش هيستدعي النسخة الميتة دي اللي بتقرأ من مصفوفة
+// SUPS الفاضية وبتحاول تكتب في عنصر es-role-title غير الموجود أصلاً في الفورم،
+// وده كان هيكسر المودال فوراً. تم حذف النظام الميت بالكامل، فبقى openEditSup/deleteSup
+// الحقيقيين (فوق، بيشتغلوا على SUPERVISORS وes-role الموجود فعلاً في الفورم) هما
+// التعريف الوحيد المتبقي.
 // ══════════════════════════════════════════════════════════════
-async function loadSups(){
-  document.getElementById('sups-table').innerHTML=
-    '<tr><td colspan="8" style="text-align:center;padding:2rem;color:#aaa"><i class="ti ti-loader spin"></i> جاري التحميل...</td></tr>';
-  SUPS = await sbGet('users',{role:'supervisor'},{order:'name.asc',limit:200});
-  ALL_USERS = [...REPS, ...SUPS];
-  renderSups();
-  document.getElementById('sups-count-lbl').textContent=`${SUPS.length} مشرف/مدير`;
-}
-
-function renderSups(){
-  if(!SUPS.length){
-    document.getElementById('sups-table').innerHTML=
-      '<tr><td colspan="8" style="text-align:center;padding:2rem;color:#aaa">لا توجد بيانات</td></tr>';
-    return;
-  }
-  const LEVEL_MAP={gm:'مدير عام',dm:'مدير تنسيق',sup:'مشرف'};
-  const LEVEL_CLR={gm:'#D62828',dm:'#005CBF',sup:'#1A7A4A'};
-  document.getElementById('sups-table').innerHTML=SUPS.map((s,i)=>{
-    const grps=(s.groups||'').split(',').filter(Boolean);
-    const badges=grps.map(g=>`<span class="badge" style="background:${GROUPS[g]?.color||'#ccc'}22;color:${GROUPS[g]?.color||'#555'};font-size:10px">${GROUPS[g]?.label||g}</span>`).join(' ');
-    const lvl=s.level||'sup';
-    const isActive=(s.status||'active')==='active';
-    return `<tr style="${!isActive?'opacity:.55':''}">
-      <td style="color:var(--text2)">${i+1}</td>
-      <td><b>${s.name}</b></td>
-      <td><span style="font-size:11px;font-weight:700;color:${LEVEL_CLR[lvl]||'#555'}">${LEVEL_MAP[lvl]||lvl}</span></td>
-      <td><code style="background:#f5f5f5;padding:2px 6px;border-radius:4px;font-size:11px">${s.pass_hash||'—'}</code></td>
-      <td style="font-size:11px">${badges||'—'}</td>
-      <td><span class="badge" style="background:${LEVEL_CLR[lvl]||'#ccc'}22;color:${LEVEL_CLR[lvl]||'#555'}">${s.role||'supervisor'}</span></td>
-      <td>${isActive?'<span class="badge b-green">نشط</span>':'<span class="badge b-red">موقوف</span>'}</td>
-      <td>
-        <div style="display:flex;gap:4px">
-          <button class="btn btn-xs" style="background:#E3F2FD;color:#1565C0" onclick="openEditSup(${i})" title="تعديل">
-            <i class="ti ti-pencil"></i>
-          </button>
-          <button class="btn btn-xs" style="background:${isActive?'#FFF3E0':'#E8F5E9'};color:${isActive?'#E65100':'#1B5E20'}"
-            onclick="toggleSup(${i})">${isActive?'إيقاف':'تفعيل'}</button>
-        </div>
-      </td>
-    </tr>`;
-  }).join('');
-}
-
-function openAddSupModal(){
-  document.getElementById('ns-name').value='';
-  document.getElementById('ns-pass').value='';
-  document.getElementById('ns-role-title').value='';
-  document.getElementById('ns-level').value='sup';
-  document.querySelectorAll('.ns-grp-cb').forEach(c=>c.checked=false);
-  openModal('modal-add-sup');
-}
-
-async function addSup(){
-  const name=document.getElementById('ns-name').value.trim();
-  const pass=document.getElementById('ns-pass').value.trim();
-  const level=document.getElementById('ns-level').value;
-  const roleTitle=document.getElementById('ns-role-title').value.trim();
-  const groups=[...document.querySelectorAll('.ns-grp-cb:checked')].map(c=>c.value).join(',');
-  const msg=document.getElementById('ns-msg');
-  if(!name||!pass){showFormMsg(msg,'❌ الاسم والباسورد مطلوبان','#B71C1C');return;}
-
-  showFormMsg(msg,'⏳ جاري الإضافة...','#F77F00');
-  const data={name,pass_hash:pass,role:'supervisor',level,groups,status:'active',
-    user_type:'مكتبي',grp:groups.split(',')[0]||null,route:null,goal:0};
-  const ok=await sbInsert('users',data);
-  if(ok){
-    showToast('✅ تم إضافة '+name);
-    closeModal('modal-add-sup');
-    await loadSups();
-  } else {
-    showFormMsg(msg,'❌ خطأ في الإضافة','#B71C1C');
-  }
-}
-
-function openEditSup(i){
-  const s=SUPS[i]; _editingSupIdx=i;
-  document.getElementById('es-id').value=s.id||'';
-  document.getElementById('es-old-name').value=s.name;
-  document.getElementById('es-name').value=s.name;
-  document.getElementById('es-pass').value=s.pass_hash||'';
-  document.getElementById('es-level').value=s.level||'sup';
-  document.getElementById('es-role-title').value=s.role_title||'';
-  document.getElementById('es-status').value=s.status||'active';
-  const grps=(s.groups||'').split(',').filter(Boolean);
-  document.querySelectorAll('.es-grp-cb').forEach(c=>c.checked=grps.includes(c.value));
-  openModal('modal-edit-sup');
-}
-
-async function saveSup(){
-  const id=document.getElementById('es-id').value;
-  const oldName=document.getElementById('es-old-name').value;
-  const name=document.getElementById('es-name').value.trim();
-  const pass=document.getElementById('es-pass').value.trim();
-  const level=document.getElementById('es-level').value;
-  const roleTitle=document.getElementById('es-role-title').value.trim();
-  const groups=[...document.querySelectorAll('.es-grp-cb:checked')].map(c=>c.value).join(',');
-  const status=document.getElementById('es-status').value;
-  const msg=document.getElementById('es-msg');
-  if(!name){showFormMsg(msg,'❌ الاسم مطلوب','#B71C1C');return;}
-
-  showFormMsg(msg,'⏳ جاري الحفظ...','#F77F00');
-  const data={name,pass_hash:pass,level,groups,status,grp:groups.split(',')[0]||null};
-  const ok = id ? await sbPatch('users',{id},data) : await sbPatch('users',{name:oldName},data);
-  if(ok){
-    showToast('✅ تم تعديل '+name);
-    closeModal('modal-edit-sup');
-    await loadSups();
-  } else {
-    showFormMsg(msg,'❌ خطأ في الحفظ','#B71C1C');
-  }
-}
-
-async function deleteSup(){
-  const id=document.getElementById('es-id').value;
-  const name=document.getElementById('es-old-name').value;
-  confirmAction(`حذف "${name}" نهائياً؟`, async ()=>{
-    closeModal('modal-edit-sup');
-    const ok = id ? await sbDelete('users',{id}) : await sbDelete('users',{name});
-    if(ok){ showToast('🗑️ تم حذف '+name); await loadSups(); }
-    else showToast('❌ خطأ في الحذف');
-  });
-}
-
-async function toggleSup(i){
-  const s=SUPS[i];
-  const newStatus=s.status==='active'?'inactive':'active';
-  const ok = s.id ? await sbPatch('users',{id:s.id},{status:newStatus})
-                  : await sbPatch('users',{name:s.name},{status:newStatus});
-  if(ok){
-    showToast(newStatus==='active'?`✅ تم تفعيل ${s.name}`:`🔴 تم إيقاف ${s.name}`);
-    await loadSups();
-  } else showToast('❌ خطأ في تغيير الحالة');
-}
 
 // ══════════════════════════════════════════════════════════════
 // SETTINGS — الباسورد والإعدادات
@@ -14524,8 +14400,8 @@ async function toggleUserByName(name,id,newStatus){
     // تحديث محلي
     const ri=REPS.findIndex(r=>r.name===name);
     if(ri!==-1){REPS[ri].status=newStatus;renderReps();}
-    const si=SUPS.findIndex(s=>s.name===name);
-    if(si!==-1){SUPS[si].status=newStatus;renderSups();}
+    const si=SUPERVISORS.findIndex(s=>s.name===name);
+    if(si!==-1){SUPERVISORS[si].status=newStatus;renderSupervisors();}
     showToast(`${newStatus==='active'?'✅':'🔴'} ${name}`);
   } else {
     showFormMsg(msg,'❌ خطأ في التغيير','#B71C1C');
