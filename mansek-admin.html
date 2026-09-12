@@ -1652,6 +1652,8 @@ h2,h3{color:#2C1F0A}
               <option value="warning">تحذير (3-4 شهور)</option>
               <option value="ok">سليمة</option>
             </select>
+            <button class="btn btn-sm" style="background:#4E5A2B;color:#E8F5E9" onclick="productsExportExcel()"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+            <button class="btn btn-sm" style="background:#731E2E;color:#F5E8E8" onclick="productsExportPDF()"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
             <button class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C" onclick="clearAllRecords('products','products','الأصناف')"><i class="ti ti-trash"></i> مسح الكل</button>
           </div>
 
@@ -17818,6 +17820,184 @@ function loadProducts(){
 
       <td><button onclick="deleteRecord('products',${p.id},'products')" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px">🗑</button></td></tr>`;
   }).join('')||'<tr><td colspan="10" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات</td></tr>';
+
+  window._prodLastData = data;
+}
+
+// نص حالة الصلاحية بدون HTML (للتصدير Excel/PDF)
+function expStatusText(st){
+  if(!st) return '—';
+  if(st.diff<0) return `منتهية (${Math.abs(st.diff)} شهر)`;
+  if(st.diff===0) return 'هذا الشهر!';
+  if(st.diff<=2) return `${st.diff} شهر — ${st.expLabel}`;
+  if(st.diff<=4) return `${st.diff} شهر`;
+  return `${st.diff} شهر`;
+}
+
+function productsExportExcel(){
+  if(typeof XLSX==='undefined'){showToast('جاري تحميل مكتبة Excel...');return;}
+  const data = window._prodLastData||[];
+  if(!data.length){showToast('لا توجد بيانات للتصدير','err');return;}
+
+  const C={dark:'2C1F0A',caramel:'4B3C1A',gold:'C8A96E',cream:'EDE5D8',light:'F5F0E8',red:'731E2E',white:'FFFFFF',line:'E0D8CC'};
+  const fill=c=>({patternType:'solid',fgColor:{rgb:c}});
+  const font=(bold,sz,color,italic)=>({bold:!!bold,sz:sz||11,color:{rgb:color||C.dark},italic:!!italic,name:'Arial'});
+  const aln=(h,v,wrap)=>({horizontal:h||'right',vertical:v||'center',wrapText:!!wrap,readingOrder:2});
+  const brd=(s,c)=>{const b={style:s||'thin',color:{rgb:c||C.line}};return{left:b,right:b,top:b,bottom:b};};
+
+  const grpSel=document.getElementById('pr-group')?.value||'all';
+  const dateFrom=document.getElementById('pr-date-from')?.value||'';
+  const dateTo=document.getElementById('pr-date-to')?.value||'';
+  const now=new Date().toLocaleDateString('en-US');
+  const periodTxt = (dateFrom||dateTo) ? `${dateFrom||'...'} → ${dateTo||'...'}` : 'كل الفترات';
+
+  const COLS=['#','المنسق','الفرع','الصنف','الفئة','رف','مخزن','صلاحية الرف','صلاحية المخزن','موعد الرفع','الحالة','آخر تحديث'];
+  const wb=XLSX.utils.book_new();
+
+  const groups={};
+  data.forEach(p=>{
+    const g=p.grp||p.group||'other';
+    if(!groups[g]) groups[g]=[];
+    groups[g].push(p);
+  });
+
+  const aoa=[
+    ['الطحان جولدن دايتس — Al Tahhan Golden Dates',...Array(11).fill('')],
+    ['الأصناف — سجل الأصناف وحالة الصلاحية (آخر رصيد لكل فرع/صنف)',...Array(11).fill('')],
+    [`تاريخ التصدير: ${now}  |  المجموعة: ${grpSel==='all'?'كل المجموعات':GROUPS[grpSel]?.label||grpSel}  |  الفترة: ${periodTxt}  |  إجمالي: ${data.length}`,...Array(11).fill('')],
+    Array(12).fill(''),
+    COLS
+  ];
+
+  const dataStart=aoa.length;
+  let idx=1;
+  Object.entries(groups).forEach(([grpKey,rows])=>{
+    aoa.push([`🔷 ${GROUPS[grpKey]?.label||grpKey}`,...Array(11).fill('')]);
+    rows.forEach(p=>{
+      const sh=calcExpMonths(p.date_shelf,p.months_shelf);
+      const st=calcExpMonths(p.date_stock,p.months_stock);
+      const rafa3=sh?sh.rafa3Diff:null;
+      const rafa3Txt = rafa3===null?'—':rafa3<=0?'حان الرفع!':`بعد ${rafa3} شهور`;
+      const statusTxt = (sh&&sh.diff<=2)||(st&&st.diff<=2) ? 'تحذير' : 'سليم';
+      const dt = p.created_at?new Date(p.created_at).toLocaleDateString('en-US'):'—';
+      aoa.push([idx++,p.name||'—',p.branch||'—',p.snf||'—',p.fea||'—',p.shelf_qty||0,p.stock_qty||0,expStatusText(sh),expStatusText(st),rafa3Txt,statusTxt,dt]);
+    });
+  });
+
+  const ws=XLSX.utils.aoa_to_sheet(aoa,{cellStyles:true});
+  const enc=(r,c)=>XLSX.utils.encode_cell({r,c});
+  const sty=(r,c,s)=>{if(!ws[enc(r,c)])ws[enc(r,c)]={t:'z',v:''};ws[enc(r,c)].s=s;};
+
+  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:11}},{s:{r:1,c:0},e:{r:1,c:11}},{s:{r:2,c:0},e:{r:2,c:11}},{s:{r:3,c:0},e:{r:3,c:11}}];
+  sty(0,0,{font:font(1,15,C.cream),fill:fill(C.dark),alignment:aln('center'),border:brd('medium',C.dark)});
+  sty(1,0,{font:font(1,13,C.dark),fill:fill(C.gold),alignment:aln('center'),border:brd('medium',C.caramel)});
+  sty(2,0,{font:font(0,10,C.caramel,true),fill:fill(C.light),alignment:aln('center'),border:brd('thin',C.line)});
+  for(let c=0;c<12;c++) sty(3,c,{fill:fill(C.dark)});
+  for(let c=0;c<12;c++) sty(4,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:aln('center'),border:brd('medium',C.dark)});
+
+  for(let ri=dataStart;ri<aoa.length;ri++){
+    const row=aoa[ri];
+    const isGrp=typeof row[0]==='string'&&row[0].includes('🔷');
+    if(isGrp){
+      ws['!merges'].push({s:{r:ri,c:0},e:{r:ri,c:11}});
+      sty(ri,0,{font:font(1,11,C.cream),fill:fill(C.caramel),alignment:aln('right'),border:brd('thin',C.dark)});
+    } else {
+      for(let c=0;c<12;c++){
+        let s={font:font(0,9,C.dark),fill:fill(C.white),alignment:aln(c===0?'center':'right',undefined,true),border:brd('thin',C.line)};
+        if(c===10 && row[10]==='حان الرفع!') s={...s,font:font(1,9,C.red)};
+        sty(ri,c,s);
+      }
+    }
+  }
+  ws['!cols']=[{wch:5},{wch:16},{wch:22},{wch:34},{wch:10},{wch:7},{wch:7},{wch:18},{wch:18},{wch:14},{wch:9},{wch:12}];
+  ws['!rows']=[{hpt:36},{hpt:28},{hpt:20},{hpt:8},{hpt:26}];
+  XLSX.utils.book_append_sheet(wb,ws,'الأصناف');
+
+  XLSX.writeFile(wb,`الأصناف_${localISO()}.xlsx`);
+  showToast('✅ تم تصدير الأصناف');
+}
+
+function productsExportPDF(){
+  const data = window._prodLastData||[];
+  if(!data.length){showToast('لا توجد بيانات للتصدير','err');return;}
+  const now=new Date().toLocaleDateString('en-US');
+  const dateFrom=document.getElementById('pr-date-from')?.value||'';
+  const dateTo=document.getElementById('pr-date-to')?.value||'';
+  const periodTxt = (dateFrom||dateTo) ? `${dateFrom||'...'} → ${dateTo||'...'}` : 'كل الفترات';
+
+  const groups={};
+  data.forEach(p=>{
+    const g=p.grp||p.group||'other';
+    if(!groups[g]) groups[g]=[];
+    groups[g].push(p);
+  });
+
+  let tablesHTML='';
+  Object.entries(groups).forEach(([grpKey,rows])=>{
+    const grpColor=GROUPS[grpKey]?.color||'#888';
+    const grpLabel=GROUPS[grpKey]?.label||grpKey;
+    tablesHTML+=`
+      <div class="grp-section">
+        <div class="grp-hdr" style="background:${grpColor}">
+          <span>${grpLabel}</span><span>${rows.length} صنف</span>
+        </div>
+        <table>
+          <thead><tr><th>#</th><th>المنسق</th><th>الفرع</th><th>الصنف</th><th>الفئة</th><th>رف</th><th>مخزن</th><th>صلاحية الرف</th><th>صلاحية المخزن</th><th>موعد الرفع</th><th>الحالة</th></tr></thead>
+          <tbody>
+          ${rows.map((p,i)=>{
+            const sh=calcExpMonths(p.date_shelf,p.months_shelf);
+            const st=calcExpMonths(p.date_stock,p.months_stock);
+            const rafa3=sh?sh.rafa3Diff:null;
+            const rafa3Txt = rafa3===null?'—':rafa3<=0?'حان الرفع!':`بعد ${rafa3} شهور`;
+            const warn = (sh&&sh.diff<=2)||(st&&st.diff<=2);
+            return `<tr>
+              <td style="text-align:center">${i+1}</td>
+              <td><b>${p.name||'—'}</b></td>
+              <td>${p.branch||'—'}</td>
+              <td style="font-weight:600">${p.snf||'—'}</td>
+              <td><span style="background:#EEF4FF;color:#1565C0;border-radius:20px;padding:1px 6px;font-size:8px">${p.fea||'—'}</span></td>
+              <td style="text-align:center">${p.shelf_qty||0}</td>
+              <td style="text-align:center">${p.stock_qty||0}</td>
+              <td style="font-size:9px">${expStatusText(sh)}</td>
+              <td style="font-size:9px">${expStatusText(st)}</td>
+              <td style="font-size:9px">${rafa3Txt}</td>
+              <td><span style="background:${warn?'#FFEBEE':'#E8F5E9'};color:${warn?'#B71C1C':'#1A7A4A'};border-radius:20px;padding:1px 6px;font-size:8px;font-weight:700">${warn?'تحذير':'سليم'}</span></td>
+            </tr>`;
+          }).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  });
+
+  const html=`<!DOCTYPE html><html dir="rtl" lang="ar">
+  <head><meta charset="UTF-8"><title>الأصناف</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap');
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Cairo',Arial,sans-serif;color:#2C1F0A;font-size:10px;padding:12px}
+    .hdr-co{background:#2C1F0A;color:#EDE5D8;text-align:center;padding:10px;font-size:14px;font-weight:900;border-radius:8px 8px 0 0}
+    .hdr-title{background:#C8A96E;color:#2C1F0A;text-align:center;padding:7px;font-size:12px;font-weight:700}
+    .hdr-info{background:#F5F0E8;color:#4B3C1A;text-align:center;padding:5px;font-size:9px;font-style:italic;margin-bottom:14px;border-radius:0 0 6px 6px}
+    .grp-section{margin-bottom:20px;page-break-inside:avoid}
+    .grp-hdr{color:#fff;padding:7px 12px;font-size:11px;font-weight:700;border-radius:6px 6px 0 0;display:flex;justify-content:space-between}
+    table{width:100%;border-collapse:collapse}
+    th{background:#4B3C1A;color:#EDE5D8;padding:6px 5px;font-size:9px;font-weight:700;text-align:center;border:1px solid #2C1F0A}
+    td{padding:5px;font-size:9px;border:1px solid #E0D8CC;vertical-align:middle}
+    .footer{background:#F5F0E8;color:#4B3C1A;text-align:center;padding:5px;font-size:8px;margin-top:12px;border-radius:6px}
+    @media print{.grp-section{page-break-inside:avoid}}
+  </style></head><body>
+  <div class="hdr-co">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
+  <div class="hdr-title">الأصناف — سجل الأصناف وحالة الصلاحية (آخر رصيد لكل فرع/صنف)</div>
+  <div class="hdr-info">تاريخ التصدير: ${now} &nbsp;|&nbsp; الفترة: ${periodTxt} &nbsp;|&nbsp; إجمالي: ${data.length} صنف</div>
+  ${tablesHTML}
+  <div class="footer">Al Tahhan Golden Dates © 2026 — نظام إدارة التنسيق الميداني</div>
+  </body></html>`;
+
+  const win=window.open('','_blank','width=1100,height=700');
+  win.document.write(html);
+  win.document.close();
+  setTimeout(()=>{win.focus();win.print();},800);
+  showToast('📄 جاري فتح نافذة PDF...');
 }
 
 // لما البحث يفلتر على صنف واحد بعينه، بنعرض كارت لكل مجموعة فيها الصنف ده كام قطعة
