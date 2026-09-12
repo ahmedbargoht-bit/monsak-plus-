@@ -7998,9 +7998,17 @@ async function supLoadReturns(){
 
     list.innerHTML = data.map(r=>{
       const dt = r.created_at ? new Date(r.created_at).toLocaleString('en-GB',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}) : '';
-      const transferred = r.status==='transferred';
+      // ✅ لو مشرف البيع صعّد المرتجع ده (المندوب راح الفرع ومالقاش المرتجع مثلاً)، السجل
+      // بيتفتح تاني عند مشرف التنسيق حتى لو كان status='transferred' قبل كده — عشان
+      // ياخد باله ان في مشكلة حصلت ويتابعها.
+      const escalated   = r.escalated_to_coord === true;
+      const transferred = r.status==='transferred' && !escalated;
       const cbDisabled  = transferred ? 'disabled' : '';
-      return `<div style="background:#f9f9fb;border:1px solid var(--border);border-right:4px solid ${transferred?'#1A7A4A':'#C0392B'};border-radius:10px;padding:12px;margin-bottom:8px;display:flex;gap:10px;align-items:flex-start" id="ret-row-${r.id}">
+      const issueLabel  = r.pull_result==='not_found' ? 'المندوب راح الفرع ومالقاش المرتجع'
+                         : r.pull_result==='partial'   ? 'المندوب رفع جزء من المرتجع بس'
+                         : r.pull_result==='other'     ? 'ملاحظة من المندوب'
+                         : 'محتاج متابعة';
+      return `<div style="background:${escalated?'#FFF8E1':'#f9f9fb'};border:1px solid var(--border);border-right:4px solid ${escalated?'#F57F17':transferred?'#1A7A4A':'#C0392B'};border-radius:10px;padding:12px;margin-bottom:8px;display:flex;gap:10px;align-items:flex-start" id="ret-row-${r.id}">
         ${!transferred ? `<input type="checkbox" class="row-check ret-row-cb" value="${r.id}"
           data-snf="${(r.snf||'').replace(/"/g,'')}"
           data-branch="${(r.branch||'').replace(/"/g,'')}"
@@ -8017,14 +8025,22 @@ async function supLoadReturns(){
           <div style="font-size:11px;margin-bottom:4px">📍 <b>${r.branch||'—'}</b></div>
           <div style="font-size:11px;color:#E65100;margin-bottom:4px">⚠️ ${r.reason}</div>
           ${r.note?`<div style="font-size:11px;color:var(--text2)">💬 ${r.note}</div>`:''}
+          ${escalated ? `<div style="font-size:11px;color:#F57F17;font-weight:700;margin-top:4px">🔁 ${issueLabel}</div>
+            ${r.pull_note?`<div style="font-size:11px;color:var(--text2)">💬 ${r.pull_note}</div>`:''}
+            <div style="font-size:10px;color:#aaa;margin-top:2px">حوّلها مشرف البيع: ${r.escalated_by||'—'}</div>` : ''}
           <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
             <div style="font-size:10px;color:#aaa">${dt}</div>
-            ${transferred
-              ? `<span style="background:#E8F5E9;color:#1A7A4A;border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700">✅ محوّل لمشرف البيع</span>`
-              : `<button onclick="supTransferReturn(${r.id},'${(r.snf||'').replace(/'/g,"\'")}','${(r.branch||'').replace(/'/g,"\'")}','${(r.name||'').replace(/'/g,"\'")}','return')"
-                  style="background:var(--navy);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif;display:flex;align-items:center;gap:4px">
-                  <i class="ti ti-send"></i> تحويل لمشرف البيع
+            ${escalated
+              ? `<button onclick="supResolveEscalation(${r.id},'${(r.snf||'').replace(/'/g,"\'")}','${(r.branch||'').replace(/'/g,"\'")}')"
+                  style="background:#F57F17;color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif;display:flex;align-items:center;gap:4px">
+                  <i class="ti ti-check"></i> تمت المتابعة
                 </button>`
+              : transferred
+                ? `<span style="background:#E8F5E9;color:#1A7A4A;border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700">✅ محوّل لمشرف البيع</span>`
+                : `<button onclick="supTransferReturn(${r.id},'${(r.snf||'').replace(/'/g,"\'")}','${(r.branch||'').replace(/'/g,"\'")}','${(r.name||'').replace(/'/g,"\'")}','return')"
+                    style="background:var(--navy);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif;display:flex;align-items:center;gap:4px">
+                    <i class="ti ti-send"></i> تحويل لمشرف البيع
+                  </button>`
             }
           </div>
         </div>
@@ -8057,6 +8073,29 @@ async function supTransferReturn(id, snf, branch, repName, type){
       else supLoadMissing();
     } else {
       _supShowToast('⚠️ تعذر التحويل، حاول مرة أخرى');
+    }
+  }catch(e){
+    _supShowToast('خطأ: '+e.message);
+  }
+}
+
+// ✅ مشرف التنسيق يقفل المتابعة بعد ما يراجع سبب المشكلة (مش موجود/جزء/سبب آخر) —
+// بيمسح escalated_to_coord بس (ومبيلمسش pulled/pull_result)، فلو المندوب حاول تاني
+// من تطبيقه هيتصعّد تلقائي من جديد لو فيه مشكلة تانية.
+async function supResolveEscalation(id, snf, branch){
+  if(!confirm(`تأكيد إنك تابعت مرتجع "${snf}" من فرع "${branch}"؟`)) return;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/returns?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,
+        'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body: JSON.stringify({escalated_to_coord:false})
+    });
+    if(res.ok){
+      _supShowToast(`✅ تم إغلاق المتابعة — ${snf} · ${branch}`);
+      supLoadReturns();
+    } else {
+      _supShowToast('⚠️ تعذر الحفظ، حاول مرة أخرى');
     }
   }catch(e){
     _supShowToast('خطأ: '+e.message);

@@ -5135,6 +5135,20 @@ async function confirmReturnBySupervisor(id, branchName){
   loadReturns();
 }
 
+// ✅ جديد: لما المندوب يبلغ إنه راح الفرع ومالقاش المرتجع (أو رفع جزء/سبب تاني)، مشرف
+// البيع بيحوّل الحالة دي لمشرف التنسيق عشان يتابعها مع المنسق — بيسجل escalated_to_coord
+// + escalated_by + escalated_at، من غير ما يلمس pulled أو pull_result/pull_note.
+async function escalateReturnToCoord(id, branchName){
+  if(!confirm(`تحويل حالة المرتجع (غير مسحوب) من:\n${branchName}\nلمشرف التنسيق عشان يتابعها مع المنسق؟`)) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/returns?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({escalated_to_coord:true, escalated_at:new Date().toISOString(), escalated_by:cu?.name||'مشرف'})
+  });
+  showToast('🔁 تم التحويل لمشرف التنسيق');
+  loadReturns();
+}
+
 async function loadReturns(){
   if(!cu) return;
   const grp        = document.getElementById('ret-grp')?.value||'all';
@@ -5177,14 +5191,18 @@ async function loadReturns(){
     badge.textContent = `⚠️ ${pending.length} مرتجع لم يُسحب`;
   }
 
+  const notFoundPending = data.filter(r=>!r.pulled && r.pull_result && r.pull_result!=='pulled' && !r.escalated_to_coord);
+  const escalated       = data.filter(r=>!r.pulled && r.escalated_to_coord);
+
   const totalQty=data.reduce((s,r)=>s+(+r.qty||0),0);
   const statsEl = document.getElementById('ret-stats');
-  statsEl.style.gridTemplateColumns='repeat(5,1fr)';
+  statsEl.style.gridTemplateColumns='repeat(6,1fr)';
   statsEl.innerHTML=`
     <div class="stat-c red"><div class="stat-n">${data.length}</div><div class="stat-l">إجمالي</div></div>
     <div class="stat-c red"><div class="stat-n">${totalQty}</div><div class="stat-l">وحدات</div></div>
     <div class="stat-c"><div class="stat-n">${pending.length}</div><div class="stat-l">⏳ لم يُسحب</div></div>
     <div class="stat-c"><div class="stat-n">${data.filter(r=>r.pulled).length}</div><div class="stat-l">✅ تم السحب</div></div>
+    <div class="stat-c"><div class="stat-n">${notFoundPending.length}</div><div class="stat-l">⚠️ مش موجود</div></div>
     <div class="stat-c"><div class="stat-n">${data.filter(r=>r.confirmed).length}</div><div class="stat-l">☑️ مؤكد من المشرف</div></div>`;
 
   const daysSince = d => {
@@ -5195,12 +5213,18 @@ async function loadReturns(){
   document.getElementById('ret-tbody').innerHTML=data.map((r,i)=>{
     const isPulled    = r.pulled;
     const isConfirmed = r.confirmed;
+    const hasIssue    = !isPulled && r.pull_result && r.pull_result!=='pulled'; // مش موجود / جزء / سبب آخر
+    const isEscalated = hasIssue && r.escalated_to_coord;
     const days      = daysSince(r.created_at);
-    const rowBg     = !isPulled && days>=3 ? 'background:#FFF0F0' : '';
-    const reminder  = !isPulled && days>=3 ?
+    const rowBg     = isEscalated ? 'background:#FFF8E1' : hasIssue ? 'background:#FFF0F0' : (!isPulled && days>=3 ? 'background:#FFF0F0' : '');
+    const reminder  = !isPulled && !hasIssue && days>=3 ?
       `<div style="color:#B71C1C;font-size:9px;margin-top:2px">⚠️ منذ ${days} يوم</div>` : '';
 
-    // ✅ 3 حالات: (1) لسه المندوب ماسحبش (2) المندوب سحب ومحتاج تأكيد المشرف (3) اتأكد
+    const issueLabel = r.pull_result==='not_found' ? 'مش موجود في الفرع' : r.pull_result==='partial' ? 'تم رفع جزء فقط' : 'سبب آخر';
+
+    // ✅ الحالات: (1) لسه المندوب ماسحبش (2) المندوب واجه مشكلة (مش موجود/جزء/سبب آخر) —
+    //     ولسه محولّاش، أو اتحولت لمشرف التنسيق ومستنية عنده (3) المندوب سحب ومحتاج
+    //     تأكيد المشرف (4) اتأكد
     const actionCell = isConfirmed
       ? `<div style="color:#1565C0;font-size:10px;font-weight:700">☑️ تم التأكيد<br><span style="color:#aaa;font-size:9px">${r.confirmed_by||'—'}</span></div>`
       : isPulled
@@ -5208,17 +5232,27 @@ async function loadReturns(){
             style="background:#1565C0;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:Cairo,sans-serif;white-space:nowrap">
             ☑️ تأكيد الاستلام
           </button>`
-        : `<button onclick="confirmReturnPull(${r.id},'${(r.branch||'').replace(/'/g,"\\'")}' )"
-            style="background:#1A7A4A;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:Cairo,sans-serif;white-space:nowrap">
-            ✅ تسجيل الرفع
-          </button>`;
+        : isEscalated
+          ? `<div style="color:#F57F17;font-size:10px;font-weight:700">🔁 محوّل لمشرف التنسيق<br><span style="color:#aaa;font-size:9px">${r.escalated_by||'—'}</span></div>`
+          : hasIssue
+            ? `<button onclick="escalateReturnToCoord(${r.id},'${(r.branch||'').replace(/'/g,"\\'")}' )"
+                style="background:#F57F17;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:Cairo,sans-serif;white-space:nowrap">
+                🔁 تحويل لمشرف التنسيق
+              </button>`
+            : `<button onclick="confirmReturnPull(${r.id},'${(r.branch||'').replace(/'/g,"\\'")}' )"
+                style="background:#1A7A4A;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:Cairo,sans-serif;white-space:nowrap">
+                ✅ تسجيل الرفع
+              </button>`;
 
     const statusBadge = isConfirmed
       ? `<span style="background:#E3F2FD;color:#1565C0;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">☑️ مؤكد</span>`
       : isPulled
         ? `<span style="background:#E8F5E9;color:#1A7A4A;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">✅ تم السحب</span>
            <div style="font-size:9px;color:#888;margin-top:2px">${r.pulled_by||'—'}</div>`
-        : `<span style="background:#FFEBEE;color:#B71C1C;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">⏳ لم يُسحب</span>`;
+        : hasIssue
+          ? `<span style="background:#FFF3E0;color:#E65100;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">⚠️ ${issueLabel}</span>
+             <div style="font-size:9px;color:#888;margin-top:2px">${r.pull_note||r.pulled_by||'—'}</div>`
+          : `<span style="background:#FFEBEE;color:#B71C1C;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">⏳ لم يُسحب</span>`;
 
     return `<tr style="${rowBg}">
       <td>${i+1}</td>

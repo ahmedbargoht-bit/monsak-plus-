@@ -714,6 +714,18 @@ input[type=number] { -moz-appearance:textfield; }
     <!-- مرتجعات -->
     <div id="tab-returns" class="tab">
 
+      <!-- مرتجعات المندوب رفعها فعلاً وبانتظار تأكيدك -->
+      <div id="ret-pending-ack-wrap" style="display:none;margin-bottom:14px">
+        <div class="card-title" style="color:#1A7A4A"><i class="ti ti-checkbox"></i> مرتجعات بانتظار تأكيدك</div>
+        <div id="ret-pending-ack-list"></div>
+      </div>
+
+      <!-- مرتجعات فيها مشكلة (مش موجود / جزء / سبب آخر) — للمتابعة فقط -->
+      <div id="ret-pending-issue-wrap" style="display:none;margin-bottom:14px">
+        <div class="card-title" style="color:#E65100"><i class="ti ti-alert-triangle"></i> مرتجعات فيها مشكلة عند المندوب</div>
+        <div id="ret-pending-issue-list"></div>
+      </div>
+
       <!-- تنبيه: الفرع مش مربوط بعميل / العميل لسه مفيهوش فواتير -->
       <div id="r-client-hint" style="display:none"></div>
 
@@ -2780,7 +2792,7 @@ function showTab(tab){
   if(tab==='visit'){loadVisitTab();}
   if(tab==='orders')      { renderOrders(); loadRepOrders(); }
   if(tab==='missing')     { renderMissing(); sciRefreshLiveCatalogForTab('missing'); }
-  if(tab==='returns')     { renderRetList(); renderRetSaved(); sciRefreshLiveCatalogForTab('returns'); }
+  if(tab==='returns')     { renderRetList(); renderRetSaved(); renderReturnsPendingAck(); sciRefreshLiveCatalogForTab('returns'); }
   if(tab==='products')    {
     renderProdList();
     checkExpiryAlerts(document.getElementById('f-branch')?.value);
@@ -4760,6 +4772,72 @@ async function confirmSupplyReceived(id, btn){
     renderMissingPendingReceipts();
   } else {
     if(btn){ btn.disabled=false; btn.textContent='✅ استلمت التوريد'; }
+    alert('فشل التأكيد — تأكد من الاتصال بالإنترنت وحاول تاني');
+  }
+}
+
+// ── مرتجعات: تأكيد المنسق النهائي + متابعة الحالات اللي فيها مشكلة ──
+// (نفس منطق نواقص التوريد فوق: المنسق هو اللي بيقفل الحلقة ويأكد إن المرتجع اللي
+// المندوب سجّل رفعه (pulled=true) اترفع فعلاً، وكمان بيشوف أي مرتجع واجه فيه المندوب
+// مشكلة (مش موجود بالفرع / جزء بس / سبب آخر) عشان يبقى عالم بالموقف حتى لو لسه بيتحل)
+async function renderReturnsPendingAck(){
+  const ackWrap   = document.getElementById('ret-pending-ack-wrap');
+  const ackList   = document.getElementById('ret-pending-ack-list');
+  const issueWrap = document.getElementById('ret-pending-issue-wrap');
+  const issueList = document.getElementById('ret-pending-issue-list');
+  if(!ackWrap || !ackList || !cu?.name) return;
+  try{
+    const rows = await sbSelect('returns', {name: cu.name});
+    const list = Array.isArray(rows) ? rows : [];
+
+    const toAck = list.filter(r => r.pulled === true && r.coord_ack !== true);
+    if(!toAck.length){ ackWrap.style.display='none'; }
+    else{
+      ackWrap.style.display='block';
+      ackList.innerHTML = toAck.map(r=>`
+        <div style="background:#F0FBF5;border:1px solid #C8E6D4;border-radius:10px;padding:10px;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:700;color:#1A7A4A">${(r.snf||'').toString().replace(/</g,'&lt;')}</div>
+          <div style="font-size:10px;color:#666;margin-top:2px">${r.branch||''} ${r.qty?'· '+r.qty+' وحدة':''}</div>
+          <div style="font-size:10px;color:#888;margin-top:2px">رفعها: ${r.pulled_by||'—'}</div>
+          <button onclick="confirmReturnPickedUp(${r.id}, this)"
+            style="width:100%;margin-top:8px;padding:9px;background:#1A7A4A;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
+            ✅ أأكد إن المرتجع اترفع فعلاً
+          </button>
+        </div>`).join('');
+    }
+
+    const issues = list.filter(r => r.pulled !== true && r.pull_result && r.pull_result !== 'pulled');
+    if(!issueWrap || !issueList) return;
+    if(!issues.length){ issueWrap.style.display='none'; }
+    else{
+      issueWrap.style.display='block';
+      issueList.innerHTML = issues.map(r=>{
+        const lbl = r.pull_result==='not_found' ? '❌ المندوب راح الفرع ومالقاش المرتجع'
+                  : r.pull_result==='partial'   ? '📦 المندوب رفع جزء بس'
+                  : '📝 ملاحظة من المندوب';
+        const stage = r.escalated_to_coord ? 'محوّلة لمشرف التنسيق للمتابعة' : 'عند مشرف البيع';
+        return `<div style="background:#FFF8E1;border:1px solid #FFE0B2;border-radius:10px;padding:10px;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:700;color:#E65100">${(r.snf||'').toString().replace(/</g,'&lt;')}</div>
+          <div style="font-size:10px;color:#666;margin-top:2px">${r.branch||''}</div>
+          <div style="font-size:11px;color:#E65100;margin-top:4px">${lbl}</div>
+          ${r.pull_note?`<div style="font-size:10px;color:#888;margin-top:2px">"${r.pull_note}"</div>`:''}
+          <div style="font-size:9px;color:#aaa;margin-top:4px">📍 ${stage}</div>
+        </div>`;
+      }).join('');
+    }
+  }catch(e){ console.warn('renderReturnsPendingAck error:', e); }
+}
+
+async function confirmReturnPickedUp(id, btn){
+  if(btn){ btn.disabled=true; btn.textContent='جارِ التأكيد...'; }
+  const ok = await sbUpdate('returns', {id}, {
+    coord_ack: true, coord_ack_by: cu?.name||'', coord_ack_at: new Date().toISOString()
+  });
+  if(ok){
+    showToastPWA?.('✅ تم تأكيد المرتجع');
+    renderReturnsPendingAck();
+  } else {
+    if(btn){ btn.disabled=false; btn.textContent='✅ أأكد إن المرتجع اترفع فعلاً'; }
     alert('فشل التأكيد — تأكد من الاتصال بالإنترنت وحاول تاني');
   }
 }

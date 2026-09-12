@@ -1442,31 +1442,47 @@ function closeMktRetModal(){
   setTimeout(()=>{ modal.style.display='none'; modal.querySelector('div').style.transform=''; modal.querySelector('div').style.transition=''; }, 280);
 }
 
+// ملحوظة مهمة: قبل كده كل الأنواع (حتى "مش موجود") كانت بتسجّل pulled=true بغلط، فكان
+// النظام بيعتبر المرتجع "اترفع فعلاً" حتى لو المندوب قال إنه مش لاقيه — والفرق كان بيتدفن
+// جوه نص pulled_by. دلوقتي pulled=true بيتسجل بس لما النوع "pulled" فعلاً؛ أي نوع تاني
+// (مش موجود / جزء / سبب آخر) بيسجّل pull_result + pull_note كحالة منفصلة تمامًا، وبيفضل
+// pulled=false لحد ما يترفع فعلاً — عشان الحالة الحقيقية توصل صح لمشرف البيع ومشرف التنسيق.
 async function submitMktRet(type){
   if(!_mktRetModalIds.length || !currentRep) return;
   const repName = currentRep.name;
-  let note = '';
-  if(type === 'pulled')   note = `تم الرفع — ${repName}`;
-  else if(type === 'missing') note = `مش موجود — ${repName}`;
-  else if(type === 'partial') note = `تم رفع جزء — ${repName}`;
-  else {
-    const custom = document.getElementById('mktret-custom-note')?.value?.trim();
-    if(!custom){ showToast('❗ اكتب سبباً أو ملاحظة'); return; }
-    note = `${custom} — ${repName}`;
+  const now = new Date().toISOString();
+  let payload;
+
+  if(type === 'pulled'){
+    payload = { pulled: true, pulled_at: now, pulled_by: repName, pull_result: 'pulled', pull_note: null };
+  } else {
+    let pullNote = '';
+    if(type === 'missing') pullNote = 'مش موجود في الفرع';
+    else if(type === 'partial') pullNote = 'تم رفع جزء فقط';
+    else {
+      const custom = document.getElementById('mktret-custom-note')?.value?.trim();
+      if(!custom){ showToast('❗ اكتب سبباً أو ملاحظة'); return; }
+      pullNote = custom;
+    }
+    payload = {
+      pulled: false, pull_result: type === 'missing' ? 'not_found' : type === 'partial' ? 'partial' : 'other',
+      pull_note: pullNote, pulled_by: repName, pulled_at: now,
+      // أي محاولة جديدة من المندوب لازم تصفّر أي تصعيد/تأكيد قديم عشان الحالة تبقى واضحة من جديد
+      escalated_to_coord: false, escalated_by: null, escalated_at: null
+    };
   }
 
   // PATCH كل records الفرع
-  const now = new Date().toISOString();
   try{
     await Promise.all(_mktRetModalIds.map(id =>
       fetch(`${SUPABASE_URL}/rest/v1/returns?id=eq.${id}`, {
         method: 'PATCH',
         headers: {...SB_HEADERS, 'Content-Type':'application/json', 'Prefer':'return=minimal'},
-        body: JSON.stringify({pulled: true, pulled_at: now, pulled_by: note})
+        body: JSON.stringify(payload)
       })
     ));
     closeMktRetModal();
-    showToast(type === 'pulled' ? '✅ تم تسجيل رفع المرتجع' : type === 'missing' ? '📋 تم إبلاغ المشرف' : '📝 تم إرسال ملاحظتك');
+    showToast(type === 'pulled' ? '✅ تم تسجيل رفع المرتجع' : type === 'missing' ? '📋 تم إبلاغ المشرف إنه مش موجود' : '📝 تم إرسال ملاحظتك');
     setTimeout(() => loadMktRetTab(), 400);
   }catch(e){
     showToast('❌ حدث خطأ، حاول مرة أخرى');
