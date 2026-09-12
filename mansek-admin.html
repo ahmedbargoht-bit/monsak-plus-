@@ -32864,6 +32864,8 @@ function sinvPDF(id){
 // أو select عادي زي sinv بالظبط) ══
 // ══════════════════════════════════════════════════════════════
 let _stkcmpMode = 'branch';
+let _stkcmpGrpSupervisors = {};
+let _stkcmpContribCoordinators = [];
 let _stkcmpRepNamesCache = null;
 let _stkcmpClientBranches = {};
 let _stkcmpDeliveries = [];
@@ -32871,7 +32873,19 @@ let _stkcmpProducts = [];
 
 async function stkcmpInitFilters(){
   stkcmpBuildGrpOptions();
-  await Promise.all([stkcmpBuildRepOptions(), stkcmpLoadClientFilter()]);
+  await Promise.all([stkcmpBuildRepOptions(), stkcmpLoadClientFilter(), stkcmpLoadGrpSupervisors()]);
+}
+
+// ── مشرف كل مجموعة (لهيدر تصدير PDF/Excel) — نفس جدول grp_supervisors المستخدم
+// في باقي شاشات النظام (شارة "المشرف المسؤول" في خريطة الموقع الحالي...إلخ) ──
+async function stkcmpLoadGrpSupervisors(){
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/grp_supervisors?select=grp,supervisor`,{headers:H});
+    const d = r.ok ? await r.json() : [];
+    _stkcmpGrpSupervisors = {};
+    (Array.isArray(d)?d:[]).forEach(x=>{ if(x.grp) _stkcmpGrpSupervisors[x.grp] = x.supervisor||''; });
+  }catch(e){ _stkcmpGrpSupervisors = {}; }
 }
 
 // ── فلتر المجموعة (اختيار متعدد) — بيتبني من GROUPS (متزامنة مع جدول groups في
@@ -33182,7 +33196,7 @@ async function stkcmpLoad(){
   if(to)   delUrl += `&delivery_date=lte.${to}`;
   if(branch) delUrl += `&branch_name=eq.${encodeURIComponent(branch)}`;
 
-  let prodUrl = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,shelf_qty,stock_qty,created_at&order=created_at.desc`;
+  let prodUrl = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,shelf_qty,stock_qty,created_at,name&order=created_at.desc`;
   if(grps.length) prodUrl += `&grp=in.(${grps.map(g=>encodeURIComponent(g)).join(',')})`;
   if(from) prodUrl += `&created_at=gte.${from}T00:00:00`;
   if(to)   prodUrl += `&created_at=lte.${to}T23:59:59`;
@@ -33232,13 +33246,18 @@ function stkcmpComputeRows(){
     if(!cur || (row.created_at||'') > (cur.created_at||'')) latestByBranchItem[key] = row;
   });
   const coordByBranch = {};
+  const coordNamesSet = new Set();
   Object.entries(latestByBranchItem).forEach(([key,row])=>{
     const branch = key.slice(0, key.lastIndexOf('||'));
     if(!coordByBranch[branch]) coordByBranch[branch] = { shelf:0, stock:0, lastDate:'' };
     coordByBranch[branch].shelf += Number(row.shelf_qty)||0;
     coordByBranch[branch].stock += Number(row.stock_qty)||0;
     if((row.created_at||'') > coordByBranch[branch].lastDate) coordByBranch[branch].lastDate = row.created_at||'';
+    if(row.name) coordNamesSet.add(row.name);
   });
+  // أسماء المنسقين اللي فعليًا سجّلوا آخر تقرير رصيد اتحسب لأي فرع ظاهر في النتيجة الحالية —
+  // بتتخزن في متغيّر عام عشان تُستخدم في هيدر تصدير PDF/Excel (مش عمود في الجدول)
+  _stkcmpContribCoordinators = [...coordNamesSet].sort((a,b)=>a.localeCompare(b,'ar'));
 
   const branchNames = new Set([...Object.keys(delivered), ...Object.keys(coordByBranch)]);
   const rows = [...branchNames].map(branch=>{
@@ -33376,13 +33395,17 @@ function stkcmpFilterInfo(){
   const from = document.getElementById('stkcmp-from')?.value || '';
   const to   = document.getElementById('stkcmp-to')?.value || '';
   const itemsSel = [...stkcmpGetSelectedItemsSet()];
+  const supNames = [...new Set(grpsSel.map(g=>_stkcmpGrpSupervisors[g]).filter(Boolean))];
+  const coordNames = _stkcmpContribCoordinators||[];
   return [
     repFilter!=='كل المناديب' ? `المندوب: ${repFilter}` : '',
     grpsSel.length ? `المجموعة: ${grpFilter}` : '',
+    supNames.length ? `مشرف المجموعة: ${supNames.join('، ')}` : '',
     typeFilter!=='كل الأنواع' ? `النوع: ${typeFilter}` : '',
     from ? `من: ${from}` : '',
     to   ? `إلى: ${to}` : '',
     itemsSel.length ? `الصنف: ${itemsSel.join('، ')}` : 'كل الأصناف',
+    coordNames.length ? `المنسقين: ${coordNames.join('، ')}` : '',
   ].filter(Boolean).join('  |  ');
 }
 
