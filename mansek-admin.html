@@ -6246,6 +6246,20 @@ h2,h3{color:#2C1F0A}
                   <div id="stkcmp-rep-options"></div>
                 </div>
               </div>
+              <div style="position:relative">
+                <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">المجموعة</label>
+                <button type="button" id="stkcmp-grp-btn" onclick="stkcmpToggleGrpDropdown(event)"
+                  style="width:100%;box-sizing:border-box;text-align:right;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;background:#fff;font-family:Cairo,sans-serif;font-size:12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:6px">
+                  <span id="stkcmp-grp-label">كل المجموعات</span>
+                  <i class="ti ti-chevron-down" style="font-size:14px;color:#888"></i>
+                </button>
+                <div id="stkcmp-grp-dropdown" style="display:none;position:absolute;top:100%;right:0;left:0;background:#fff;border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.18);z-index:60;padding:6px;margin-top:4px;max-height:280px;overflow-y:auto;min-width:220px">
+                  <label style="display:flex;align-items:center;gap:6px;padding:6px 6px;font-size:12px;cursor:pointer;border-bottom:1px solid var(--border);margin-bottom:4px;font-weight:700">
+                    <input type="checkbox" id="stkcmp-grp-all" checked onchange="stkcmpGrpAllChange()"/> كل المجموعات
+                  </label>
+                  <div id="stkcmp-grp-options"></div>
+                </div>
+              </div>
               <div>
                 <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">نوع الفاتورة</label>
                 <select id="stkcmp-type" style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
@@ -32856,7 +32870,62 @@ let _stkcmpDeliveries = [];
 let _stkcmpProducts = [];
 
 async function stkcmpInitFilters(){
+  stkcmpBuildGrpOptions();
   await Promise.all([stkcmpBuildRepOptions(), stkcmpLoadClientFilter()]);
+}
+
+// ── فلتر المجموعة (اختيار متعدد) — بيتبني من GROUPS (متزامنة مع جدول groups في
+// Supabase عند تسجيل الدخول)، فأي مجموعة جديدة تتضاف تظهر هنا تلقائي ──
+function stkcmpBuildGrpOptions(){
+  const box = document.getElementById('stkcmp-grp-options');
+  if(!box) return;
+  const keys = Object.keys(GROUPS||{});
+  box.innerHTML = keys.map(key=>{
+    const label = GROUPS[key]?.label || key;
+    return `<label class="stkcmp-grp-opt" style="display:flex;align-items:center;gap:6px;padding:5px 6px;font-size:12px;cursor:pointer;white-space:nowrap">
+      <input type="checkbox" class="stkcmp-grp-cb" value="${key}" onchange="stkcmpGrpCbChange()"/> ${label}
+    </label>`;
+  }).join('') || '<div style="padding:10px;text-align:center;color:#aaa;font-size:11px">لا توجد مجموعات</div>';
+}
+function stkcmpToggleGrpDropdown(e){
+  if(e) e.stopPropagation();
+  const dd = document.getElementById('stkcmp-grp-dropdown');
+  if(!dd) return;
+  const opening = dd.style.display==='none' || !dd.style.display;
+  if(opening && !document.getElementById('stkcmp-grp-options')?.childElementCount) stkcmpBuildGrpOptions();
+  dd.style.display = opening ? 'block' : 'none';
+}
+document.addEventListener('click', (e)=>{
+  const dd  = document.getElementById('stkcmp-grp-dropdown');
+  const btn = document.getElementById('stkcmp-grp-btn');
+  if(dd && dd.style.display==='block' && !dd.contains(e.target) && e.target!==btn && !btn?.contains(e.target)){
+    dd.style.display = 'none';
+  }
+});
+function stkcmpGrpAllChange(){
+  document.querySelectorAll('.stkcmp-grp-cb').forEach(c=>c.checked=false);
+  const all = document.getElementById('stkcmp-grp-all');
+  if(all) all.checked = true;
+  stkcmpUpdateGrpLabel();
+  stkcmpLoad();
+}
+function stkcmpGrpCbChange(){
+  const any = [...document.querySelectorAll('.stkcmp-grp-cb')].some(c=>c.checked);
+  const all = document.getElementById('stkcmp-grp-all');
+  if(all) all.checked = !any;
+  stkcmpUpdateGrpLabel();
+  stkcmpLoad();
+}
+function stkcmpGetSelectedGrps(){
+  return [...document.querySelectorAll('.stkcmp-grp-cb:checked')].map(c=>c.value);
+}
+function stkcmpUpdateGrpLabel(){
+  const sel = stkcmpGetSelectedGrps();
+  const label = document.getElementById('stkcmp-grp-label');
+  if(!label) return;
+  if(!sel.length) label.textContent = 'كل المجموعات';
+  else if(sel.length===1) label.textContent = GROUPS[sel[0]]?.label || sel[0];
+  else label.textContent = `${sel.length} مجموعات محددة`;
 }
 
 // ── فلتر المندوب (اختيار متعدد) ──
@@ -33053,21 +33122,24 @@ async function stkcmpLoad(){
   if(wrap) wrap.innerHTML = '<div style="padding:30px;text-align:center;color:#888">جاري التحميل...</div>';
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
   const reps   = stkcmpGetSelectedReps();
+  const grps   = stkcmpGetSelectedGrps();
   const type   = document.getElementById('stkcmp-type')?.value||'';
   const from   = document.getElementById('stkcmp-from')?.value||'';
   const to     = document.getElementById('stkcmp-to')?.value||'';
   const client = document.getElementById('stkcmp-client')?.value||'';
   const branch = document.getElementById('stkcmp-branch')?.value||'';
 
-  let delUrl = `${SUPABASE_URL}/rest/v1/sales_deliveries?select=branch_name,client_name,rep_name,items,delivery_date&deleted_at=is.null`;
+  let delUrl = `${SUPABASE_URL}/rest/v1/sales_deliveries?select=branch_name,client_name,rep_name,items,delivery_date,grp&deleted_at=is.null`;
   if(reps.length===1) delUrl += `&rep_name=eq.${encodeURIComponent(reps[0])}`;
   else if(reps.length>1) delUrl += `&rep_name=in.(${reps.map(r=>`"${r.replace(/"/g,'\\"')}"`).join(',')})`;
+  if(grps.length) delUrl += `&grp=in.(${grps.map(g=>encodeURIComponent(g)).join(',')})`;
   if(type) delUrl += `&invoice_type=eq.${type}`;
   if(from) delUrl += `&delivery_date=gte.${from}`;
   if(to)   delUrl += `&delivery_date=lte.${to}`;
   if(branch) delUrl += `&branch_name=eq.${encodeURIComponent(branch)}`;
 
   let prodUrl = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,shelf_qty,stock_qty,created_at&order=created_at.desc`;
+  if(grps.length) prodUrl += `&grp=in.(${grps.map(g=>encodeURIComponent(g)).join(',')})`;
   if(from) prodUrl += `&created_at=gte.${from}T00:00:00`;
   if(to)   prodUrl += `&created_at=lte.${to}T23:59:59`;
   if(branch) prodUrl += `&branch=eq.${encodeURIComponent(branch)}`;
@@ -33252,12 +33324,15 @@ function stkcmpRenderTable(display){
 function stkcmpFilterInfo(){
   const repsSel = stkcmpGetSelectedReps();
   const repFilter = !repsSel.length ? 'كل المناديب' : repsSel.length===1 ? repsSel[0] : repsSel.join('، ');
+  const grpsSel = stkcmpGetSelectedGrps();
+  const grpFilter = grpsSel.map(g=>GROUPS[g]?.label||g).join('، ');
   const typeFilter = document.getElementById('stkcmp-type')?.selectedOptions[0]?.text || 'كل الأنواع';
   const from = document.getElementById('stkcmp-from')?.value || '';
   const to   = document.getElementById('stkcmp-to')?.value || '';
   const itemsSel = [...stkcmpGetSelectedItemsSet()];
   return [
     repFilter!=='كل المناديب' ? `المندوب: ${repFilter}` : '',
+    grpsSel.length ? `المجموعة: ${grpFilter}` : '',
     typeFilter!=='كل الأنواع' ? `النوع: ${typeFilter}` : '',
     from ? `من: ${from}` : '',
     to   ? `إلى: ${to}` : '',
