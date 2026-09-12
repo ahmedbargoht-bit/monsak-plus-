@@ -3638,7 +3638,7 @@ h2,h3{color:#2C1F0A}
                   <th style="width:32px"><input type="checkbox" id="ret-hdr-cb" onchange="retToggleAll(this)" style="accent-color:#C8A96E;width:14px;height:14px"></th>
                   <th>#</th><th>المنسق</th><th>خط السير</th><th>المجموعة</th>
                   <th>العميل/الفرع</th><th>الصنف</th><th>الكمية</th>
-                  <th>سبب الارتجاع</th><th>ملاحظة</th><th>التاريخ</th>
+                  <th>سبب الارتجاع</th><th>ملاحظة</th><th>الحالة</th><th>التاريخ</th>
                 </tr>
               </thead>
               <tbody id="admin-ret-tbody"></tbody>
@@ -11594,7 +11594,7 @@ async function adminLoadReturns(){
   const from   = document.getElementById('admin-ret-from')?.value||'';
   const to     = document.getElementById('admin-ret-to')?.value||'';
   if(!tbody) return;
-  tbody.innerHTML='<tr><td colspan="11" style="text-align:center;padding:1rem">جاري التحميل...</td></tr>';
+  tbody.innerHTML='<tr><td colspan="12" style="text-align:center;padding:1rem">جاري التحميل...</td></tr>';
 
   try{
     let url=`${SUPABASE_URL}/rest/v1/returns?order=created_at.desc&limit=2000`;
@@ -11632,13 +11632,28 @@ async function adminLoadReturns(){
       <div class="stat-card green"><div class="stat-n">${uniqSnf}</div><div class="stat-l">أصناف مختلفة</div></div>`;
 
     if(!data.length){
-      tbody.innerHTML='<tr><td colspan="11" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد مرتجعات</td></tr>';
+      tbody.innerHTML='<tr><td colspan="12" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد مرتجعات</td></tr>';
       const bar=document.getElementById('ret-select-bar');
       if(bar) bar.style.display='none';
       return;
     }
 
     const REASON_BG={'قرب انتهاء الصلاحية':'#FFF8F0','تلف في التغليف':'#FFF8F0','تلف في المنتج':'#FFF5F5','منتهي الصلاحية':'#FFF5F5','تغير شكل التمرة':'#FFFDF0','العبوة غير صالحة':'#FFF8F0'};
+
+    // ✅ عمود الحالة: يعكس آخر إجراء حصل على المرتجع (رفع/مش موجود/جزء/سبب آخر + تحويل +
+    // تأكيد المنسق) — نفس منطق تاب "مرتجعات المبيعات" فوق، هنا لكل سطر خام لوحده.
+    const retStatusCell = (r)=>{
+      if(r.pulled){
+        const ack = r.coord_ack ? `<div style="font-size:9px;color:#1565C0;margin-top:2px">☑️ أكدها المنسق</div>` : '';
+        return `<span class="badge" style="background:#E8F5E9;color:#1A7A4A;font-size:10px">✅ تم الرفع</span>${ack}`;
+      }
+      if(r.pull_result && r.pull_result!=='pulled'){
+        const lbl = r.pull_result==='not_found' ? 'مش موجود' : r.pull_result==='partial' ? 'جزء فقط' : 'سبب آخر';
+        const stage = r.escalated_to_coord ? '🔁 عند مشرف التنسيق' : 'عند مشرف البيع';
+        return `<span class="badge" style="background:#FFF3E0;color:#E65100;font-size:10px">⚠️ ${lbl}</span><div style="font-size:9px;color:#888;margin-top:2px">${stage}</div>`;
+      }
+      return `<span class="badge" style="background:#FFEBEE;color:#B91C1C;font-size:10px">⏳ لم يُرفع</span>`;
+    };
 
     tbody.innerHTML=data.map((r,i)=>{
       const dt=r.created_at?new Date(r.created_at).toLocaleString('en-US',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}):'';
@@ -11654,6 +11669,7 @@ async function adminLoadReturns(){
         <td><b style="color:#C0392B">${r.qty||0}</b></td>
         <td><span class="badge b-red" style="font-size:10px">${r.reason||'—'}</span></td>
         <td style="font-size:11px">${r.note||'—'}</td>
+        <td>${retStatusCell(r)}</td>
         <td style="font-size:11px">${dt}</td>
       </tr>`;
     }).join('');
@@ -26118,6 +26134,16 @@ async function sretLoad(){
       // احتفظ بأحدث حالة رفع وتأكيد
       if(r.pulled)    { dedupMap[key].pulled=true; dedupMap[key].pulled_by=r.pulled_by; dedupMap[key].pulled_at=r.pulled_at; }
       if(r.confirmed) { dedupMap[key].confirmed=true; dedupMap[key].confirmed_by=r.confirmed_by; dedupMap[key].confirmed_at=r.confirmed_at; }
+      // ✅ نفس المنطق لحالات المرتجع الجديدة (مش موجود/جزء/سبب آخر + التصعيد + تأكيد المنسق)
+      if(r.pull_result && r.pull_result!=='pulled' && !dedupMap[key].pull_result){
+        dedupMap[key].pull_result = r.pull_result; dedupMap[key].pull_note = r.pull_note;
+      }
+      if(r.escalated_to_coord && !dedupMap[key].escalated_to_coord){
+        dedupMap[key].escalated_to_coord=true; dedupMap[key].escalated_by=r.escalated_by; dedupMap[key].escalated_at=r.escalated_at;
+      }
+      if(r.coord_ack && !dedupMap[key].coord_ack){
+        dedupMap[key].coord_ack=true; dedupMap[key].coord_ack_by=r.coord_ack_by; dedupMap[key].coord_ack_at=r.coord_ack_at;
+      }
     }
   });
   const dedupData = Object.values(dedupMap);
@@ -26154,26 +26180,43 @@ async function sretLoad(){
     const rdRow  = ADMIN_ROUTES_DATA.find(x=>x.branch_name===r.branch);
     const routeN = rdRow?.route || r.route || '—';
 
+    // ✅ حالة "فيها مشكلة" (مش موجود بالفرع / جزء بس / سبب آخر) — من غير ما يكون اترفع فعلاً
+    const hasIssue = !isPulled && r.pull_result && r.pull_result!=='pulled';
+    const issueLabel = r.pull_result==='not_found' ? 'مش موجود في الفرع'
+                      : r.pull_result==='partial'   ? 'تم رفع جزء فقط'
+                      : 'سبب آخر';
+    const issueStage = r.escalated_to_coord
+      ? `<div style="font-size:9px;color:#F57F17;font-weight:700;margin-top:2px">🔁 محوّلة لمشرف التنسيق${r.escalated_by?` — ${r.escalated_by}`:''}</div>`
+      : `<div style="font-size:9px;color:#888;margin-top:2px">عند مشرف البيع</div>`;
+
     // حالة الرفع
     const pullStatus = isPulled
       ? `<div style="font-size:10px;color:#065F46;font-weight:700">✅ تم الرفع</div>
          <div style="font-size:9px;color:#888">${r.pulled_by||'—'}</div>`
-      : `<span style="background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">⚠️ لم يُرفع${isLate?` (${days}ي)`:''}</span>`;
+      : hasIssue
+        ? `<span style="background:#FFF3E0;color:#E65100;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">⚠️ ${issueLabel}</span>
+           ${r.pull_note?`<div style="font-size:9px;color:#888;margin-top:2px">"${r.pull_note}"</div>`:''}
+           ${issueStage}`
+        : `<span style="background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">⚠️ لم يُرفع${isLate?` (${days}ي)`:''}</span>`;
 
     // تاريخ الرفع
     const pullDate = r.pulled_at
       ? fmtDate(r.pulled_at)
       : '—';
 
-    // تأكيد السحب
+    // تأكيد السحب (تأكيد المشرف اليدوي هنا + عرض تأكيد المنسق نفسه لو حصل من تطبيقه)
+    const coordAckLine = r.coord_ack
+      ? `<div style="font-size:9px;color:#1565C0;font-weight:700;margin-top:2px">☑️ أكدها المنسق: ${r.coord_ack_by||'—'}</div>`
+      : '';
     const confirmCell = isConfirmed
       ? `<div style="font-size:10px;color:#065F46;font-weight:700">✅ تم التأكيد من خلال المشرف ${r.confirmed_by||'—'}</div>
-         <div style="font-size:9px;color:#888">${r.confirmed_at?new Date(r.confirmed_at).toLocaleDateString('en-GB',{day:'numeric',month:'short'}):'—'}</div>`
+         <div style="font-size:9px;color:#888">${r.confirmed_at?new Date(r.confirmed_at).toLocaleDateString('en-GB',{day:'numeric',month:'short'}):'—'}</div>
+         ${coordAckLine}`
       : isPulled
         ? `<button onclick="sretConfirmPull(${r.id},'${(r.branch||'').replace(/'/g,"\\'")}' )"
             style="background:#1A7A4A;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-family:Cairo,sans-serif;font-weight:700">
             ✅ تأكيد الاستلام
-          </button>`
+          </button>${coordAckLine}`
         : `<span style="color:#ccc;font-size:11px">—</span>`;
 
     const dt = r.created_at ? fmtDate(r.created_at) : '—';
