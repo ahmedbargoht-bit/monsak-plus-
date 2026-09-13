@@ -1643,6 +1643,9 @@ h2,h3{color:#2C1F0A}
                 <!-- بتتبنى وتتحدث من renderPrGrpCheckboxes() من GROUPS الفعلية (شاملة أي مجموعة جديدة) -->
               </div>
             </div>
+            <select id="pr-branch" onchange="loadProducts()" style="min-width:160px">
+              <option value="">كل الفروع</option>
+            </select>
             <select id="pr-fea" onchange="loadProducts()">
               <option value="all">كل الفئات</option>
               <option value="الطحان">الطحان</option>
@@ -8798,6 +8801,7 @@ async function createGroup(){
       refreshAllStaticGroupSelects();
       renderAttGrpCheckboxes();
       renderPrGrpCheckboxes();
+      prBuildBranchOptions();
     } else {
       const err=await res.text();
       if(err.includes('duplicate')||err.includes('unique')){
@@ -13584,6 +13588,7 @@ async function doLogin(){
   refreshAllStaticGroupSelects(); // يضيف أي مجموعة جديدة (زي delta) لكل قوائم فلتر المجموعات الثابتة في الصفحة
   renderAttGrpCheckboxes(); // نفس الفكرة لكن لفلتر تشيك بوكسات الحضور والانصراف تحديداً
   renderPrGrpCheckboxes(); // ونفس الفكرة لفلتر تشيك بوكسات تاب الأصناف
+  prBuildBranchOptions(); // بناء قائمة فروع تاب الأصناف لأول مرة بعد الدخول
   loadAdminRoutesData(); // تحميل مسبق لبيانات الفلاتر
   setupApp();
   startRealtimeAdmin();
@@ -13830,7 +13835,7 @@ function renderCurrentPanel(){
     case 'hyper-shelf': hsLoad(); break;
     case 'location': renderLocations(); break;
     case 'visits': loadVisits(); break;
-    case 'products': loadProducts(); break;
+    case 'products': prBuildBranchOptions(); loadProducts(); break;
     case 'missing': loadMissing(); break;
     case 'returns': adminLoadReturns(); break;
     case 'attendance': loadAttendance(); break;
@@ -18000,16 +18005,36 @@ function prGrpAllChange(){
   document.querySelectorAll('.pr-grp-cb').forEach(c=>c.checked=false);
   document.getElementById('pr-grp-all').checked = true;
   prUpdateGrpLabel();
+  prBuildBranchOptions();
   loadProducts();
 }
 function prGrpCbChange(){
   const any = [...document.querySelectorAll('.pr-grp-cb')].some(c=>c.checked);
   document.getElementById('pr-grp-all').checked = !any;
   prUpdateGrpLabel();
+  prBuildBranchOptions();
   loadProducts();
 }
 function prGetSelectedGrps(){
   return [...document.querySelectorAll('.pr-grp-cb:checked')].map(c=>c.value);
+}
+// ── دروب داون "الفرع" — بيتضيّق تلقائيًا على فروع المجموعة/المجموعات المختارة فوق ──
+// (لو مفيش مجموعة محددة، بيعرض فروع كل المجموعات المسموح للمستخدم يشوفها)
+function prBuildBranchOptions(){
+  const sel = document.getElementById('pr-branch');
+  if(!sel) return;
+  const prevVal = sel.value;
+  const grps = prGetSelectedGrps();
+  const myGroupsP = CU.level==='gm' ? Object.keys(GROUPS) : CU.groups;
+  const effectiveGrps = grps.length ? grps : myGroupsP;
+  const branches = [...new Set(
+    (cachedData.products||[])
+      .filter(p=>effectiveGrps.includes(p.grp||p.group||''))
+      .map(p=>(p.branch||'').trim())
+      .filter(Boolean)
+  )].sort((a,b)=>a.localeCompare(b,'ar'));
+  sel.innerHTML = '<option value="">كل الفروع</option>' + branches.map(b=>`<option value="${b.replace(/"/g,'&quot;')}">${b}</option>`).join('');
+  if(prevVal && branches.includes(prevVal)) sel.value = prevVal;
 }
 function prUpdateGrpLabel(){
   const sel   = prGetSelectedGrps();
@@ -18087,6 +18112,7 @@ function prUpdateItemLabel(){
 
 function loadProducts(){
   const grps=prGetSelectedGrps();
+  const branch=document.getElementById('pr-branch')?.value||'';
   const fea=document.getElementById('pr-fea').value;
   const itemsSet=prGetSelectedItemsSet();
   const exp=document.getElementById('pr-exp').value;
@@ -18097,6 +18123,7 @@ function loadProducts(){
   if(dateFrom) data=data.filter(p=>p.created_at && p.created_at>=dateFrom);
   if(dateTo)   data=data.filter(p=>p.created_at && p.created_at<=dateTo+'T23:59:59');
   if(grps.length) data=data.filter(p=>grps.includes(p.grp||p.group));
+  if(branch) data=data.filter(p=>(p.branch||'').trim()===branch);
   if(fea!=='all') data=data.filter(p=>p.fea===fea);
   if(itemsSet.size) data=data.filter(p=>itemsSet.has(p.snf||''));
   if(exp!=='all'){
@@ -18170,6 +18197,7 @@ function productsExportExcel(){
 
   const grpSelArr=prGetSelectedGrps();
   const grpSelTxt = !grpSelArr.length ? 'كل المجموعات' : grpSelArr.map(g=>GROUPS[g]?.label||g).join('، ');
+  const branchSelTxt = document.getElementById('pr-branch')?.value || '';
   const itemSelArr=[...prGetSelectedItemsSet()];
   const itemSelTxt = !itemSelArr.length ? 'كل الأصناف' : itemSelArr.length===1 ? itemSelArr[0] : `${itemSelArr.length} أصناف محددة`;
   const dateFrom=document.getElementById('pr-date-from')?.value||'';
@@ -18190,7 +18218,7 @@ function productsExportExcel(){
   const aoa=[
     ['الطحان جولدن دايتس — Al Tahhan Golden Dates',...Array(11).fill('')],
     ['الأصناف — سجل الأصناف وحالة الصلاحية (آخر رصيد لكل فرع/صنف)',...Array(11).fill('')],
-    [`تاريخ التصدير: ${now}  |  المجموعة: ${grpSelTxt}  |  الصنف: ${itemSelTxt}  |  الفترة: ${periodTxt}  |  إجمالي: ${data.length}`,...Array(11).fill('')],
+    [`تاريخ التصدير: ${now}  |  المجموعة: ${grpSelTxt}${branchSelTxt?`  |  الفرع: ${branchSelTxt}`:''}  |  الصنف: ${itemSelTxt}  |  الفترة: ${periodTxt}  |  إجمالي: ${data.length}`,...Array(11).fill('')],
     Array(12).fill(''),
     COLS
   ];
@@ -18252,6 +18280,9 @@ function productsExportPDF(){
   const periodTxt = (dateFrom||dateTo) ? `${dateFrom||'...'} → ${dateTo||'...'}` : 'كل الفترات';
   const itemSelArr=[...prGetSelectedItemsSet()];
   const itemSelTxt = !itemSelArr.length ? 'كل الأصناف' : itemSelArr.length===1 ? itemSelArr[0] : `${itemSelArr.length} أصناف محددة`;
+  const grpSelArr=prGetSelectedGrps();
+  const grpSelTxt = !grpSelArr.length ? 'كل المجموعات' : grpSelArr.map(g=>GROUPS[g]?.label||g).join('، ');
+  const branchSelTxt = document.getElementById('pr-branch')?.value || '';
 
   const groups={};
   data.forEach(p=>{
@@ -18317,7 +18348,7 @@ function productsExportPDF(){
   </style></head><body>
   <div class="hdr-co">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
   <div class="hdr-title">الأصناف — سجل الأصناف وحالة الصلاحية (آخر رصيد لكل فرع/صنف)</div>
-  <div class="hdr-info">تاريخ التصدير: ${now} &nbsp;|&nbsp; الصنف: ${itemSelTxt} &nbsp;|&nbsp; الفترة: ${periodTxt} &nbsp;|&nbsp; إجمالي: ${data.length} صنف</div>
+  <div class="hdr-info">تاريخ التصدير: ${now} &nbsp;|&nbsp; المجموعة: ${grpSelTxt}${branchSelTxt?` &nbsp;|&nbsp; الفرع: ${branchSelTxt}`:''} &nbsp;|&nbsp; الصنف: ${itemSelTxt} &nbsp;|&nbsp; الفترة: ${periodTxt} &nbsp;|&nbsp; إجمالي: ${data.length} صنف</div>
   ${tablesHTML}
   <div class="footer">Al Tahhan Golden Dates © 2026 — نظام إدارة التنسيق الميداني</div>
   </body></html>`;
