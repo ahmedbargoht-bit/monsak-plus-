@@ -2828,8 +2828,10 @@ function showTab(tab){
 
 // ── أهداف خاصة (تاب المنسق) ──────────────────────────────────────
 // بتجيب من special_targets أي هدف متعين للمنسق ده في فرعه الحالي وتاريخه (من-إلى) يشمل النهاردة،
-// وبتعرض لكل صنف فيه: خانة تسجيل الرصيد الافتتاحي (أول الشيفت) ثم خانة تسجيل الكمية المباعة فعليًا
-// (آخر الشيفت) — كل تسجيل بيتبعت فورًا لـ special_target_records عشان يوصل لحظيًا للوحة التحكم.
+// وبتعرض لكل صنف فيه: خانة تسجيل الرصيد الافتتاحي (أول الشيفت) ثم خانة تسجيل الرصيد الختامي
+// (آخر الشيفت) — والكمية المباعة بتتحسب تلقائيًا (افتتاحي - ختامي) مش خانة إدخال يدوي، عشان
+// الاعتماد على عدّ الرصيد الفعلي أدق من تقدير المنسق لعدد القطع اللي اتباعت. كل تسجيل بيتبعت
+// فورًا لـ special_target_records عشان يوصل لحظيًا للوحة التحكم ومشرف التنسيق.
 async function sptLoad(){
   const branch = document.getElementById('f-branch')?.value;
   const listEl = document.getElementById('spt-list');
@@ -2870,7 +2872,7 @@ async function sptLoad(){
     if(!t.received_at){ pendingCount++; return; }
     (t.items||[]).forEach(it=>{
       const rec = records.find(r=>r.target_id===t.id && r.item_name===it.name);
-      if(!rec || rec.opening_qty==null || rec.sold_qty==null) pendingCount++;
+      if(!rec || rec.opening_qty==null || rec.closing_qty==null) pendingCount++;
     });
   });
   if(badge){ badge.textContent = pendingCount; badge.style.display = pendingCount ? '' : 'none'; }
@@ -2888,7 +2890,7 @@ async function sptLoad(){
     const rowsHtml = (t.items||[]).map(it=>{
       const rec = records.find(r=>r.target_id===t.id && r.item_name===it.name);
       const opening = (rec && rec.opening_qty!=null) ? rec.opening_qty : null;
-      const sold = (rec && rec.sold_qty!=null) ? rec.sold_qty : null;
+      const closing = (rec && rec.closing_qty!=null) ? rec.closing_qty : null;
       const safeName = it.name.replace(/'/g,"\\'").replace(/"/g,'&quot;');
       let actionHtml;
       if(opening===null){
@@ -2896,18 +2898,20 @@ async function sptLoad(){
           <input type="number" min="0" step="1" placeholder="الرصيد الافتتاحي" style="flex:1;padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12px"/>
           <button class="btn btn-sm btn-blue" onclick="sptSaveOpening(${t.id},'${safeName}',this)">تسجيل</button>
         </div>`;
-      } else if(sold===null){
+      } else if(closing===null){
         actionHtml = `<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap">
           <span style="font-size:11px;color:#1A7A4A;white-space:nowrap">✅ افتتاحي: ${opening}</span>
           <div style="display:flex;gap:6px;align-items:center;flex:1;min-width:160px">
-            <input type="number" min="0" step="1" placeholder="الكمية المباعة فعليًا" style="flex:1;padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12px"/>
-            <button class="btn btn-sm btn-blue" onclick="sptSaveSold(${t.id},'${safeName}',this)">تسجيل</button>
+            <input type="number" min="0" step="1" placeholder="الرصيد الختامي" style="flex:1;padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12px"/>
+            <button class="btn btn-sm btn-blue" onclick="sptSaveClosing(${t.id},'${safeName}',${opening},this)">تسجيل</button>
           </div>
         </div>`;
       } else {
-        actionHtml = `<div style="display:flex;gap:14px;font-size:11px">
+        const sold = opening - closing;
+        actionHtml = `<div style="display:flex;gap:14px;font-size:11px;flex-wrap:wrap">
           <span style="color:#1A7A4A">✅ افتتاحي: ${opening}</span>
-          <span style="color:#003A80">✅ مباع فعلي: ${sold}</span>
+          <span style="color:#003A80">✅ ختامي: ${closing}</span>
+          <span style="color:${sold<0?'#B71C1C':'#7B3F00'}">${sold<0?'⚠️ الختامي أكبر من الافتتاحي':'مباع: '+sold}</span>
         </div>`;
       }
       return `<div style="padding:10px;border-bottom:1px solid var(--border)">
@@ -2940,11 +2944,14 @@ function sptSaveOpening(targetId, itemName, btn){
   if(isNaN(val) || val<0){ alert('⚠️ اكتب رقم صحيح للرصيد الافتتاحي'); return; }
   sptUpsertRecord(targetId, itemName, {opening_qty: val, opening_at: new Date().toISOString()});
 }
-function sptSaveSold(targetId, itemName, btn){
+// الرصيد الختامي هو اللي المنسق بيدخله (عدّ فعلي للمتبقي)، والكمية المباعة بتتحسب تلقائيًا
+// (افتتاحي - ختامي) وبتتخزن في sold_qty عشان تفاصيل التقارير القديمة في اللوحة/المشرف تفضل شغالة.
+function sptSaveClosing(targetId, itemName, openingVal, btn){
   const input = btn.previousElementSibling;
   const val = parseFloat(input?.value);
-  if(isNaN(val) || val<0){ alert('⚠️ اكتب رقم صحيح للكمية المباعة'); return; }
-  sptUpsertRecord(targetId, itemName, {sold_qty: val, sold_at: new Date().toISOString()});
+  if(isNaN(val) || val<0){ alert('⚠️ اكتب رقم صحيح للرصيد الختامي'); return; }
+  const sold = (+openingVal||0) - val;
+  sptUpsertRecord(targetId, itemName, {closing_qty: val, closing_at: new Date().toISOString(), sold_qty: sold, sold_at: new Date().toISOString()});
 }
 async function sptUpsertRecord(targetId, itemName, patch){
   const branch = document.getElementById('f-branch')?.value;
