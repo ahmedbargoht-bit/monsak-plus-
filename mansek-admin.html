@@ -1608,11 +1608,19 @@ h2,h3{color:#2C1F0A}
                   <div id="vhm-grp-list"></div>
                 </div>
               </div>
-              <div class="fld" style="margin:0">
+              <div class="fld" style="margin:0;position:relative">
                 <label class="lbl">خط السير</label>
-                <select id="vhm-route" onchange="vhmLoad()">
-                  <option value="all">كل الخطوط</option>
-                </select>
+                <button type="button" id="vhm-route-btn" onclick="vhmToggleRouteDropdown(event)"
+                  style="width:100%;box-sizing:border-box;text-align:right;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:#fff;font-family:Cairo,sans-serif;font-size:12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:6px">
+                  <span id="vhm-route-label">كل الخطوط</span>
+                  <i class="ti ti-chevron-down" style="font-size:14px;color:#888"></i>
+                </button>
+                <div id="vhm-route-dropdown" style="display:none;position:absolute;top:100%;right:0;left:0;background:#fff;border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.18);z-index:60;padding:6px;margin-top:4px;max-height:280px;overflow-y:auto">
+                  <label style="display:flex;align-items:center;gap:6px;padding:6px 6px;font-size:12px;cursor:pointer;border-bottom:1px solid var(--border);margin-bottom:4px;font-weight:700">
+                    <input type="checkbox" id="vhm-route-all" checked onchange="vhmRouteAllChange()"/> كل الخطوط
+                  </label>
+                  <div id="vhm-route-list"></div>
+                </div>
               </div>
               <div class="fld" style="margin:0">
                 <label class="lbl">عرض حسب</label>
@@ -35450,27 +35458,71 @@ function vhmUpdateGrpLabel(){
   else label.textContent = `${sel.length} مناطق محددة`;
 }
 
-// ── دروب داون خط السير — بيتفلتر تلقائي حسب المنطقة/المناطق المختارة، من جدول الفروع المحمّل أصلاً ──
+// ── دروب داون خط السير — مربع اختيارات متعدد زي المنطقة بالظبط، بيتفلتر تلقائي حسب
+// المنطقة/المناطق المختارة، من جدول الفروع المحمّل أصلاً ──
 function vhmBuildRouteOptions(){
-  const sel = document.getElementById('vhm-route');
-  if(!sel) return;
-  const prevVal = sel.value;
+  const box = document.getElementById('vhm-route-list');
+  if(!box) return;
+  const prevChecked = new Set(vhmGetSelectedRoutes());
   const grps = vhmGetSelectedGrps();
   const branches = cachedData.branches||[];
   const routes = [...new Set(
     branches.filter(b=>b.route && (!grps.length || grps.includes(b.grp||''))).map(b=>String(b.route).trim())
   )].filter(Boolean).sort((a,b)=>a.localeCompare(b,'ar'));
-  sel.innerHTML = '<option value="all">كل الخطوط</option>' + routes.map(r=>`<option value="${r.replace(/"/g,'&quot;')}">${r}</option>`).join('');
-  sel.value = (prevVal && routes.includes(prevVal)) ? prevVal : 'all';
+  box.innerHTML = routes.map(r=>{
+    const checked = prevChecked.has(r) ? 'checked' : '';
+    const esc = r.replace(/"/g,'&quot;');
+    return `<label style="display:flex;align-items:center;gap:6px;padding:5px 6px;font-size:12px;cursor:pointer"><input type="checkbox" class="vhm-route-cb" value="${esc}" ${checked} onchange="vhmRouteCbChange()"/> ${r}</label>`;
+  }).join('');
+  const routeSet = new Set(routes);
+  const stillValid = [...prevChecked].some(r=>routeSet.has(r));
+  document.getElementById('vhm-route-all').checked = !stillValid;
+  vhmUpdateRouteLabel();
+}
+function vhmToggleRouteDropdown(e){
+  if(e) e.stopPropagation();
+  const dd = document.getElementById('vhm-route-dropdown');
+  if(!dd) return;
+  const opening = dd.style.display==='none';
+  dd.style.display = opening ? 'block' : 'none';
+  if(opening) vhmBuildRouteOptions();
+}
+document.addEventListener('click', (e)=>{
+  const dd  = document.getElementById('vhm-route-dropdown');
+  const btn = document.getElementById('vhm-route-btn');
+  if(dd && dd.style.display==='block' && !dd.contains(e.target) && e.target!==btn && !btn?.contains(e.target)){
+    dd.style.display = 'none';
+  }
+});
+function vhmRouteAllChange(){
+  document.querySelectorAll('.vhm-route-cb').forEach(c=>c.checked=false);
+  document.getElementById('vhm-route-all').checked = true;
+  vhmUpdateRouteLabel();
+}
+function vhmRouteCbChange(){
+  const any = [...document.querySelectorAll('.vhm-route-cb')].some(c=>c.checked);
+  document.getElementById('vhm-route-all').checked = !any;
+  vhmUpdateRouteLabel();
+}
+function vhmGetSelectedRoutes(){
+  return [...document.querySelectorAll('.vhm-route-cb:checked')].map(c=>c.value);
+}
+function vhmUpdateRouteLabel(){
+  const sel   = vhmGetSelectedRoutes();
+  const label = document.getElementById('vhm-route-label');
+  if(!label) return;
+  if(!sel.length) label.textContent = 'كل الخطوط';
+  else if(sel.length===1) label.textContent = sel[0];
+  else label.textContent = `${sel.length} خطوط محددة`;
 }
 
 // ── إجمالي الفروع/الخطوط/المناطق (المقام) حسب الفلاتر المختارة — بيرجع أسماء مش عدد بس،
 // عشان نقدر نعرض قائمة "لم تُزار" بالاسم في المودال، مش رقم مجرد ──
-function vhmComputeTotalList(viewBy, grps, route){
+function vhmComputeTotalList(viewBy, grps, routes){
   const branches = cachedData.branches||[];
   if(viewBy==='branch'){
     let list = branches;
-    if(route!=='all') list = list.filter(b=>String(b.route||'').trim()===route);
+    if(routes.length) list = list.filter(b=>routes.includes(String(b.route||'').trim()));
     if(grps.length) list = list.filter(b=>grps.includes(b.grp||''));
     return [...new Set(list.map(b=>(b.branch_name||'').trim()).filter(Boolean))];
   }
@@ -35489,7 +35541,7 @@ async function vhmLoad(){
   const to   = document.getElementById('vhm-to').value;
   if(!from||!to){ alert('اختر فترة زمنية'); return; }
   const grps   = vhmGetSelectedGrps();
-  const route  = document.getElementById('vhm-route').value || 'all';
+  const routes = vhmGetSelectedRoutes();
   const viewBy = document.getElementById('vhm-viewby').value || 'branch';
 
   document.getElementById('vhm-container').innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner" style="margin:0 auto 10px"></div>جاري تحميل البيانات...</div>';
@@ -35497,7 +35549,7 @@ async function vhmLoad(){
   // فلترة زيارات المنسقين المحمّلة أصلاً في cachedData (زي تاب "الزيارات" بالظبط)
   let V = (cachedData.visits||[]).filter(v=>v.date && v.date>=from && v.date<=to);
   if(grps.length) V = V.filter(v=>grps.includes(v.grp||''));
-  if(route!=='all') V = V.filter(v=>String(v.route||'').trim()===route);
+  if(routes.length) V = V.filter(v=>routes.includes(String(v.route||'').trim()));
 
   // تجميع على مستوى الفرع أولاً — ده الأساس اللي بنبني عليه تجميع خط السير/المنطقة
   const branchMap = {};
@@ -35557,7 +35609,7 @@ async function vhmLoad(){
     visitedNames = arr.map(z=>z.grp);
   }
 
-  const totalList = vhmComputeTotalList(viewBy, grps, route);
+  const totalList = vhmComputeTotalList(viewBy, grps, routes);
   const visitedSet = new Set(visitedNames);
   const visited = totalList.filter(n=>visitedSet.has(n));
   const notVisited = totalList.filter(n=>!visitedSet.has(n));
@@ -35772,7 +35824,8 @@ function vhmExportPDF(){
   const to   = document.getElementById('vhm-to').value;
   const grps = vhmGetSelectedGrps();
   const grpFilter = grps.length ? grps.map(g=>hmGrpLabel(g)).join('، ') : 'كل المناطق';
-  const route = document.getElementById('vhm-route').value;
+  const routes = vhmGetSelectedRoutes();
+  const routeFilter = routes.length ? routes.join('، ') : '';
   const today = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
   const tabColor = '#D62828';
   const sorted = [...arr].sort((a,b)=>(b.visits||0)-(a.visits||0));
@@ -35844,7 +35897,7 @@ function vhmExportPDF(){
   const filterInfo = [
     `من: ${from}`, `إلى: ${to}`,
     `المنطقة: ${grpFilter}`,
-    route!=='all' ? `خط السير: ${route}` : '',
+    routeFilter ? `خط السير: ${routeFilter}` : '',
     `عرض حسب: ${viewByLabels[viewBy]}`,
   ].filter(Boolean).join('  |  ');
 
