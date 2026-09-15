@@ -4643,6 +4643,333 @@ table.datatable details summary:hover { text-decoration: underline; }
     URL.revokeObjectURL(url);
   };
 
+  // تصدير Excel ملون بشعار الشركة وتوقيعات لتاب "الفروع" - نفس بيانات renderBranches بالظبط
+  // (بيانات خام محفوظة في state.__branchesExport وقت آخر عرض للتاب، عشان التصدير يطابق المعروض)
+  window.exportBranchesExcel = async function () {
+    if (typeof ExcelJS === 'undefined') { alert('مكتبة تصدير الإكسل مش محمّلة - تأكد إن الجهاز متصل بالإنترنت وحاول تاني.'); return; }
+    const data = state.__branchesExport;
+    if (!data || !data.rows || !data.rows.length) { alert('مفيش بيانات لتصديرها - اعرض تاب "الفروع" الأول.'); return; }
+    const { years, hasBranchReturns, retYearsShownBranch, rows, footer } = data;
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'نظام تحليل مبيعات تمور الطحان';
+    wb.created = new Date();
+    const now = new Date();
+    const RED = 'FFB23B3B', INK = 'FF3A2417', SAND = 'FFEDE5D8', SAND_DARK = 'FFDCCFBB', BAND = 'FFFAF7F2', GOOD = 'FF2F6B45';
+    const numFmt = '#,##0;[Red]-#,##0';
+    const colLetter = (n) => { let s = '', x = n; while (x > 0) { const m = (x - 1) % 26; s = String.fromCharCode(65 + m) + s; x = Math.floor((x - 1) / 26); } return s; };
+
+    const ws = wb.addWorksheet('الفروع', { views: [{ rightToLeft: true }] });
+
+    // الشعار (من نفس صورة الهيدر في الصفحة)
+    try {
+      const logoEl = document.querySelector('img.logo');
+      const src = logoEl ? logoEl.getAttribute('src') : '';
+      if (src && src.indexOf('base64,') > -1) {
+        const base64 = src.split('base64,')[1];
+        const imgId = wb.addImage({ base64, extension: 'png' });
+        ws.addImage(imgId, { tl: { col: 0.15, row: 0.15 }, ext: { width: 64, height: 64 } });
+      }
+    } catch (e) { /* لو فشل تحميل الشعار، نكمل التصدير من غيره */ }
+
+    // نفس أعمدة جدول الشاشة بالظبط (سنة لكل سنة أو صافي واحد، + مرتجع لكل سنة لو موجود)
+    const headers = ['الفرع'];
+    if (years.length >= 2) headers.push(...years.map(y => 'صافي ' + y));
+    else headers.push('صافي المبيعات');
+    headers.push('إجمالي الخصم المباشر', 'نسبة من الإجمالي', 'متوسط الفاتورة');
+    if (hasBranchReturns) headers.push(...retYearsShownBranch.map(y => 'مرتجع ' + y), 'الصافي بعد المرتجع');
+
+    const lastColLetter = colLetter(headers.length);
+    ws.mergeCells(`B1:${lastColLetter}2`);
+    const titleCell = ws.getCell('B1');
+    titleCell.value = 'نظام تحليل مبيعات تمور الطحان - تقرير الفروع' + (hasBranchReturns ? ' والمرتجعات' : '');
+    titleCell.font = { bold: true, size: 15, color: { argb: INK } };
+    titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    ws.mergeCells(`B3:${lastColLetter}3`);
+    const dateCell = ws.getCell('B3');
+    dateCell.value = 'تاريخ التصدير: ' + String(now.getDate()).padStart(2, '0') + '/' + String(now.getMonth() + 1).padStart(2, '0') + '/' + now.getFullYear();
+    dateCell.font = { size: 11, color: { argb: 'FF6B5647' } };
+    dateCell.alignment = { horizontal: 'center' };
+    ws.addRow([]);
+
+    const headerRow = ws.addRow(headers);
+    headerRow.eachCell(cell => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: INK } };
+      cell.font = { bold: true, color: { argb: SAND } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      cell.border = { bottom: { style: 'medium', color: { argb: INK } } };
+    });
+    headerRow.height = 34;
+
+    rows.forEach((r, idx) => {
+      const vals = [r.branch];
+      if (years.length >= 2) vals.push(...r.yearVals); else vals.push(r.net);
+      vals.push(r.discX ? -r.discX : 0, r.pct, r.avg);
+      if (hasBranchReturns) vals.push(...r.retVals.map(v => v ? -v : 0), r.afterReturn);
+      const row = ws.addRow(vals);
+      if (idx % 2 === 1) row.eachCell(cell => { if (!cell.fill || !cell.fill.fgColor) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
+      row.getCell(1).alignment = { horizontal: 'right' };
+      for (let c = 2; c <= headers.length; c++) {
+        row.getCell(c).numFmt = (headers[c - 1] === 'نسبة من الإجمالي') ? '0.0%' : numFmt;
+      }
+      const lastVal = hasBranchReturns ? r.afterReturn : (years.length >= 2 ? r.yearVals[r.yearVals.length - 1] : r.net);
+      row.getCell(headers.length).font = { bold: true, color: { argb: lastVal >= 0 ? GOOD : RED } };
+    });
+
+    const footerVals = ['الإجمالي'];
+    if (years.length >= 2) footerVals.push(...footer.yearVals); else footerVals.push(footer.net);
+    footerVals.push(footer.discAll ? -footer.discAll : 0, 1, footer.avg);
+    if (hasBranchReturns) footerVals.push(...footer.retVals.map(v => v ? -v : 0), footer.afterReturn);
+    const footerRow = ws.addRow(footerVals);
+    footerRow.eachCell(cell => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SAND_DARK } };
+      cell.font = { bold: true, color: { argb: INK } };
+      cell.border = { top: { style: 'medium', color: { argb: INK } } };
+    });
+    for (let c = 2; c <= headers.length; c++) {
+      footerRow.getCell(c).numFmt = (headers[c - 1] === 'نسبة من الإجمالي') ? '0.0%' : numFmt;
+    }
+
+    ws.getColumn(1).width = 32;
+    for (let c = 2; c <= headers.length; c++) ws.getColumn(c).width = 18;
+
+    // توقيعات - بتتمركز نسبيًا حسب عدد الأعمدة عشان تفضل متوسّطة أيًا كان شكل الجدول (بمرتجعات أو من غيرها)
+    const colCount = headers.length;
+    const mid1 = Math.max(1, Math.floor(colCount * 0.25)), mid2 = Math.max(mid1 + 1, Math.floor(colCount * 0.7));
+    ws.addRow([]); ws.addRow([]);
+    const labelArr = new Array(colCount).fill('');
+    labelArr[mid1 - 1] = 'مدير مبيعات مودرن تريد'; labelArr[mid2 - 1] = 'مدير عام المبيعات';
+    const sigLabelRow = ws.addRow(labelArr);
+    sigLabelRow.eachCell(cell => { if (cell.value) { cell.font = { bold: true, size: 12, color: { argb: INK } }; cell.alignment = { horizontal: 'center' }; } });
+    ws.addRow([]);
+    const lineArr = new Array(colCount).fill('');
+    lineArr[mid1 - 1] = '____________________'; lineArr[mid2 - 1] = '____________________';
+    const sigLineRow = ws.addRow(lineArr);
+    sigLineRow.eachCell(cell => { if (cell.value) { cell.alignment = { horizontal: 'center' }; cell.font = { color: { argb: 'FF6B5647' } }; } });
+
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const stamp = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    a.download = 'الفروع_' + stamp + '.xlsx';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  // تصدير Excel ملون بشعار الشركة وتوقيعات لتاب "العملاء" - نفس بيانات renderCustomers بالظبط، ومحترم فيه
+  // نفس إخفاء/إظهار الأعمدة الحالي من دروب داون "أعمدة الجدول" (state.custHiddenCols)
+  window.exportCustomersExcel = async function () {
+    if (typeof ExcelJS === 'undefined') { alert('مكتبة تصدير الإكسل مش محمّلة - تأكد إن الجهاز متصل بالإنترنت وحاول تاني.'); return; }
+    const data = state.__customersExport;
+    if (!data || !data.rows || !data.rows.length) { alert('مفيش بيانات لتصديرها - اعرض تاب "العملاء" الأول.'); return; }
+    const { headers, groups, colTypes, rows, footer, hasReturns } = data;
+
+    const keepCol = (i) => groups[i] === 'customer' || !state.custHiddenCols.has(groups[i]);
+    const visibleIdx = headers.map((_, i) => i).filter(keepCol);
+    const vHeaders = visibleIdx.map(i => headers[i]);
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'نظام تحليل مبيعات تمور الطحان';
+    wb.created = new Date();
+    const now = new Date();
+    const INK = 'FF3A2417', SAND = 'FFEDE5D8', SAND_DARK = 'FFDCCFBB', BAND = 'FFFAF7F2';
+    const colLetter = (n) => { let s = '', x = n; while (x > 0) { const m = (x - 1) % 26; s = String.fromCharCode(65 + m) + s; x = Math.floor((x - 1) / 26); } return s; };
+    const applyTypeFmt = (cell, type) => {
+      if (type === 'pct') cell.numFmt = '0.0%';
+      else if (type === 'pct-signed') cell.numFmt = '0.0%;[Red]-0.0%';
+      else if (type === 'int') cell.numFmt = '#,##0';
+      else if (type === 'money' || type === 'money-neg') cell.numFmt = '#,##0;[Red]-#,##0';
+    };
+
+    const ws = wb.addWorksheet('العملاء', { views: [{ rightToLeft: true }] });
+
+    // الشعار (من نفس صورة الهيدر في الصفحة)
+    try {
+      const logoEl = document.querySelector('img.logo');
+      const src = logoEl ? logoEl.getAttribute('src') : '';
+      if (src && src.indexOf('base64,') > -1) {
+        const base64 = src.split('base64,')[1];
+        const imgId = wb.addImage({ base64, extension: 'png' });
+        ws.addImage(imgId, { tl: { col: 0.15, row: 0.15 }, ext: { width: 64, height: 64 } });
+      }
+    } catch (e) { /* لو فشل تحميل الشعار، نكمل التصدير من غيره */ }
+
+    const lastColLetter = colLetter(vHeaders.length);
+    ws.mergeCells(`B1:${lastColLetter}2`);
+    const titleCell = ws.getCell('B1');
+    titleCell.value = 'نظام تحليل مبيعات تمور الطحان - تقرير العملاء' + (hasReturns ? ' والمرتجعات' : '');
+    titleCell.font = { bold: true, size: 15, color: { argb: INK } };
+    titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    ws.mergeCells(`B3:${lastColLetter}3`);
+    const dateCell = ws.getCell('B3');
+    dateCell.value = 'تاريخ التصدير: ' + String(now.getDate()).padStart(2, '0') + '/' + String(now.getMonth() + 1).padStart(2, '0') + '/' + now.getFullYear();
+    dateCell.font = { size: 11, color: { argb: 'FF6B5647' } };
+    dateCell.alignment = { horizontal: 'center' };
+    ws.addRow([]);
+
+    const headerRow = ws.addRow(vHeaders);
+    headerRow.eachCell(cell => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: INK } };
+      cell.font = { bold: true, color: { argb: SAND } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      cell.border = { bottom: { style: 'medium', color: { argb: INK } } };
+    });
+    headerRow.height = 34;
+
+    rows.forEach((r, idx) => {
+      const vRow = visibleIdx.map(i => {
+        let v = r[i];
+        if (colTypes[i] === 'money-neg' && v) v = -v;
+        return (v === null || v === undefined) ? '' : v;
+      });
+      const row = ws.addRow(vRow);
+      if (idx % 2 === 1) row.eachCell(cell => { if (!cell.fill || !cell.fill.fgColor) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
+      row.getCell(1).alignment = { horizontal: 'right' };
+      visibleIdx.forEach((origI, c) => applyTypeFmt(row.getCell(c + 1), colTypes[origI]));
+    });
+
+    const footerVRow = visibleIdx.map(i => {
+      let v = footer[i];
+      if (colTypes[i] === 'money-neg' && v) v = -v;
+      return (v === null || v === undefined) ? '' : v;
+    });
+    const footerRow = ws.addRow(footerVRow);
+    footerRow.eachCell(cell => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SAND_DARK } };
+      cell.font = { bold: true, color: { argb: INK } };
+      cell.border = { top: { style: 'medium', color: { argb: INK } } };
+    });
+    visibleIdx.forEach((origI, c) => applyTypeFmt(footerRow.getCell(c + 1), colTypes[origI]));
+
+    ws.getColumn(1).width = 34;
+    for (let c = 2; c <= vHeaders.length; c++) ws.getColumn(c).width = 17;
+
+    // توقيعات - بتتمركز نسبيًا حسب عدد الأعمدة الظاهرة فعليًا
+    const colCount = vHeaders.length;
+    const mid1 = Math.max(1, Math.floor(colCount * 0.25)), mid2 = Math.max(mid1 + 1, Math.floor(colCount * 0.7));
+    ws.addRow([]); ws.addRow([]);
+    const labelArr = new Array(colCount).fill('');
+    labelArr[mid1 - 1] = 'مدير مبيعات مودرن تريد'; labelArr[mid2 - 1] = 'مدير عام المبيعات';
+    const sigLabelRow = ws.addRow(labelArr);
+    sigLabelRow.eachCell(cell => { if (cell.value) { cell.font = { bold: true, size: 12, color: { argb: INK } }; cell.alignment = { horizontal: 'center' }; } });
+    ws.addRow([]);
+    const lineArr = new Array(colCount).fill('');
+    lineArr[mid1 - 1] = '____________________'; lineArr[mid2 - 1] = '____________________';
+    const sigLineRow = ws.addRow(lineArr);
+    sigLineRow.eachCell(cell => { if (cell.value) { cell.alignment = { horizontal: 'center' }; cell.font = { color: { argb: 'FF6B5647' } }; } });
+
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const stamp = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    a.download = 'العملاء_' + stamp + '.xlsx';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  // تصدير Excel ملون بشعار الشركة وتوقيعات لتاب "صافي مسحوبات عملاء MT" - نفس بيانات renderCustomerNet بالظبط
+  window.exportCustomerNetExcel = async function () {
+    if (typeof ExcelJS === 'undefined') { alert('مكتبة تصدير الإكسل مش محمّلة - تأكد إن الجهاز متصل بالإنترنت وحاول تاني.'); return; }
+    const data = state.__customerNetExport;
+    if (!data || !data.rows || !data.rows.length) { alert('مفيش بيانات لتصديرها - اعرض تاب "صافي مسحوبات عملاء MT" الأول.'); return; }
+    const { headers, colTypes, rows, footer } = data;
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'نظام تحليل مبيعات تمور الطحان';
+    wb.created = new Date();
+    const now = new Date();
+    const INK = 'FF3A2417', SAND = 'FFEDE5D8', SAND_DARK = 'FFDCCFBB', BAND = 'FFFAF7F2';
+    const colLetter = (n) => { let s = '', x = n; while (x > 0) { const m = (x - 1) % 26; s = String.fromCharCode(65 + m) + s; x = Math.floor((x - 1) / 26); } return s; };
+    const applyTypeFmt = (cell, type) => {
+      if (type === 'pct') cell.numFmt = '0.0%';
+      else if (type === 'int') cell.numFmt = '#,##0';
+      else if (type === 'money' || type === 'money-neg') cell.numFmt = '#,##0;[Red]-#,##0';
+    };
+
+    const ws = wb.addWorksheet('صافي مسحوبات العملاء', { views: [{ rightToLeft: true }] });
+
+    // الشعار (من نفس صورة الهيدر في الصفحة)
+    try {
+      const logoEl = document.querySelector('img.logo');
+      const src = logoEl ? logoEl.getAttribute('src') : '';
+      if (src && src.indexOf('base64,') > -1) {
+        const base64 = src.split('base64,')[1];
+        const imgId = wb.addImage({ base64, extension: 'png' });
+        ws.addImage(imgId, { tl: { col: 0.15, row: 0.15 }, ext: { width: 64, height: 64 } });
+      }
+    } catch (e) { /* لو فشل تحميل الشعار، نكمل التصدير من غيره */ }
+
+    const lastColLetter = colLetter(headers.length);
+    ws.mergeCells(`B1:${lastColLetter}2`);
+    const titleCell = ws.getCell('B1');
+    titleCell.value = 'نظام تحليل مبيعات تمور الطحان - تقرير صافي مسحوبات عملاء MT';
+    titleCell.font = { bold: true, size: 15, color: { argb: INK } };
+    titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    ws.mergeCells(`B3:${lastColLetter}3`);
+    const dateCell = ws.getCell('B3');
+    dateCell.value = 'تاريخ التصدير: ' + String(now.getDate()).padStart(2, '0') + '/' + String(now.getMonth() + 1).padStart(2, '0') + '/' + now.getFullYear();
+    dateCell.font = { size: 11, color: { argb: 'FF6B5647' } };
+    dateCell.alignment = { horizontal: 'center' };
+    ws.addRow([]);
+
+    const headerRow = ws.addRow(headers);
+    headerRow.eachCell(cell => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: INK } };
+      cell.font = { bold: true, color: { argb: SAND } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      cell.border = { bottom: { style: 'medium', color: { argb: INK } } };
+    });
+    headerRow.height = 34;
+
+    rows.forEach((r, idx) => {
+      const vRow = r.map((v, i) => (colTypes[i] === 'money-neg' && v) ? -v : v);
+      const row = ws.addRow(vRow);
+      if (idx % 2 === 1) row.eachCell(cell => { if (!cell.fill || !cell.fill.fgColor) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
+      row.getCell(1).alignment = { horizontal: 'right' };
+      colTypes.forEach((t, i) => applyTypeFmt(row.getCell(i + 1), t));
+    });
+
+    const footerVRow = footer.map((v, i) => (colTypes[i] === 'money-neg' && v) ? -v : v);
+    const footerRow = ws.addRow(footerVRow);
+    footerRow.eachCell(cell => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SAND_DARK } };
+      cell.font = { bold: true, color: { argb: INK } };
+      cell.border = { top: { style: 'medium', color: { argb: INK } } };
+    });
+    colTypes.forEach((t, i) => applyTypeFmt(footerRow.getCell(i + 1), t));
+
+    ws.getColumn(1).width = 34;
+    for (let c = 2; c <= headers.length; c++) ws.getColumn(c).width = 17;
+
+    // توقيعات
+    const colCount = headers.length;
+    const mid1 = Math.max(1, Math.floor(colCount * 0.25)), mid2 = Math.max(mid1 + 1, Math.floor(colCount * 0.7));
+    ws.addRow([]); ws.addRow([]);
+    const labelArr = new Array(colCount).fill('');
+    labelArr[mid1 - 1] = 'مدير مبيعات مودرن تريد'; labelArr[mid2 - 1] = 'مدير عام المبيعات';
+    const sigLabelRow = ws.addRow(labelArr);
+    sigLabelRow.eachCell(cell => { if (cell.value) { cell.font = { bold: true, size: 12, color: { argb: INK } }; cell.alignment = { horizontal: 'center' }; } });
+    ws.addRow([]);
+    const lineArr = new Array(colCount).fill('');
+    lineArr[mid1 - 1] = '____________________'; lineArr[mid2 - 1] = '____________________';
+    const sigLineRow = ws.addRow(lineArr);
+    sigLineRow.eachCell(cell => { if (cell.value) { cell.alignment = { horizontal: 'center' }; cell.font = { color: { argb: 'FF6B5647' } }; } });
+
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const stamp = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    a.download = 'صافي_مسحوبات_عملاء_MT_' + stamp + '.xlsx';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
   // تصدير Excel ملون بشعار الشركة وتوقيعات لتاب "المناديب وخطوط السير" - شيتين: أداء المناديب، وأداء خطوط السير
   // (نفس بيانات renderReps بالظبط، بيتحسبوا هنا من جديد من فلاتر الصفحة الحالية عشان التصدير يفضل مطابق للمعروض)
   window.exportRepsExcel = async function () {
@@ -6690,9 +7017,50 @@ function renderBranches() {
     ? `<div class="pill-note">⚠ ${fmtMoney(unmatchedBranchReturnVal)} من المرتجعات (${fmt(unmatchedBranchCount)} فرع) لأسماء فروع مش موجودة في فواتير المبيعات المرفوعة حاليًا - راجع الفروع دي أو ارفع باقي ملفات المبيعات.</div>`
     : '';
 
+  // بيانات خام (أرقام مش نصوص منسّقة/ملوّنة) لزرار "تصدير Excel" - محفوظة في state عشان الزرار
+  // يستخدمها من غير ما يعيد بناء نفس الحسابات تاني، وتفضل مطابقة تمامًا لما هو معروض في الجدول
+  state.__branchesExport = {
+    years, hasBranchReturns, retYearsShownBranch,
+    rows: byBranch.map(x => {
+      const discX = inv.filter(i => i['الفرع'] === x.key).reduce((s, i) => s + i.__discount, 0);
+      const rec = { branch: x.key, discX, pct: total ? x.sum / total : 0, avg: x.sum / (x.count || 1) };
+      if (years.length >= 2) {
+        const ym = branchBmap.get(x.key) || new Map();
+        rec.yearVals = years.map(y => ym.get(y) || 0);
+      } else {
+        rec.net = x.sum;
+      }
+      if (hasBranchReturns) {
+        const retYm = retBranchBmap.get(x.key) || new Map();
+        rec.retVals = retYearsShownBranch.map(y => retYm.get(y) || 0);
+        rec.afterReturn = x.sum - (retByBranchTotal.get(x.key) || 0);
+      }
+      return rec;
+    }),
+    footer: (() => {
+      const f = { discAll: totalDiscAll, avg: total / (totalInvCount || 1), net: total };
+      if (years.length >= 2) {
+        const ymTotal = sumYearTotalsBmap(branchBmap, branchKeys, years).get('__TOTAL__');
+        f.yearVals = years.map(y => ymTotal.get(y) || 0);
+      }
+      if (hasBranchReturns) {
+        const retYmTotal = sumYearTotalsBmap(retBranchBmap, branchKeys, retYearsShownBranch).get('__TOTAL__');
+        f.retVals = retYearsShownBranch.map(y => retYmTotal.get(y) || 0);
+        const branchesReturnsTotal = branchKeys.reduce((s, k) => s + (retByBranchTotal.get(k) || 0), 0);
+        f.afterReturn = total - branchesReturnsTotal;
+      }
+      return f;
+    })()
+  };
+
   el.innerHTML = `
     <div class="chart-box"><canvas id="chBranches"></canvas></div>
-    <div class="table-title">تفاصيل الفروع${hasBranchReturns ? ' والمرتجعات' : ''}</div>
+    <div class="table-title" style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+      <span>تفاصيل الفروع${hasBranchReturns ? ' والمرتجعات' : ''}</span>
+      <span class="no-print" style="display:flex; gap:8px;">
+        <button type="button" class="btn secondary" style="padding:6px 14px; font-size:12.5px;" onclick="exportBranchesExcel()"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+      </span>
+    </div>
     ${branchReturnsWarn}
     <div class="table-wrap">${tableHTML(branchHeaders, rowsHtml, branchFooter)}</div>
   `;
@@ -6964,12 +7332,82 @@ function renderCustomers() {
     </div>
   `;
 
+  // بيانات خام (أرقام مش نصوص منسّقة/تفاصيل قابلة للفتح) لزرار "تصدير Excel" - نفس ترتيب custHeaders/custGroups
+  // بالظبط عمود بعمود، عشان زرار الإخفاء/الإظهار الحالي يتطبّق برضو وقت التصدير (نفس الأعمدة الظاهرة في الشاشة)
+  const custColTypes = ['text', 'int', 'int', 'money', 'money-neg', 'pct', 'money'];
+  if (years.length >= 2) custColTypes.push(...years.map(() => 'money'));
+  else custColTypes.push('money');
+  if (hasReturns) {
+    custColTypes.push(...retYearsShown.map(() => 'money-neg'), 'pct', 'money');
+    if (showPostReturnGrowth) custColTypes.push('pct-signed');
+  }
+  const custRawRows = top.map(x => {
+    const invs = inv.filter(i => i['العميل'] === x.key);
+    const grossX = invs.reduce((s, i) => s + i.__gross, 0);
+    const discX = invs.reduce((s, i) => s + i.__discount, 0);
+    const taxX = invs.reduce((s, i) => s + i.__tax, 0);
+    const discPctX = grossX ? discX / grossX : 0;
+    const sitesCount = new Set(invs.map(i => (i['فرع_العميل'] || '').toString().trim()).filter(Boolean)).size;
+    const itemsCount = new Set(custItemRowsAll.filter(r => r.customer === x.key).map(r => r.item)).size;
+    const vals = [x.key, sitesCount, itemsCount, grossX, discX, discPctX, taxX];
+    if (years.length >= 2) {
+      const ym = custBmap.get(x.key) || new Map();
+      vals.push(...years.map(y => ym.get(y) || 0));
+    } else {
+      vals.push(x.sum);
+    }
+    if (hasReturns) {
+      const normKey = SalesParser.normalizeCustomerKey(x.key);
+      const retYm = retYearBmap.get(normKey) || new Map();
+      const retVals = retYearsShown.map(y => retYm.get(y) || 0);
+      const retValTotal = retByCustNorm.get(normKey) || 0;
+      const netAfterReturn = x.sum - retValTotal;
+      const retPct = x.sum ? retValTotal / x.sum : 0;
+      vals.push(...retVals, retPct, netAfterReturn);
+      if (showPostReturnGrowth) {
+        const salesYm = custBmap.get(x.key) || new Map();
+        const gVals = retYearsShown.map(y => (salesYm.get(y) || 0) - (retYm.get(y) || 0));
+        const prev = gVals[gVals.length - 2], last = gVals[gVals.length - 1];
+        vals.push((prev === undefined || last === undefined) ? null : (prev ? (last - prev) / prev : (last > 0 ? 1 : 0)));
+      }
+    }
+    return vals;
+  });
+  const custRawFooter = ['الإجمالي (كل العملاء)', topSitesCount, topItemsCount, topGross, topDisc, topDiscPct, topTax];
+  if (years.length >= 2) {
+    const topYm = sumYearTotalsBmap(custBmap, topKeys, years).get('__TOTAL__');
+    custRawFooter.push(...years.map(y => topYm.get(y) || 0));
+  } else {
+    custRawFooter.push(topNet);
+  }
+  if (hasReturns) {
+    const topNormKeys = topKeys.map(k => SalesParser.normalizeCustomerKey(k));
+    const retTotalYm = sumYearTotalsBmap(retYearBmap, topNormKeys, retYearsShown).get('__TOTAL__');
+    const retValsFooter = retYearsShown.map(y => retTotalYm.get(y) || 0);
+    const topReturnsTotal = topNormKeys.reduce((s, k) => s + (retByCustNorm.get(k) || 0), 0);
+    const topNetAfterReturn = topNet - topReturnsTotal;
+    const topRetPct = topNet ? topReturnsTotal / topNet : 0;
+    custRawFooter.push(...retValsFooter, topRetPct, topNetAfterReturn);
+    if (showPostReturnGrowth) {
+      const topSalesYm = sumYearTotalsBmap(custBmap, topKeys, years).get('__TOTAL__');
+      const gVals = retYearsShown.map(y => (topSalesYm.get(y) || 0) - (retTotalYm.get(y) || 0));
+      const prev = gVals[gVals.length - 2], last = gVals[gVals.length - 1];
+      custRawFooter.push((prev === undefined || last === undefined) ? null : (prev ? (last - prev) / prev : (last > 0 ? 1 : 0)));
+    }
+  }
+  state.__customersExport = { headers: custHeaders, groups: custGroups, colTypes: custColTypes, rows: custRawRows, footer: custRawFooter, hasReturns };
+
   el.innerHTML = `
     <div class="grid2">
       <div class="chart-box"><canvas id="chTopCustomers"></canvas></div>
       <div class="chart-box"><canvas id="chCashCredit"></canvas></div>
     </div>
-    <div class="table-title">كل العملاء (${fmt(top.length)} عميل) - مع الخصم المباشر والصافي بعد الخصم المباشر والضريبة${hasReturns ? ' والمرتجعات' : ''}</div>
+    <div class="table-title" style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+      <span>كل العملاء (${fmt(top.length)} عميل) - مع الخصم المباشر والصافي بعد الخصم المباشر والضريبة${hasReturns ? ' والمرتجعات' : ''}</span>
+      <span class="no-print" style="display:flex; gap:8px;">
+        <button type="button" class="btn secondary" style="padding:6px 14px; font-size:12.5px;" onclick="exportCustomersExcel()"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+      </span>
+    </div>
     ${returnsNote}
     ${custSearchHtml}
     ${topGrowthItemsHtml}
@@ -7058,25 +7496,33 @@ function renderCustomerNet() {
     });
   }
 
-  const headers = ['اسم العميل', 'عدد الفروع', 'صافي بعد الخصم المباشر', 'مبيعات', 'مرتجعات'];
+  const headers = ['اسم العميل', 'عدد الفروع', 'صافي بعد الخصم المباشر', 'مبيعات', 'نسبة الخصم', 'مرتجعات', 'نسبة المرتجع'];
   headers.push(...(multiYear ? yearColumnHeaders(years, 'صافي المبيعات ') : ['صافي المبيعات']));
+
+  // بيانات خام (أرقام مش نصوص منسّقة/ملوّنة) لزرار "تصدير Excel" - نفس ترتيب headers بالظبط
+  const custNetColTypes = ['text', 'int', 'money', 'money', 'pct', 'money-neg', 'pct'];
+  custNetColTypes.push(...(multiYear ? years.map(() => 'money') : ['money']));
 
   const rowsHtml = top.map(x => {
     const invs = inv.filter(i => i['العميل'] === x.key);
     const grossX = invs.reduce((s, i) => s + i.__gross, 0);
+    const discPctX = grossX ? (grossX - x.sum) / grossX : 0;
 
     const sitesX = new Set(invs.map(i => (i['فرع_العميل'] || '').toString().trim()).filter(Boolean));
 
     const normKey = SalesParser.normalizeCustomerKey(x.key);
     const retValTotal = retByCustNorm.get(normKey) || 0;
     const netAfterReturn = x.sum - retValTotal;
+    const retPct = x.sum ? retValTotal / x.sum : 0;
 
     const row = [
       x.key,
       fmt(sitesX.size),
       fmtMoney(x.sum),
       fmtMoney(grossX),
+      fmtPct(discPctX),
       retValTotal ? `<span style="color:var(--bad); font-weight:700;">-${fmtMoney(retValTotal)}</span>` : fmtMoney(0),
+      retValTotal ? `<span style="color:${retPct >= 0.1 ? 'var(--bad)' : '#9A5B00'}; font-weight:700;">${fmtPct(retPct)}</span>` : fmtPct(0),
     ];
     if (multiYear) {
       row.push(...yearColumnCells(netAfterReturnBmap, x.key, years, fmtMoney));
@@ -7091,23 +7537,55 @@ function renderCustomerNet() {
   const topInvs = inv.filter(i => topKeys.includes(i['العميل']));
   const topGross = topInvs.reduce((s, i) => s + i.__gross, 0);
   const topNet = top.reduce((s, x) => s + x.sum, 0);
+  const topDiscPct = topGross ? (topGross - topNet) / topGross : 0;
   const topSitesCount = new Set(topInvs.map(i => i['فرع_العميل']).filter(Boolean)).size;
   const topNormKeys = topKeys.map(k => SalesParser.normalizeCustomerKey(k));
   const topReturnsTotal = topNormKeys.reduce((s, k) => s + (retByCustNorm.get(k) || 0), 0);
   const topNetAfterReturn = topNet - topReturnsTotal;
+  const topRetPct = topNet ? topReturnsTotal / topNet : 0;
 
   const footer = [
     'الإجمالي (كل العملاء)',
     fmt(topSitesCount),
     fmtMoney(topNet),
     fmtMoney(topGross),
+    fmtPct(topDiscPct),
     topReturnsTotal ? `<span style="color:var(--bad); font-weight:700;">-${fmtMoney(topReturnsTotal)}</span>` : fmtMoney(0),
+    topReturnsTotal ? `<span style="color:${topRetPct >= 0.1 ? 'var(--bad)' : '#9A5B00'}; font-weight:700;">${fmtPct(topRetPct)}</span>` : fmtPct(0),
   ];
   if (multiYear) {
     footer.push(...yearColumnCells(sumYearTotalsBmap(netAfterReturnBmap, topKeys, years), '__TOTAL__', years, fmtMoney));
   } else {
     footer.push(`<b>${fmtMoney(topNetAfterReturn)}</b>`);
   }
+
+  // نفس القيم الخام بره الـ HTML عشان زرار تصدير Excel
+  const custNetRawRows = top.map(x => {
+    const invs = inv.filter(i => i['العميل'] === x.key);
+    const grossX = invs.reduce((s, i) => s + i.__gross, 0);
+    const discPctX = grossX ? (grossX - x.sum) / grossX : 0;
+    const sitesX = new Set(invs.map(i => (i['فرع_العميل'] || '').toString().trim()).filter(Boolean));
+    const normKey = SalesParser.normalizeCustomerKey(x.key);
+    const retValTotal = retByCustNorm.get(normKey) || 0;
+    const netAfterReturn = x.sum - retValTotal;
+    const retPct = x.sum ? retValTotal / x.sum : 0;
+    const vals = [x.key, sitesX.size, x.sum, grossX, discPctX, retValTotal, retPct];
+    if (multiYear) {
+      const ym = netAfterReturnBmap.get(x.key) || new Map();
+      vals.push(...years.map(y => ym.get(y) || 0));
+    } else {
+      vals.push(netAfterReturn);
+    }
+    return vals;
+  });
+  const custNetRawFooter = ['الإجمالي (كل العملاء)', topSitesCount, topNet, topGross, topDiscPct, topReturnsTotal, topRetPct];
+  if (multiYear) {
+    const topYm = sumYearTotalsBmap(netAfterReturnBmap, topKeys, years).get('__TOTAL__');
+    custNetRawFooter.push(...years.map(y => topYm.get(y) || 0));
+  } else {
+    custNetRawFooter.push(topNetAfterReturn);
+  }
+  state.__customerNetExport = { headers, colTypes: custNetColTypes, rows: custNetRawRows, footer: custNetRawFooter, multiYear, years };
 
   const custNetSearchHtml = `
     <div class="no-print" style="margin-bottom:10px;">
@@ -7122,7 +7600,12 @@ function renderCustomerNet() {
     : `<div class="pill-note">⚠ لا توجد بيانات مرتجعات مطابقة للفلتر الحالي - عمود "صافي المبيعات" هيبقى نفس "صافي بعد الخصم المباشر" لحد ما ترفع/تفلتر بيانات مرتجع.</div>`;
 
   el.innerHTML = `
-    <div class="table-title">صافي مسحوبات عملاء MT (${fmt(top.length)} عميل)${multiYear ? ' - مقارنة بين السنوات: ' + years.join('، ') : ''}</div>
+    <div class="table-title" style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+      <span>صافي مسحوبات عملاء MT (${fmt(top.length)} عميل)${multiYear ? ' - مقارنة بين السنوات: ' + years.join('، ') : ''}</span>
+      <span class="no-print" style="display:flex; gap:8px;">
+        <button type="button" class="btn secondary" style="padding:6px 14px; font-size:12.5px;" onclick="exportCustomerNetExcel()"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+      </span>
+    </div>
     ${noteHtml}
     ${custNetSearchHtml}
     <div class="table-wrap">${tableHTML(headers, rowsHtml, footer)}</div>
