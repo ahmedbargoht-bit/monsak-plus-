@@ -5537,11 +5537,48 @@ table.datatable details summary:hover { text-decoration: underline; }
   };
 
   // تصدير Excel ملون بشعار الشركة وتوقيعات لتاب "الأصناف" - شيتين: بالقيمة (مع تفصيل السنوات لو متاحة) وبالكمية
+  // نفس منطق تجميع بيانات تاب "الأصناف" (شوف renderItems) بالظبط، لكن قابل لإعادة الاستخدام على أي
+  // مجموعة صفوف/مرتجعات معينة بدل ما يبقى مربوط بالفلتر الحالي بس - مستخدم في تصدير Excel عشان نقدر
+  // نبني نفس البيانات لكل شهر لوحده (شوف splitByMonth جوه exportItemsExcel).
+  function buildItemsExportAgg(rows, returnRows) {
+    const byItemValueSorted = groupSum(rows, r => r.item, r => r.total).sort((a, b) => b.sum - a.sum);
+    const byItemValue = groupItemsByCategoryDesc(byItemValueSorted);
+    const byItemQty = groupItemsByCategoryDesc(groupSum(rows, r => r.item, r => (r.qtyCarton || 0) + (r.qtyPiece || 0)).sort((a, b) => b.sum - a.sum));
+
+    const itemCartonsRawMap = new Map(), itemPiecesRawMap = new Map();
+    rows.forEach(r => {
+      const k = r.item; if (!k) return;
+      itemCartonsRawMap.set(k, (itemCartonsRawMap.get(k) || 0) + (r.qtyCarton || 0));
+      itemPiecesRawMap.set(k, (itemPiecesRawMap.get(k) || 0) + (r.qtyPiece || 0));
+    });
+    const itemCartonsTotalOf = (itemName) => {
+      const ppc = resolveItemPiecesPerCarton(itemName);
+      const cartons = itemCartonsRawMap.get(itemName) || 0;
+      const pieces = itemPiecesRawMap.get(itemName) || 0;
+      if (ppc) return cartons + pieces / ppc;
+      return cartons || null;
+    };
+
+    const years = activeYears(rows, r => r.year);
+    const itemBmap = yearBreakdownMap(rows, r => r.item, r => r.year, r => r.total);
+
+    const hasItemReturns = returnRows.some(r => r['الصنف']);
+    const retItemBmap = yearBreakdownMap(returnRows, r => r['الصنف'], r => r.__year, r => r['الإجمالي']);
+    const retByItemTotal = new Map();
+    returnRows.forEach(r => { const k = r['الصنف']; if (!k) return; retByItemTotal.set(k, (retByItemTotal.get(k) || 0) + (r['الإجمالي'] || 0)); });
+    const retYearsShownItems = years.length ? years : activeYears(returnRows, r => r.__year);
+
+    const itemQtyValueOf = (key) => groupSum(rows.filter(r => r.item === key), () => 1, r => r.total)[0]?.sum || 0;
+    const itemQtyValueOfMap = new Map(byItemQty.map(x => [x.key, itemQtyValueOf(x.key)]));
+    const itemQtyCartonsTotalMap = new Map(byItemQty.map(x => [x.key, itemCartonsTotalOf(x.key)]));
+
+    return { years, itemBmap, byItemValue, hasItemReturns, retYearsShownItems, retItemBmap, retByItemTotal, byItemQty, itemQtyValueOfMap, itemQtyCartonsTotalMap };
+  }
+
   window.exportItemsExcel = async function () {
     if (typeof ExcelJS === 'undefined') { alert('مكتبة تصدير الإكسل مش محمّلة - تأكد إن الجهاز متصل بالإنترنت وحاول تاني.'); return; }
     const ex = state.__itemsExport;
     if (!ex || !ex.byItemValue || !ex.byItemValue.length) { alert('مفيش بيانات لتصديرها - اعرض تاب "الأصناف" الأول.'); return; }
-    const { years, itemBmap, byItemValue, hasItemReturns, retYearsShownItems, retItemBmap, retByItemTotal, byItemQty, itemQtyValueOfMap, itemQtyCartonsTotalMap } = ex;
 
     const wb = new ExcelJS.Workbook();
     wb.creator = 'نظام تحليل مبيعات تمور الطحان';
@@ -5602,111 +5639,146 @@ table.datatable details summary:hover { text-decoration: underline; }
       sigLineRow.eachCell(cell => { if (cell.value) { cell.alignment = { horizontal: 'center' }; cell.font = { color: { argb: 'FF6B5647' } }; } });
     };
 
-    /* ---- شيت 1: بالقيمة ---- */
-    const ws1 = wb.addWorksheet('الأصناف - بالقيمة', { views: [{ rightToLeft: true }] });
-    const yearCols = years.length >= 2 ? [...years.map(y => 'قيمة ' + y), 'الفرق', 'نسبة النمو'] : (years.length === 1 ? ['قيمة ' + years[0]] : ['القيمة']);
-    const retCols = hasItemReturns ? [...retYearsShownItems.map(y => 'مرتجع ' + y), 'نسبة المرتجع من البيع', 'الصافي بعد المرتجع'] : [];
-    const headers1 = ['كود الصنف', 'الصنف', 'التصنيف', ...yearCols, 'عدد مرات البيع', ...retCols];
-    const lastColLetter1 = String.fromCharCode(64 + headers1.length); // تقريبي كويس لعدد الأعمدة المتوقع (أقل من 26)
-    addLetterhead(ws1, 'تقرير الأصناف - بالقيمة', lastColLetter1);
-    const headerRow1 = ws1.addRow(headers1);
-    styleHeaderRow(headerRow1);
-    const growthColIdx = years.length >= 2 ? 3 + yearCols.length : -1; // فهرس عمود "نسبة النمو" (لو موجود)
+    // بيبني شيتي "بالقيمة" و"بالكمية" لمجموعة بيانات معينة (data بنفس شكل state.__itemsExport) - قابلة
+    // للنداء أكتر من مرة لبناء شيت الإجمالي + شيت لكل شهر لوحده لما يكون فيه أكتر من شهر مختار
+    // (sheetSuffix بيتضاف لاسم التاب في أسفل الإكسيل - لازم يفضل قصير عشان حد الـ31 حرف بتاع إكسيل،
+    // وtitleSuffix بيتضاف لعنوان التقرير في الهيدر - ده مفيش عليه حد طول).
+    const addItemsSheets = (data, sheetSuffix, titleSuffix) => {
+      const { years, itemBmap, byItemValue, hasItemReturns, retYearsShownItems, retItemBmap, retByItemTotal, byItemQty, itemQtyValueOfMap, itemQtyCartonsTotalMap } = data;
+      const sheetName1 = ('الأصناف - بالقيمة' + sheetSuffix).slice(0, 31);
+      const sheetName2 = ('الأصناف - بالكمية' + sheetSuffix).slice(0, 31);
 
-    byItemValue.forEach((x, idx) => {
-      const ym = itemBmap.get(x.key) || new Map();
-      const yearVals = years.map(y => ym.get(y) || 0);
-      const rowVals = [resolveItemCode(x.key), x.key, resolveItemCategory(x.key)];
-      rowVals.push(...yearVals);
+      /* ---- شيت: بالقيمة ---- */
+      const ws1 = wb.addWorksheet(sheetName1, { views: [{ rightToLeft: true }] });
+      const yearCols = years.length >= 2 ? [...years.map(y => 'قيمة ' + y), 'الفرق', 'نسبة النمو'] : (years.length === 1 ? ['قيمة ' + years[0]] : ['القيمة']);
+      const retCols = hasItemReturns ? [...retYearsShownItems.map(y => 'مرتجع ' + y), 'نسبة المرتجع من البيع', 'الصافي بعد المرتجع'] : [];
+      const headers1 = ['كود الصنف', 'الصنف', 'التصنيف', ...yearCols, 'عدد مرات البيع', ...retCols];
+      const lastColLetter1 = String.fromCharCode(64 + headers1.length); // تقريبي كويس لعدد الأعمدة المتوقع (أقل من 26)
+      addLetterhead(ws1, 'تقرير الأصناف - بالقيمة' + titleSuffix, lastColLetter1);
+      const headerRow1 = ws1.addRow(headers1);
+      styleHeaderRow(headerRow1);
+      const growthColIdx = years.length >= 2 ? 3 + yearCols.length : -1; // فهرس عمود "نسبة النمو" (لو موجود)
+
+      byItemValue.forEach((x, idx) => {
+        const ym = itemBmap.get(x.key) || new Map();
+        const yearVals = years.map(y => ym.get(y) || 0);
+        const rowVals = [resolveItemCode(x.key), x.key, resolveItemCategory(x.key)];
+        rowVals.push(...yearVals);
+        if (years.length >= 2) {
+          const diff = yearVals[yearVals.length - 1] - yearVals[yearVals.length - 2];
+          const prev = yearVals[yearVals.length - 2];
+          const pct = prev ? diff / prev : (yearVals[yearVals.length - 1] > 0 ? 1 : 0);
+          rowVals.push(diff, pct);
+        } else if (years.length === 0) {
+          rowVals.push(x.sum);
+        }
+        rowVals.push(x.count);
+        if (hasItemReturns) {
+          const retYm = retItemBmap.get(x.key) || new Map();
+          retYearsShownItems.forEach(y => rowVals.push(-(retYm.get(y) || 0)));
+          const retTotal = retByItemTotal.get(x.key) || 0;
+          rowVals.push(x.sum ? retTotal / x.sum : 0, x.sum - retTotal);
+        }
+        const row = ws1.addRow(rowVals);
+        if (idx % 2 === 1) row.eachCell(cell => { if (!cell.fill || !cell.fill.fgColor) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
+        row.getCell(1).alignment = { horizontal: 'center' };
+        row.getCell(2).alignment = { horizontal: 'right' };
+        // تنسيق أرقام: أعمدة القيمة/المرتجع كأرقام صحيحة، وأعمدة النسب كنسبة مئوية
+        for (let c = 4; c <= row.cellCount; c++) {
+          const cell = row.getCell(c);
+          if (typeof cell.value === 'number') {
+            if (c === growthColIdx || (hasItemReturns && c === row.cellCount - 1)) cell.numFmt = '0.0%';
+            else cell.numFmt = '#,##0;[Red]-#,##0';
+          }
+        }
+      });
+
+      const totalCount1 = byItemValue.reduce((s, x) => s + x.count, 0);
+      const totalSum1 = byItemValue.reduce((s, x) => s + x.sum, 0);
+      const footerVals1 = ['-', 'الإجمالي', '-'];
       if (years.length >= 2) {
-        const diff = yearVals[yearVals.length - 1] - yearVals[yearVals.length - 2];
-        const prev = yearVals[yearVals.length - 2];
-        const pct = prev ? diff / prev : (yearVals[yearVals.length - 1] > 0 ? 1 : 0);
-        rowVals.push(diff, pct);
-      } else if (years.length === 0) {
-        rowVals.push(x.sum);
+        const totalsYm = years.map(y => byItemValue.reduce((s, x) => s + ((itemBmap.get(x.key) || new Map()).get(y) || 0), 0));
+        footerVals1.push(...totalsYm);
+        const diff = totalsYm[totalsYm.length - 1] - totalsYm[totalsYm.length - 2];
+        const prev = totalsYm[totalsYm.length - 2];
+        footerVals1.push(diff, prev ? diff / prev : 0);
+      } else {
+        footerVals1.push(totalSum1);
       }
-      rowVals.push(x.count);
+      footerVals1.push(totalCount1);
       if (hasItemReturns) {
-        const retYm = retItemBmap.get(x.key) || new Map();
-        retYearsShownItems.forEach(y => rowVals.push(-(retYm.get(y) || 0)));
-        const retTotal = retByItemTotal.get(x.key) || 0;
-        rowVals.push(x.sum ? retTotal / x.sum : 0, x.sum - retTotal);
+        const totalRet = byItemValue.reduce((s, x) => s + (retByItemTotal.get(x.key) || 0), 0);
+        retYearsShownItems.forEach(y => {
+          const t = byItemValue.reduce((s, x) => s + ((retItemBmap.get(x.key) || new Map()).get(y) || 0), 0);
+          footerVals1.push(-t);
+        });
+        footerVals1.push(totalSum1 ? totalRet / totalSum1 : 0, totalSum1 - totalRet);
       }
-      const row = ws1.addRow(rowVals);
-      if (idx % 2 === 1) row.eachCell(cell => { if (!cell.fill || !cell.fill.fgColor) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
-      row.getCell(1).alignment = { horizontal: 'center' };
-      row.getCell(2).alignment = { horizontal: 'right' };
-      // تنسيق أرقام: أعمدة القيمة/المرتجع كأرقام صحيحة، وأعمدة النسب كنسبة مئوية
-      for (let c = 4; c <= row.cellCount; c++) {
-        const cell = row.getCell(c);
+      const footerRow1 = ws1.addRow(footerVals1);
+      styleFooterRow(footerRow1);
+      for (let c = 4; c <= footerRow1.cellCount; c++) {
+        const cell = footerRow1.getCell(c);
         if (typeof cell.value === 'number') {
-          if (c === growthColIdx || (hasItemReturns && c === row.cellCount - 1)) cell.numFmt = '0.0%';
-          else cell.numFmt = '#,##0;[Red]-#,##0';
+          cell.numFmt = (c === growthColIdx || (hasItemReturns && c === footerRow1.cellCount - 1)) ? '0.0%' : '#,##0;[Red]-#,##0';
         }
       }
-    });
 
-    const totalCount1 = byItemValue.reduce((s, x) => s + x.count, 0);
-    const totalSum1 = byItemValue.reduce((s, x) => s + x.sum, 0);
-    const footerVals1 = ['-', 'الإجمالي', '-'];
-    if (years.length >= 2) {
-      const totalsYm = years.map(y => byItemValue.reduce((s, x) => s + ((itemBmap.get(x.key) || new Map()).get(y) || 0), 0));
-      footerVals1.push(...totalsYm);
-      const diff = totalsYm[totalsYm.length - 1] - totalsYm[totalsYm.length - 2];
-      const prev = totalsYm[totalsYm.length - 2];
-      footerVals1.push(diff, prev ? diff / prev : 0);
-    } else {
-      footerVals1.push(totalSum1);
-    }
-    footerVals1.push(totalCount1);
-    if (hasItemReturns) {
-      const totalRet = byItemValue.reduce((s, x) => s + (retByItemTotal.get(x.key) || 0), 0);
-      retYearsShownItems.forEach(y => {
-        const t = byItemValue.reduce((s, x) => s + ((retItemBmap.get(x.key) || new Map()).get(y) || 0), 0);
-        footerVals1.push(-t);
+      ws1.getColumn(1).width = 14; ws1.getColumn(2).width = 38; ws1.getColumn(3).width = 22;
+      for (let c = 4; c <= headers1.length; c++) ws1.getColumn(c).width = 16;
+      addSignatures(ws1, headers1.length);
+
+      /* ---- شيت: بالكمية ---- */
+      const ws2 = wb.addWorksheet(sheetName2, { views: [{ rightToLeft: true }] });
+      const headers2 = ['كود الصنف', 'الصنف', 'التصنيف', 'عدد بالكرتونة', 'إجمالي الكمية', 'إجمالي عدد الكراتين', 'القيمة'];
+      addLetterhead(ws2, 'تقرير الأصناف - بالكمية' + titleSuffix, 'G');
+      const headerRow2 = ws2.addRow(headers2);
+      styleHeaderRow(headerRow2);
+      let cartonsGrandTotal2 = 0;
+      byItemQty.forEach((x, idx) => {
+        const ppc2 = resolveItemPiecesPerCarton(x.key);
+        const cartonsTotal2 = itemQtyCartonsTotalMap ? itemQtyCartonsTotalMap.get(x.key) : null;
+        cartonsGrandTotal2 += cartonsTotal2 || 0;
+        const row = ws2.addRow([resolveItemCode(x.key), x.key, resolveItemCategory(x.key), ppc2 || '-', x.sum, (cartonsTotal2 || cartonsTotal2 === 0) ? cartonsTotal2 : '-', itemQtyValueOfMap.get(x.key) || 0]);
+        if (idx % 2 === 1) row.eachCell(cell => { if (!cell.fill || !cell.fill.fgColor) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
+        row.getCell(1).alignment = { horizontal: 'center' };
+        row.getCell(2).alignment = { horizontal: 'right' };
+        row.getCell(4).alignment = { horizontal: 'center' };
+        row.getCell(6).alignment = { horizontal: 'center' };
+        if (!ppc2) row.getCell(4).font = { color: { argb: RED } };
+        if (cartonsTotal2 === null) row.getCell(6).font = { color: { argb: RED } };
+        row.getCell(5).numFmt = '#,##0'; row.getCell(6).numFmt = '#,##0.00'; row.getCell(7).numFmt = '#,##0';
       });
-      footerVals1.push(totalSum1 ? totalRet / totalSum1 : 0, totalSum1 - totalRet);
-    }
-    const footerRow1 = ws1.addRow(footerVals1);
-    styleFooterRow(footerRow1);
-    for (let c = 4; c <= footerRow1.cellCount; c++) {
-      const cell = footerRow1.getCell(c);
-      if (typeof cell.value === 'number') {
-        cell.numFmt = (c === growthColIdx || (hasItemReturns && c === footerRow1.cellCount - 1)) ? '0.0%' : '#,##0;[Red]-#,##0';
-      }
-    }
+      const footerRow2 = ws2.addRow(['-', 'الإجمالي', '-', '-', byItemQty.reduce((s, x) => s + x.sum, 0), cartonsGrandTotal2, byItemQty.reduce((s, x) => s + (itemQtyValueOfMap.get(x.key) || 0), 0)]);
+      styleFooterRow(footerRow2);
+      footerRow2.getCell(5).numFmt = '#,##0'; footerRow2.getCell(6).numFmt = '#,##0.00'; footerRow2.getCell(7).numFmt = '#,##0';
+      ws2.getColumn(1).width = 14; ws2.getColumn(2).width = 38; ws2.getColumn(3).width = 22; ws2.getColumn(4).width = 14; ws2.getColumn(5).width = 16; ws2.getColumn(6).width = 18; ws2.getColumn(7).width = 16;
+      addSignatures(ws2, headers2.length);
+    };
 
-    ws1.getColumn(1).width = 14; ws1.getColumn(2).width = 38; ws1.getColumn(3).width = 22;
-    for (let c = 4; c <= headers1.length; c++) ws1.getColumn(c).width = 16;
-    addSignatures(ws1, headers1.length);
+    // لو محدد أكتر من شهر في فلتر "الشهر" المشترك فوق الصفحة، نقسّم التصدير: شيت إجمالي أول (كل
+    // الشهور المختارة مجمّعة مع بعض - زي التصدير القديم بالظبط)، وبعده شيت منفصل لكل شهر (أو شهر+سنة
+    // لو أكتر من سنة مختارة كمان) موجود فعليًا في البيانات المفلترة حاليًا.
+    const selMonths = state.filters.month || [];
+    if (selMonths.length >= 2) {
+      addItemsSheets(ex, ' - الإجمالي', ' - إجمالي كل الشهور المختارة');
 
-    /* ---- شيت 2: بالكمية ---- */
-    const ws2 = wb.addWorksheet('الأصناف - بالكمية', { views: [{ rightToLeft: true }] });
-    const headers2 = ['كود الصنف', 'الصنف', 'التصنيف', 'عدد بالكرتونة', 'إجمالي الكمية', 'إجمالي عدد الكراتين', 'القيمة'];
-    addLetterhead(ws2, 'تقرير الأصناف - بالكمية', 'G');
-    const headerRow2 = ws2.addRow(headers2);
-    styleHeaderRow(headerRow2);
-    let cartonsGrandTotal2 = 0;
-    byItemQty.forEach((x, idx) => {
-      const ppc2 = resolveItemPiecesPerCarton(x.key);
-      const cartonsTotal2 = itemQtyCartonsTotalMap ? itemQtyCartonsTotalMap.get(x.key) : null;
-      cartonsGrandTotal2 += cartonsTotal2 || 0;
-      const row = ws2.addRow([resolveItemCode(x.key), x.key, resolveItemCategory(x.key), ppc2 || '-', x.sum, (cartonsTotal2 || cartonsTotal2 === 0) ? cartonsTotal2 : '-', itemQtyValueOfMap.get(x.key) || 0]);
-      if (idx % 2 === 1) row.eachCell(cell => { if (!cell.fill || !cell.fill.fgColor) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
-      row.getCell(1).alignment = { horizontal: 'center' };
-      row.getCell(2).alignment = { horizontal: 'right' };
-      row.getCell(4).alignment = { horizontal: 'center' };
-      row.getCell(6).alignment = { horizontal: 'center' };
-      if (!ppc2) row.getCell(4).font = { color: { argb: RED } };
-      if (cartonsTotal2 === null) row.getCell(6).font = { color: { argb: RED } };
-      row.getCell(5).numFmt = '#,##0'; row.getCell(6).numFmt = '#,##0.00'; row.getCell(7).numFmt = '#,##0';
-    });
-    const footerRow2 = ws2.addRow(['-', 'الإجمالي', '-', '-', byItemQty.reduce((s, x) => s + x.sum, 0), cartonsGrandTotal2, byItemQty.reduce((s, x) => s + (itemQtyValueOfMap.get(x.key) || 0), 0)]);
-    styleFooterRow(footerRow2);
-    footerRow2.getCell(5).numFmt = '#,##0'; footerRow2.getCell(6).numFmt = '#,##0.00'; footerRow2.getCell(7).numFmt = '#,##0';
-    ws2.getColumn(1).width = 14; ws2.getColumn(2).width = 38; ws2.getColumn(3).width = 22; ws2.getColumn(4).width = 14; ws2.getColumn(5).width = 16; ws2.getColumn(6).width = 18; ws2.getColumn(7).width = 16;
-    addSignatures(ws2, headers2.length);
+      const allRows = filteredItemRows();
+      const allReturnRows = filteredReturns();
+      const comboMap = new Map();
+      allRows.forEach(r => { if (r.year && r.monthNum) { const k = r.year + '-' + r.monthNum; if (!comboMap.has(k)) comboMap.set(k, { year: r.year, month: r.monthNum }); } });
+      const combos = Array.from(comboMap.values()).sort((a, b) => a.year - b.year || a.month - b.month);
+      const multiYear = new Set(combos.map(c => c.year)).size > 1;
+      combos.forEach(c => {
+        const rowsM = allRows.filter(r => r.year === c.year && r.monthNum === c.month);
+        if (!rowsM.length) return;
+        const retRowsM = allReturnRows.filter(r => r.__year === c.year && r.__month === c.month);
+        const monthAgg = buildItemsExportAgg(rowsM, retRowsM);
+        const label = (MONTH_NAMES_AR[c.month - 1] || ('شهر ' + c.month)) + (multiYear ? ' ' + c.year : '');
+        addItemsSheets(monthAgg, ' - ' + label, ' - ' + label);
+      });
+    } else {
+      addItemsSheets(ex, '', '');
+    }
 
     const buf = await wb.xlsx.writeBuffer();
     const blob = new Blob([buf], { type: 'application/octet-stream' });
