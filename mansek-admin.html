@@ -29616,20 +29616,32 @@ function splBuildMemberPriceRows(type, pl){
   }).filter(Boolean).sort((a,b)=>a.name.localeCompare(b.name,'ar'));
 }
 
-function splExportMemberPriceList(btn){
+// بيلحق كل صف بباركود الصنف بتاعه (لو مسجل) من نفس فهرس الباركود المستخدم في تاب "أصناف العملاء"
+// (sciBuildBarcodeIndex، مصدره tamr_sales_item_catalog) - عشان نفس الباركود يظهر هنا في قوائم
+// الأسعار من غير ما نكرر تسجيله في مكانين.
+async function splAttachBarcodes(rows){
+  try{
+    const idx = await sciBuildBarcodeIndex();
+    rows.forEach(r=>{ r.barcode = idx[r.name] || ''; });
+  }catch(e){ console.error('[splAttachBarcodes]', e); }
+  return rows;
+}
+
+async function splExportMemberPriceList(btn){
   const type = btn.dataset.type, id = btn.dataset.id, member = btn.dataset.member, fmt = btn.dataset.fmt;
   const pl = splFindListById(type, id);
   if(!pl){ alert('تعذر العثور على القائمة'); return; }
   const rows = splBuildMemberPriceRows(type, pl);
   if(!rows.length){ alert('مفيش أصناف بسعر متاح للتصدير في القائمة دي - تأكد إن كتالوج الأصناف والأسعار الأساسي محمّل.'); return; }
+  await splAttachBarcodes(rows);
   if(fmt==='excel') splExportMemberExcel(member, pl.name, type, rows);
   else splExportMemberPDF(member, pl.name, type, rows);
 }
 
 // زرار تصدير Excel/PDF الثابت في عمود الإجراءات: بياخد كل العملاء/الفروع المحددة بمربعات
-// الاختيار (.spl-mem-cb) في نفس صف القائمة، وبيصدّر لكل واحد منهم قائمة أصناف وأسعاره بنفس
-// أسلوب splExportMemberExcel/PDF - بديل مضمون الشغل لأسلوب "إظهار زرار جنب الاسم" القديم.
-function splExportRowMembers(btn, fmt){
+// الاختيار (.spl-mem-cb) في نفس صف القائمة، وبيصدّر لكل واحد منهم قائمة أصناف وأسعاره (مع باركود
+// كل صنف) بنفس أسلوب splExportMemberExcel/PDF - بديل مضمون الشغل لأسلوب "إظهار زرار جنب الاسم" القديم.
+async function splExportRowMembers(btn, fmt){
   const type = btn.dataset.type, id = btn.dataset.id;
   const tr = btn.closest('tr');
   const members = tr ? [...tr.querySelectorAll('.spl-mem-cb:checked')].map(cb=>cb.value) : [];
@@ -29638,6 +29650,7 @@ function splExportRowMembers(btn, fmt){
   if(!pl){ alert('تعذر العثور على القائمة'); return; }
   const rows = splBuildMemberPriceRows(type, pl);
   if(!rows.length){ alert('مفيش أصناف بسعر متاح للتصدير في القائمة دي - تأكد إن كتالوج الأصناف والأسعار الأساسي محمّل.'); return; }
+  await splAttachBarcodes(rows);
   members.forEach(m => { if(fmt==='excel') splExportMemberExcel(m, pl.name, type, rows); else splExportMemberPDF(m, pl.name, type, rows); });
 }
 
@@ -29652,23 +29665,23 @@ function splExportMemberExcel(member, listName, type, rows){
   });
   const isDisc = type==='discount';
   const headers = isDisc
-    ? ['#','الصنف','السعر الأساسي','نسبة الخصم','السعر بعد الخصم','الضريبة','السعر شامل الضريبة']
-    : ['#','الصنف','السعر','الضريبة','السعر شامل الضريبة'];
+    ? ['#','الباركود','الصنف','السعر الأساسي','نسبة الخصم','السعر بعد الخصم','الضريبة','السعر شامل الضريبة']
+    : ['#','الباركود','الصنف','السعر','الضريبة','السعر شامل الضريبة'];
   const colCount = headers.length;
   const aoa = [
     [`قائمة أسعار العميل: ${member}`, ...Array(colCount-1).fill('')],
     [`${listName} — الطحان جولدن دايتس — ${new Date().toLocaleString('ar-EG')} — ${rows.length} صنف`, ...Array(colCount-1).fill('')],
     headers,
     ...rows.map((r,i)=> isDisc
-      ? [i+1, r.name, r.basePrice, r.discountPct+'%', r.price, r.taxPct>0?r.taxPct+'%':'—', r.priceWithTax]
-      : [i+1, r.name, r.price, r.taxPct>0?r.taxPct+'%':'—', r.priceWithTax]),
+      ? [i+1, r.barcode||'—', r.name, r.basePrice, r.discountPct+'%', r.price, r.taxPct>0?r.taxPct+'%':'—', r.priceWithTax]
+      : [i+1, r.barcode||'—', r.name, r.price, r.taxPct>0?r.taxPct+'%':'—', r.priceWithTax]),
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [
     {s:{r:0,c:0}, e:{r:0,c:colCount-1}},
     {s:{r:1,c:0}, e:{r:1,c:colCount-1}},
   ];
-  ws['!cols'] = isDisc ? [{wch:6},{wch:40},{wch:14},{wch:12},{wch:16},{wch:12},{wch:18}] : [{wch:6},{wch:44},{wch:14},{wch:12},{wch:18}];
+  ws['!cols'] = isDisc ? [{wch:6},{wch:16},{wch:40},{wch:14},{wch:12},{wch:16},{wch:12},{wch:18}] : [{wch:6},{wch:16},{wch:44},{wch:14},{wch:12},{wch:18}];
   for(let c=0;c<colCount;c++){
     const t = XLSX.utils.encode_cell({r:0,c});
     if(ws[t]) ws[t].s = S(CARAMEL, CREAM, true, 14, true);
@@ -29681,7 +29694,7 @@ function splExportMemberExcel(member, listName, type, rows){
     const rIdx = 3+i;
     for(let c=0;c<colCount;c++){
       const cell = XLSX.utils.encode_cell({r:rIdx,c});
-      if(ws[cell]) ws[cell].s = S(i%2===1?'F5F0E8':WHITE, DARK, c===1, 10.5, c===1);
+      if(ws[cell]) ws[cell].s = S(i%2===1?'F5F0E8':WHITE, DARK, c===2, 10.5, c===2);
     }
   });
   const wb = XLSX.utils.book_new();
@@ -29693,9 +29706,15 @@ function splExportMemberPDF(member, listName, type, rows){
   const C = {dark:'#2C1F0A', caramel:'#4B3C1A', gold:'#C8A96E', cream:'#EDE5D8', light:'#F5F0E8'};
   const now = new Date().toLocaleString('ar-EG');
   const isDisc = type==='discount';
+  // خلية الباركود: باركود حقيقي قابل للمسح (SVG عن طريق مكتبة JsBarcode) لو الصنف عنده باركود مسجل،
+  // وإلا شرطة فاضية - نفس فهرس الباركود المستخدم في تاب "أصناف العملاء" (splAttachBarcodes)
+  const barcodeCell = r => r.barcode
+    ? `<svg class="barcode" jsbarcode-value="${String(r.barcode).replace(/"/g,'&quot;')}" jsbarcode-height="26" jsbarcode-width="1.3" jsbarcode-fontsize="9" jsbarcode-margin="0" jsbarcode-displayvalue="true"></svg>`
+    : `<span style="color:#bbb;font-size:10px">—</span>`;
   const tableRows = rows.map((r,i)=> isDisc ? `
     <tr style="${i%2===1?'background:'+C.light:''}">
       <td style="padding:6px 8px;font-size:10.5px;color:#888">${i+1}</td>
+      <td style="padding:6px 4px;text-align:center">${barcodeCell(r)}</td>
       <td style="padding:6px 8px;font-weight:700;font-size:12px">${r.name}</td>
       <td style="padding:6px 8px;text-align:center;font-size:11px">${r.basePrice}</td>
       <td style="padding:6px 8px;text-align:center;font-size:11px">${r.discountPct}%</td>
@@ -29705,14 +29724,15 @@ function splExportMemberPDF(member, listName, type, rows){
     </tr>` : `
     <tr style="${i%2===1?'background:'+C.light:''}">
       <td style="padding:6px 8px;font-size:10.5px;color:#888">${i+1}</td>
+      <td style="padding:6px 4px;text-align:center">${barcodeCell(r)}</td>
       <td style="padding:6px 8px;font-weight:700;font-size:12px">${r.name}</td>
       <td style="padding:6px 8px;text-align:center;font-size:11px">${r.price}</td>
       <td style="padding:6px 8px;text-align:center;font-size:11px">${r.taxPct>0?r.taxPct+'%':'—'}</td>
       <td style="padding:6px 8px;text-align:center;font-size:11px;font-weight:700;color:${C.caramel}">${r.priceWithTax}</td>
     </tr>`).join('');
   const headCells = isDisc
-    ? `<th>#</th><th>الصنف</th><th style="text-align:center">السعر الأساسي</th><th style="text-align:center">نسبة الخصم</th><th style="text-align:center">السعر بعد الخصم</th><th style="text-align:center">الضريبة</th><th style="text-align:center">السعر شامل الضريبة</th>`
-    : `<th>#</th><th>الصنف</th><th style="text-align:center">السعر</th><th style="text-align:center">الضريبة</th><th style="text-align:center">السعر شامل الضريبة</th>`;
+    ? `<th>#</th><th style="text-align:center;width:110px">الباركود</th><th>الصنف</th><th style="text-align:center">السعر الأساسي</th><th style="text-align:center">نسبة الخصم</th><th style="text-align:center">السعر بعد الخصم</th><th style="text-align:center">الضريبة</th><th style="text-align:center">السعر شامل الضريبة</th>`
+    : `<th>#</th><th style="text-align:center;width:110px">الباركود</th><th>الصنف</th><th style="text-align:center">السعر</th><th style="text-align:center">الضريبة</th><th style="text-align:center">السعر شامل الضريبة</th>`;
 
   const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8"><title>قائمة أسعار ${member}</title>
   <style>
@@ -29744,7 +29764,14 @@ function splExportMemberPDF(member, listName, type, rows){
     <thead><tr>${headCells}</tr></thead>
     <tbody>${tableRows}</tbody>
   </table>
-  <${'script'}>window.onload=()=>window.print();</${'script'}>
+  <${'script'} src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></${'script'}>
+  <${'script'}>
+    window.onload = () => {
+      // بيرسم كل باركودات الصفحة (عناصر .barcode) بصريًا كصور SVG حقيقية قابلة للمسح قبل ما يفتح الطباعة
+      try { if (window.JsBarcode) JsBarcode(".barcode").init(); } catch(e) { console.error('[barcode]', e); }
+      window.print();
+    };
+  </${'script'}>
   </body></html>`;
 
   const blob = new Blob([html], {type:'text/html;charset=utf-8'});
