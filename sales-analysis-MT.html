@@ -5536,10 +5536,10 @@ table.datatable details summary:hover { text-decoration: underline; }
     URL.revokeObjectURL(url);
   };
 
-  // تصدير Excel ملون بشعار الشركة وتوقيعات لتاب "الأصناف" - شيتين: بالقيمة (مع تفصيل السنوات لو متاحة) وبالكمية
-  // نفس منطق تجميع بيانات تاب "الأصناف" (شوف renderItems) بالظبط، لكن قابل لإعادة الاستخدام على أي
-  // مجموعة صفوف/مرتجعات معينة بدل ما يبقى مربوط بالفلتر الحالي بس - مستخدم في تصدير Excel عشان نقدر
-  // نبني نفس البيانات لكل شهر لوحده (شوف splitByMonth جوه exportItemsExcel).
+  // تصدير Excel ملون بشعار الشركة وتوقيعات لتاب "الأصناف" - زرارين منفصلين (بالقيمة/بالكمية)، كل واحد
+  // بيطلع ملف مستقل. نفس منطق تجميع بيانات تاب "الأصناف" (شوف renderItems) بالظبط، لكن قابل لإعادة
+  // الاستخدام على أي مجموعة صفوف/مرتجعات معينة بدل ما يبقى مربوط بالفلتر الحالي بس - مستخدم في التصدير
+  // عشان نقدر نبني نفس البيانات لكل شهر لوحده (شوف _itemsExportGroups تحت).
   function buildItemsExportAgg(rows, returnRows) {
     const byItemValueSorted = groupSum(rows, r => r.item, r => r.total).sort((a, b) => b.sum - a.sum);
     const byItemValue = groupItemsByCategoryDesc(byItemValueSorted);
@@ -5575,17 +5575,11 @@ table.datatable details summary:hover { text-decoration: underline; }
     return { years, itemBmap, byItemValue, hasItemReturns, retYearsShownItems, retItemBmap, retByItemTotal, byItemQty, itemQtyValueOfMap, itemQtyCartonsTotalMap };
   }
 
-  window.exportItemsExcel = async function () {
-    if (typeof ExcelJS === 'undefined') { alert('مكتبة تصدير الإكسل مش محمّلة - تأكد إن الجهاز متصل بالإنترنت وحاول تاني.'); return; }
-    const ex = state.__itemsExport;
-    if (!ex || !ex.byItemValue || !ex.byItemValue.length) { alert('مفيش بيانات لتصديرها - اعرض تاب "الأصناف" الأول.'); return; }
-
-    const wb = new ExcelJS.Workbook();
-    wb.creator = 'نظام تحليل مبيعات تمور الطحان';
-    wb.created = new Date();
-    const now = new Date();
+  // أدوات مشتركة (شعار/هيدر/تنسيق رأس وتذييل الجدول/توقيعات) لتصدير إكسيل تاب "الأصناف" - نفس الشكل
+  // والهوية المستخدمة في باقي تصديرات الملف ده، لكن مفصولة في دالة واحدة عشان تُستخدم من زرار "بالقيمة"
+  // وزرار "بالكمية" المنفصلين من غير تكرار.
+  function _itemsExcelKit(wb, now) {
     const RED = 'FFB23B3B', INK = 'FF3A2417', SAND = 'FFEDE5D8', SAND_DARK = 'FFDCCFBB', BAND = 'FFFAF7F2', GOOD = 'FF2F6B45';
-
     const addLetterhead = (ws, title, lastCol) => {
       try {
         const logoEl = document.querySelector('img.logo');
@@ -5608,7 +5602,6 @@ table.datatable details summary:hover { text-decoration: underline; }
       dateCell.alignment = { horizontal: 'center' };
       ws.addRow([]);
     };
-
     const styleHeaderRow = (row) => {
       row.eachCell(cell => {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: INK } };
@@ -5638,26 +5631,58 @@ table.datatable details summary:hover { text-decoration: underline; }
       const sigLineRow = ws.addRow(lineArr);
       sigLineRow.eachCell(cell => { if (cell.value) { cell.alignment = { horizontal: 'center' }; cell.font = { color: { argb: 'FF6B5647' } }; } });
     };
+    return { RED, INK, SAND, SAND_DARK, BAND, GOOD, addLetterhead, styleHeaderRow, styleFooterRow, addSignatures };
+  }
 
-    // بيبني شيتي "بالقيمة" و"بالكمية" لمجموعة بيانات معينة (data بنفس شكل state.__itemsExport) - قابلة
-    // للنداء أكتر من مرة لبناء شيت الإجمالي + شيت لكل شهر لوحده لما يكون فيه أكتر من شهر مختار
-    // (sheetSuffix بيتضاف لاسم التاب في أسفل الإكسيل - لازم يفضل قصير عشان حد الـ31 حرف بتاع إكسيل،
-    // وtitleSuffix بيتضاف لعنوان التقرير في الهيدر - ده مفيش عليه حد طول).
-    const addItemsSheets = (data, sheetSuffix, titleSuffix) => {
-      const { years, itemBmap, byItemValue, hasItemReturns, retYearsShownItems, retItemBmap, retByItemTotal, byItemQty, itemQtyValueOfMap, itemQtyCartonsTotalMap } = data;
-      const sheetName1 = ('الأصناف - بالقيمة' + sheetSuffix).slice(0, 31);
-      const sheetName2 = ('الأصناف - بالكمية' + sheetSuffix).slice(0, 31);
+  // بيرجع شيت الإجمالي + شيتات الشهور المطلوب بناؤها لتصدير معين - قايمة {data,sheetSuffix,titleSuffix}
+  // واحدة لو مفيش أكتر من شهر مختار، أو شيت إجمالي + شيت لكل شهر (أو شهر+سنة) فعليًا موجود لو محدد
+  // أكتر من شهر في فلتر "الشهر" المشترك فوق الصفحة - مشتركة بين زرار "بالقيمة" وزرار "بالكمية".
+  function _itemsExportGroups(ex) {
+    const selMonths = state.filters.month || [];
+    if (selMonths.length < 2) return [{ data: ex, sheetSuffix: '', titleSuffix: '' }];
+    const groups = [{ data: ex, sheetSuffix: ' - الإجمالي', titleSuffix: ' - إجمالي كل الشهور المختارة' }];
+    const allRows = filteredItemRows();
+    const allReturnRows = filteredReturns();
+    const comboMap = new Map();
+    allRows.forEach(r => { if (r.year && r.monthNum) { const k = r.year + '-' + r.monthNum; if (!comboMap.has(k)) comboMap.set(k, { year: r.year, month: r.monthNum }); } });
+    const combos = Array.from(comboMap.values()).sort((a, b) => a.year - b.year || a.month - b.month);
+    const multiYear = new Set(combos.map(c => c.year)).size > 1;
+    combos.forEach(c => {
+      const rowsM = allRows.filter(r => r.year === c.year && r.monthNum === c.month);
+      if (!rowsM.length) return;
+      const retRowsM = allReturnRows.filter(r => r.__year === c.year && r.__month === c.month);
+      const monthAgg = buildItemsExportAgg(rowsM, retRowsM);
+      const label = (MONTH_NAMES_AR[c.month - 1] || ('شهر ' + c.month)) + (multiYear ? ' ' + c.year : '');
+      groups.push({ data: monthAgg, sheetSuffix: ' - ' + label, titleSuffix: ' - ' + label });
+    });
+    return groups;
+  }
 
-      /* ---- شيت: بالقيمة ---- */
-      const ws1 = wb.addWorksheet(sheetName1, { views: [{ rightToLeft: true }] });
+  // تصدير Excel لجدول "الأصناف - بالقيمة" لوحده (شيت إجمالي + شيت لكل شهر لو محدد أكتر من شهر) - منفصل
+  // تمامًا عن تصدير "بالكمية" (exportItemsExcelQty) بناءً على طلب فصل الملفين عن بعض.
+  window.exportItemsExcelValue = async function () {
+    if (typeof ExcelJS === 'undefined') { alert('مكتبة تصدير الإكسل مش محمّلة - تأكد إن الجهاز متصل بالإنترنت وحاول تاني.'); return; }
+    const ex = state.__itemsExport;
+    if (!ex || !ex.byItemValue || !ex.byItemValue.length) { alert('مفيش بيانات لتصديرها - اعرض تاب "الأصناف" الأول.'); return; }
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'نظام تحليل مبيعات تمور الطحان';
+    wb.created = new Date();
+    const now = new Date();
+    const { INK, BAND, addLetterhead, styleHeaderRow, styleFooterRow, addSignatures } = _itemsExcelKit(wb, now);
+
+    _itemsExportGroups(ex).forEach(({ data, sheetSuffix, titleSuffix }) => {
+      const { years, itemBmap, byItemValue, hasItemReturns, retYearsShownItems, retItemBmap, retByItemTotal } = data;
+      const sheetName = ('الأصناف - بالقيمة' + sheetSuffix).slice(0, 31);
+      const ws1 = wb.addWorksheet(sheetName, { views: [{ rightToLeft: true }] });
       const yearCols = years.length >= 2 ? [...years.map(y => 'قيمة ' + y), 'الفرق', 'نسبة النمو'] : (years.length === 1 ? ['قيمة ' + years[0]] : ['القيمة']);
       const retCols = hasItemReturns ? [...retYearsShownItems.map(y => 'مرتجع ' + y), 'نسبة المرتجع من البيع', 'الصافي بعد المرتجع'] : [];
       const headers1 = ['كود الصنف', 'الصنف', 'التصنيف', ...yearCols, 'عدد مرات البيع', ...retCols];
-      const lastColLetter1 = String.fromCharCode(64 + headers1.length); // تقريبي كويس لعدد الأعمدة المتوقع (أقل من 26)
+      const lastColLetter1 = String.fromCharCode(64 + headers1.length);
       addLetterhead(ws1, 'تقرير الأصناف - بالقيمة' + titleSuffix, lastColLetter1);
       const headerRow1 = ws1.addRow(headers1);
       styleHeaderRow(headerRow1);
-      const growthColIdx = years.length >= 2 ? 3 + yearCols.length : -1; // فهرس عمود "نسبة النمو" (لو موجود)
+      const growthColIdx = years.length >= 2 ? 3 + yearCols.length : -1;
 
       byItemValue.forEach((x, idx) => {
         const ym = itemBmap.get(x.key) || new Map();
@@ -5683,7 +5708,6 @@ table.datatable details summary:hover { text-decoration: underline; }
         if (idx % 2 === 1) row.eachCell(cell => { if (!cell.fill || !cell.fill.fgColor) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } }; });
         row.getCell(1).alignment = { horizontal: 'center' };
         row.getCell(2).alignment = { horizontal: 'right' };
-        // تنسيق أرقام: أعمدة القيمة/المرتجع كأرقام صحيحة، وأعمدة النسب كنسبة مئوية
         for (let c = 4; c <= row.cellCount; c++) {
           const cell = row.getCell(c);
           if (typeof cell.value === 'number') {
@@ -5726,9 +5750,36 @@ table.datatable details summary:hover { text-decoration: underline; }
       ws1.getColumn(1).width = 14; ws1.getColumn(2).width = 38; ws1.getColumn(3).width = 22;
       for (let c = 4; c <= headers1.length; c++) ws1.getColumn(c).width = 16;
       addSignatures(ws1, headers1.length);
+    });
 
-      /* ---- شيت: بالكمية ---- */
-      const ws2 = wb.addWorksheet(sheetName2, { views: [{ rightToLeft: true }] });
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const stamp = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    a.download = 'الأصناف_بالقيمة_' + stamp + '.xlsx';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  // تصدير Excel لجدول "الأصناف - بالكمية" لوحده (شيت إجمالي + شيت لكل شهر لو محدد أكتر من شهر) - منفصل
+  // تمامًا عن تصدير "بالقيمة" (exportItemsExcelValue).
+  window.exportItemsExcelQty = async function () {
+    if (typeof ExcelJS === 'undefined') { alert('مكتبة تصدير الإكسل مش محمّلة - تأكد إن الجهاز متصل بالإنترنت وحاول تاني.'); return; }
+    const ex = state.__itemsExport;
+    if (!ex || !ex.byItemValue || !ex.byItemValue.length) { alert('مفيش بيانات لتصديرها - اعرض تاب "الأصناف" الأول.'); return; }
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'نظام تحليل مبيعات تمور الطحان';
+    wb.created = new Date();
+    const now = new Date();
+    const { RED, BAND, addLetterhead, styleHeaderRow, styleFooterRow, addSignatures } = _itemsExcelKit(wb, now);
+
+    _itemsExportGroups(ex).forEach(({ data, sheetSuffix, titleSuffix }) => {
+      const { byItemQty, itemQtyValueOfMap, itemQtyCartonsTotalMap } = data;
+      const sheetName = ('الأصناف - بالكمية' + sheetSuffix).slice(0, 31);
+      const ws2 = wb.addWorksheet(sheetName, { views: [{ rightToLeft: true }] });
       const headers2 = ['كود الصنف', 'الصنف', 'التصنيف', 'عدد بالكرتونة', 'إجمالي الكمية', 'إجمالي عدد الكراتين', 'القيمة'];
       addLetterhead(ws2, 'تقرير الأصناف - بالكمية' + titleSuffix, 'G');
       const headerRow2 = ws2.addRow(headers2);
@@ -5753,32 +5804,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       footerRow2.getCell(5).numFmt = '#,##0'; footerRow2.getCell(6).numFmt = '#,##0.00'; footerRow2.getCell(7).numFmt = '#,##0';
       ws2.getColumn(1).width = 14; ws2.getColumn(2).width = 38; ws2.getColumn(3).width = 22; ws2.getColumn(4).width = 14; ws2.getColumn(5).width = 16; ws2.getColumn(6).width = 18; ws2.getColumn(7).width = 16;
       addSignatures(ws2, headers2.length);
-    };
-
-    // لو محدد أكتر من شهر في فلتر "الشهر" المشترك فوق الصفحة، نقسّم التصدير: شيت إجمالي أول (كل
-    // الشهور المختارة مجمّعة مع بعض - زي التصدير القديم بالظبط)، وبعده شيت منفصل لكل شهر (أو شهر+سنة
-    // لو أكتر من سنة مختارة كمان) موجود فعليًا في البيانات المفلترة حاليًا.
-    const selMonths = state.filters.month || [];
-    if (selMonths.length >= 2) {
-      addItemsSheets(ex, ' - الإجمالي', ' - إجمالي كل الشهور المختارة');
-
-      const allRows = filteredItemRows();
-      const allReturnRows = filteredReturns();
-      const comboMap = new Map();
-      allRows.forEach(r => { if (r.year && r.monthNum) { const k = r.year + '-' + r.monthNum; if (!comboMap.has(k)) comboMap.set(k, { year: r.year, month: r.monthNum }); } });
-      const combos = Array.from(comboMap.values()).sort((a, b) => a.year - b.year || a.month - b.month);
-      const multiYear = new Set(combos.map(c => c.year)).size > 1;
-      combos.forEach(c => {
-        const rowsM = allRows.filter(r => r.year === c.year && r.monthNum === c.month);
-        if (!rowsM.length) return;
-        const retRowsM = allReturnRows.filter(r => r.__year === c.year && r.__month === c.month);
-        const monthAgg = buildItemsExportAgg(rowsM, retRowsM);
-        const label = (MONTH_NAMES_AR[c.month - 1] || ('شهر ' + c.month)) + (multiYear ? ' ' + c.year : '');
-        addItemsSheets(monthAgg, ' - ' + label, ' - ' + label);
-      });
-    } else {
-      addItemsSheets(ex, '', '');
-    }
+    });
 
     const buf = await wb.xlsx.writeBuffer();
     const blob = new Blob([buf], { type: 'application/octet-stream' });
@@ -5786,7 +5812,7 @@ table.datatable details summary:hover { text-decoration: underline; }
     const a = document.createElement('a');
     a.href = url;
     const stamp = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
-    a.download = 'الأصناف_' + stamp + '.xlsx';
+    a.download = 'الأصناف_بالكمية_' + stamp + '.xlsx';
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   };
@@ -6469,7 +6495,8 @@ function renderItems() {
           <button type="button" class="export-dd-btn" onclick="toggleExportDD(this,event)"><i class="ti ti-download"></i> تصدير <i class="ti ti-chevron-down"></i></button>
           <div class="export-dd-menu">
             <button type="button" class="dd-pdf" onclick="printCurrentTab()"><i class="ti ti-file-type-pdf"></i> طباعة PDF</button>
-            <button type="button" class="dd-excel" onclick="exportItemsExcel()"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+            <button type="button" class="dd-excel" onclick="exportItemsExcelValue()"><i class="ti ti-file-spreadsheet"></i> تصدير Excel - بالقيمة</button>
+            <button type="button" class="dd-excel" onclick="exportItemsExcelQty()"><i class="ti ti-file-spreadsheet"></i> تصدير Excel - بالكمية</button>
           </div>
         </div>
       </span>
