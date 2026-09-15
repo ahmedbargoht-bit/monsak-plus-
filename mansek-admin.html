@@ -4614,6 +4614,12 @@ h2,h3{color:#2C1F0A}
                   <i class="ti ti-plus"></i> إضافة
                 </button>
               </div>
+              <div style="margin-top:8px">
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;width:fit-content">
+                  <input type="checkbox" id="spl-cexempt"/>
+                  <span>🚫 عميل معفي من الضريبة (مايتحسبش عليه أي ضريبة على أي صنف)</span>
+                </label>
+              </div>
               <div id="spl-client-msg" style="margin-top:8px;font-size:12px"></div>
             </div>
 
@@ -27969,6 +27975,9 @@ function splRenderClients(){
     const typeBadge = c.client_type==='سلاسل الطحان'
       ? `<span style="background:#D1FAE5;color:#065F46;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:700">سلاسل</span>`
       : `<span style="background:#EEF6FF;color:#1D4ED8;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:700">خاص</span>`;
+    const exemptBadge = c.tax_exempt
+      ? `<span title="معفي من الضريبة" style="background:#FCE7E7;color:#B71C1C;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:700;margin-inline-start:4px">🚫 ضريبة</span>`
+      : '';
     const catCells = cats.map(cat=>{
       const disc = _splCatDiscounts.find(d=>d.client_name===c.name && d.cat===cat);
       return disc
@@ -27986,13 +27995,13 @@ function splRenderClients(){
 
     return `<tr style="border-bottom:0.5px solid var(--border);${i%2===1?'background:var(--surface-1)':''}">
       <td style="padding:8px 12px;font-size:12px;color:var(--text2)">${i+1}</td>
-      <td style="padding:8px 12px;font-weight:600;font-size:12px">${c.name}</td>
+      <td style="padding:8px 12px;font-weight:600;font-size:12px">${c.name}${exemptBadge}</td>
       <td style="padding:8px;text-align:center">${typeBadge}</td>
       ${catCells}
       ${promosCell}
       <td style="padding:8px;text-align:center;color:var(--text2);font-size:12px">${branchCount} فرع</td>
       <td style="padding:8px;text-align:center;display:flex;gap:4px;justify-content:center">
-        <button onclick="splEditClient(${c.id},'${(c.name).replace(/'/g,"\'")}',${c.discount_pct},'${(c.client_type||'أسواق خاصة').replace(/'/g,"\'")}')"
+        <button onclick="splEditClient(${c.id},'${(c.name).replace(/'/g,"\'")}',${c.discount_pct},'${(c.client_type||'أسواق خاصة').replace(/'/g,"\'")}',${!!c.tax_exempt})"
           style="background:#EEF6FF;color:#1D4ED8;border:1px solid #BFDBFE;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">✏️</button>
         <button onclick="splDeleteClient(${c.id},'${(c.name).replace(/'/g,"\'")}')"
           style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">🗑</button>
@@ -28079,6 +28088,7 @@ async function splSaveClient(){
   const name = document.getElementById('spl-cname').value.trim();
   const type = document.getElementById('spl-ctype').value;
   const pct  = parseFloat(document.getElementById('spl-cpct').value)||0;
+  const exempt = !!document.getElementById('spl-cexempt')?.checked;
   const msg  = document.getElementById('spl-client-msg');
   if(!name){ msg.style.color='#B71C1C'; msg.textContent='يرجى إدخال اسم العميل'; return; }
   const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
@@ -28086,32 +28096,34 @@ async function splSaveClient(){
   let r;
   if(existing){
     r = await fetch(`${SUPABASE_URL}/rest/v1/sales_clients?id=eq.${existing.id}`,{
-      method:'PATCH', headers:H, body:JSON.stringify({discount_pct:pct, client_type:type})
+      method:'PATCH', headers:H, body:JSON.stringify({discount_pct:pct, client_type:type, tax_exempt:exempt})
     });
   } else {
     r = await fetch(`${SUPABASE_URL}/rest/v1/sales_clients`,{
-      method:'POST', headers:H, body:JSON.stringify({name, discount_pct:pct, client_type:type})
+      method:'POST', headers:H, body:JSON.stringify({name, discount_pct:pct, client_type:type, tax_exempt:exempt})
     });
   }
   if(r.ok||r.status===201||r.status===204){
     msg.style.color='#065F46'; msg.textContent='✅ تم الحفظ';
     document.getElementById('spl-cname').value='';
     document.getElementById('spl-cpct').value='';
+    const exemptCb = document.getElementById('spl-cexempt'); if(exemptCb) exemptCb.checked=false;
     await spLoadAll();
   } else { msg.style.color='#B71C1C'; msg.textContent='❌ خطأ: '+await r.text(); }
   setTimeout(()=>msg.textContent='',3000);
 }
 
-async function splEditClient(id, name, pct, type){
+async function splEditClient(id, name, pct, type, exempt){
   const newNameRaw = prompt(`اسم العميل / السلسلة:`, name); if(newNameRaw===null) return;
   const newName = newNameRaw.trim();
   if(!newName){ showToast('❌ الاسم لا يمكن أن يكون فارغاً'); return; }
   const newPct = prompt(`خصم "${newName}":`, pct); if(newPct===null) return;
   const newType = confirm(`النوع الحالي: ${type}\nاضغط OK لـ "سلاسل الطحان" أو Cancel لـ "أسواق خاصة"`) ? 'سلاسل الطحان' : 'أسواق خاصة';
+  const newExempt = confirm(`إعفاء "${newName}" من الضريبة؟\nالحالة الحالية: ${exempt ? 'معفي' : 'غير معفي'}\nاضغط OK لجعله معفي من الضريبة أو Cancel لإلغاء الإعفاء (تطبيق الضريبة عادي)`);
   const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
 
   await fetch(`${SUPABASE_URL}/rest/v1/sales_clients?id=eq.${id}`,{
-    method:'PATCH', headers:H, body:JSON.stringify({name:newName, discount_pct:parseFloat(newPct)||0, client_type:newType})
+    method:'PATCH', headers:H, body:JSON.stringify({name:newName, discount_pct:parseFloat(newPct)||0, client_type:newType, tax_exempt:newExempt})
   });
 
   // لو الاسم اتغيّر — لازم نحدّث كل الجداول المرتبطة بالاسم القديم عشان الربط ميتكسرش
@@ -29241,10 +29253,11 @@ function sciRenderTable(){
   }
   // سعر الصنف والضريبة — من نفس كتالوج "الأصناف والأسعار" العام (_splPrices)، مطابقة بالاسم مثل renderProdDB
   const sciPriceList = (typeof _splPrices!=='undefined' ? _splPrices : []);
+  const sciTableExempt = splIsClientTaxExempt(_sciCurrentClientRaw);
   tbody.innerHTML = filtered.map((r,i)=>{
     const pr = sciPriceList.find(x=>x.snf_name===r.name);
     const price = pr?.price||0;
-    const taxPct = pr?.tax_pct||0;
+    const taxPct = sciTableExempt ? 0 : (pr?.tax_pct||0);
     const priceWithTax = taxPct>0 ? price*(1+taxPct/100) : price;
     return `
     <tr style="${i%2===1?'background:#F9F6F1':''}">
@@ -29372,10 +29385,11 @@ function sciExportPDF(){
   const sciPdfFileTitle = sciPdfFea ? `قائمة أصناف ${sciPdfFea} - ${_sciCurrentClient}` : `أصناف ${_sciCurrentClient}`;
 
   const sciPdfPriceList = (typeof _splPrices!=='undefined' ? _splPrices : []);
+  const sciPdfExempt = splIsClientTaxExempt(_sciCurrentClientRaw);
   const tableRows = rows.map((r,i)=>{
     const pr = sciPdfPriceList.find(x=>x.snf_name===r.name);
     const price = pr?.price||0;
-    const taxPct = pr?.tax_pct||0;
+    const taxPct = sciPdfExempt ? 0 : (pr?.tax_pct||0);
     const priceWithTax = taxPct>0 ? price*(1+taxPct/100) : price;
     return `
     <tr style="${i%2===1?'background:'+C.light:''}">
@@ -29449,10 +29463,11 @@ function sciExportExcel(){
   const sciXlsFileTitle = sciXlsFea ? `قائمة أصناف ${sciXlsFea} - ${_sciCurrentClient}` : `أصناف ${_sciCurrentClient}`;
 
   const sciXlsPriceList = (typeof _splPrices!=='undefined' ? _splPrices : []);
+  const sciXlsExempt = splIsClientTaxExempt(_sciCurrentClientRaw);
   const priceInfoOf = name => {
     const pr = sciXlsPriceList.find(x=>x.snf_name===name);
     const price = pr?.price||0;
-    const taxPct = pr?.tax_pct||0;
+    const taxPct = sciXlsExempt ? 0 : (pr?.tax_pct||0);
     const priceWithTax = taxPct>0 ? price*(1+taxPct/100) : price;
     return {price, taxPct, priceWithTax};
   };
@@ -29591,15 +29606,26 @@ function splFindListById(type, id){
 // - قوائم "أسعار خاصة": الأصناف والأسعار المخصصة مسجلة جاهزة جوه القائمة نفسها (pl.products).
 // - قوائم "خصم %": مفيش أصناف مسجلة جوه القائمة (بس نسبة خصم عامة)، فبنجيب كل أصناف الكتالوج
 //   الأساسي (_splProducts) مع سعرها الأساسي (_splPrices) ونطرح منه نسبة الخصم لكل صنف.
-function splBuildMemberPriceRows(type, pl){
+// بيرجع true لو العميل ده مسجل في سجل العملاء (sales_clients) كمعفي من الضريبة بالكامل
+// (tax_exempt) - الإعفاء على مستوى العميل نفسه وشامل كل النظام، مش مربوط بقائمة سعر معينة.
+function splIsClientTaxExempt(memberName){
+  if(!memberName) return false;
+  const c = (_splClients||[]).find(x=>x.name===memberName);
+  return !!(c && c.tax_exempt);
+}
+
+function splBuildMemberPriceRows(type, pl, memberName){
   // نسبة الضريبة مسجلة على مستوى الصنف نفسه في كتالوج الأسعار الأساسي (sales_prices.tax_pct)،
   // مش جوه قائمة السعر الخاص - فبنجيبها من هناك بنفس منطق باقي شاشات "الأصناف والأسعار"
   // (priceWithTax = price × (1 + tax_pct/100))، عشان الضريبة تظهر صح حتى لو الصنف بسعر خاص.
+  // لو العميل (memberName) معفي من الضريبة (sales_clients.tax_exempt) بتتصفر الضريبة بالكامل له
+  // حتى لو الصنف نفسه عليه tax_pct في الكتالوج العام.
+  const exempt = splIsClientTaxExempt(memberName);
   if(type==='prices'){
     return (pl.products||[]).map(p=>{
       const price = Number(p.price)||0;
       const pr = _splPrices.find(x=>x.snf_name===p.name);
-      const taxPct = Number(pr?.tax_pct)||0;
+      const taxPct = exempt ? 0 : (Number(pr?.tax_pct)||0);
       const priceWithTax = taxPct>0 ? +(price*(1+taxPct/100)).toFixed(2) : price;
       return {name:p.name, price, taxPct, priceWithTax};
     }).sort((a,b)=>a.name.localeCompare(b.name,'ar'));
@@ -29609,7 +29635,7 @@ function splBuildMemberPriceRows(type, pl){
     const pr = _splPrices.find(x=>x.snf_name===p.name);
     if(!pr || pr.price==null) return null;
     const base = Number(pr.price);
-    const taxPct = Number(pr.tax_pct)||0;
+    const taxPct = exempt ? 0 : (Number(pr.tax_pct)||0);
     const priceAfterDisc = +(base*(1-pct/100)).toFixed(2);
     const priceWithTax = taxPct>0 ? +(priceAfterDisc*(1+taxPct/100)).toFixed(2) : priceAfterDisc;
     return {name:p.name, basePrice:base, discountPct:pct, price:priceAfterDisc, taxPct, priceWithTax};
@@ -29631,7 +29657,7 @@ async function splExportMemberPriceList(btn){
   const type = btn.dataset.type, id = btn.dataset.id, member = btn.dataset.member, fmt = btn.dataset.fmt;
   const pl = splFindListById(type, id);
   if(!pl){ alert('تعذر العثور على القائمة'); return; }
-  const rows = splBuildMemberPriceRows(type, pl);
+  const rows = splBuildMemberPriceRows(type, pl, member);
   if(!rows.length){ alert('مفيش أصناف بسعر متاح للتصدير في القائمة دي - تأكد إن كتالوج الأصناف والأسعار الأساسي محمّل.'); return; }
   await splAttachBarcodes(rows);
   if(fmt==='excel') splExportMemberExcel(member, pl.name, type, rows);
@@ -29648,10 +29674,13 @@ async function splExportRowMembers(btn, fmt){
   if(!members.length){ alert('حدد عميل واحد على الأقل من عمود "المشمولون" (مربع الاختيار جنب اسمه) الأول'); return; }
   const pl = splFindListById(type, id);
   if(!pl){ alert('تعذر العثور على القائمة'); return; }
-  const rows = splBuildMemberPriceRows(type, pl);
-  if(!rows.length){ alert('مفيش أصناف بسعر متاح للتصدير في القائمة دي - تأكد إن كتالوج الأصناف والأسعار الأساسي محمّل.'); return; }
-  await splAttachBarcodes(rows);
-  members.forEach(m => { if(fmt==='excel') splExportMemberExcel(m, pl.name, type, rows); else splExportMemberPDF(m, pl.name, type, rows); });
+  // كل عميل ليه صفوف أسعار/ضريبة مستقلة (لو معفي من الضريبة بتتصفر ضريبته بس، مش باقي الأعضاء)
+  for(const m of members){
+    const rows = splBuildMemberPriceRows(type, pl, m);
+    if(!rows.length){ alert(`مفيش أصناف بسعر متاح للتصدير لـ "${m}" - تأكد إن كتالوج الأصناف والأسعار الأساسي محمّل.`); continue; }
+    await splAttachBarcodes(rows);
+    if(fmt==='excel') splExportMemberExcel(m, pl.name, type, rows); else splExportMemberPDF(m, pl.name, type, rows);
+  }
 }
 
 function splExportMemberExcel(member, listName, type, rows){
@@ -29767,8 +29796,20 @@ function splExportMemberPDF(member, listName, type, rows){
   <${'script'} src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></${'script'}>
   <${'script'}>
     window.onload = () => {
-      // بيرسم كل باركودات الصفحة (عناصر .barcode) بصريًا كصور SVG حقيقية قابلة للمسح قبل ما يفتح الطباعة
+      // بيرسم كل باركودات الصفحة (عناصر .barcode) بصريًا كصور SVG حقيقية (ترميز CODE128 معياري) قابلة
+      // للمسح فعلًا بأي قارئ باركود أو كاميرا موبايل - ده محتاج إنترنت لحظة الطباعة عشان مكتبة الرسم
+      // (JsBarcode) بتتحمّل من الإنترنت. لو مفيش نت أو المكتبة فشلت تتحمّل، بنستبدل أي باركود فشل يترسم
+      // برقمه كنص عادي (مش شكل فاضي) عشان الرقم يفضل موجود على الأقل حتى من غير رسمة قابلة للمسح.
       try { if (window.JsBarcode) JsBarcode(".barcode").init(); } catch(e) { console.error('[barcode]', e); }
+      document.querySelectorAll('.barcode').forEach(svg => {
+        if (!svg.childElementCount) {
+          const val = svg.getAttribute('jsbarcode-value') || '';
+          const span = document.createElement('span');
+          span.style.cssText = 'font-family:monospace;font-size:11px;letter-spacing:1px;color:#555';
+          span.textContent = val;
+          svg.replaceWith(span);
+        }
+      });
       window.print();
     };
   </${'script'}>
