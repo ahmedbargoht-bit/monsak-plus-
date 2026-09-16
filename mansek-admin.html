@@ -27089,17 +27089,79 @@ async function sretConfirmPull(id, branch){
 }
 
 function sretExportExcel(){
-  const tbody = document.getElementById('sret-tbody');
-  if(!tbody||!tbody.rows.length) return;
+  const data = _sretLastData||[];
+  if(!data.length) return;
   const from = document.getElementById('sret-from')?.value||'';
   const to   = document.getElementById('sret-to')?.value||'';
-  const headers = ['#','المجموعة','خط السير','الفرع','الصنف','الكمية','السبب','الحالة','تأكيد السحب','التاريخ'];
-  const rows = [...tbody.rows].map(r=>[...r.cells].map(c=>c.innerText.trim()));
-  const aoa = [['الطحان جولدن دايتس — مرتجعات المبيعات','','','','','','','','',''],
-    [`الفترة: ${from} — ${to}`,'','','','','','','','',''],[''],headers,...rows];
+  const COLS = 10;
+
+  // إجمالي الكمية لكل صنف (يعكس فلتر "الصنف" لو متفعّل، وإلا كل الأصناف الظاهرة حاليًا)
+  const itemTotals = {};
+  data.forEach(r=>{
+    const name = (r.snf||'—').trim()||'—';
+    itemTotals[name] = (itemTotals[name]||0) + (+r.qty||0);
+  });
+  const itemTotalRows = Object.entries(itemTotals).sort((a,b)=>b[1]-a[1]);
+
+  const dataRows = data.map((r,i)=>{
+    const rdRow  = ADMIN_ROUTES_DATA.find(x=>x.branch_name===r.branch);
+    const routeN = rdRow?.route || r.route || '—';
+    const isPulled = !!r.pulled;
+    const isLate   = !isPulled && ((Date.now()-new Date(r.created_at).getTime())/864e5)>=3;
+    const hasIssue = !isPulled && r.pull_result && r.pull_result!=='pulled';
+    const issueLabel = r.pull_result==='not_found' ? 'مش موجود في الفرع' : r.pull_result==='partial' ? 'تم رفع جزء فقط' : r.pull_result ? 'سبب آخر' : '';
+    const status = isPulled ? '✅ تم السحب' : hasIssue ? `⚠️ ${issueLabel}` : `⚠️ لم يُسحب${isLate?' (متأخر)':''}`;
+    const confirm = r.confirmed ? `✅ تم التأكيد — ${r.confirmed_by||'—'}` : (isPulled ? 'في انتظار التأكيد' : '—');
+    const pullDate = r.pulled_at ? fmtDate(r.pulled_at) : '—';
+    return [i+1, GROUPS[r.grp]?.label||r.grp||'—', routeN, r.branch||'—', r.snf||'—', +r.qty||0, `${r._visits||1} زيارة`, status, pullDate, confirm];
+  });
+
+  const headers = ['#','المجموعة','خط السير','الفرع','الصنف','الكمية','عدد الزيارات','حالة الرفع','تاريخ الرفع','تأكيد الاستلام'];
+
+  const aoa = [
+    ['الطحان جولدن دايتس — مرتجعات المبيعات', ...Array(COLS-1).fill('')],
+    [`الفترة: ${from} — ${to}`, ...Array(COLS-1).fill('')],
+    [''],
+    ['📦 إجمالي الأصناف المحددة', ...Array(COLS-1).fill('')],
+    ['الصنف','الإجمالي', ...Array(COLS-2).fill('')],
+    ...itemTotalRows.map(([name,total])=>[name, total, ...Array(COLS-2).fill('')]),
+    [''],
+    headers,
+    ...dataRows,
+  ];
+
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:9}},{s:{r:1,c:0},e:{r:1,c:9}}];
+  ws['!cols'] = [{wch:6},{wch:16},{wch:16},{wch:22},{wch:26},{wch:10},{wch:12},{wch:20},{wch:14},{wch:20}];
+
+  const S=(bg,fc,b,sz,right)=>({fill:{fgColor:{rgb:bg}},font:{bold:b,color:{rgb:fc},sz,name:'Cairo'},alignment:{horizontal:right?'right':'center',vertical:'center',wrapText:true,readingOrder:2},border:{top:{style:'thin'},bottom:{style:'thin'},left:{style:'thin'},right:{style:'thin'}}});
+  const set=(r,c,s)=>{const a=XLSX.utils.encode_cell({r,c});if(!ws[a])ws[a]={t:'z',v:''};ws[a].s=s;};
+
+  const R_TITLE=0, R_PERIOD=1, R_ITEMS_HDR=3, R_ITEMS_TABLE_HDR=4;
+  const itemsStart = R_ITEMS_TABLE_HDR+1;
+  const R_MAIN_HDR = itemsStart + itemTotalRows.length + 1;
+
+  ws['!merges'] = [
+    {s:{r:R_TITLE,c:0},e:{r:R_TITLE,c:COLS-1}},
+    {s:{r:R_PERIOD,c:0},e:{r:R_PERIOD,c:COLS-1}},
+    {s:{r:R_ITEMS_HDR,c:0},e:{r:R_ITEMS_HDR,c:COLS-1}},
+    ...itemTotalRows.map((_,i)=>({s:{r:itemsStart+i,c:1},e:{r:itemsStart+i,c:COLS-1}})),
+  ];
+
+  for(let c=0;c<COLS;c++) set(R_TITLE,c,S('731E2E','FFFFFF',true,14));
+  for(let c=0;c<COLS;c++) set(R_PERIOD,c,S('003049','FFFFFF',true,11));
+  for(let c=0;c<COLS;c++) set(R_ITEMS_HDR,c,S('731E2E','FFFFFF',true,12));
+  for(let c=0;c<2;c++) set(R_ITEMS_TABLE_HDR,c,S('003049','FFFFFF',true,11));
+  itemTotalRows.forEach((_,i)=>{
+    set(itemsStart+i,0,S('FFF3E0','5C3D2E',false,10,true));
+    set(itemsStart+i,1,S('FFF3E0','5C3D2E',true,10));
+  });
+  for(let c=0;c<COLS;c++) set(R_MAIN_HDR,c,S('731E2E','FFFFFF',true,11));
+  dataRows.forEach((row,i)=>{
+    const r = R_MAIN_HDR+1+i;
+    row.forEach((val,c)=> set(r,c, S(i%2===0?'FFFFFF':'FBF3E7','2B1A10',c===4,10,c===4)));
+  });
+
   XLSX.utils.book_append_sheet(wb,ws,'مرتجعات المبيعات');
   XLSX.writeFile(wb,`sales_returns_${from}_${to}.xlsx`);
 }
@@ -27135,6 +27197,15 @@ function sretExportPDF(){
       <div class="sitem"><div class="slbl">لم يُسحب بعد</div><div class="sval" style="color:#B91C1C">${pendingCount}</div></div>
     </div>`;
 
+  // إجمالي الكمية لكل صنف — يعكس فلتر "الصنف" لو متفعّل، وإلا كل الأصناف الظاهرة حاليًا
+  const itemTotals = {};
+  data.forEach(r=>{ const name=(r.snf||'—').trim()||'—'; itemTotals[name]=(itemTotals[name]||0)+(+r.qty||0); });
+  const itemTotalRows = Object.entries(itemTotals).sort((a,b)=>b[1]-a[1]);
+  const itemTotalsHtml = `
+    <div class="items-hdr">📦 إجمالي الأصناف المحددة</div>
+    <table class="items-tbl"><thead><tr><th>الصنف</th><th>الإجمالي</th></tr></thead>
+    <tbody>${itemTotalRows.map(([name,total],i)=>`<tr style="${i%2?'background:#FBF3E7':''}"><td>${name}</td><td style="text-align:center;font-weight:700;color:#731E2E">${total}</td></tr>`).join('')}</tbody></table>`;
+
   const rows = data.map((r,i)=>{
     const rdRow  = ADMIN_ROUTES_DATA.find(x=>x.branch_name===r.branch);
     const routeN = rdRow?.route || r.route || '—';
@@ -27158,18 +27229,26 @@ function sretExportPDF(){
   }).join('');
 
   const html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><style>
-    body{font-family:Cairo,Arial,sans-serif;font-size:11px;padding:16px}
-    .hdr{background:#731E2E;color:#fff;padding:12px;border-radius:8px;margin-bottom:10px}
-    .warn{background:#FFEBEE;color:#B71C1C;padding:7px 12px;border-radius:6px;margin-bottom:10px;font-weight:700}
-    .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+    body{font-family:Cairo,Arial,sans-serif;font-size:11px;padding:16px;color:#2B1A10}
+    .hdr{background:linear-gradient(135deg,#731E2E,#8B2635);color:#fff;padding:14px 16px;border-radius:8px;margin-bottom:4px;border-bottom:4px solid #C79A4B}
+    .hdr h2{margin:0}
+    .accent{height:4px;background:#003049;border-radius:0 0 6px 6px;margin-bottom:10px}
+    .warn{background:#FFEBEE;color:#B71C1C;padding:7px 12px;border-radius:6px;margin-bottom:10px;font-weight:700;border-right:4px solid #B71C1C}
+    .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}
     .sitem{background:#F5E6D0;border:1px solid #E8C99A;border-radius:8px;padding:8px 10px}
     .slbl{font-size:10px;color:#8B5A2B;margin-bottom:3px}
     .sval{font-size:12px;font-weight:700;color:#3D2000}
+    .items-hdr{background:#731E2E;color:#fff;font-weight:700;padding:6px 12px;border-radius:6px;margin-bottom:6px;font-size:12px}
+    .items-tbl{margin-bottom:14px}
     table{width:100%;border-collapse:collapse}th{background:#731E2E;color:#fff;padding:6px 8px;text-align:right;font-size:10px}
+    .items-tbl th{background:#003049}
     td{padding:5px 8px;border-bottom:1px solid #eee;font-size:10px}
+    tbody tr:nth-child(even){background:#FBF3E7}
   </style></head><body>
-  <div class="hdr"><h2 style="margin:0">↩️ مرتجعات المبيعات — ${from} إلى ${to}</h2></div>
+  <div class="hdr"><h2>↩️ مرتجعات المبيعات — ${from} إلى ${to}</h2></div>
+  <div class="accent"></div>
   ${summaryHtml}
+  ${itemTotalRows.length?itemTotalsHtml:''}
   ${pendingCount>0?`<div class="warn">⚠️ ${pendingCount} مرتجع لم يُسحب بعد</div>`:''}
   <table><thead><tr><th>#</th><th>المجموعة</th><th>المندوب</th><th>خط السير</th><th>الفرع</th><th>الصنف</th><th>الكمية</th><th>السبب</th><th>الحالة</th><th>التاريخ</th><th>تأكيد الاستلام</th></tr></thead>
   <tbody>${rows}</tbody></table></body></html>`;
