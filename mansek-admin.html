@@ -28539,6 +28539,20 @@ function sciNormalizeCustomerKey(s){
     .replace(/ى/g, 'ي');
 }
 
+// نفس فكرة توحيد اسم العميل، بس لأسماء الأصناف الجايه من فواتير MT (tamr_sales_items) — عشان
+// أسماء زي "...برحي..." و"...برحى..." (فرق إملائي بس، نفس الصنف فعليًا) متتعاملش كصنفين منفصلين.
+// ملحوظة: بيوحّد بس لو باقي النص طابق تمامًا (فمش هيدمج مثلاً "400 Gram" مع "800 Gram" غلط).
+function sciNormalizeItemKey(s){
+  if(!s) return '';
+  return String(s).trim()
+    .replace(/ـ/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي');
+}
+let _sciItemCanonicalMap = null; // {مفتاح_موحّد: الاسم الأكتر تكرارًا في فواتير MT — ده اللي بيتعرض}
+
 let _sciMt2026LoadingPromise = null; // يمنع تكرار نفس التحميل لو اتنادت الدالة أكتر من مرة قبل ما تخلص
 async function sciLoadMt2026(){
   if(_sciMt2026Cache) return _sciMt2026Cache;
@@ -28578,6 +28592,7 @@ async function sciLoadMt2026(){
   const rows = await _sciMt2026LoadingPromise;
   _sciMt2026Cache = rows;
   _sciMtCustomerMap = {};
+  const _itemFreq = {}; // مفتاح_صنف_موحّد -> {اسم_خام: عدد تكراره في الفواتير}
   rows.forEach(r=>{
     const raw = (r.customer||'').trim();
     // بنحسب مفتاح الاسم الموحّد مرة واحدة هنا ونخزّنه على الصف نفسه (r.__custKey) - عشان المطابقة
@@ -28585,8 +28600,23 @@ async function sciLoadMt2026(){
     // بالنص الحرفي اللي كانت بتفوّت أي عميل مسجّل بإملاء مختلف شوية بين نشاط والتاني (زي "تمراتي"
     // بتاعة عميل مسجّل "…والتجارة…" بينما "الطحان" بتاعة نفس العميل مسجّل "…والتجاره…").
     r.__custKey = sciNormalizeCustomerKey(raw);
-    if(!raw) return;
-    if(r.__custKey && !_sciMtCustomerMap[r.__custKey]) _sciMtCustomerMap[r.__custKey] = raw;
+    if(raw && r.__custKey && !_sciMtCustomerMap[r.__custKey]) _sciMtCustomerMap[r.__custKey] = raw;
+    const itemRaw = (r.item||'').trim();
+    if(itemRaw){
+      const ik = sciNormalizeItemKey(itemRaw);
+      (_itemFreq[ik] ||= {})[itemRaw] = (_itemFreq[ik][itemRaw]||0) + 1;
+    }
+  });
+  // لكل مجموعة أسماء أصناف متشابهة إملائيًا (زي "برحي"/"برحى")، بنختار الاسم الأكتر تكرارًا في
+  // الفواتير الفعلية كاسم معتمد نوحّد بيه العرض في تاب "أصناف العميل" وخانة البحث فيه.
+  _sciItemCanonicalMap = {};
+  Object.keys(_itemFreq).forEach(ik=>{
+    const variants = _itemFreq[ik];
+    let bestName = '', bestCount = -1;
+    Object.keys(variants).forEach(name=>{
+      if(variants[name] > bestCount){ bestCount = variants[name]; bestName = name; }
+    });
+    _sciItemCanonicalMap[ik] = bestName;
   });
   return _sciMt2026Cache;
 }
@@ -29355,7 +29385,11 @@ async function sciOnClientChange(){
     }
     mtMatched.forEach(r=>{
       const name = (r.item||'').trim();
-      if(name) seen[name] = true;
+      if(!name) return;
+      // نستخدم الاسم "المعتمد" (الأكتر تكرارًا لنفس الصنف) بدل الاسم الخام — عشان لو الصنف ده
+      // متسجل بأكتر من إملاء (زي "برحي"/"برحى") يظهر كصنف واحد بس مش يتكرر في القايمة.
+      const canonical = (_sciItemCanonicalMap && _sciItemCanonicalMap[sciNormalizeItemKey(name)]) || name;
+      seen[canonical] = true;
     });
   }catch(e){ console.error('[sciOnClientChange MT merge]', e); }
 
@@ -29431,7 +29465,9 @@ function sciRenderTable(){
   const tbody = document.getElementById('sci-tbody');
   if(!tbody) return;
   let filtered = feaVal ? _sciAllRows.filter(r=>r.fea===feaVal) : _sciAllRows;
-  if(q) filtered = filtered.filter(r=>r.name.includes(q));
+  // مقارنة بالمفتاح الموحّد (يتجاهل فروق زي "ي/ى" و"ة/ه") عشان البحث يلاقي الصنف
+  // حتى لو المستخدم كتب إملاء مختلف شوية عن الاسم المعتمد المعروض.
+  if(q) filtered = filtered.filter(r=>sciNormalizeItemKey(r.name).includes(sciNormalizeItemKey(q)));
   _sciCurrentRows = filtered;
   const colCount = _sciShowActions ? 10 : 9;
   if(!filtered.length){
