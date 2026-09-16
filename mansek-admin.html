@@ -27118,13 +27118,30 @@ function sretExportExcel(){
 
   const headers = ['#','المجموعة','خط السير','الفرع','الصنف','الكمية','عدد الزيارات','حالة الرفع','تاريخ الرفع','تأكيد الاستلام'];
 
+  // كروت إجمالي الأصناف — كل كارت عرضه عمودين × صفين (اسم الصنف فوق، الإجمالي كبير تحته)
+  const CARD_COLS = 5;
+  const cardW = Math.floor(COLS/CARD_COLS); // 2
+  const cardRowsCount = Math.ceil(itemTotalRows.length/CARD_COLS) || 0;
+  const cardAoaRows = [];
+  for(let gr=0; gr<cardRowsCount; gr++){
+    const nameRow = Array(COLS).fill('');
+    const totalRow = Array(COLS).fill('');
+    for(let cc=0; cc<CARD_COLS; cc++){
+      const idx = gr*CARD_COLS+cc;
+      if(idx>=itemTotalRows.length) break;
+      const [name,total] = itemTotalRows[idx];
+      nameRow[cc*cardW]  = name;
+      totalRow[cc*cardW] = total;
+    }
+    cardAoaRows.push(nameRow, totalRow);
+  }
+
   const aoa = [
     ['الطحان جولدن دايتس — مرتجعات المبيعات', ...Array(COLS-1).fill('')],
     [`الفترة: ${from} — ${to}`, ...Array(COLS-1).fill('')],
     [''],
     ['📦 إجمالي الأصناف المحددة', ...Array(COLS-1).fill('')],
-    ['الصنف','الإجمالي', ...Array(COLS-2).fill('')],
-    ...itemTotalRows.map(([name,total])=>[name, total, ...Array(COLS-2).fill('')]),
+    ...cardAoaRows,
     [''],
     headers,
     ...dataRows,
@@ -27137,25 +27154,41 @@ function sretExportExcel(){
   const S=(bg,fc,b,sz,right)=>({fill:{fgColor:{rgb:bg}},font:{bold:b,color:{rgb:fc},sz,name:'Cairo'},alignment:{horizontal:right?'right':'center',vertical:'center',wrapText:true,readingOrder:2},border:{top:{style:'thin'},bottom:{style:'thin'},left:{style:'thin'},right:{style:'thin'}}});
   const set=(r,c,s)=>{const a=XLSX.utils.encode_cell({r,c});if(!ws[a])ws[a]={t:'z',v:''};ws[a].s=s;};
 
-  const R_TITLE=0, R_PERIOD=1, R_ITEMS_HDR=3, R_ITEMS_TABLE_HDR=4;
-  const itemsStart = R_ITEMS_TABLE_HDR+1;
-  const R_MAIN_HDR = itemsStart + itemTotalRows.length + 1;
+  const R_TITLE=0, R_PERIOD=1, R_ITEMS_HDR=3;
+  const cardsStart = R_ITEMS_HDR+1;
+  const R_MAIN_HDR = cardsStart + cardAoaRows.length + 1;
 
   ws['!merges'] = [
     {s:{r:R_TITLE,c:0},e:{r:R_TITLE,c:COLS-1}},
     {s:{r:R_PERIOD,c:0},e:{r:R_PERIOD,c:COLS-1}},
     {s:{r:R_ITEMS_HDR,c:0},e:{r:R_ITEMS_HDR,c:COLS-1}},
-    ...itemTotalRows.map((_,i)=>({s:{r:itemsStart+i,c:1},e:{r:itemsStart+i,c:COLS-1}})),
   ];
+  for(let gr=0; gr<cardRowsCount; gr++){
+    const nameRow  = cardsStart + gr*2;
+    const totalRow = nameRow+1;
+    for(let cc=0; cc<CARD_COLS; cc++){
+      const idx = gr*CARD_COLS+cc;
+      if(idx>=itemTotalRows.length) break;
+      const c0 = cc*cardW, c1 = c0+cardW-1;
+      ws['!merges'].push({s:{r:nameRow,c:c0},e:{r:nameRow,c:c1}});
+      ws['!merges'].push({s:{r:totalRow,c:c0},e:{r:totalRow,c:c1}});
+    }
+  }
 
   for(let c=0;c<COLS;c++) set(R_TITLE,c,S('731E2E','FFFFFF',true,14));
   for(let c=0;c<COLS;c++) set(R_PERIOD,c,S('003049','FFFFFF',true,11));
   for(let c=0;c<COLS;c++) set(R_ITEMS_HDR,c,S('731E2E','FFFFFF',true,12));
-  for(let c=0;c<2;c++) set(R_ITEMS_TABLE_HDR,c,S('003049','FFFFFF',true,11));
-  itemTotalRows.forEach((_,i)=>{
-    set(itemsStart+i,0,S('FFF3E0','5C3D2E',false,10,true));
-    set(itemsStart+i,1,S('FFF3E0','5C3D2E',true,10));
-  });
+  for(let gr=0; gr<cardRowsCount; gr++){
+    const nameRow  = cardsStart + gr*2;
+    const totalRow = nameRow+1;
+    for(let cc=0; cc<CARD_COLS; cc++){
+      const idx = gr*CARD_COLS+cc;
+      if(idx>=itemTotalRows.length) break;
+      const c0 = cc*cardW;
+      set(nameRow, c0, S('FFF3E0','5C3D2E',true,9));
+      set(totalRow, c0, S('FFFFFF','731E2E',true,16));
+    }
+  }
   for(let c=0;c<COLS;c++) set(R_MAIN_HDR,c,S('731E2E','FFFFFF',true,11));
   dataRows.forEach((row,i)=>{
     const r = R_MAIN_HDR+1+i;
@@ -27203,8 +27236,13 @@ function sretExportPDF(){
   const itemTotalRows = Object.entries(itemTotals).sort((a,b)=>b[1]-a[1]);
   const itemTotalsHtml = `
     <div class="items-hdr">📦 إجمالي الأصناف المحددة</div>
-    <table class="items-tbl"><thead><tr><th>الصنف</th><th>الإجمالي</th></tr></thead>
-    <tbody>${itemTotalRows.map(([name,total],i)=>`<tr style="${i%2?'background:#FBF3E7':''}"><td>${name}</td><td style="text-align:center;font-weight:700;color:#731E2E">${total}</td></tr>`).join('')}</tbody></table>`;
+    <div class="item-cards">
+      ${itemTotalRows.map(([name,total])=>`
+        <div class="item-card">
+          <div class="ic-name">${name}</div>
+          <div class="ic-total">${total}</div>
+        </div>`).join('')}
+    </div>`;
 
   const rows = data.map((r,i)=>{
     const rdRow  = ADMIN_ROUTES_DATA.find(x=>x.branch_name===r.branch);
@@ -27238,10 +27276,12 @@ function sretExportPDF(){
     .sitem{background:#F5E6D0;border:1px solid #E8C99A;border-radius:8px;padding:8px 10px}
     .slbl{font-size:10px;color:#8B5A2B;margin-bottom:3px}
     .sval{font-size:12px;font-weight:700;color:#3D2000}
-    .items-hdr{background:#731E2E;color:#fff;font-weight:700;padding:6px 12px;border-radius:6px;margin-bottom:6px;font-size:12px}
-    .items-tbl{margin-bottom:14px}
+    .items-hdr{background:#731E2E;color:#fff;font-weight:700;padding:6px 12px;border-radius:6px;margin-bottom:8px;font-size:12px}
+    .item-cards{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+    .item-card{flex:1 1 130px;background:#fff;border:1.5px solid #E8C99A;border-radius:8px;overflow:hidden;text-align:center}
+    .item-card .ic-name{background:#FFF3E0;color:#5C3D2E;font-size:10px;font-weight:700;padding:6px 8px;min-height:28px;display:flex;align-items:center;justify-content:center}
+    .item-card .ic-total{color:#731E2E;font-size:20px;font-weight:800;padding:8px}
     table{width:100%;border-collapse:collapse}th{background:#731E2E;color:#fff;padding:6px 8px;text-align:right;font-size:10px}
-    .items-tbl th{background:#003049}
     td{padding:5px 8px;border-bottom:1px solid #eee;font-size:10px}
     tbody tr:nth-child(even){background:#FBF3E7}
   </style></head><body>
