@@ -9663,8 +9663,11 @@ async function sgLoad(){
     }
 
     // 2. جيب المناديب + الفروع بالتوازي
+    // ملحوظة: من غير فلتر status=eq.active عمداً — "إيقاف" المندوب معناه منعه من الدخول
+    // على التطبيق بس، ومش لازم يمسح أثره من هدف/محقق الفترة اللي كان شغال فيها هنا
+    // (نفس منطق "المبيعات الفعلية" في sgRender اللي بيجمع كل sales[] من غير فلتر حالة)
     const [repRes, branchesRes] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/users?select=id,name,route,routes,grp,groups,supervisors,status&role=eq.sales&level=eq.rep&status=eq.active&order=name.asc&limit=500`,{headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/users?select=id,name,route,routes,grp,groups,supervisors,status&role=eq.sales&level=eq.rep&order=name.asc&limit=500`,{headers:H}),
       fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route&status=eq.active&limit=2000`,{headers:H}),
     ]);
     const repData     = repRes.ok     ? await repRes.json()     : [];
@@ -10123,7 +10126,7 @@ function sgRenderTable(repsList, targets, sales, workDays){
     const _ovrDateFmt = (()=>{ if(!_ovr?.range_to) return '—'; const [y,m,d]=_ovr.range_to.split('-'); return `${+d}/${+m}/${y}`; })();
     rows += `<tr style="border-bottom:0.5px solid var(--border)" id="sg-row-${r.id}">
       <td style="padding:9px 12px;color:var(--text-secondary);font-size:11px">${i+1}</td>
-      <td style="padding:9px 12px;font-weight:600;font-size:12px">${r.name}</td>
+      <td style="padding:9px 12px;font-weight:600;font-size:12px">${r.name}${r.status==='inactive'?' <span class="badge b-gray" style="font-size:9px">موقوف</span>':''}</td>
       <td style="padding:9px 12px;font-size:10px;color:var(--text-secondary)">${routeLabel}</td>
       <td style="padding:9px 8px"><input type="number" class="sg-goal-inp" data-name="${r.name}" data-id="${r.id}" data-tgt-id="${tgtId||''}" value="${goal}" min="0" step="1000" onchange="sgUpdateDaily(this,${workDays})" style="width:90px;padding:4px 7px;border:0.5px solid var(--border-strong);border-radius:6px;font-size:12px;font-family:Cairo,sans-serif;text-align:center;background:var(--surface-1);color:var(--text-primary)"/></td>
       <td style="padding:9px 8px;font-size:11px;font-weight:700;color:#185FA5" id="sg-daily-${r.id}">${daily>0?daily.toLocaleString('en-US')+' ج':'—'}</td>
@@ -38333,20 +38336,16 @@ async function sdLoad(){
   document.getElementById('sd-month-bar').style.width = Math.min(monthPct,100)+'%';
 
   // ── الأهداف: rep_targets هو المصدر الحي (نفس شاشة "الأهداف الشهرية") — نبدأ بيه دايماً ──
+  // ملحوظة: من غير استبعاد المناديب الموقوفين (status) عمداً — "إيقاف" مندوب معناه منعه من
+  // الدخول على التطبيق بس، ومش المفروض يمسح هدفه/محققه من إجمالي الشهر اللي كان شغال فيه
   sdTargetsData = [];
   try{
-    const [rtRes, activeRepsRes] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${month}&select=rep_name,supervisor_name,target_amount&limit=1000`,{headers:H}),
-      fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&status=eq.active&select=name&limit=500`,{headers:H})
-    ]);
-    if(rtRes.ok && activeRepsRes.ok){
-      const rtData      = await rtRes.json();
-      const activeReps  = await activeRepsRes.json();
+    const rtRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${month}&select=rep_name,supervisor_name,target_amount&limit=1000`,{headers:H});
+    if(rtRes.ok){
+      const rtData = await rtRes.json();
       if(Array.isArray(rtData) && rtData.length){
-        const activeSet = new Set((Array.isArray(activeReps)?activeReps:[]).map(r=>r.name));
         const supMap = {};
         rtData.forEach(r=>{
-          if(!activeSet.has(r.rep_name)) return; // استبعد المناديب غير الفعّالين
           const sup = r.supervisor_name||'غير محدد';
           supMap[sup] = (supMap[sup]||0) + (+(r.target_amount||0));
         });
