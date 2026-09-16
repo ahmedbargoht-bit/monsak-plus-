@@ -28190,6 +28190,9 @@ function splRenderClients(){
       <td style="padding:8px;text-align:center;display:flex;gap:4px;justify-content:center">
         <button onclick="splEditClient(${c.id},'${(c.name).replace(/'/g,"\'")}',${c.discount_pct},'${(c.client_type||'أسواق خاصة').replace(/'/g,"\'")}',${!!c.tax_exempt})"
           style="background:#EEF6FF;color:#1D4ED8;border:1px solid #BFDBFE;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">✏️</button>
+        <button onclick="splEditMtAliases(${c.id},'${(c.name).replace(/'/g,"\'")}')"
+          title="أسماء العميل زي ما بتظهر حرفيًا في فواتير MT (لو مختلفة عن الاسم فوق) — بيحل مشكلة أصناف مش ظاهرة للعميل بسبب اختلاف الاسم"
+          style="background:${(c.mt_customer_names&&c.mt_customer_names.length)?'#FFF3E0':'#F3F4F6'};color:${(c.mt_customer_names&&c.mt_customer_names.length)?'#E65100':'#6B7280'};border:1px solid ${(c.mt_customer_names&&c.mt_customer_names.length)?'#FFCC80':'#E5E7EB'};border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">🔗</button>
         <button onclick="splDeleteClient(${c.id},'${(c.name).replace(/'/g,"\'")}')"
           style="background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">🗑</button>
       </td>
@@ -28330,6 +28333,28 @@ async function splEditClient(id, name, pct, type, exempt){
   }
 
   showToast('✅ تم التحديث'); await spLoadAll();
+}
+
+// إدارة أسماء العميل البديلة زي ما بتظهر حرفيًا في فواتير MT — لازمة لما اسم العميل هنا (زي
+// "اسواق عبد الله العثيم") يكون مختصر عن الاسم الخام في الفواتير (زي "شركة اسواق عبد الله
+// العثيم - مصر")، عشان تاب "أصناف العميل" وتطبيق المنسق يقدروا يلاقوا فواتير MT بتاعته صح.
+async function splEditMtAliases(id, name){
+  const c = _splClients.find(x=>x.id===id);
+  const current = (c && Array.isArray(c.mt_customer_names)) ? c.mt_customer_names : [];
+  const raw = prompt(
+    `أسماء "${name}" زي ما بتظهر حرفيًا في فواتير MT (لو مختلفة عن الاسم أعلاه)\n` +
+    `اكتب كل اسم في سطر — انسخه بالظبط من عمود "العميل" في فواتير MT.\n` +
+    `سيبها فاضية لو الاسم مطابق تمامًا.`,
+    current.join('\n')
+  );
+  if(raw===null) return;
+  const aliases = raw.split('\n').map(s=>s.trim()).filter(Boolean);
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/sales_clients?id=eq.${id}`,{
+    method:'PATCH', headers:H, body:JSON.stringify({mt_customer_names:aliases})
+  });
+  if(r.ok||r.status===204){ showToast('✅ تم حفظ أسماء فواتير MT'); await spLoadAll(); }
+  else showToast('❌ حصل خطأ أثناء الحفظ');
 }
 
 async function splDeleteClient(id, name){
@@ -29379,9 +29404,12 @@ async function sciOnClientChange(){
       mtMatched = mtRows;
     } else {
       // مطابقة بالمفتاح الموحّد (r.__custKey) مش بالنص الحرفي - عشان لو نفس العميل مسجّل بإملاء
-      // مختلف شوية بين نشاط والتاني (زي "التجارة"/"التجاره")، فواتيره كلها تتجمع صح مع بعض.
-      const clientKey = sciNormalizeCustomerKey(client);
-      if(clientKey) mtMatched = mtRows.filter(r=>r.__custKey===clientKey);
+      // مختلف شوية بين نشاط والتاني (زي "التجارة"/"التجاره")، فواتيره كلها تتجمع صح مع بعض. وكمان
+      // بنضيف أي أسماء بديلة مسجلة يدويًا للعميل (mt_customer_names) عشان حالات زي "اسواق عبد
+      // الله العثيم" مقابل "شركة اسواق عبد الله العثيم - مصر" في فواتير MT الخام.
+      const aliasKeys = splClientMtAliases(client).map(sciNormalizeCustomerKey).filter(Boolean);
+      const acceptableKeys = new Set([sciNormalizeCustomerKey(client), ...aliasKeys].filter(Boolean));
+      if(acceptableKeys.size) mtMatched = mtRows.filter(r=>acceptableKeys.has(r.__custKey));
     }
     mtMatched.forEach(r=>{
       const name = (r.item||'').trim();
@@ -29835,6 +29863,16 @@ function splIsClientTaxExempt(memberName){
   if(!memberName) return false;
   const c = (_splClients||[]).find(x=>x.name===memberName);
   return !!(c && c.tax_exempt);
+}
+
+// أسماء العميل البديلة زي ما بتظهر حرفيًا في فواتير MT (مسجّلة يدويًا من تاب "خصومات العملاء") —
+// لازمة لحالات زي "اسواق عبد الله العثيم" (اسم مختصر) مقابل "شركة اسواق عبد الله العثيم - مصر"
+// (الاسم الخام في الفواتير) — فرق هيكلي في النص مش مجرد فرق إملائي، فالتوحيد بالحروف (sciNormalizeCustomerKey)
+// لوحده مش كافي يحله.
+function splClientMtAliases(memberName){
+  if(!memberName) return [];
+  const c = (_splClients||[]).find(x=>x.name===memberName);
+  return (c && Array.isArray(c.mt_customer_names)) ? c.mt_customer_names : [];
 }
 
 function splBuildMemberPriceRows(type, pl, memberName){
