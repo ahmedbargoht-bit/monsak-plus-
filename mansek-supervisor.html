@@ -1479,7 +1479,7 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
           </select>
         </div>
 
-        <div id="sup-ret-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px"></div>
+        <div id="sup-ret-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px"></div>
 
         <!-- Export Bar (v1.9) -->
         <div class="export-bar" id="ret-export-bar" style="display:none">
@@ -7951,7 +7951,11 @@ async function supLoadReturns(){
     // إحصائيات
     const totalQty=data.reduce((s,r)=>s+(+r.qty||0),0);
     const uniqSnf=new Set(data.map(r=>r.snf)).size;
-    const newCount=data.filter(r=>r.status==='new').length;
+    // ✅ البادج لازم يتنبّه على حالتين: مرتجع جديد (status='new') أو مرتجع اتصعّد له من مشرف
+    // البيع (escalated_to_coord=true) — حتى لو حالته 'seen' من قبل، عشان مشرف التنسيق ميفوتش
+    // أي تصعيد جديد ولو كان شايف المرتجع ده قبل كده.
+    const newCount=data.filter(r=>r.status==='new' || r.escalated_to_coord===true).length;
+    const escalatedCount=data.filter(r=>r.escalated_to_coord===true).length;
 
     // badge
     const badge=document.getElementById('ret-sup-badge');
@@ -7969,6 +7973,10 @@ async function supLoadReturns(){
       <div style="text-align:center;padding:8px;background:#F3E5F5;border-radius:8px;border:1px solid #E1BEE7">
         <div style="font-size:18px;font-weight:700;color:#6A1B9A">${uniqSnf}</div>
         <div style="font-size:10px;color:#6A1B9A">أصناف مختلفة</div>
+      </div>
+      <div style="text-align:center;padding:8px;background:#FFF8E1;border-radius:8px;border:1px solid #FFE082">
+        <div style="font-size:18px;font-weight:700;color:#F57F17">${escalatedCount}</div>
+        <div style="font-size:10px;color:#F57F17">🔁 محوّلة من مشرف البيع</div>
       </div>`;
 
     // علّم كـ seen
@@ -8761,15 +8769,22 @@ function startMissingBadgePolling(){
   },60000);
 }
 
-// polling badge كل دقيقة
+// polling badge كل دقيقة — بيجيب مرتجعات جديدة (status='new') + مرتجعات متصعّدة من مشرف
+// البيع لسه محتاجة متابعة (escalated_to_coord=true) في نفس الوقت، عشان مشرف التنسيق ينتبه
+// لأي تصعيد جديد حتى لو المرتجع نفسه كان شايفه قبل كده (status='seen' مش 'new')
 function startReturnsBadgePolling(){
   setInterval(async()=>{
     try{
       const grps=(cu.groups||[]).map(g=>`"${g}"`).join(',');
-      const res=await fetch(`${SUPABASE_URL}/rest/v1/returns?grp=in.(${grps})&status=eq.new&select=id`,
-        {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-      const data=await res.json();
-      const count=Array.isArray(data)?data.length:0;
+      const H={headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}};
+      const [newRes, escRes] = await Promise.all([
+        fetch(`${SUPABASE_URL}/rest/v1/returns?grp=in.(${grps})&status=eq.new&select=id`, H),
+        fetch(`${SUPABASE_URL}/rest/v1/returns?grp=in.(${grps})&escalated_to_coord=eq.true&select=id`, H),
+      ]);
+      const newData = await newRes.json();
+      const escData = await escRes.json();
+      const ids = new Set([...(Array.isArray(newData)?newData:[]), ...(Array.isArray(escData)?escData:[])].map(r=>r.id));
+      const count = ids.size;
       const badge=document.getElementById('ret-sup-badge');
       if(badge){badge.textContent=count;badge.style.display=count?'':'none';}
     }catch(e){}
