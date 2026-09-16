@@ -26830,6 +26830,41 @@ async function sretLoad(){
   const dedupData = Object.values(dedupMap);
   _sretLastData = dedupData; // نخزنها عشان تصدير PDF/Excel يبني منها ملخص دقيق بدل قراءة الجدول
 
+  // ── هل المندوب زار الفرع فعليًا بعد بلاغ المرتجع؟ (مش نفس حاجة "تم الرفع") ──
+  // بنجيب فواتير التوريد والمرتجع الرسمية (تاب "فواتير المناديب") من نفس فترة العرض، وبنفلترها
+  // client-side على أسماء الفروع الظاهرة في الجدول - عشان أسماء بعض الفروع فيها أقواس بتبوّظ
+  // فلتر in.() في PostgREST (نفس الملحوظة الموجودة في sinvLoad). لكل صف مرتجع، بنجيب أحدث تاريخ
+  // فاتورة (توريد أو مرتجع) لنفس الفرع بتاريخ >= تاريخ بلاغ المرتجع نفسه (created_at) — يعني
+  // "زيارة حصلت بعد ما المرتجع اتبلّغ عنه"، مش أي زيارة قديمة قبل كده.
+  const branchesInView = new Set(dedupData.map(r=>(r.branch||'').trim()).filter(Boolean));
+  const visitMap = {}; // branch -> [تواريخ فواتير]
+  if(branchesInView.size){
+    try{
+      const H2 = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+      const [delData, retInvData] = await Promise.all([
+        fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=branch_name,delivery_date&deleted_at=is.null&delivery_date=gte.${from}`, H2),
+        fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=branch_name,return_date&deleted_at=is.null&return_date=gte.${from}`, H2),
+      ]);
+      (Array.isArray(delData)?delData:[]).forEach(d=>{
+        const b=(d.branch_name||'').trim(); if(!b || !branchesInView.has(b) || !d.delivery_date) return;
+        (visitMap[b] ||= []).push(d.delivery_date);
+      });
+      (Array.isArray(retInvData)?retInvData:[]).forEach(d=>{
+        const b=(d.branch_name||'').trim(); if(!b || !branchesInView.has(b) || !d.return_date) return;
+        (visitMap[b] ||= []).push(d.return_date);
+      });
+    }catch(e){ console.error('[sretLoad visitMap]', e); }
+  }
+  // بيرجع أحدث تاريخ فاتورة للفرع ده بتاريخ >= تاريخ بلاغ المرتجع، أو null لو مفيش
+  const lastVisitAfter = (branch, createdAt) => {
+    const dates = visitMap[(branch||'').trim()];
+    if(!dates || !dates.length) return null;
+    const createdDateOnly = String(createdAt||'').slice(0,10);
+    const after = dates.filter(d => String(d).slice(0,10) >= createdDateOnly);
+    if(!after.length) return null;
+    return after.sort().slice(-1)[0];
+  };
+
   const pending  = dedupData.filter(r=>!r.pulled);
   const done     = dedupData.filter(r=>r.pulled);
   const totalQty = dedupData.reduce((s,r)=>s+(+r.qty||0),0);
@@ -26860,6 +26895,13 @@ async function sretLoad(){
     // خط السير من ADMIN_ROUTES_DATA
     const rdRow  = ADMIN_ROUTES_DATA.find(x=>x.branch_name===r.branch);
     const routeN = rdRow?.route || r.route || '—';
+
+    // ✅ هل المندوب زار الفرع فعليًا بعد بلاغ المرتجع؟ (فاتورة توريد أو مرتجع رسمية بعد created_at) —
+    // ده مؤشر منفصل عن "تم الرفع": ممكن المندوب يزور الفرع (فاتورة عادية) من غير ما يسحب المرتجع.
+    const lastVisit = lastVisitAfter(r.branch, r.created_at);
+    const visitLine = lastVisit
+      ? `<div style="font-size:9px;color:#1A7A4A;margin-top:2px">✅ تمت الزيارة يوم ${fmtDate(lastVisit)}</div>`
+      : `<div style="font-size:9px;color:#B91C1C;margin-top:2px">⚠️ مفيش زيارة مسجلة بعد</div>`;
 
     // ✅ حالة "فيها مشكلة" (مش موجود بالفرع / جزء بس / سبب آخر) — من غير ما يكون اترفع فعلاً
     const hasIssue = !isPulled && r.pull_result && r.pull_result!=='pulled';
@@ -26906,7 +26948,7 @@ async function sretLoad(){
       <td>${i+1}</td>
       <td><span style="background:${grpInfo.color}22;color:${grpInfo.color};padding:2px 6px;border-radius:8px;font-size:10px;font-weight:700">${grpInfo.label}</span></td>
       <td style="font-size:11px">${routeN}</td>
-      <td style="font-size:11px;font-weight:700">${r.branch||'—'}${isLate?`<div style="color:#DC2626;font-size:9px">⚠️ ${days} يوم</div>`:''}</td>
+      <td style="font-size:11px;font-weight:700">${r.branch||'—'}${isLate?`<div style="color:#DC2626;font-size:9px">⚠️ ${days} يوم</div>`:''}${visitLine}</td>
       <td style="font-size:11px;max-width:160px">${r.snf||'—'}</td>
       <td style="text-align:center;font-weight:700;color:#B91C1C">${r.qty||0}</td>
       <td style="text-align:center">
