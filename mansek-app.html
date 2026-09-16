@@ -1161,6 +1161,28 @@ function pgOrVal(v){
   return encodeURIComponent('"' + esc + '"');
 }
 
+// نفس منطق التوحيد الإملائي الموجود في لوحة التحكم (sciNormalizeCustomerKey/sciNormalizeItemKey) —
+// لازم يفضل مطابق حرفيًا لنسخة الأدمن ولعمود customer_norm المحسوب في قاعدة البيانات، عشان
+// المفتاح اللي بيتحسب هنا يطابق نفس المفتاح المخزّن هناك.
+function sciNormalizeCustomerKey(s){
+  if(!s) return '';
+  return String(s).trim()
+    .replace(/ـ/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي');
+}
+function sciNormalizeItemKey(s){
+  if(!s) return '';
+  return String(s).trim()
+    .replace(/ـ/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي');
+}
+
 // PostgREST بيرجّع 1000 صف بالحد الأقصى مهما كان limit المطلوب أكبر — لازم صفحات (offset) عشان
 // نضمن نجيب كل فواتير عميل كبير (زي كارفور/عثيم) من غير ما نفقد جزء من البيانات بصمت.
 // بترجع {rows, ok} — ok=false معناها فيه صفحة فشلت فعلاً (مشكلة نت/سيرفر)، مش إن البيانات فاضية
@@ -1318,6 +1340,31 @@ async function sciLoadClientCatalogForBranch(branchName){
           if(name) seen[name] = true;
         });
       });
+      // دمج أصناف العميل من فواتير MT الحقيقية (tamr_sales_items) — تغطية لأي صنف اتباع للعميل
+      // فعليًا (زي "تمراتي"، أو أصناف باعها العميل قبل ما المناديب يبدأوا يسجلوا تسليم بنفسهم)
+      // ومسجل مش لسه في تطبيق التسليم. المطابقة بمفتاح موحّد (يتجاهل فروق إملائية زي "ة/ه"
+      // و"ي/ى")، وباستخدام RPC مبني على إندكس (customer_norm) عشان يبقى سريع من غير ما يسحب
+      // جدول الـ100 ألف صف كامل زي ما لوحة التحكم بتعمل.
+      try{
+        const custKey = sciNormalizeCustomerKey(client);
+        if(custKey){
+          const mtRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_mt_items_for_customer_key`, {
+            method:'POST', headers:{...H,'Content-Type':'application/json'},
+            body: JSON.stringify({p_key: custKey})
+          });
+          const mtRows = mtRes.ok ? await mtRes.json().catch(()=>[]) : [];
+          // لو نفس الصنف متسجل بأكتر من إملاء في فواتير MT (زي "برحي"/"برحى")، بنختار الإملاء
+          // الأكتر تكرارًا كاسم معتمد بدل ما يتكرر الصنف مرتين في القايمة.
+          const byKey = {};
+          (Array.isArray(mtRows)?mtRows:[]).forEach(r=>{
+            const name = (r.item||'').trim(); if(!name) return;
+            const ik = sciNormalizeItemKey(name);
+            const cnt = +r.cnt || 0;
+            if(!byKey[ik] || cnt > byKey[ik].cnt) byKey[ik] = {name, cnt};
+          });
+          Object.values(byKey).forEach(v=>{ seen[v.name] = true; });
+        }
+      }catch(e){ console.warn('sciLoadClientCatalogForBranch MT merge error:', e); }
       // استبعاد الأصناف اللي الأدمن أخفاها من "أصناف العملاء" — عام (كل العملاء) أو خاص بالعميل ده بس
       try{
         const hOr = 'or=(' + `client_name.eq.${pgOrVal(client)},client_name.eq.${pgOrVal('__GLOBAL__')}` + ')';
