@@ -1152,7 +1152,27 @@ function pdbSnfMonthsStock(item){ return typeof item==='string' ? 10 : (item?.mo
 // ══════════════════════════════════════════════════════════════
 window._sciBranchClientMap  = null;  // {branch_name: client_name}
 window._sciClientBranchesMap = null; // {client_name: Set(branch_name)}
+window._sciClientAliasesMap = null;  // {client_name: [أسماء العميل زي ما بتظهر في فواتير MT]}
 window._sciClientState = {branch:'', client:null, items:[], itemNames:null, prunedPDB:null, locked:false, empty:false, loading:false};
+
+// تحميل مرة واحدة (وتخزين مؤقت في الذاكرة) لأسماء العملاء البديلة المسجلة يدويًا من لوحة التحكم —
+// دي بتحل حالات زي "اسواق عبد الله العثيم" (اسم مختصر في sales_clients) مقابل "شركة اسواق عبد
+// الله العثيم - مصر" (الاسم الخام في فواتير MT) — فرق هيكلي في النص مش مجرد فرق إملائي، فمش ممكن
+// يتحل بتوحيد الحروف (ي/ى، ة/ه) لوحده؛ لازم اسم بديل مسجل يدويًا.
+async function sciLoadClientAliasesMap(){
+  if(window._sciClientAliasesMap) return window._sciClientAliasesMap;
+  const map = {};
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/sales_clients?select=name,mt_customer_names&deleted_at=is.null`, {headers:H, cache:'no-store'});
+    const rows = res.ok ? await res.json().catch(()=>[]) : [];
+    (Array.isArray(rows)?rows:[]).forEach(r=>{
+      if(r.name) map[r.name] = Array.isArray(r.mt_customer_names) ? r.mt_customer_names : [];
+    });
+  }catch(e){ console.warn('sciLoadClientAliasesMap error:', e); }
+  window._sciClientAliasesMap = map;
+  return map;
+}
 
 // قيمة فلتر or=() آمنة لـ PostgREST — الأقواس جوه اسم الفرع بتكسر الفلتر لو اتشفرت عادي بس
 // (encodeURIComponent مابيشفرش القوسين)، فلازم تتحط بين علامتي تنصيص مُرمّزة حسب توثيق PostgREST.
@@ -1346,11 +1366,13 @@ async function sciLoadClientCatalogForBranch(branchName){
       // و"ي/ى")، وباستخدام RPC مبني على إندكس (customer_norm) عشان يبقى سريع من غير ما يسحب
       // جدول الـ100 ألف صف كامل زي ما لوحة التحكم بتعمل.
       try{
-        const custKey = sciNormalizeCustomerKey(client);
-        if(custKey){
-          const mtRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_mt_items_for_customer_key`, {
+        const aliasesMap = await sciLoadClientAliasesMap();
+        const aliases = aliasesMap[client] || [];
+        const keys = [...new Set([sciNormalizeCustomerKey(client), ...aliases.map(sciNormalizeCustomerKey)].filter(Boolean))];
+        if(keys.length){
+          const mtRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_mt_items_for_customer_keys`, {
             method:'POST', headers:{...H,'Content-Type':'application/json'},
-            body: JSON.stringify({p_key: custKey})
+            body: JSON.stringify({p_keys: keys})
           });
           const mtRows = mtRes.ok ? await mtRes.json().catch(()=>[]) : [];
           // لو نفس الصنف متسجل بأكتر من إملاء في فواتير MT (زي "برحي"/"برحى")، بنختار الإملاء
