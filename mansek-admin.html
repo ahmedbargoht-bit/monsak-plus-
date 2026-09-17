@@ -3181,7 +3181,7 @@ h2,h3{color:#2C1F0A}
             </div>
           </div>
           <p style="font-size:11px;color:var(--text2);margin-bottom:10px">
-            التقييم بيتحسب من 4 معايير: تحقيق الهدف الشهري، الحضور والغياب (نشاط تسليم/مرتجع)، تغطية خط السير، ونسبة المرتجعات.
+            التقييم بيتحسب من 8 معايير: تحقيق الهدف الشهري، الحضور والغياب (نشاط تسليم/مرتجع)، تغطية خط السير، نسبة المرتجعات، متوسط قيمة الفاتورة، نمو المبيعات شهر عن شهر، تنوع الأصناف المباعة، واستغلال العروض النشطة.
             مستبعد منها تلقائيًا أي حساب اسمه بيبدأ بـ"بيع اداري".
           </p>
           <div id="rev-stats-bar" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px"></div>
@@ -3228,10 +3228,10 @@ h2,h3{color:#2C1F0A}
               </select>
             </div>
           </div>
-          <p style="font-size:11px;color:var(--text2);margin-bottom:10px">
-            التقييم بيتحسب من 4 معايير: الالتزام بالخطة الأسبوعية وتنفيذها (من تطبيق المشرف نفسه)، غياب المناديب (أيام من غير أي نشاط تسليم/مرتجع)، حجم المبيعات (مقابل هدف الفريق لو موجود)، حجم المرتجع (نسبة من إجمالي المبيعات).
-            مستبعد منها تلقائيًا أي حساب اسمه بيبدأ بـ"بيع اداري".
-          </p>
+          <div style="margin-bottom:14px">
+            <div style="font-size:11px;font-weight:700;color:#8A8A82;margin-bottom:6px">📋 التقييم بيتحسب من 7 معايير — اضغط على أي كارت عشان تعرف هو بيقيس إيه وإزاي تحققه بالكامل (مستبعد منها تلقائيًا أي حساب اسمه بيبدأ بـ"بيع اداري"):</div>
+            <div id="mse-crit-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px"></div>
+          </div>
           <div id="mse-stats-bar" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px"></div>
           <div id="mse-leaderboard" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px"></div>
           <div id="mse-eval-list"></div>
@@ -41564,7 +41564,8 @@ function sevExportExcel(onlyName){
 
 // ══════════════════════════════════════════════════════════════
 // تقييم المناديب — بانل مستقل "تقييم المناديب"
-// (4 معايير: تحقيق الهدف الشهري / الحضور والغياب (نشاط) / تغطية خط السير / نسبة المرتجعات)
+// (8 معايير: تحقيق الهدف الشهري / الحضور والغياب (نشاط) / تغطية خط السير / نسبة المرتجعات /
+// متوسط قيمة الفاتورة / نمو المبيعات شهر عن شهر / تنوع الأصناف المباعة / استغلال العروض النشطة)
 // مستبعد منه تلقائيًا أي حساب اسمه بيبدأ بـ"بيع اداري"
 // ══════════════════════════════════════════════════════════════
 let _revResults = [];
@@ -41695,23 +41696,41 @@ function revMonthsInRange(start, end){
   return months;
 }
 
+// بيرجع نطاق الشهر التقويمي اللي قبل الشهر المحتوي على startISO مباشرة — مُستخدم في معايير
+// "نمو المبيعات شهر عن شهر" على مستوى المندوب والفريق مع بعض (تقييم المناديب وتقييم مشرفي المبيعات)
+function revPrevMonthRange(startISO){
+  const d = new Date(startISO+'T00:00:00');
+  const prev = new Date(d.getFullYear(), d.getMonth()-1, 1);
+  const py = prev.getFullYear(), pm = prev.getMonth()+1;
+  const lastDay = new Date(py, pm, 0).getDate();
+  return {
+    start: `${py}-${String(pm).padStart(2,'0')}-01`,
+    end: `${py}-${String(pm).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`,
+    label: `${REV_MONTH_NAMES[pm-1]} ${py}`,
+  };
+}
+
 async function revLoadContext(){
   const { start, end } = revGetPeriodRange();
   const periodLabel = revPeriodLabel();
   const H = PLANS_H();
+  const prevM = revPrevMonthRange(start);
 
   const repsRes = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&status=eq.active&name=neq.${encodeURIComponent('تحت التعيين')}&select=id,name,grp,grps,route,routes,user_type,day_off,supervisors&order=name.asc&limit=500`,{headers:H});
   let reps = repsRes.ok ? await repsRes.json().catch(()=>[]) : [];
   if(!Array.isArray(reps)) reps = [];
   reps = reps.filter(r=>r.name && !r.name.startsWith('بيع اداري'));
 
-  const [deliveries, returns, branchesRaw, targets, overrides, holidayRows] = await Promise.all([
-    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,branch_name,route,total_net,total_tax,delivery_date&delivery_date=gte.${start}&delivery_date=lte.${end}&deleted_at=is.null`, H),
+  const [deliveries, returns, branchesRaw, targets, overrides, holidayRows, promos, prevDeliveries, prevReturns] = await Promise.all([
+    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,branch_name,route,client_name,total_net,total_tax,delivery_date,items&delivery_date=gte.${start}&delivery_date=lte.${end}&deleted_at=is.null`, H),
     fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,branch_name,route,total_net,total_tax,return_date&return_date=gte.${start}&return_date=lte.${end}&deleted_at=is.null`, H),
     fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route&limit=3000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/rep_targets?select=*&deleted_at=is.null&limit=2000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?select=*&limit=2000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/holidays?select=date,grp,exceptions&date=gte.${start}&date=lte.${end}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    fetch(`${SUPABASE_URL}/rest/v1/sales_promotions?select=client_name,snf_name,date_from,date_to&active=eq.true`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,total_net,total_tax,delivery_date&delivery_date=gte.${prevM.start}&delivery_date=lte.${prevM.end}&deleted_at=is.null`, H),
+    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,total_net,total_tax,return_date&return_date=gte.${prevM.start}&return_date=lte.${prevM.end}&deleted_at=is.null`, H),
   ]);
 
   const routeBranches = {};
@@ -41725,6 +41744,10 @@ async function revLoadContext(){
     targets: Array.isArray(targets)?targets:[],
     overrides: Array.isArray(overrides)?overrides:[],
     holidayRows: Array.isArray(holidayRows)?holidayRows:[],
+    promos: Array.isArray(promos)?promos:[],
+    prevDeliveries: Array.isArray(prevDeliveries)?prevDeliveries:[],
+    prevReturns: Array.isArray(prevReturns)?prevReturns:[],
+    prevMonthLabel: prevM.label,
     now: Date.now(),
   };
 }
@@ -41868,12 +41891,116 @@ function revReturnsCriterion(rep, ctx){
   };
 }
 
+// 5) متوسط قيمة الفاتورة — مؤشر جودة البيع مش بس عدده (مندوب ممكن يعمل فواتير كتير بقيمة صغيرة)،
+// بنقارنه بمتوسط قيمة الفاتورة لكل المناديب في نفس الفترة (بنش مارك نسبي زي "جودة الزيارات" بتاع المشرفين)
+function revAvgInvoiceCriterion(rep, ctx){
+  const repDels = ctx.deliveries.filter(d=>d.rep_name===rep.name);
+  if(!repDels.length) return { level:'good', text:`مفيش فواتير تسليم مسجلة ${ctx.periodLabel}`, details:[] };
+  const repNet = repDels.reduce((s,d)=>s+(d.total_net||0)-(d.total_tax||0),0);
+  const repAvg = repNet/repDels.length;
+  const allDels = ctx.deliveries;
+  const companyNet = allDels.reduce((s,d)=>s+(d.total_net||0)-(d.total_tax||0),0);
+  const companyAvg = allDels.length ? companyNet/allDels.length : null;
+  let level = 'good';
+  if(companyAvg){
+    if(repAvg>=companyAvg) level='excellent';
+    else if(repAvg>=companyAvg*0.7) level='good';
+    else level='needsWork';
+  }
+  return {
+    level,
+    text: companyAvg
+      ? `متوسط قيمة الفاتورة ${Math.round(repAvg).toLocaleString()} ج.م مقابل متوسط كل المناديب ${Math.round(companyAvg).toLocaleString()} ج.م (${repDels.length} فاتورة)`
+      : `متوسط قيمة الفاتورة ${Math.round(repAvg).toLocaleString()} ج.م (${repDels.length} فاتورة)`,
+    details: [],
+  };
+}
+
+// 6) نمو المبيعات شهر عن شهر — صافي مبيعات المندوب في الفترة الحالية مقابل نفس المندوب في الشهر
+// التقويمي اللي قبل أول شهر في الفترة المختارة مباشرة (بغض النظر هل الفترة أسبوع ولا شهر كامل)
+function revGrowthCriterion(rep, ctx){
+  let curNet=0, prevNet=0;
+  ctx.deliveries.forEach(d=>{ if(d.rep_name===rep.name) curNet += (d.total_net||0)-(d.total_tax||0); });
+  ctx.returns.forEach(r=>{ if(r.rep_name===rep.name) curNet -= (r.total_net||0)-(r.total_tax||0); });
+  ctx.prevDeliveries.forEach(d=>{ if(d.rep_name===rep.name) prevNet += (d.total_net||0)-(d.total_tax||0); });
+  ctx.prevReturns.forEach(r=>{ if(r.rep_name===rep.name) prevNet -= (r.total_net||0)-(r.total_tax||0); });
+
+  if(!prevNet && !curNet) return { level:'good', text:`مفيش مبيعات مسجلة في الفترة الحالية ولا في ${ctx.prevMonthLabel}`, details:[] };
+  if(!prevNet) return { level:'good', text:`مفيش مبيعات مسجلة في ${ctx.prevMonthLabel} للمقارنة (مبيعات الفترة الحالية ${Math.round(curNet).toLocaleString()} ج.م)`, details:[] };
+
+  const growthPct = Math.round((curNet-prevNet)/Math.abs(prevNet)*100);
+  const level = growthPct>=0 ? 'excellent' : growthPct>=-15 ? 'good' : 'needsWork';
+  return {
+    level,
+    text: `${growthPct>=0?'📈 نمو':'📉 تراجع'} ${Math.abs(growthPct)}% مقارنة بـ${ctx.prevMonthLabel} (${Math.round(prevNet).toLocaleString()} ← ${Math.round(curNet).toLocaleString()} ج.م)`,
+    details: [],
+  };
+}
+
+// 7) تنوع الأصناف المباعة — عدد الأصناف المختلفة اللي باعها المندوب فعليًا من إجمالي الأصناف اللي
+// اتباعت لكل المناديب في نفس الفترة (بنش مارك نسبي، مش رقم مطلق لأن قاعدة الأصناف بتتغير وبتختلف باختلاف خط السير)
+function revVarietyCriterion(rep, ctx){
+  const repItems = new Set();
+  const allItems = new Set();
+  ctx.deliveries.forEach(d=>{
+    (Array.isArray(d.items)?d.items:[]).forEach(it=>{
+      const nm = (it.name||'').trim();
+      if(!nm) return;
+      allItems.add(nm);
+      if(d.rep_name===rep.name) repItems.add(nm);
+    });
+  });
+  if(!allItems.size) return { level:'good', text:`مفيش بيانات أصناف كافية في الفواتير ${ctx.periodLabel}`, details:[] };
+  const pct = Math.round(repItems.size/allItems.size*100);
+  const level = pct>=50 ? 'excellent' : pct>=30 ? 'good' : 'needsWork';
+  return {
+    level,
+    text: `باع ${repItems.size} صنف مختلف من إجمالي ${allItems.size} صنف اتباعوا لكل المناديب ${ctx.periodLabel} (${pct}%)`,
+    details: [],
+  };
+}
+
+// 8) نسبة استغلال العروض النشطة — من العروض النشطة على عملاء باع لهم المندوب الفترة دي، كام عرض
+// فعليًا باع فيه الصنف صاحب العرض لنفس العميل خلال فترة سريان العرض (متقاطعة مع الفترة المختارة)
+function revPromoCriterion(rep, ctx){
+  const repDels = ctx.deliveries.filter(d=>d.rep_name===rep.name);
+  if(!ctx.promos.length) return { level:'good', text:'مفيش عروض نشطة مسجلة حاليًا', details:[] };
+  if(!repDels.length) return { level:'good', text:`مفيش فواتير تسليم مسجلة ${ctx.periodLabel}`, details:[] };
+  const repClients = new Set(repDels.map(d=>(d.client_name||'').trim()).filter(Boolean));
+  const applicable = ctx.promos.filter(p=>repClients.has((p.client_name||'').trim()) && (p.date_from||'')<=ctx.end && (p.date_to||'9999-12-31')>=ctx.start);
+  if(!applicable.length) return { level:'good', text:`مفيش عروض نشطة على عملاء هذا المندوب ${ctx.periodLabel}`, details:[] };
+  let utilized=0;
+  const missed=[];
+  applicable.forEach(p=>{
+    const from = (p.date_from||ctx.start) > ctx.start ? p.date_from : ctx.start;
+    const to   = (p.date_to||ctx.end)     < ctx.end   ? p.date_to   : ctx.end;
+    const sold = repDels.some(d=>
+      (d.client_name||'').trim()===(p.client_name||'').trim() &&
+      (d.delivery_date||'')>=from && (d.delivery_date||'')<=to &&
+      (Array.isArray(d.items)?d.items:[]).some(it=>(it.name||'').trim()===(p.snf_name||'').trim())
+    );
+    if(sold) utilized++;
+    else missed.push(`🎁 ${p.client_name||'—'} — ${p.snf_name||'—'} — لسه ما اتباعش خلال فترة العرض`);
+  });
+  const pct = Math.round(utilized/applicable.length*100);
+  const level = pct>=70 ? 'excellent' : pct>=40 ? 'good' : 'needsWork';
+  return {
+    level,
+    text: `${utilized}/${applicable.length} عرض نشط تم استغلاله فعليًا (${pct}%)`,
+    details: missed,
+  };
+}
+
 function revComputeForRep(rep, ctx){
   const crits = [
     {icon:'🎯', title:'تحقيق الهدف الشهري', ...revTargetCriterion(rep, ctx)},
     {icon:'🕒', title:'الحضور والغياب', ...revAttendanceCriterion(rep, ctx)},
     {icon:'🧭', title:'تغطية خط السير', ...revCoverageCriterion(rep, ctx)},
     {icon:'🔄', title:'نسبة المرتجعات', ...revReturnsCriterion(rep, ctx)},
+    {icon:'💳', title:'متوسط قيمة الفاتورة', ...revAvgInvoiceCriterion(rep, ctx)},
+    {icon:'📈', title:'نمو المبيعات شهر عن شهر', ...revGrowthCriterion(rep, ctx)},
+    {icon:'🧺', title:'تنوع الأصناف المباعة', ...revVarietyCriterion(rep, ctx)},
+    {icon:'🎁', title:'استغلال العروض النشطة', ...revPromoCriterion(rep, ctx)},
   ];
   const overall = sevOverallFromCrits(crits);
   const pct = sevPctFromCrits(crits);
@@ -42376,6 +42503,7 @@ async function mseLoadContext(){
   const { start, end } = mseGetPeriodRange();
   const periodLabel = msePeriodLabel();
   const H = PLANS_H();
+  const prevM = revPrevMonthRange(start);
 
   const [supsRes, repsRes] = await Promise.all([
     fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.sup&status=eq.active&select=id,name,grp,grps,user_type&order=name.asc&limit=200`,{headers:H}),
@@ -42404,7 +42532,7 @@ async function mseLoadContext(){
     extraSupNames.filter(n=>!foundNames.has(n)).forEach(n=>sups.push({name:n, grp:'', grps:[], user_type:'مشرف مبيعات'}));
   }
 
-  const [deliveries, returns, targets, overrides, holidayRows, plans] = await Promise.all([
+  const [deliveries, returns, targets, overrides, holidayRows, plans, pullReturns, prevDeliveries, prevReturns] = await Promise.all([
     fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,branch_name,route,total_net,total_tax,delivery_date&delivery_date=gte.${start}&delivery_date=lte.${end}&deleted_at=is.null`, H),
     fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,branch_name,route,total_net,total_tax,return_date&return_date=gte.${start}&return_date=lte.${end}&deleted_at=is.null`, H),
     fetch(`${SUPABASE_URL}/rest/v1/rep_targets?select=*&deleted_at=is.null&limit=2000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
@@ -42413,6 +42541,11 @@ async function mseLoadContext(){
     // الخطة الأسبوعية اللي كل مشرف مبيعات بيقدمها فعليًا من تطبيقه (sales_plans_plus) — أي أسبوع بيتقاطع
     // مع الفترة المختارة، بغض النظر هل الأسبوع بيبدأ أو بيخلص جوه الفترة بالظبط أو لأ
     fetch(`${SUPABASE_URL}/rest/v1/sales_plans_plus?week_start=lte.${end}&week_end=gte.${start}&select=id,staff_name,role,week_start,week_end,status,target_amount,achieved_amount,total_branches,total_reps,created_at,approved_at,reject_reason&limit=500`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    // جدول "مرتجعات المبيعات" (returns) اللي بيتبع سحب المرتجع فعليًا من الفرع (pulled/pulled_at) —
+    // مُستخدم في معيار "سرعة سحب مرتجعات الفريق" بتاع مشرف المبيعات
+    fetchAllRows(`${SUPABASE_URL}/rest/v1/returns?select=rep_name,created_at,pulled,pulled_at&created_at=gte.${start}&created_at=lte.${end}T23:59:59`, H),
+    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,total_net,total_tax,delivery_date&delivery_date=gte.${prevM.start}&delivery_date=lte.${prevM.end}&deleted_at=is.null`, H),
+    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,total_net,total_tax,return_date&return_date=gte.${prevM.start}&return_date=lte.${prevM.end}&deleted_at=is.null`, H),
   ]);
 
   // بنود كل خطة (فروع/عملاء الأسبوع) — عشان نحسب نسبة التنفيذ الفعلي، بنجيبها بس للخطط اللي فعلاً اتحمّلت فوق
@@ -42433,6 +42566,10 @@ async function mseLoadContext(){
     holidayRows: Array.isArray(holidayRows)?holidayRows:[],
     plans: Array.isArray(plans)?plans:[],
     planItems: Array.isArray(planItems)?planItems:[],
+    pullReturns: Array.isArray(pullReturns)?pullReturns:[],
+    prevDeliveries: Array.isArray(prevDeliveries)?prevDeliveries:[],
+    prevReturns: Array.isArray(prevReturns)?prevReturns:[],
+    prevMonthLabel: prevM.label,
     now: Date.now(),
   };
 }
@@ -42500,10 +42637,11 @@ function mseAbsenceCriterion(team, ctx){
 // 2) حجم المبيعات — صافي مبيعات الفريق كله (نفس منطق revTargetCriterion لكل مندوب مجمّع) مقابل مجموع
 // أهداف الفريق لو موجودة. لو مفيش هدف مسجل خالص لأي مندوب في الفريق، بيتعرض الرقم بس من غير تقييم لوني.
 function mseSalesCriterion(team, ctx){
-  if(!team.length) return { level:'good', text:'مفيش مناديب مرتبطين بهذا المشرف حاليًا', details:[] };
+  if(!team.length) return { level:'good', text:'مفيش مناديب مرتبطين بهذا المشرف حاليًا', details:[], repPcts:[] };
   const months = revMonthsInRange(ctx.start, ctx.end);
   let totalTarget=0, totalAchieved=0;
   const perRep=[];
+  const repPcts=[]; // نسبة تحقيق كل مندوب عنده هدف مسجل — بتُستخدم في معيار "توازن الأداء داخل الفريق"
   team.forEach(rep=>{
     let repTarget=0, repAchieved=0;
     months.forEach(m=>{
@@ -42529,12 +42667,16 @@ function mseSalesCriterion(team, ctx){
     });
     totalTarget += repTarget;
     totalAchieved += repAchieved;
-    if(repTarget) perRep.push(`${rep.name} — الهدف ${Math.round(repTarget).toLocaleString()} ج.م، المحقق ${Math.round(repAchieved).toLocaleString()} ج.م (${Math.round(repAchieved/repTarget*100)}%)`);
+    if(repTarget){
+      const rPct = Math.round(repAchieved/repTarget*100);
+      perRep.push(`${rep.name} — الهدف ${Math.round(repTarget).toLocaleString()} ج.م، المحقق ${Math.round(repAchieved).toLocaleString()} ج.م (${rPct}%)`);
+      repPcts.push({ name: rep.name, pct: rPct });
+    }
     else perRep.push(`${rep.name} — مبيعات ${Math.round(repAchieved).toLocaleString()} ج.م (بدون هدف مسجل)`);
   });
 
   if(!totalTarget){
-    return { level:'good', text:`إجمالي مبيعات الفريق ${Math.round(totalAchieved).toLocaleString()} ج.م ${ctx.periodLabel} (مفيش هدف مسجل لأي مندوب في الفريق للفترة دي)`, details: perRep };
+    return { level:'good', text:`إجمالي مبيعات الفريق ${Math.round(totalAchieved).toLocaleString()} ج.م ${ctx.periodLabel} (مفيش هدف مسجل لأي مندوب في الفريق للفترة دي)`, details: perRep, repPcts };
   }
   const pct = Math.round(totalAchieved/totalTarget*100);
   const level = pct>=100 ? 'excellent' : pct>=70 ? 'good' : 'needsWork';
@@ -42542,6 +42684,7 @@ function mseSalesCriterion(team, ctx){
     level,
     text: `تحقيق ${pct}% من هدف الفريق (${Math.round(totalAchieved).toLocaleString()} من ${Math.round(totalTarget).toLocaleString()} ج.م)`,
     details: perRep,
+    repPcts,
   };
 }
 
@@ -42572,13 +42715,82 @@ function mseReturnsCriterion(team, ctx){
   };
 }
 
+// 4) نمو مبيعات الفريق ككل شهر عن شهر — إجمالي صافي مبيعات فريق المشرف في الفترة الحالية مقابل نفس
+// الفريق في الشهر التقويمي اللي قبل أول شهر في الفترة المختارة مباشرة (نفس منطق نمو المندوب بالظبط)
+function mseGrowthCriterion(team, ctx){
+  if(!team.length) return { level:'good', text:'مفيش مناديب مرتبطين بهذا المشرف حاليًا', details:[] };
+  const teamNames = new Set(team.map(r=>r.name));
+  let curNet=0, prevNet=0;
+  ctx.deliveries.forEach(d=>{ if(teamNames.has(d.rep_name)) curNet += (d.total_net||0)-(d.total_tax||0); });
+  ctx.returns.forEach(r=>{ if(teamNames.has(r.rep_name)) curNet -= (r.total_net||0)-(r.total_tax||0); });
+  ctx.prevDeliveries.forEach(d=>{ if(teamNames.has(d.rep_name)) prevNet += (d.total_net||0)-(d.total_tax||0); });
+  ctx.prevReturns.forEach(r=>{ if(teamNames.has(r.rep_name)) prevNet -= (r.total_net||0)-(r.total_tax||0); });
+
+  if(!prevNet && !curNet) return { level:'good', text:`مفيش مبيعات مسجلة للفريق في الفترة الحالية ولا في ${ctx.prevMonthLabel}`, details:[] };
+  if(!prevNet) return { level:'good', text:`مفيش مبيعات فريق مسجلة في ${ctx.prevMonthLabel} للمقارنة (مبيعات الفترة الحالية ${Math.round(curNet).toLocaleString()} ج.م)`, details:[] };
+
+  const growthPct = Math.round((curNet-prevNet)/Math.abs(prevNet)*100);
+  const level = growthPct>=0 ? 'excellent' : growthPct>=-15 ? 'good' : 'needsWork';
+  return {
+    level,
+    text: `${growthPct>=0?'📈 نمو':'📉 تراجع'} ${Math.abs(growthPct)}% لمبيعات الفريق مقارنة بـ${ctx.prevMonthLabel} (${Math.round(prevNet).toLocaleString()} ← ${Math.round(curNet).toLocaleString()} ج.م)`,
+    details: [],
+  };
+}
+
+// 5) توازن الأداء داخل الفريق — الفرق بين أعلى وأقل نسبة تحقيق هدف بين مناديب الفريق (اللي عندهم هدف
+// مسجل بس) — بيوضح لو المشرف متروك عليه مندوب شايل الفريق كله وباقي المناديب متسيبين
+function mseBalanceCriterion(salesCrit){
+  const pcts = salesCrit.repPcts || [];
+  if(pcts.length<2) return { level:'good', text:'مفيش عدد كافي من المناديب بهدف مسجل لحساب التوازن', details:[] };
+  const sorted = [...pcts].sort((a,b)=>b.pct-a.pct);
+  const spread = sorted[0].pct - sorted[sorted.length-1].pct;
+  const level = spread<=20 ? 'excellent' : spread<=40 ? 'good' : 'needsWork';
+  return {
+    level,
+    text: `الفرق بين أعلى وأقل نسبة تحقيق هدف في الفريق ${spread} نقطة (من ${sorted[sorted.length-1].pct}% لـ${sorted[0].pct}%)`,
+    details: sorted.map(p=>`${p.name} — ${p.pct}%`),
+  };
+}
+
+// 6) سرعة سحب مرتجعات الفريق — سرعة "سحب" (pulled) المرتجعات اللي اتسجلت من زيارات فريق مناديبه فعليًا
+// من الفرع، من وقت التسجيل لحد ما تتسحب (جدول returns بتاع "مرتجعات المبيعات" — مش sales_returns)
+function mseReturnSpeedCriterion(team, ctx){
+  if(!team.length) return { level:'good', text:'مفيش مناديب مرتبطين بهذا المشرف حاليًا', details:[] };
+  const teamNames = new Set(team.map(r=>r.name));
+  const teamReturns = (ctx.pullReturns||[]).filter(r=>teamNames.has(r.rep_name));
+  if(!teamReturns.length) return { level:'good', text:`مفيش مرتجعات مسجلة لفريق هذا المشرف ${ctx.periodLabel}`, details:[] };
+  const pulled = teamReturns.filter(r=>r.pulled);
+  const pending = teamReturns.filter(r=>!r.pulled);
+  const latencies = pulled.filter(r=>r.pulled_at && r.created_at).map(r=>(new Date(r.pulled_at)-new Date(r.created_at))/86400000);
+  const avgDays = latencies.length ? latencies.reduce((a,b)=>a+b,0)/latencies.length : null;
+  let oldestPendingDays = 0;
+  if(pending.length){
+    const oldest = pending.reduce((a,b)=>(a.created_at<b.created_at?a:b));
+    oldestPendingDays = Math.floor((ctx.now-new Date(oldest.created_at).getTime())/86400000);
+  }
+  const pendingPct = teamReturns.length ? Math.round(pending.length/teamReturns.length*100) : 0;
+  let level = 'good';
+  if(pendingPct<=20 && (avgDays===null || avgDays<=3)) level='excellent';
+  else if(pendingPct>50 || oldestPendingDays>=10) level='needsWork';
+  return {
+    level,
+    text: `${pulled.length}/${teamReturns.length} مرتجع تم سحبه فعليًا${avgDays!==null?` (متوسط ${avgDays.toFixed(1)} يوم)`:''} · ${pending.length} لسه مستني${pending.length?` (أقدمهم من ${oldestPendingDays} يوم)`:''}`,
+    details: [],
+  };
+}
+
 function mseComputeForSup(sup, ctx){
   const team = mseTeamOf(sup, ctx);
+  const salesCrit = mseSalesCriterion(team, ctx);
   const crits = [
     {icon:'📋', title:'الالتزام بالخطة الأسبوعية', ...msePlanCriterion(sup, ctx)},
     {icon:'🕒', title:'غياب المناديب', ...mseAbsenceCriterion(team, ctx)},
-    {icon:'💰', title:'حجم المبيعات', ...mseSalesCriterion(team, ctx)},
+    {icon:'💰', title:'حجم المبيعات', ...salesCrit},
     {icon:'🔄', title:'حجم المرتجع', ...mseReturnsCriterion(team, ctx)},
+    {icon:'📊', title:'نمو مبيعات الفريق شهر عن شهر', ...mseGrowthCriterion(team, ctx)},
+    {icon:'⚖️', title:'توازن الأداء داخل الفريق', ...mseBalanceCriterion(salesCrit)},
+    {icon:'⏱️', title:'سرعة سحب مرتجعات الفريق', ...mseReturnSpeedCriterion(team, ctx)},
   ];
   const overall = sevOverallFromCrits(crits);
   const pct = sevPctFromCrits(crits);
@@ -42677,10 +42889,73 @@ function mseRender(){
   listEl.innerHTML = sorted.map(mseRenderCard).join('') || '<div style="text-align:center;padding:40px;color:var(--text2)">لا يوجد مشرفو مبيعات مطابقون للفلتر</div>';
 }
 
+// ── شرح كل معيار من معايير تقييم مشرفي المبيعات: بيقيس إيه بالظبط + إزاي توصله لـ100% —
+// نفس المنطق المحسوب في mseComputeForSup بالحرف. الترتيب هنا لازم يفضل مطابق لترتيب مصفوفة crits هناك.
+const MSE_CRIT_INFO = [
+  { icon:'📋', title:'الالتزام بالخطة الأسبوعية',
+    what:'هل المشرف قدّم خطة أسبوعية من تطبيقه، وهل نفّذ بنودها (فروع/عملاء الأسبوع) فعليًا على الأرض — مش بس قدّمها وسابها.',
+    how:'قدّم خطة أسبوعية بانتظام، ونفّذ <b>80% أو أكتر</b> من بنودها المخططة، من غير أي خطة مرفوضة.' },
+  { icon:'🕒', title:'غياب المناديب',
+    what:'عدد أيام العمل اللي مفيش فيها أي نشاط تسليم أو مرتجع مسجل لأي مندوب في فريقه (مجمّع على الفريق كله).',
+    how:'تابع مع مناديبك إن كل واحد فيهم يكون عنده نشاط (فاتورة تسليم أو مرتجع) في كل يوم عمل — وصّل متوسط أيام الغياب لـ<b>يومين أو أقل</b> لكل مندوب في الفريق.' },
+  { icon:'💰', title:'حجم المبيعات',
+    what:'نسبة تحقيق فريقه (كل مناديبه مع بعض) لإجمالي هدف المبيعات الشهري المسجل لهم.',
+    how:'خلّي إجمالي مبيعات فريقك يوصل أو يعدّي <b>100%</b> من إجمالي أهدافهم المسجلة.' },
+  { icon:'🔄', title:'حجم المرتجع',
+    what:'نسبة قيمة مرتجعات الفريق كله من إجمالي مبيعاته.',
+    how:'خلّي نسبة المرتجعات لإجمالي المبيعات <b>5% أو أقل</b>.' },
+  { icon:'📊', title:'نمو مبيعات الفريق شهر عن شهر',
+    what:'إجمالي صافي مبيعات الفريق في الفترة الحالية مقارنة بنفس الفريق في الشهر التقويمي اللي فات مباشرة.',
+    how:'خلّي مبيعات فريقك في نمو أو ثبات مقارنة بالشهر اللي فات — تراجع أكتر من <b>15%</b> بيورّط المعيار في "يحتاج متابعة".' },
+  { icon:'⚖️', title:'توازن الأداء داخل الفريق',
+    what:'الفرق بين أعلى وأقل نسبة تحقيق هدف بين مناديب فريقك (اللي عندهم هدف مسجل بس) — يوضح لو في مندوب شايل الفريق لوحده وباقيهم متسيبين.',
+    how:'خلّي الفرق بين أعلى وأقل نسبة تحقيق هدف في فريقك <b>20 نقطة أو أقل</b> — يعني اهتم بمتابعة الضعفاء في الفريق مش بس المتفوقين.' },
+  { icon:'⏱️', title:'سرعة سحب مرتجعات الفريق',
+    what:'سرعة "سحب" (تحصيل فعلي من الفرع) المرتجعات اللي اتسجلت من زيارات مناديب فريقك، من وقت التسجيل لحد ما تتسحب.',
+    how:'تابع سحب مرتجعات فريقك بسرعة (متوسط <b>3 أيام أو أقل</b>)، وميفضلش عندك مرتجعات معلقة أكتر من نص العدد أو مرتجع قديم من غير سحب أكتر من 10 أيام.' },
+];
+
+// بيبني كروت شرح المعايير تحت الفلاتر في بانل "تقييم مشرفي المبيعات"
+function mseRenderCritCards(){
+  const wrap = document.getElementById('mse-crit-cards');
+  if(!wrap) return;
+  wrap.innerHTML = MSE_CRIT_INFO.map((c,idx)=>`
+    <div onclick="mseShowCritInfo(${idx})" style="cursor:pointer;background:#fff;border:1px solid var(--border,#E8D9C0);border-radius:10px;padding:10px 8px;text-align:center;transition:box-shadow .15s" onmouseover="this.style.boxShadow='0 2px 10px rgba(0,0,0,.08)'" onmouseout="this.style.boxShadow='none'">
+      <div style="font-size:20px;margin-bottom:4px">${c.icon}</div>
+      <div style="font-size:11px;font-weight:700;color:#3B1F12;line-height:1.4">${c.title}</div>
+    </div>`).join('');
+}
+
+// بوب أب شرح معيار من معايير تقييم مشرفي المبيعات: بيقيس إيه + إزاي تحققه بالكامل
+function mseShowCritInfo(idx){
+  const info = MSE_CRIT_INFO[idx];
+  if(!info) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'mse-crit-info-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+  overlay.innerHTML = `
+    <div style="background:#FFFDF8;border-radius:14px;padding:22px 24px;width:100%;max-width:440px;max-height:85vh;overflow-y:auto;box-shadow:0 8px 32px rgba(75,60,26,.3);border:1px solid #E8D9C0;font-family:Cairo,sans-serif;direction:rtl">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div style="font-size:15px;font-weight:800;color:#3B1F12">${info.icon} ${info.title}</div>
+        <button onclick="document.getElementById('mse-crit-info-overlay').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#8B6F47;line-height:1">×</button>
+      </div>
+      <div style="font-size:11px;font-weight:700;color:#8A8A82;margin-bottom:4px">📌 بيقيس إيه؟</div>
+      <div style="font-size:13px;color:#2C2C2A;line-height:1.7;margin-bottom:14px">${info.what}</div>
+      <div style="font-size:11px;font-weight:700;color:#8A8A82;margin-bottom:4px">✅ إزاي تحققه بالكامل (100%)؟</div>
+      <div style="font-size:13px;color:#2C2C2A;line-height:1.7">${info.how}</div>
+      <div style="text-align:left;margin-top:16px">
+        <button onclick="document.getElementById('mse-crit-info-overlay').remove()" style="background:var(--navy,#1A3A5C);color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:12px;font-weight:700;cursor:pointer">تمام، فهمت</button>
+      </div>
+    </div>`;
+  overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
 async function mseRefresh(){
   const listEl = document.getElementById('mse-eval-list');
   if(!listEl) return;
   mseInitFilters();
+  mseRenderCritCards();
   listEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text2)">جاري تحميل التقييم...</div>';
   try{
     const ctx = await mseLoadContext();
