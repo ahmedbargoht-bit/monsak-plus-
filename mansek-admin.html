@@ -36,6 +36,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
 .branch-name-label{font-family:Cairo,sans-serif;font-size:10px;font-weight:700;color:#0F6E56;background:#fff;border:1px solid #1A7A4A;padding:1px 6px;border-radius:5px}
 .branch-name-label::before{display:none}
@@ -35127,10 +35128,12 @@ function repbalRenderAllRequests(rows){
 function repbalRenderBalances(){
   const wrap = document.getElementById('rbadm-balances');
   const q = (document.getElementById('rbadm-search')?.value||'').trim();
-  let reps = Object.keys(_repbalBalances);
+  // القايمة مبنية على كل المناديب الظاهرين حاليًا (مش بس اللي عندهم رصيد غير صفري)،
+  // عشان الاسم يفضل ظاهر حتى لو رصيده صفر (زي أول يوم بعد بداية تسجيل الأرصدة).
+  let reps = (_repbalReps||[]).map(r=>r.name);
   if(q) reps = reps.filter(r=>r.includes(q));
   reps.sort((a,b)=>a.localeCompare(b,'ar'));
-  if(!reps.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش أرصدة لعرضها</div>'; return; }
+  if(!reps.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش مناديب لعرضهم</div>'; return; }
   wrap.innerHTML = reps.map(rep=>{
     const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0);
     const safe = rep.replace(/'/g,"\\'");
@@ -35292,6 +35295,115 @@ function repbalExportRepExcel(){
   XLSX.writeFile(wb, `سجل_جرد_${safeName}_${localISO()}.xlsx`);
   showToast('✅ تم تصدير سجل الجرد');
 }
+
+// يبني محتوى مستند "سجل الجرد الفعلي" (كل عمليات الجرد المسجّلة، مش بس الفروق) بألوان وهوية الطحان
+function repbalBuildInventoryLogHTML(rep, rows){
+  const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
+  const rowsHtml = rows.length
+    ? rows.map((r,i)=>{
+        const hasSplit = (+r.counted_valid_qty||0) + (+r.counted_returned_qty||0) > 0;
+        const validTxt    = hasSplit ? (r.counted_valid_qty||0)    : '—';
+        const returnedTxt = hasSplit ? (r.counted_returned_qty||0) : '—';
+        const d = new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'numeric'});
+        const diffColor = r.diff>0 ? '#B91C1C' : r.diff<0 ? '#B45309' : '#276749';
+        const diffTxt = r.diff>0 ? `ناقص ${r.diff}` : r.diff<0 ? `زيادة ${Math.abs(r.diff)}` : 'مطابق';
+        return `<tr style="background:${i%2?'#FCF9F4':'#fff'}">
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${i+1}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC">${d}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;font-weight:700">${r.snf}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${validTxt}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${returnedTxt}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${r.computed_qty}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${r.counted_qty}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800;color:${diffColor}">${diffTxt}</td>
+        </tr>`;
+      }).join('')
+    : `<tr><td colspan="8" style="padding:14px;text-align:center;color:#aaa">مفيش عمليات جرد مسجّلة لهذا المندوب</td></tr>`;
+  return `
+    <div style="background:#2C1F0A;color:#EDE5D8;text-align:center;padding:14px;font-size:20px;font-weight:900;border-radius:10px 10px 0 0">الطحان جولدن دايتس<div style="font-size:10px;color:#C8A96E;margin-top:3px;font-weight:400">Al Tahhan Golden Dates</div></div>
+    <div style="background:#C8A96E;color:#2C1F0A;text-align:center;padding:9px;font-size:14px;font-weight:700">سجل جرد فعلي — المندوب</div>
+    <div style="background:#F5F0E8;padding:12px 18px;border-radius:0 0 8px 8px;margin-bottom:18px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px">
+      <div>المندوب: <b style="color:#731E2E">${rep}</b></div>
+      <div>عدد العمليات: <b style="color:#731E2E">${rows.length}</b></div>
+      <div>تاريخ الإصدار: <b style="color:#731E2E">${now}</b></div>
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:26px">
+      <thead><tr style="background:#731E2E;color:#fff">
+        <th style="padding:7px;border:1px solid #5a1622">#</th>
+        <th style="padding:7px;border:1px solid #5a1622">التاريخ</th>
+        <th style="padding:7px;border:1px solid #5a1622">الصنف</th>
+        <th style="padding:7px;border:1px solid #5a1622">✅ صالح</th>
+        <th style="padding:7px;border:1px solid #5a1622">↩️ مرتجع</th>
+        <th style="padding:7px;border:1px solid #5a1622">المتوقع</th>
+        <th style="padding:7px;border:1px solid #5a1622">الفعلي</th>
+        <th style="padding:7px;border:1px solid #5a1622">الفرق</th>
+      </tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+    <div style="text-align:center;color:#aaa;font-size:9px;margin-top:24px">Al Tahhan Golden Dates © ${new Date().getFullYear()} — تم إنشاء المستند من منظومة إدارة المبيعات والتنسيق</div>`;
+}
+
+// تصدير سجل الجرد الفعلي (كل عمليات الجرد) — توليد PDF ومشاركته مباشرة (واتساب/تطبيقات) من غير فتح نافذة جديدة
+async function repbalShareRepInventory(){
+  const rep = _repbalExportRep;
+  if(!rep){ showToast('اختر مندوب أولاً','err'); return; }
+  if(typeof html2canvas==='undefined' || !window.jspdf){ showToast('مكتبة PDF لسه بتتحمّل، حاول تاني بعد لحظة','err'); return; }
+
+  showToast('⏳ جاري تجهيز سجل الجرد...');
+  let rows = [];
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=eq.${encodeURIComponent(rep)}&order=created_at.desc&limit=500&select=snf,counted_qty,counted_valid_qty,counted_returned_qty,computed_qty,diff,created_at`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}, cache:'no-store'});
+    rows = res.ok ? await res.json() : [];
+  }catch(e){ rows = []; }
+
+  const holder = document.createElement('div');
+  holder.style.cssText = 'position:fixed;top:0;left:-99999px;width:780px;background:#fff;z-index:-1;direction:rtl;font-family:Cairo,Arial,sans-serif';
+  holder.innerHTML = repbalBuildInventoryLogHTML(rep, rows||[]);
+  document.body.appendChild(holder);
+
+  try{
+    if(document.fonts && document.fonts.ready) await document.fonts.ready;
+    const canvas = await html2canvas(holder, {scale:2, useCORS:true, backgroundColor:'#ffffff'});
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({unit:'mm', format:'a4'});
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const imgW = pageW;
+    const imgH = canvas.height * imgW / canvas.width;
+    const imgData = canvas.toDataURL('image/jpeg', 0.95);
+    let heightLeft = imgH, position = 0;
+    pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH);
+    heightLeft -= pageH;
+    while(heightLeft > 0){
+      position = heightLeft - imgH;
+      pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH);
+      heightLeft -= pageH;
+    }
+    const blob = pdf.output('blob');
+    const safeName = rep.replace(/[\\/:*?"<>|]/g,'_');
+    const fileName = `سجل_جرد_${safeName}.pdf`;
+    const file = new File([blob], fileName, {type:'application/pdf'});
+
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file], title:'سجل جرد', text:`سجل جرد فعلي — ${rep}`});
+      showToast('✅ تم فتح خيارات الإرسال');
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = fileName;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 4000);
+      showToast('✅ اتحمّل ملف PDF — تقدر ترسله من الواتس يدويًا');
+    }
+  }catch(e){
+    if(e && e.name === 'AbortError'){ /* المستخدم لغى المشاركة بنفسه */ }
+    else{ console.warn('repbalShareRepInventory failed', e); showToast('حصل خطأ أثناء تجهيز الملف','err'); }
+  } finally {
+    holder.remove();
+  }
+}
 </script>
 <!-- ══ modal: تصدير سجل جرد مندوب (PDF/Excel) ══ -->
 <div id="modal-repbal-export" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;align-items:center;justify-content:center;padding:24px 12px" onclick="if(event.target===this)repbalCloseExportModal()">
@@ -35303,10 +35415,11 @@ function repbalExportRepExcel(){
     <div style="padding:14px 18px">
       <div id="repbal-export-meta" style="background:#F5F0E8;color:#4B3C1A;border-radius:8px;padding:8px 12px;font-size:11px;margin-bottom:12px;text-align:center"></div>
       <div id="repbal-export-list" style="max-height:260px;overflow-y:auto;margin-bottom:14px"></div>
-      <div style="display:flex;gap:10px">
+      <div style="display:flex;gap:10px;margin-bottom:10px">
         <button onclick="repbalExportRepPDF()" style="flex:1;background:#2C1F0A;color:#EDE5D8;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
         <button onclick="repbalExportRepExcel()" style="flex:1;background:#4E5A2B;color:#E8F5E9;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
       </div>
+      <button onclick="repbalShareRepInventory()" style="width:100%;background:#C8A96E;color:#2C1F0A;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="ti ti-share"></i> تصدير سجل الجرد الفعلي (مشاركة/واتساب)</button>
     </div>
   </div>
 </div>
