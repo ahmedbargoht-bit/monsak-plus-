@@ -6566,6 +6566,18 @@ h2,h3{color:#2C1F0A}
           </div>
 
           <div class="card">
+            <div class="card-title"><i class="ti ti-calendar" style="color:#276749"></i> فلتر الفترة</div>
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <span style="font-size:12px;color:var(--text2)">من</span>
+              <input type="date" id="repbal-from" onchange="repbalApplyPeriod()" style="padding:6px 8px;border:1.5px solid var(--border);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif;background:#fff;color:#2C2C2A"/>
+              <span style="font-size:12px;color:var(--text2)">إلى</span>
+              <input type="date" id="repbal-to" onchange="repbalApplyPeriod()" style="padding:6px 8px;border:1.5px solid var(--border);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif;background:#fff;color:#2C2C2A"/>
+              <span onclick="repbalClearPeriod()" style="font-size:12px;color:#731E2E;cursor:pointer;text-decoration:underline">الكل</span>
+            </div>
+            <div id="repbal-period-note" style="font-size:11px;color:var(--text2);margin-top:6px">بدون تحديد فترة: كل الطلبات المعلّقة والفروق الحالية والسجل الكامل، والرصيد التراكمي منذ البداية.</div>
+          </div>
+
+          <div class="card">
             <div class="card-title"><i class="ti ti-clock" style="color:#B45309"></i> طلبات بضاعة معلّقة</div>
             <div id="rbadm-pending"></div>
           </div>
@@ -34857,6 +34869,62 @@ function repbalInit(){
   repbalLoad();
 }
 
+let _repbalRawPending  = [];
+let _repbalRawDiffs    = [];
+let _repbalRawAllReqs  = [];
+let _repbalRawBalanceData = {dels:[], rets:[], reqsApproved:[], adjs:[]};
+
+function repbalGetPeriod(){
+  const from = document.getElementById('repbal-from')?.value || '';
+  const to   = document.getElementById('repbal-to')?.value || '';
+  return {from, to, has: !!(from||to)};
+}
+function repbalInRange(dateStr, from, to){
+  if(!dateStr) return false;
+  const d = dateStr.slice(0,10);
+  if(from && d<from) return false;
+  if(to && d>to) return false;
+  return true;
+}
+// بدون فترة: رصيد تراكمي من البداية (زي ما كان). بفترة محددة: صافي الحركة خلال الفترة بس.
+function repbalCalcBalances(raw, from, to, has){
+  const bal = {};
+  const add = (rep,item,qty)=>{ if(!rep||!item) return; bal[rep]=bal[rep]||{}; bal[rep][item]=(bal[rep][item]||0)+qty; };
+  const inRange = (d)=>{
+    if(!has) return true;
+    if(!d) return false;
+    const s = d.slice(0,10);
+    if(from && s<from) return false;
+    if(to && s>to) return false;
+    return true;
+  };
+  (raw.dels||[]).forEach(d=>{ if(inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
+  (raw.rets||[]).forEach(d=>{ if(inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.reqsApproved||[]).forEach(d=>{ if(inRange(d.decided_at||d.created_at)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.adjs||[]).forEach(a=>{ if(inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
+  return bal;
+}
+function repbalApplyPeriod(){
+  const {from, to, has} = repbalGetPeriod();
+  const note = document.getElementById('repbal-period-note');
+  if(note) note.textContent = has
+    ? 'الفترة محددة: الطلبات والفروق والسجل اللي حصل خلالها، والرصيد بقى صافي الحركة خلال الفترة دي بس.'
+    : 'بدون تحديد فترة: كل الطلبات المعلّقة والفروق الحالية والسجل الكامل، والرصيد التراكمي منذ البداية.';
+  const pending = has ? _repbalRawPending.filter(r=>repbalInRange(r.created_at,from,to)) : _repbalRawPending;
+  const diffs   = has ? _repbalRawDiffs.filter(r=>repbalInRange(r.created_at,from,to))   : _repbalRawDiffs;
+  const allReqs = has ? _repbalRawAllReqs.filter(r=>repbalInRange(r.created_at,from,to)) : _repbalRawAllReqs;
+  _repbalBalances = repbalCalcBalances(_repbalRawBalanceData, from, to, has);
+  repbalRenderPending(pending);
+  repbalRenderDiffs(diffs);
+  repbalRenderAllRequests(allReqs);
+  repbalRenderBalances();
+}
+function repbalClearPeriod(){
+  const f = document.getElementById('repbal-from'), t = document.getElementById('repbal-to');
+  if(f) f.value=''; if(t) t.value='';
+  repbalApplyPeriod();
+}
+
 async function repbalLoad(){
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
   ['rbadm-pending','rbadm-diffs','rbadm-all-requests','rbadm-balances'].forEach(id=>{
@@ -34886,24 +34954,17 @@ async function repbalLoad(){
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&order=created_at.asc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&order=created_at.desc&limit=300`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items&limit=5000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta&limit=5000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at&limit=5000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at&limit=5000`),
   ]);
 
-  const bal = {};
-  const add = (rep,item,qty)=>{ if(!rep||!item) return; bal[rep]=bal[rep]||{}; bal[rep][item]=(bal[rep][item]||0)+qty; };
-  (dels||[]).forEach(d=>(d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))));
-  (rets||[]).forEach(d=>(d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))));
-  (reqsApproved||[]).forEach(d=>(d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))));
-  (adjs||[]).forEach(a=>add(a.rep_name,a.snf,+(+a.qty_delta||0)));
-  _repbalBalances = bal;
-
-  repbalRenderPending(pending||[]);
-  repbalRenderDiffs(diffs||[]);
-  repbalRenderAllRequests(allReqs||[]);
-  repbalRenderBalances();
+  _repbalRawPending = pending||[];
+  _repbalRawDiffs   = diffs||[];
+  _repbalRawAllReqs = allReqs||[];
+  _repbalRawBalanceData = {dels:dels||[], rets:rets||[], reqsApproved:reqsApproved||[], adjs:adjs||[]};
+  repbalApplyPeriod();
 }
 
 function repbalRenderPending(rows){

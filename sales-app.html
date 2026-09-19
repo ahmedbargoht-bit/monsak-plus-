@@ -2051,6 +2051,17 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
     <!-- ══ أرصدة المناديب ══ -->
     <div class="panel" id="panel-repbal">
       <div class="card">
+        <div class="card-title"><i class="ti ti-calendar" style="color:#276749"></i> فلتر الفترة</div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span style="font-size:12px;color:var(--text2)">من</span>
+          <input type="date" id="rb-from" onchange="rbApplyPeriod()" style="padding:6px 8px;border:1.5px solid var(--border);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif"/>
+          <span style="font-size:12px;color:var(--text2)">إلى</span>
+          <input type="date" id="rb-to" onchange="rbApplyPeriod()" style="padding:6px 8px;border:1.5px solid var(--border);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif"/>
+          <span onclick="rbClearPeriod()" style="font-size:12px;color:#1D4ED8;cursor:pointer;text-decoration:underline">الكل</span>
+        </div>
+        <div id="rb-period-note" style="font-size:11px;color:var(--text2);margin-top:6px">بدون تحديد فترة: كل الطلبات المعلّقة والفروق الحالية، والرصيد التراكمي منذ البداية.</div>
+      </div>
+      <div class="card">
         <div class="card-title"><i class="ti ti-truck-delivery" style="color:#1D4ED8"></i> طلبات بضاعة معلّقة</div>
         <div id="rb-pending"><div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جارِ التحميل...</div></div>
       </div>
@@ -3179,7 +3190,7 @@ async function rbGetTeamReps(){
       const d = r.ok ? await r.json() : [];
       return Array.isArray(d) ? d.map(x=>x.name).filter(Boolean) : [];
     } else if(cu.level === 'sup'){
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/users?supervisors=eq.${encodeURIComponent(cu.name)}&select=name&order=name.asc&limit=500`,{headers:H});
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/users?supervisors=eq.${encodeURIComponent(cu.name)}&status=eq.active&select=name&order=name.asc&limit=500`,{headers:H});
       const d = r.ok ? await r.json() : [];
       return Array.isArray(d) ? d.map(x=>x.name).filter(Boolean) : [];
     } else if(cu.level === 'manager'){
@@ -3200,7 +3211,7 @@ async function rbGetTeamReps(){
       const supNames = filteredSups.map(s=>s.name);
       if(!supNames.length) return [];
       const encSups = supNames.map(n=>encodeURIComponent(n)).join(',');
-      const repsRes = await fetch(`${SUPABASE_URL}/rest/v1/users?supervisors=in.(${encSups})&select=name&limit=500`,{headers:H});
+      const repsRes = await fetch(`${SUPABASE_URL}/rest/v1/users?supervisors=in.(${encSups})&status=eq.active&select=name&limit=500`,{headers:H});
       const allReps = repsRes.ok ? await repsRes.json() : [];
       return Array.isArray(allReps) ? allReps.map(x=>x.name).filter(Boolean) : [];
     }
@@ -3208,24 +3219,72 @@ async function rbGetTeamReps(){
   return [];
 }
 
-async function rbComputeBalances(repNames){
-  if(!repNames.length) return {};
+let _rbRawPending = [];
+let _rbRawDiffs   = [];
+let _rbRawBalanceData = {dels:[], rets:[], reqs:[], adjs:[]};
+
+async function rbFetchRawBalanceData(repNames){
+  if(!repNames.length) return {dels:[], rets:[], reqs:[], adjs:[]};
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
   const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H}); return r.ok?await r.json():[]; }catch(e){ return []; } };
   const [dels, rets, reqs, adjs] = await Promise.all([
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items&limit=5000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta&limit=5000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at&limit=5000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at&limit=5000`),
   ]);
+  return {dels:dels||[], rets:rets||[], reqs:reqs||[], adjs:adjs||[]};
+}
+
+// بدون فترة: رصيد تراكمي من البداية (زي ما كان). بفترة محددة: صافي الحركة خلال الفترة بس.
+function rbCalcBalances(raw, from, to, has){
   const bal = {};
   const add = (rep,item,qty)=>{ if(!rep||!item) return; bal[rep]=bal[rep]||{}; bal[rep][item]=(bal[rep][item]||0)+qty; };
-  (dels||[]).forEach(d=>(d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))));
-  (rets||[]).forEach(d=>(d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))));
-  (reqs||[]).forEach(d=>(d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))));
-  (adjs||[]).forEach(a=>add(a.rep_name,a.snf,+(+a.qty_delta||0)));
+  const inRange = (d)=>{
+    if(!has) return true;
+    if(!d) return false;
+    const s = d.slice(0,10);
+    if(from && s<from) return false;
+    if(to && s>to) return false;
+    return true;
+  };
+  (raw.dels||[]).forEach(d=>{ if(inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
+  (raw.rets||[]).forEach(d=>{ if(inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.reqs||[]).forEach(d=>{ if(inRange(d.decided_at||d.created_at)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.adjs||[]).forEach(a=>{ if(inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
   return bal;
+}
+
+function rbGetPeriod(){
+  const from = document.getElementById('rb-from')?.value || '';
+  const to   = document.getElementById('rb-to')?.value || '';
+  return {from, to, has: !!(from||to)};
+}
+function rbInRange(dateStr, from, to){
+  if(!dateStr) return false;
+  const d = dateStr.slice(0,10);
+  if(from && d<from) return false;
+  if(to && d>to) return false;
+  return true;
+}
+function rbApplyPeriod(){
+  const {from, to, has} = rbGetPeriod();
+  const note = document.getElementById('rb-period-note');
+  if(note) note.textContent = has
+    ? 'الفترة محددة: الطلبات والفروق اللي حصلت خلالها، والرصيد بقى صافي الحركة خلال الفترة دي بس.'
+    : 'بدون تحديد فترة: كل الطلبات المعلّقة والفروق الحالية، والرصيد التراكمي منذ البداية.';
+  _rbPending  = has ? _rbRawPending.filter(r=>rbInRange(r.created_at,from,to)) : _rbRawPending;
+  const diffs = has ? _rbRawDiffs.filter(r=>rbInRange(r.created_at,from,to)) : _rbRawDiffs;
+  _rbBalances = rbCalcBalances(_rbRawBalanceData, from, to, has);
+  rbRenderPending(_rbPending);
+  rbRenderDiscrepancies(diffs);
+  rbRenderBalances();
+}
+function rbClearPeriod(){
+  const f = document.getElementById('rb-from'), t = document.getElementById('rb-to');
+  if(f) f.value=''; if(t) t.value='';
+  rbApplyPeriod();
 }
 
 async function rbLoad(){
@@ -3246,16 +3305,15 @@ async function rbLoad(){
   const encList = _rbTeamReps.map(n=>encodeURIComponent(n)).join(',');
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H}); return r.ok?await r.json():[]; }catch(e){ return []; } };
 
-  const [pending, diffs, balances] = await Promise.all([
+  const [pending, diffs, raw] = await Promise.all([
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&order=created_at.asc&limit=200`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc&limit=200`),
-    rbComputeBalances(_rbTeamReps),
+    rbFetchRawBalanceData(_rbTeamReps),
   ]);
-  _rbPending  = pending||[];
-  _rbBalances = balances||{};
-  rbRenderPending(_rbPending);
-  rbRenderDiscrepancies(diffs||[]);
-  rbRenderBalances();
+  _rbRawPending = pending||[];
+  _rbRawDiffs   = diffs||[];
+  _rbRawBalanceData = raw;
+  rbApplyPeriod();
 }
 
 function rbRenderPending(rows){
@@ -3273,9 +3331,68 @@ function rbRenderPending(rows){
       <div style="display:flex;gap:8px;margin-top:8px">
         <button class="btn btn-sm" style="background:#276749;color:#fff" onclick="rbApprove(${r.id})"><i class="ti ti-check"></i> موافقة</button>
         <button class="btn btn-sm" style="background:#B91C1C;color:#fff" onclick="rbReject(${r.id})"><i class="ti ti-x"></i> رفض</button>
+        <button class="btn btn-sm" style="background:#C8A96E;color:#2C1F0A" onclick="rbPrintRequest(${r.id})"><i class="ti ti-file-type-pdf"></i> طباعة PDF</button>
       </div>
     </div>`;
   }).join('');
+}
+
+// طباعة طلبية المندوب: كل صنف قدامه الكمية المطلوبة، بهوية الطحان جولدن دايتس،
+// وفي الآخر 3 خانات توقيع (المشرف، المدير، المندوب) يتوقعوا عليها بعد الطباعة يدويًا.
+function rbPrintRequest(id){
+  const r = _rbPending.find(x=>x.id===id);
+  if(!r){ showToast?.('الطلب مش موجود') || alert('الطلب مش موجود'); return; }
+  const items = r.items||[];
+  const dateStr = new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'long',year:'numeric'});
+  const groupLbl = GROUPS?.[r.grp]?.label || r.grp || '—';
+  const rowsHtml = items.map((it,i)=>`<tr style="background:${i%2?'#FAF7F0':'#fff'}">
+      <td style="padding:7px;border:1px solid #E0D8CC;text-align:center">${i+1}</td>
+      <td style="padding:7px;border:1px solid #E0D8CC;font-weight:700">${it.name}</td>
+      <td style="padding:7px;border:1px solid #E0D8CC;text-align:center;font-weight:900;color:#731E2E">${it.qty}</td>
+    </tr>`).join('') || `<tr><td colspan="3" style="padding:14px;text-align:center;color:#aaa">لا توجد أصناف</td></tr>`;
+
+  const html = `<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><title>طلبية بضاعة — ${r.rep_name}</title>
+  <style>
+    @page{size:A4;margin:14mm 12mm}
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap');
+    *{box-sizing:border-box}
+    body{font-family:'Cairo',Arial,sans-serif;color:#2C1F0A;margin:0;padding:0;font-size:12px}
+    .band-1{background:#2C1F0A;color:#EDE5D8;text-align:center;padding:14px;font-size:20px;font-weight:900;border-radius:10px 10px 0 0;print-color-adjust:exact;-webkit-print-color-adjust:exact}
+    .band-1 .en{font-size:10px;color:#C8A96E;margin-top:3px;font-weight:400}
+    .band-2{background:#C8A96E;color:#2C1F0A;text-align:center;padding:9px;font-size:14px;font-weight:700;print-color-adjust:exact;-webkit-print-color-adjust:exact}
+    .info-band{background:#F5F0E8;padding:12px 18px;border-radius:0 0 8px 8px;margin-bottom:18px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px}
+    .info-band b{color:#731E2E}
+    table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:26px}
+    thead tr{background:#731E2E;color:#fff;print-color-adjust:exact;-webkit-print-color-adjust:exact}
+    th{padding:8px;border:1px solid #5a1622;font-weight:700}
+    .sigs{display:flex;justify-content:space-around;margin-top:50px;text-align:center}
+    .sig{width:150px}
+    .sig-line{border-top:1.5px solid #444;padding-top:6px;font-size:11px;font-weight:700;color:#4B3C1A}
+    .footer-note{text-align:center;color:#aaa;font-size:9px;margin-top:24px}
+    @media print{.no-print{display:none}}
+  </style></head><body>
+    <div class="band-1">الطحان جولدن دايتس<div class="en">Al Tahhan Golden Dates</div></div>
+    <div class="band-2">طلبية بضاعة من المخزن</div>
+    <div class="info-band">
+      <div>المندوب: <b>${r.rep_name}</b></div>
+      <div>المجموعة: <b>${groupLbl}</b></div>
+      <div>تاريخ الطلب: <b>${dateStr}</b></div>
+      <div>رقم الطلب: <b>#${r.id}</b></div>
+    </div>
+    <table>
+      <thead><tr><th style="width:40px">#</th><th>اسم الصنف</th><th style="width:120px">الكمية المطلوبة</th></tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+    <div class="sigs">
+      <div class="sig"><div class="sig-line">توقيع المشرف</div></div>
+      <div class="sig"><div class="sig-line">توقيع المدير</div></div>
+      <div class="sig"><div class="sig-line">توقيع المندوب</div></div>
+    </div>
+    <div class="footer-note">Al Tahhan Golden Dates © ${new Date().getFullYear()} — تم إنشاء المستند من منظومة الطحان جولدن دايتس</div>
+    <${'script'}>window.onload=function(){window.print();}</${'script'}>
+  </body></html>`;
+  const w = window.open('','_blank','width=900,height=1000');
+  w.document.write(html); w.document.close();
 }
 
 async function rbApprove(id){
