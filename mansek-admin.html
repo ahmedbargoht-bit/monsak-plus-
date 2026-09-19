@@ -6578,11 +6578,21 @@ h2,h3{color:#2C1F0A}
           </div>
 
           <div class="card">
-            <div class="card-title"><i class="ti ti-clock" style="color:#B45309"></i> طلبات بضاعة معلّقة</div>
+            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+              <span><i class="ti ti-clock" style="color:#B45309"></i> طلبات بضاعة معلّقة</span>
+              <button id="repbal-del-pending-btn" onclick="repbalDeleteSelected('pending')" style="display:none;background:#B91C1C;color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">
+                <i class="ti ti-trash"></i> حذف المحدد (<span id="repbal-del-pending-count">0</span>)
+              </button>
+            </div>
             <div id="rbadm-pending"></div>
           </div>
           <div class="card">
-            <div class="card-title"><i class="ti ti-alert-triangle" style="color:#B45309"></i> فروق جرد محتاجة مراجعة</div>
+            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+              <span><i class="ti ti-alert-triangle" style="color:#B45309"></i> فروق جرد محتاجة مراجعة</span>
+              <button id="repbal-del-diffs-btn" onclick="repbalDeleteSelected('diffs')" style="display:none;background:#B91C1C;color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">
+                <i class="ti ti-trash"></i> حذف المحدد (<span id="repbal-del-diffs-count">0</span>)
+              </button>
+            </div>
             <div id="rbadm-diffs"></div>
           </div>
           <div class="card">
@@ -34967,12 +34977,69 @@ async function repbalLoad(){
   repbalApplyPeriod();
 }
 
+let _repbalSelPending  = new Set();
+let _repbalSelDiffs    = new Set();
+let _repbalPendingRows = [];
+let _repbalDiffsRows   = [];
+
+function repbalUpdateDelBtn(kind){
+  const sel = kind==='pending' ? _repbalSelPending : _repbalSelDiffs;
+  const btn = document.getElementById(kind==='pending' ? 'repbal-del-pending-btn' : 'repbal-del-diffs-btn');
+  const cnt = document.getElementById(kind==='pending' ? 'repbal-del-pending-count' : 'repbal-del-diffs-count');
+  if(cnt) cnt.textContent = sel.size;
+  if(btn) btn.style.display = sel.size ? 'inline-flex' : 'none';
+}
+
+function repbalToggleSel(kind, id, checked){
+  const sel = kind==='pending' ? _repbalSelPending : _repbalSelDiffs;
+  if(checked) sel.add(id); else sel.delete(id);
+  repbalUpdateDelBtn(kind);
+}
+
+function repbalToggleSelectAll(kind, checked){
+  const sel  = kind==='pending' ? _repbalSelPending : _repbalSelDiffs;
+  const rows = kind==='pending' ? _repbalPendingRows : _repbalDiffsRows;
+  sel.clear();
+  if(checked) rows.forEach(r=>sel.add(r.id));
+  const wrapId = kind==='pending' ? 'rbadm-pending' : 'rbadm-diffs';
+  document.querySelectorAll(`#${wrapId} .repbal-row-cb`).forEach(cb=>{ cb.checked = checked; });
+  repbalUpdateDelBtn(kind);
+}
+
+// حذف نهائي من قاعدة البيانات — بيختفي تلقائيًا من تطبيق المشرف/مدير المبيعات ومن تطبيق المندوب
+// كمان لأن الكل بيقرا من نفس الجدول. إجراء لا رجعة فيه.
+async function repbalDeleteSelected(kind){
+  const sel   = kind==='pending' ? _repbalSelPending : _repbalSelDiffs;
+  const table = kind==='pending' ? 'rep_stock_requests' : 'rep_car_inventory';
+  const label = kind==='pending' ? 'طلب/طلبات البضاعة المحددة' : 'فرق/فروق الجرد المحددة';
+  if(!sel.size) return;
+  if(!confirm(`متأكد إنك عايز تحذف ${sel.size} من ${label} نهائيًا من النظام؟\nالإجراء ده لا رجعة فيه، والسجل هيختفي من تطبيق المشرف ومن تطبيق المندوب كمان.`)) return;
+  const ids = Array.from(sel).join(',');
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=in.(${ids})`,{
+      method:'DELETE',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    if(!res.ok) throw new Error(await res.text());
+    showToast('✅ اتحذف بنجاح');
+    if(kind==='pending') _repbalSelPending.clear(); else _repbalSelDiffs.clear();
+    repbalLoad();
+  }catch(e){ alert('حصل خطأ أثناء الحذف، حاول تاني'); }
+}
+
 function repbalRenderPending(rows){
   const wrap = document.getElementById('rbadm-pending');
+  _repbalPendingRows = rows;
+  _repbalSelPending.clear();
+  repbalUpdateDelBtn('pending');
   if(!rows.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش طلبات معلّقة حاليًا</div>'; return; }
   wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px">
-    <tr style="background:#F5F0E6"><th style="padding:8px;text-align:right">المندوب</th><th style="padding:8px;text-align:right">الأصناف</th><th style="padding:8px;text-align:right">التاريخ</th></tr>
+    <tr style="background:#F5F0E6">
+      <th style="padding:8px;width:28px"><input type="checkbox" onchange="repbalToggleSelectAll('pending',this.checked)"/></th>
+      <th style="padding:8px;text-align:right">المندوب</th><th style="padding:8px;text-align:right">الأصناف</th><th style="padding:8px;text-align:right">التاريخ</th>
+    </tr>
     ${rows.map(r=>`<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:8px"><input type="checkbox" class="repbal-row-cb" onchange="repbalToggleSel('pending',${r.id},this.checked)"/></td>
       <td style="padding:8px">${r.rep_name}</td>
       <td style="padding:8px">${(r.items||[]).map(i=>`${i.name} ×${i.qty}`).join('، ')}</td>
       <td style="padding:8px">${new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'})}</td>
@@ -34982,19 +35049,31 @@ function repbalRenderPending(rows){
 
 function repbalRenderDiffs(rows){
   const wrap = document.getElementById('rbadm-diffs');
+  _repbalDiffsRows = rows;
+  _repbalSelDiffs.clear();
+  repbalUpdateDelBtn('diffs');
   if(!rows.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش فروق جرد محتاجة مراجعة</div>'; return; }
   wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px">
-    <tr style="background:#F5F0E6"><th style="padding:8px;text-align:right">المندوب</th><th style="padding:8px;text-align:right">الصنف</th><th style="padding:8px;text-align:right">المتوقع</th><th style="padding:8px;text-align:right">الفعلي</th><th style="padding:8px;text-align:right">الفرق</th><th style="padding:8px;text-align:right">التاريخ</th></tr>
-    ${rows.map(r=>`<tr style="border-bottom:1px solid var(--border)">
+    <tr style="background:#F5F0E6">
+      <th style="padding:8px;width:28px"><input type="checkbox" onchange="repbalToggleSelectAll('diffs',this.checked)"/></th>
+      <th style="padding:8px;text-align:right">المندوب</th><th style="padding:8px;text-align:right">الصنف</th><th style="padding:8px;text-align:right">المتوقع</th><th style="padding:8px;text-align:right">الفعلي</th><th style="padding:8px;text-align:right">التفصيل</th><th style="padding:8px;text-align:right">الفرق</th><th style="padding:8px;text-align:right">التاريخ</th>
+    </tr>
+    ${rows.map(r=>{
+      const hasSplit = (+r.counted_valid_qty||0) + (+r.counted_returned_qty||0) > 0;
+      const splitTxt = hasSplit ? `صالح ${r.counted_valid_qty||0} · مرتجع ${r.counted_returned_qty||0}` : '—';
+      return `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:8px"><input type="checkbox" class="repbal-row-cb" onchange="repbalToggleSel('diffs',${r.id},this.checked)"/></td>
       <td style="padding:8px">${r.rep_name}</td>
       <td style="padding:8px">${r.snf}</td>
       <td style="padding:8px">${r.computed_qty}</td>
       <td style="padding:8px">${r.counted_qty}</td>
+      <td style="padding:8px;color:var(--text2);font-size:11px">${splitTxt}</td>
       <td style="padding:8px;font-weight:700;color:${r.diff>0?'#B91C1C':'#B45309'}">${r.diff>0?'ناقص '+r.diff:'زيادة '+Math.abs(r.diff)}</td>
       <td style="padding:8px">${new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'})}</td>
-    </tr>`).join('')}
+    </tr>`;
+    }).join('')}
   </table>
-  <div style="font-size:11px;color:var(--text2);margin-top:8px">* التصحيح والتجاهل بيتم من تطبيق مشرف/مدير المبيعات المسؤول عن كل مندوب</div>`;
+  <div style="font-size:11px;color:var(--text2);margin-top:8px">* التصحيح والتجاهل بيتم من تطبيق مشرف/مدير المبيعات المسؤول عن كل مندوب. الحذف من هنا نهائي من النظام بالكامل.</div>`;
 }
 
 function repbalRenderAllRequests(rows){

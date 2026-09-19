@@ -2158,28 +2158,48 @@ function ciRenderCountList(){
     return;
   }
   list.innerHTML = names.map(n=>{
-    const val = (_ciCountInputs[n]!=null) ? _ciCountInputs[n] : '';
-    return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-bottom:1px solid var(--bg2)">
-      <div style="font-size:12px;color:var(--t1);flex:1">${n}</div>
-      <input type="number" min="0" inputmode="decimal" value="${val}" oninput="ciOnCountInput('${n.replace(/'/g,"\\'")}',this.value)"
-        placeholder="العدد الفعلي" style="width:90px;padding:6px 8px;border:1.5px solid var(--bg2);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;text-align:center"/>
+    const esc = n.replace(/'/g,"\\'");
+    const cur = _ciCountInputs[n] || {};
+    const validVal = (cur.valid!=null) ? cur.valid : '';
+    const retVal   = (cur.returned!=null) ? cur.returned : '';
+    return `<div style="padding:8px 4px;border-bottom:1px solid var(--bg2)">
+      <div style="font-size:12px;color:var(--t1);margin-bottom:6px">${n}</div>
+      <div style="display:flex;gap:8px">
+        <div style="flex:1">
+          <input type="number" min="0" inputmode="decimal" value="${validVal}" oninput="ciOnCountInput('${esc}','valid',this.value)"
+            placeholder="صالح" style="width:100%;padding:6px 8px;border:1.5px solid var(--bg2);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;text-align:center;box-sizing:border-box"/>
+          <div style="font-size:9px;color:var(--t3);text-align:center;margin-top:2px">✅ صالح</div>
+        </div>
+        <div style="flex:1">
+          <input type="number" min="0" inputmode="decimal" value="${retVal}" oninput="ciOnCountInput('${esc}','returned',this.value)"
+            placeholder="مرتجع" style="width:100%;padding:6px 8px;border:1.5px solid var(--bg2);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;text-align:center;box-sizing:border-box"/>
+          <div style="font-size:9px;color:var(--t3);text-align:center;margin-top:2px">↩️ مرتجع</div>
+        </div>
+      </div>
     </div>`;
   }).join('');
 }
 
-function ciOnCountInput(name, val){
-  if(val==='' || val==null) delete _ciCountInputs[name];
-  else _ciCountInputs[name] = val;
+function ciOnCountInput(name, field, val){
+  const cur = _ciCountInputs[name] || {};
+  if(val==='' || val==null) delete cur[field];
+  else cur[field] = val;
+  if(Object.keys(cur).length) _ciCountInputs[name] = cur;
+  else delete _ciCountInputs[name];
 }
 
 async function ciSaveCount(){
-  const entries = Object.entries(_ciCountInputs).filter(([n,v])=> v!=='' && v!=null && !isNaN(+v));
-  if(!entries.length){ showToast('دخّل عدد صنف واحد على الأقل'); return; }
-  const rows = entries.map(([name,val])=>{
-    const counted  = +val;
-    const computed = +(_ciBalances[name]||0);
+  const isFilled = (v)=> v!=null && v!=='' && !isNaN(+v);
+  const entries = Object.entries(_ciCountInputs).filter(([n,v])=> isFilled(v.valid) || isFilled(v.returned));
+  if(!entries.length){ showToast('دخّل عدد صنف واحد على الأقل (صالح أو مرتجع)'); return; }
+  const rows = entries.map(([name,v])=>{
+    const validQty    = isFilled(v.valid) ? +v.valid : 0;
+    const returnedQty = isFilled(v.returned) ? +v.returned : 0;
+    const counted     = validQty + returnedQty;
+    const computed    = +(_ciBalances[name]||0);
     return { rep_name:currentRep.name, grp:currentRep.grp||'', snf:name,
-             counted_qty:counted, computed_qty:computed, diff:computed-counted };
+             counted_qty:counted, counted_valid_qty:validQty, counted_returned_qty:returnedQty,
+             computed_qty:computed, diff:computed-counted };
   });
   try{
     const res = await fetch(SUPABASE_URL+'/rest/v1/rep_car_inventory',{method:'POST',headers:SB_HEADERS,body:JSON.stringify(rows)});
@@ -2213,9 +2233,14 @@ function ciRenderMyHistory(){
       const diffTxt = r.diff==0 ? '<span style="color:var(--g)">✅ مطابق</span>'
         : r.diff>0 ? `<span style="color:var(--r)">⬇️ ناقص ${r.diff}</span>`
         : `<span style="color:#B45309">⬆️ زيادة ${Math.abs(r.diff)}</span>`;
-      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 4px;border-bottom:1px solid var(--bg2);font-size:11.5px">
-        <div style="color:var(--t1)">${r.snf} <span style="color:var(--t3)">(${dateStr})</span></div>
-        <div>${diffTxt}</div>
+      const hasSplit = (+r.counted_valid_qty||0) + (+r.counted_returned_qty||0) > 0;
+      const splitTxt = hasSplit ? `<div style="color:var(--t3);font-size:10.5px;margin-top:2px">✅ صالح ${r.counted_valid_qty||0} · ↩️ مرتجع ${r.counted_returned_qty||0}</div>` : '';
+      return `<div style="padding:7px 4px;border-bottom:1px solid var(--bg2);font-size:11.5px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="color:var(--t1)">${r.snf} <span style="color:var(--t3)">(${dateStr})</span></div>
+          <div>${diffTxt}</div>
+        </div>
+        ${splitTxt}
       </div>`;
     }).join('');
 }
