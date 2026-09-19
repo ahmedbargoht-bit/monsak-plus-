@@ -1192,6 +1192,13 @@ h2,h3{color:#2C1F0A}
                 <div id="lb-grp-options" style="padding:6px 4px"></div>
               </div>
             </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="color:#fff;font-size:11.5px;font-weight:600">من</span>
+              <input type="date" id="lb-from" onchange="renderLB()" style="background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.18);border-radius:6px;padding:6px 8px;font-family:Cairo,sans-serif;font-size:12px;color-scheme:dark"/>
+              <span style="color:#fff;font-size:11.5px;font-weight:600">إلى</span>
+              <input type="date" id="lb-to" onchange="renderLB()" style="background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.18);border-radius:6px;padding:6px 8px;font-family:Cairo,sans-serif;font-size:12px;color-scheme:dark"/>
+              <span onclick="lbClearPeriod()" title="إلغاء الفترة" style="color:#F0C880;font-size:11px;font-weight:700;cursor:pointer;text-decoration:underline">الكل</span>
+            </div>
             <button class="btn btn-sm" onclick="renderLB(true)" style="background:rgba(255,255,255,.08);color:#fff"><i class="ti ti-refresh"></i> تحديث</button>
             <button class="btn btn-sm" onclick="lbExportPDF()" style="background:#3A0008;color:#F0C880;display:flex;align-items:center;gap:5px"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
           </div>
@@ -1199,7 +1206,7 @@ h2,h3{color:#2C1F0A}
             <div style="text-align:center;margin-bottom:16px">
               <div style="font-size:20px;font-weight:900;color:#3A0008">🏆 لوحة شرف المنسقين</div>
               <div style="font-size:12px;font-weight:700;color:#6B6B6B;margin-top:4px" id="lb-date"></div>
-              <div style="font-size:11px;color:#8A8A82;margin-top:2px">ترتيب تراكمي منذ بداية التسجيل</div>
+              <div style="font-size:11px;color:#8A8A82;margin-top:2px" id="lb-period-label">ترتيب تراكمي منذ بداية التسجيل</div>
             </div>
             <div class="lb-top3" id="lb-top3"></div>
             <div id="lb-rows" style="max-height:500px;overflow-y:auto;padding:0 4px"></div>
@@ -15823,6 +15830,14 @@ function lbSelectAllGrps(all){
   renderLB();
 }
 
+function lbClearPeriod(){
+  const f = document.getElementById('lb-from');
+  const t = document.getElementById('lb-to');
+  if(f) f.value='';
+  if(t) t.value='';
+  renderLB();
+}
+
 function lbUpdateGrpLabel(){
   const lbl = document.getElementById('lb-grp-label');
   if(!lbl) return;
@@ -15930,8 +15945,27 @@ async function renderLB(forceRefresh){
   lbUpdateGrpLabel();
 
   const visible      = CU.level==='gm' ? Object.keys(GROUPS) : CU.groups;
-  const {visits, missing, attendance, branches} = cachedData;
+  const {visits: allVisits, missing: allMissing, attendance: allAttendance, branches} = cachedData;
   const weights = LB_WEIGHTS[_lbActiveType];
+
+  // ── فلتر الفترة (من/إلى) — لو فاضي بيفضل السلوك القديم: تراكمي من بداية التسجيل ──
+  const lbFrom = document.getElementById('lb-from')?.value || '';
+  const lbTo   = document.getElementById('lb-to')?.value || '';
+  const hasPeriod = !!(lbFrom || lbTo);
+  const inRange = (d)=>{ if(!d) return false; if(lbFrom && d<lbFrom) return false; if(lbTo && d>lbTo) return false; return true; };
+
+  const visits     = hasPeriod ? allVisits.filter(v=>inRange(v.date))                                     : allVisits;
+  const attendance = hasPeriod ? allAttendance.filter(a=>inRange(a.date))                                 : allAttendance;
+  const missing    = hasPeriod ? allMissing.filter(m=>inRange((m.created_at||'').slice(0,10)))            : allMissing;
+  const lbReturns  = hasPeriod ? (_lbReturns||[]).filter(r=>inRange((r.created_at||'').slice(0,10)))      : (_lbReturns||[]);
+  const lbRatings  = hasPeriod ? (_lbRatings||[]).filter(r=>inRange(r.week_start))                        : (_lbRatings||[]);
+
+  const periodLbl = document.getElementById('lb-period-label');
+  if(periodLbl){
+    periodLbl.textContent = hasPeriod
+      ? `الفترة: ${lbFrom?fmtDate(lbFrom):'البداية'} ← ${lbTo?fmtDate(lbTo):'النهاردة'}`
+      : 'ترتيب تراكمي منذ بداية التسجيل';
+  }
 
   // قائمة المنسقين من النوع المختار فقط (المصدر: REPS — مصدر user_type المعتمد في كل النظام)
   let reps = (REPS||[]).filter(r=>r.type===_lbActiveType && r.name!=='تحت التعيين' && r.status!=='inactive');
@@ -15946,8 +15980,8 @@ async function renderLB(forceRefresh){
     const myVisits  = (visits||[]).filter(v=>v.name===name);
     const myAtt     = (attendance||[]).filter(a=>a.name===name);
     const myMissing = (missing||[]).filter(m=>m.name===name);
-    const myReturns = (_lbReturns||[]).filter(r=>r.name===name);
-    const myRatings = (_lbRatings||[]).filter(r=>r.coordinator_name===name);
+    const myReturns = lbReturns.filter(r=>r.name===name);
+    const myRatings = lbRatings.filter(r=>r.coordinator_name===name);
 
     const crit = {};
 
