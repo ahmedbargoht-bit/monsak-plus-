@@ -6596,7 +6596,12 @@ h2,h3{color:#2C1F0A}
             <div id="rbadm-diffs"></div>
           </div>
           <div class="card">
-            <div class="card-title"><i class="ti ti-list-check" style="color:#2E7D32"></i> كل طلبات البضاعة (سجل كامل)</div>
+            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+              <span><i class="ti ti-list-check" style="color:#2E7D32"></i> كل طلبات البضاعة (سجل كامل)</span>
+              <button id="repbal-del-allreqs-btn" onclick="repbalDeleteAllRequests()" style="display:none;background:#B91C1C;color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">
+                <i class="ti ti-trash"></i> حذف السجل بالكامل (<span id="repbal-del-allreqs-count">0</span>)
+              </button>
+            </div>
             <div id="rbadm-all-requests" class="card" style="padding:0;overflow-x:auto"></div>
           </div>
           <div class="card">
@@ -35076,8 +35081,30 @@ function repbalRenderDiffs(rows){
   <div style="font-size:11px;color:var(--text2);margin-top:8px">* التصحيح والتجاهل بيتم من تطبيق مشرف/مدير المبيعات المسؤول عن كل مندوب. الحذف من هنا نهائي من النظام بالكامل.</div>`;
 }
 
+let _repbalAllReqsRows = [];
+async function repbalDeleteAllRequests(){
+  const rows = _repbalAllReqsRows;
+  if(!rows.length) return;
+  if(!confirm(`متأكد إنك عايز تحذف كل السجل (${rows.length} طلب) نهائيًا من النظام؟\nالإجراء ده لا رجعة فيه، وهيمسح كل طلبات البضاعة (معلّقة وموافق عليها ومرفوضة) من تطبيق المشرف والمندوب كمان.`)) return;
+  const ids = rows.map(r=>r.id).join(',');
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_requests?id=in.(${ids})`,{
+      method:'DELETE',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    if(!res.ok) throw new Error(await res.text());
+    showToast('✅ اتحذف السجل بالكامل بنجاح');
+    repbalLoad();
+  }catch(e){ alert('حصل خطأ أثناء الحذف، حاول تاني'); }
+}
+
 function repbalRenderAllRequests(rows){
   const wrap = document.getElementById('rbadm-all-requests');
+  _repbalAllReqsRows = rows||[];
+  const delBtn = document.getElementById('repbal-del-allreqs-btn');
+  const delCnt = document.getElementById('repbal-del-allreqs-count');
+  if(delCnt) delCnt.textContent = rows.length;
+  if(delBtn) delBtn.style.display = rows.length ? 'inline-flex' : 'none';
   if(!rows.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش طلبات بضاعة مسجّلة</div>'; return; }
   const statusLbl = {pending:['⏳ معلّق','#B45309'], approved:['✅ تمت الموافقة','#276749'], rejected:['❌ مرفوض','#B91C1C']};
   wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px">
@@ -35104,19 +35131,183 @@ function repbalRenderBalances(){
   if(!reps.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش أرصدة لعرضها</div>'; return; }
   wrap.innerHTML = reps.map(rep=>{
     const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0);
-    const rowsHtml = items.length
-      ? items.sort((a,b)=>b[1]-a[1]).map(([name,qty])=>
-          `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:11.5px;border-bottom:1px dashed var(--border)">
+    const safe = rep.replace(/'/g,"\\'");
+    return `<div onclick="repbalOpenExportModal('${safe}')" style="display:flex;align-items:center;justify-content:space-between;border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:8px;cursor:pointer;transition:background .15s" onmouseover="this.style.background='var(--surface-2,#F8F5F0)'" onmouseout="this.style.background='transparent'">
+      <span style="font-weight:700;font-size:13px"><i class="ti ti-user" style="color:#C8A96E;margin-left:6px"></i>${rep}</span>
+      <span style="display:flex;align-items:center;gap:8px">
+        <span style="color:var(--text2);font-weight:400;font-size:11px">${items.length} صنف برصيد</span>
+        <i class="ti ti-chevron-left" style="color:var(--text2)"></i>
+      </span>
+    </div>`;
+  }).join('');
+}
+
+// ══ بوب أب تصدير سجل جرد المندوب (PDF / Excel) ══
+let _repbalExportRep = null;
+function repbalOpenExportModal(rep){
+  _repbalExportRep = rep;
+  const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const {from, to, has} = repbalGetPeriod();
+  const periodTxt = has ? `الفترة: من ${from||'—'} إلى ${to||'—'}` : 'رصيد تراكمي منذ البداية';
+  const title = document.getElementById('repbal-export-title');
+  const meta  = document.getElementById('repbal-export-meta');
+  const list  = document.getElementById('repbal-export-list');
+  if(title) title.textContent = rep;
+  if(meta)  meta.textContent  = `${periodTxt} — ${items.length} صنف برصيد`;
+  if(list){
+    list.innerHTML = items.length
+      ? items.map(([name,qty])=>
+          `<div style="display:flex;justify-content:space-between;padding:5px 0;font-size:12px;border-bottom:1px dashed var(--border)">
             <span>${name}</span><span style="font-weight:700">${qty}</span>
           </div>`).join('')
       : '<div style="font-size:11px;color:var(--text2);padding:4px 0">مفيش رصيد مسجّل حاليًا</div>';
-    return `<details style="border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin-bottom:8px">
-      <summary style="cursor:pointer;font-weight:700;font-size:13px">${rep} <span style="color:var(--text2);font-weight:400;font-size:11px">(${items.length} صنف برصيد)</span></summary>
-      <div style="margin-top:8px">${rowsHtml}</div>
-    </details>`;
-  }).join('');
+  }
+  const modal = document.getElementById('modal-repbal-export');
+  if(modal) modal.style.display = 'flex';
+}
+function repbalCloseExportModal(){
+  const modal = document.getElementById('modal-repbal-export');
+  if(modal) modal.style.display = 'none';
+  _repbalExportRep = null;
+}
+
+function repbalExportRepPDF(){
+  const rep = _repbalExportRep;
+  if(!rep){ showToast('اختر مندوب أولاً','err'); return; }
+  const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const {from, to, has} = repbalGetPeriod();
+  const periodTxt = has ? `الفترة: من ${from||'—'} إلى ${to||'—'}` : 'رصيد تراكمي منذ بداية التسجيل';
+  const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
+
+  const rowsHtml = items.length
+    ? items.map(([name,qty],i)=>`<tr>
+        <td style="text-align:center;width:36px">${i+1}</td>
+        <td>${name}</td>
+        <td style="text-align:center;font-weight:800">${qty}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="3" style="text-align:center;color:#8a7a5c">لا يوجد رصيد مسجّل حاليًا</td></tr>`;
+
+  const html = `<!DOCTYPE html><html dir="rtl" lang="ar">
+  <head><meta charset="UTF-8"><title>سجل جرد — ${rep}</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap');
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Cairo',Arial,sans-serif;color:#2C1F0A;font-size:12px;padding:18px}
+    .hdr-co{background:#2C1F0A;color:#EDE5D8;text-align:center;padding:12px;font-size:16px;font-weight:900;border-radius:8px 8px 0 0}
+    .hdr-title{background:#C8A96E;color:#2C1F0A;text-align:center;padding:8px;font-size:13px;font-weight:700}
+    .hdr-info{background:#F5F0E8;color:#4B3C1A;text-align:center;padding:7px;font-size:11px;margin-bottom:16px;border-radius:0 0 6px 6px}
+    .meta{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;background:#FFF8F0;border:1px solid #EDE0CC;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:11.5px}
+    table{width:100%;border-collapse:collapse;margin-top:0}
+    th{background:#4B3C1A;color:#EDE5D8;padding:8px 6px;font-size:11px;font-weight:700;text-align:center;border:1px solid #2C1F0A}
+    td{padding:7px 8px;font-size:11px;border:1px solid #E0D8CC;vertical-align:middle}
+    tr:nth-child(even) td{background:#FCF9F4}
+    .sign-wrap{display:flex;justify-content:space-between;gap:16px;margin-top:36px}
+    .sign-box{flex:1;text-align:center;border-top:1.5px solid #4B3C1A;padding-top:8px;font-size:11px;font-weight:700}
+    .footer{background:#F5F0E8;color:#4B3C1A;text-align:center;padding:6px;font-size:9px;margin-top:18px;border-radius:6px}
+    @media print{body{padding:6px}}
+  </style></head><body>
+  <div class="hdr-co">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
+  <div class="hdr-title">سجل جرد رصيد مندوب</div>
+  <div class="hdr-info">تاريخ الطباعة: ${now}</div>
+  <div class="meta">
+    <span>👤 المندوب: <b>${rep}</b></span>
+    <span>📅 ${periodTxt}</span>
+    <span>📦 عدد الأصناف: <b>${items.length}</b></span>
+  </div>
+  <table>
+    <thead><tr><th>#</th><th>اسم الصنف</th><th>الرصيد</th></tr></thead>
+    <tbody>${rowsHtml}</tbody>
+  </table>
+  <div class="sign-wrap">
+    <div class="sign-box">توقيع المسؤول</div>
+    <div class="sign-box">توقيع المندوب</div>
+  </div>
+  <div class="footer">Al Tahhan Golden Dates © 2026 — نظام إدارة المبيعات والتنسيق</div>
+  </body></html>`;
+
+  const win = window.open('','_blank','width=900,height=700');
+  win.document.write(html);
+  win.document.close();
+  setTimeout(()=>{ win.focus(); win.print(); }, 600);
+  showToast('📄 جاري فتح نافذة PDF...');
+}
+
+function repbalExportRepExcel(){
+  const rep = _repbalExportRep;
+  if(!rep){ showToast('اختر مندوب أولاً','err'); return; }
+  if(typeof XLSX==='undefined'){ showToast('جاري تحميل مكتبة Excel...'); return; }
+  const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const {from, to, has} = repbalGetPeriod();
+  const periodTxt = has ? `الفترة: من ${from||'—'} إلى ${to||'—'}` : 'رصيد تراكمي منذ بداية التسجيل';
+  const now = new Date().toLocaleDateString('en-US');
+
+  const C = {dark:'2C1F0A', caramel:'4B3C1A', gold:'C8A96E', cream:'EDE5D8', light:'F5F0E8', white:'FFFFFF', line:'E0D8CC'};
+  const fill = c=>({patternType:'solid',fgColor:{rgb:c}});
+  const font = (bold,sz,color)=>({bold:!!bold,sz:sz||11,color:{rgb:color||C.dark},name:'Arial'});
+  const align = (h,v,wrap)=>({horizontal:h||'right',vertical:v||'center',wrapText:!!wrap,readingOrder:2});
+  const brd = (s,c)=>{const b={style:s||'thin',color:{rgb:c||C.line}};return{left:b,right:b,top:b,bottom:b};};
+
+  const COLS = ['#','اسم الصنف','الرصيد'];
+  const aoa = [
+    ['الطحان جولدن دايتس — Al Tahhan Golden Dates','',''],
+    [`سجل جرد رصيد مندوب — ${rep}`,'',''],
+    [`${periodTxt}  |  تاريخ التصدير: ${now}  |  عدد الأصناف: ${items.length}`,'',''],
+    ['','',''],
+    COLS,
+    ...items.map(([name,qty],i)=>[i+1, name, qty])
+  ];
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa,{cellStyles:true});
+  const enc = (r,c)=>XLSX.utils.encode_cell({r,c});
+  const sty = (r,c,s)=>{ if(!ws[enc(r,c)]) ws[enc(r,c)]={t:'z',v:''}; ws[enc(r,c)].s=s; };
+
+  ws['!merges'] = [
+    {s:{r:0,c:0},e:{r:0,c:2}},
+    {s:{r:1,c:0},e:{r:1,c:2}},
+    {s:{r:2,c:0},e:{r:2,c:2}},
+    {s:{r:3,c:0},e:{r:3,c:2}},
+  ];
+
+  sty(0,0,{font:font(1,15,C.cream),fill:fill(C.dark),alignment:align('center'),border:brd('medium',C.dark)});
+  sty(1,0,{font:font(1,13,C.dark),fill:fill(C.gold),alignment:align('center'),border:brd('medium',C.caramel)});
+  sty(2,0,{font:font(0,10,C.caramel),fill:fill(C.light),alignment:align('center'),border:brd('thin',C.line)});
+  for(let c=0;c<3;c++) sty(3,c,{fill:fill(C.dark)});
+  for(let c=0;c<3;c++) sty(4,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:align('center'),border:brd('medium',C.dark)});
+
+  for(let ri=5;ri<aoa.length;ri++){
+    for(let c=0;c<3;c++){
+      const bold = c===2;
+      sty(ri,c,{font:font(bold,10,C.dark),fill:fill(C.white),alignment:align(c===0?'center':c===2?'center':'right'),border:brd('thin',C.line)});
+    }
+  }
+
+  ws['!cols'] = [{wch:6},{wch:38},{wch:14}];
+  ws['!rows'] = [{hpt:32},{hpt:24},{hpt:18},{hpt:8},{hpt:22}];
+
+  XLSX.utils.book_append_sheet(wb, ws, 'سجل الجرد');
+  const safeName = rep.replace(/[\\/:*?"<>|]/g,'_');
+  XLSX.writeFile(wb, `سجل_جرد_${safeName}_${localISO()}.xlsx`);
+  showToast('✅ تم تصدير سجل الجرد');
 }
 </script>
+<!-- ══ modal: تصدير سجل جرد مندوب (PDF/Excel) ══ -->
+<div id="modal-repbal-export" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;align-items:center;justify-content:center;padding:24px 12px" onclick="if(event.target===this)repbalCloseExportModal()">
+  <div style="background:var(--surface-2,#fff);border-radius:14px;width:100%;max-width:460px;box-shadow:0 8px 40px rgba(0,0,0,.35);font-family:Cairo,sans-serif;direction:rtl;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:#2C1F0A;color:#EDE5D8">
+      <div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:800"><i class="ti ti-user"></i> <span id="repbal-export-title">—</span></div>
+      <button onclick="repbalCloseExportModal()" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center">✕</button>
+    </div>
+    <div style="padding:14px 18px">
+      <div id="repbal-export-meta" style="background:#F5F0E8;color:#4B3C1A;border-radius:8px;padding:8px 12px;font-size:11px;margin-bottom:12px;text-align:center"></div>
+      <div id="repbal-export-list" style="max-height:260px;overflow-y:auto;margin-bottom:14px"></div>
+      <div style="display:flex;gap:10px">
+        <button onclick="repbalExportRepPDF()" style="flex:1;background:#2C1F0A;color:#EDE5D8;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
+        <button onclick="repbalExportRepExcel()" style="flex:1;background:#4E5A2B;color:#E8F5E9;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+      </div>
+    </div>
+  </div>
+</div>
 <!-- ══ modal: تفاصيل فاتورة ══ -->
 <div id="sinv-detail-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;align-items:flex-start;justify-content:center;padding:24px 12px;overflow-y:auto" onclick="if(event.target===this)this.style.display='none'">
   <div style="background:var(--surface-2,#fff);border-radius:14px;width:100%;max-width:640px;box-shadow:0 8px 40px rgba(0,0,0,.35);font-family:Cairo,sans-serif;direction:rtl;overflow:hidden">
