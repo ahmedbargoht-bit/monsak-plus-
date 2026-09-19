@@ -15784,6 +15784,7 @@ function renderDashboard(){
 let _lbActiveType = 'متحرك';
 let _lbReturns    = null;   // كاش returns — بيتحمّل مرة، يتحدّث بزرار "تحديث" بس
 let _lbRatings    = null;   // كاش coordinator_weekly_ratings
+let _lbDeliveries = null;   // كاش sales_deliveries (آخر 90 يوم) — لمطابقة زيادة رصيد الصنف بتوريد فعلي
 let _lbLastResults = null;  // آخر نتيجة محسوبة — تُستخدم في تصدير PDF
 let _lbLastWeights = null;
 let _lbSelectedGrps = [];   // فاضية = كل المجموعات — فلتر مربع اختيار متعدد لمجموعات لوحة الشرف
@@ -15847,15 +15848,18 @@ function lbUpdateGrpLabel(){
 }
 
 // جدول الأوزان المعتمد من الأدمن لكل نوع منسق (المجموع = 100% لكل عمود)
+// ملحوظة: لما اتضاف معيار "دقة تسجيل الأرصدة" اتاخدله 10% وباقي المعايير اتقصت بنفس النسبة
+// (×0.9) كل واحد من وزنه الأصلي، عشان يفضل التناسب بينهم زي ما كان قبل الإضافة بالظبط.
 const LB_WEIGHTS = {
-  'متحرك':            {quality:.20, attendance:.15, shiftClose:.08, speed:.12, toOrder:.10, completeness:.10, coverage:.10, gps:.08, rating:.07},
-  'ثابت':             {quality:.22, attendance:.18, shiftClose:.08, speed:.12, toOrder:.10, completeness:.10, variety:.10, rating:.10},
-  'ثابت كبار عملاء':  {quality:.25, attendance:.20, shiftClose:.10, speed:.13, toOrder:.12, completeness:.10, rating:.10},
+  'متحرك':            {quality:.18, attendance:.135, shiftClose:.072, speed:.108, toOrder:.09, completeness:.09, coverage:.09, gps:.072, rating:.063, balanceAccuracy:.10},
+  'ثابت':             {quality:.198, attendance:.162, shiftClose:.072, speed:.108, toOrder:.09, completeness:.09, variety:.09, rating:.09, balanceAccuracy:.10},
+  'ثابت كبار عملاء':  {quality:.225, attendance:.18, shiftClose:.09, speed:.117, toOrder:.108, completeness:.09, rating:.09, balanceAccuracy:.10},
 };
 const LB_CRIT_LABELS = {
   quality:'جودة التنفيذ', attendance:'الانتظام والحضور', shiftClose:'إغلاق الشيفت بدون نسيان',
   speed:'سرعة حل النواقص/المرتجعات', toOrder:'تحويل النواقص لتوريد فعلي', completeness:'اكتمال الزيارة',
-  coverage:'تغطية خط السير', gps:'نزاهة الموقع (GPS)', variety:'تنوع نوع العرض', rating:'تقييم المشرف الأسبوعي'
+  coverage:'تغطية خط السير', gps:'نزاهة الموقع (GPS)', variety:'تنوع نوع العرض', rating:'تقييم المشرف الأسبوعي',
+  balanceAccuracy:'دقة تسجيل الأرصدة'
 };
 // ── شرح كل معيار: بيقيس إيه بالظبط + إزاي توصله لـ100% — نفس المنطق المحسوب في renderLB بالحرف ──
 // (quality ليها نص مختلف حسب نوع المنسق، لأن طريقة حسابها مختلفة فعلياً بين المتحرك والثابت)
@@ -15906,6 +15910,10 @@ const LB_CRIT_INFO = {
     what:'تقييم مشرفك الأسبوعي ليك (من 5)، بمتوسط كل الأسابيع المسجّلة من بداية التسجيل.',
     how:'حافظ على أداء ممتاز يخلي مشرفك يديك <b>5 من 5</b> باستمرار كل أسبوع.'
   },
+  balanceAccuracy: {
+    what:'مطابقة رصيد الصنف (رف + مخزن) اللي بتسجله بين زيارتين متتاليتين لنفس الفرع مع أي توريد فعلي حصل للفرع ده في نفس الفترة. الرصيد مبيزيدش لوحده — لو زاد من غير توريد، يبقى فيه تسجيل غلط.',
+    how:'اتأكد إن العدد اللي بتسجله (رف+مخزن) لكل صنف في كل زيارة <b>مطابق للواقع فعليًا</b> — أي زيادة لازم يكون وراها توريد حقيقي وصل الفرع.'
+  },
 };
 
 function lbSwitchType(type){
@@ -15928,15 +15936,57 @@ function lbHaversine(lat1,lng1,lat2,lng2){
   return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
 }
 
-// جلب returns + coordinator_weekly_ratings (مش موجودين في cachedData العام) — مرة واحدة إلا لو forceRefresh
+// جلب returns + coordinator_weekly_ratings + sales_deliveries (مش موجودين في cachedData العام) — مرة واحدة إلا لو forceRefresh
 async function lbFetchExtra(forceRefresh){
-  if(_lbReturns && _lbRatings && !forceRefresh) return;
-  const [ret, rat] = await Promise.all([
+  if(_lbReturns && _lbRatings && _lbDeliveries && !forceRefresh) return;
+  // نفس نافذة الـ90 يوم اللي products بتتحمّل بيها في loadStaticData — عشان مقارنة الأرصدة (شوف
+  // lbBalanceAccuracyCriterion) تتم في نفس مدى البيانات المتاحة فعليًا.
+  const deliveriesFrom = new Date(Date.now() - 90*24*60*60*1000).toISOString().slice(0,10);
+  const [ret, rat, del] = await Promise.all([
     sb('returns', {}, {limit:1000, allPages:true}).catch(()=>[]),
     sb('coordinator_weekly_ratings', {}, {limit:1000, allPages:true}).catch(()=>[]),
+    sb('sales_deliveries', {delivery_date:'gte.'+deliveriesFrom, deleted_at:'is.null'}, {limit:2000, allPages:true}).catch(()=>[]),
   ]);
-  _lbReturns = Array.isArray(ret) ? ret : [];
-  _lbRatings = Array.isArray(rat) ? rat : [];
+  _lbReturns    = Array.isArray(ret) ? ret : [];
+  _lbRatings    = Array.isArray(rat) ? rat : [];
+  _lbDeliveries = Array.isArray(del) ? del : [];
+}
+
+// ── دقة تسجيل الأرصدة: لو رصيد صنف (رف+مخزن) في فرع معين زاد بين زيارتين متتاليتين للمنسق
+// من غير أي توريد فعلي (sales_deliveries) لنفس الفرع في نفس الفترة، فده رصيد متسجل غلط —
+// المخزون بطبيعته بينزل بالاستهلاك أو يفضل زي ما هو، ومبيزيدش لوحده من غير توريد. ──
+function lbBalanceAccuracyCriterion(repName, products, deliveries, hasPeriod, lbFrom, lbTo){
+  const myRows = (products||[]).filter(p=>p.name===repName && p.branch && p.snf);
+  if(myRows.length<2) return 100; // مفيش بيانات كافية (أقل من زيارتين لنفس الصنف) — منديش عليه
+  const groups = {};
+  myRows.forEach(p=>{ (groups[p.branch+'|||'+p.snf] = groups[p.branch+'|||'+p.snf]||[]).push(p); });
+
+  let total=0, flagged=0;
+  Object.entries(groups).forEach(([key, rows])=>{
+    if(rows.length<2) return;
+    rows.sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||''));
+    const branch = key.split('|||')[0];
+    const snf    = key.slice(branch.length+3);
+    const snfKey = sciNormalizeItemKey(snf);
+    for(let i=1;i<rows.length;i++){
+      const currDate = (rows[i].created_at||'').slice(0,10);
+      if(hasPeriod){
+        if(lbFrom && currDate<lbFrom) continue; // بره الفترة المختارة
+        if(lbTo && currDate>lbTo) continue;
+      }
+      const prevQty = (+rows[i-1].shelf_qty||0)+(+rows[i-1].stock_qty||0);
+      const currQty = (+rows[i].shelf_qty||0)+(+rows[i].stock_qty||0);
+      if(currQty<=prevQty) continue; // مفيش زيادة (نزول/ثبات) = طبيعي، مش موضوع فحص
+      total++;
+      const prevDate = (rows[i-1].created_at||'').slice(0,10);
+      const delivered = (deliveries||[]).some(d=>
+        d.branch_name===branch && d.delivery_date && d.delivery_date>=prevDate && d.delivery_date<=currDate &&
+        Array.isArray(d.items) && d.items.some(it=>sciNormalizeItemKey(it.name)===snfKey)
+      );
+      if(!delivered) flagged++;
+    }
+  });
+  return total ? Math.round((1-flagged/total)*100) : 100;
 }
 
 async function renderLB(forceRefresh){
@@ -16056,6 +16106,9 @@ async function renderLB(forceRefresh){
 
     // ── تقييم المشرف الأسبوعي (تراكمي، متوسط كل الأسابيع المسجّلة من 5) ──
     crit.rating = myRatings.length ? Math.round(myRatings.reduce((s,r)=>s+(+r.rating||0),0)/myRatings.length/5*100) : 0;
+
+    // ── دقة تسجيل الأرصدة: زيادة رصيد صنف بين زيارتين من غير توريد فعلي = تسجيل غلط ──
+    crit.balanceAccuracy = lbBalanceAccuracyCriterion(name, cachedData.products, _lbDeliveries, hasPeriod, lbFrom, lbTo);
 
     // ── المجموع المرجّح ──
     let total=0;
