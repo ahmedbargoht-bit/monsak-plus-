@@ -569,6 +569,9 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
     <button class="tnav" id="tnav-yawm" onclick="showPanel('yawm')">
       <i class="ti ti-receipt"></i>البيع اليومي
     </button>
+    <button class="tnav" id="tnav-repbal" onclick="showPanel('repbal')">
+      <i class="ti ti-truck-delivery"></i>أرصدة المناديب
+    </button>
     <button class="tnav" id="tnav-settings" onclick="showPanel('settings')">
       <i class="ti ti-settings"></i>الإعدادات
     </button>
@@ -2045,6 +2048,24 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
       </div>
     </div>
 
+    <!-- ══ أرصدة المناديب ══ -->
+    <div class="panel" id="panel-repbal">
+      <div class="card">
+        <div class="card-title"><i class="ti ti-truck-delivery" style="color:#1D4ED8"></i> طلبات بضاعة معلّقة</div>
+        <div id="rb-pending"><div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جارِ التحميل...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title"><i class="ti ti-alert-triangle" style="color:#B45309"></i> فروق جرد محتاجة مراجعة</div>
+        <div id="rb-diffs"><div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جارِ التحميل...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title"><i class="ti ti-package" style="color:#276749"></i> رصيد كل مندوب</div>
+        <input type="text" id="rb-search" placeholder="🔍 ابحث باسم المندوب..." oninput="rbRenderBalances()"
+          style="width:100%;padding:9px 10px;border:1.5px solid var(--border);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif;margin-bottom:10px"/>
+        <div id="rb-balances"><div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جارِ التحميل...</div></div>
+      </div>
+    </div>
+
     <!-- ══ البيع اليومي ══ -->
     <div class="panel" id="panel-yawm">
 
@@ -3047,6 +3068,7 @@ function showPanel(id){
   if(id==='achieved')    { loadAchievedPanel(); }
   if(id==='branch-notes') { loadBranchNotes(); }
   if(id==='yawm')         { yawmInit(); }
+  if(id==='repbal')       { rbLoad(); }
   if(id==='tamr-benefits'){ tbLoad(); }
   if(id==='dash') { setTimeout(()=>bnLoadBadge(),2000); }
 }
@@ -3138,6 +3160,223 @@ function tbOpenDetail(name){
   }
 
   document.getElementById('modal-tb-detail').classList.add('active');
+}
+
+// ══════════════════════════════════════════════════════════════
+// أرصدة المناديب — طلبات بضاعة من المخزن + فروق جرد + رصيد كل مندوب
+// الرصيد = طلبات موافق عليها + مرتجعات - فواتير توريد + تصحيحات المشرف
+// ══════════════════════════════════════════════════════════════
+let _rbTeamReps  = [];
+let _rbBalances  = {};
+let _rbPending   = [];
+
+// نفس منطق yawmLoadReps بالظبط (gm/sup/manager) بس بيرجّع array أسماء بدل ما يملى select
+async function rbGetTeamReps(){
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  try{
+    if(cu.level==='gm'){
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&status=eq.active&select=name&order=name.asc&limit=500`,{headers:H});
+      const d = r.ok ? await r.json() : [];
+      return Array.isArray(d) ? d.map(x=>x.name).filter(Boolean) : [];
+    } else if(cu.level === 'sup'){
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/users?supervisors=eq.${encodeURIComponent(cu.name)}&select=name&order=name.asc&limit=500`,{headers:H});
+      const d = r.ok ? await r.json() : [];
+      return Array.isArray(d) ? d.map(x=>x.name).filter(Boolean) : [];
+    } else if(cu.level === 'manager'){
+      const supsRes = await fetch(`${SUPABASE_URL}/rest/v1/staff?reports_to=eq.${encodeURIComponent(cu.name)}&active=eq.true&select=name,grp&limit=200`,{headers:H});
+      const mySups = supsRes.ok ? await supsRes.json() : [];
+      const normalizeGrp = (g) => {
+        if(g==='private_chains_cairo') return 'private_cairo';
+        if(g==='private_chains_giza')  return 'private_alex';
+        if(g==='private_chains_alex')  return 'private_alex';
+        return g;
+      };
+      const rawMgrGrps = (Array.isArray(cu.groups) ? cu.groups : (cu.groups||'').toString().split(',')).map(g=>g.trim()).filter(Boolean);
+      const mgrGrps = new Set(rawMgrGrps.map(normalizeGrp));
+      const filteredSups = mySups.filter(sup=>{
+        const supGrps = Array.isArray(sup.grp) ? sup.grp : (sup.grp||'').toString().split(',').map(g=>g.trim()).filter(Boolean);
+        return supGrps.some(g=>mgrGrps.has(normalizeGrp(g)));
+      });
+      const supNames = filteredSups.map(s=>s.name);
+      if(!supNames.length) return [];
+      const encSups = supNames.map(n=>encodeURIComponent(n)).join(',');
+      const repsRes = await fetch(`${SUPABASE_URL}/rest/v1/users?supervisors=in.(${encSups})&select=name&limit=500`,{headers:H});
+      const allReps = repsRes.ok ? await repsRes.json() : [];
+      return Array.isArray(allReps) ? allReps.map(x=>x.name).filter(Boolean) : [];
+    }
+  }catch(e){ console.warn('rbGetTeamReps error', e); }
+  return [];
+}
+
+async function rbComputeBalances(repNames){
+  if(!repNames.length) return {};
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
+  const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H}); return r.ok?await r.json():[]; }catch(e){ return []; } };
+  const [dels, rets, reqs, adjs] = await Promise.all([
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items&limit=5000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta&limit=5000`),
+  ]);
+  const bal = {};
+  const add = (rep,item,qty)=>{ if(!rep||!item) return; bal[rep]=bal[rep]||{}; bal[rep][item]=(bal[rep][item]||0)+qty; };
+  (dels||[]).forEach(d=>(d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))));
+  (rets||[]).forEach(d=>(d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))));
+  (reqs||[]).forEach(d=>(d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))));
+  (adjs||[]).forEach(a=>add(a.rep_name,a.snf,+(+a.qty_delta||0)));
+  return bal;
+}
+
+async function rbLoad(){
+  if(!cu) return;
+  document.getElementById('rb-pending').innerHTML   = '<div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جارِ التحميل...</div>';
+  document.getElementById('rb-diffs').innerHTML     = '<div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جارِ التحميل...</div>';
+  document.getElementById('rb-balances').innerHTML  = '<div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جارِ التحميل...</div>';
+
+  _rbTeamReps = await rbGetTeamReps();
+  if(!_rbTeamReps.length){
+    document.getElementById('rb-pending').innerHTML  = '<div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">مفيش مناديب تابعين ليك</div>';
+    document.getElementById('rb-diffs').innerHTML    = '';
+    document.getElementById('rb-balances').innerHTML = '';
+    return;
+  }
+
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const encList = _rbTeamReps.map(n=>encodeURIComponent(n)).join(',');
+  const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H}); return r.ok?await r.json():[]; }catch(e){ return []; } };
+
+  const [pending, diffs, balances] = await Promise.all([
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&order=created_at.asc&limit=200`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc&limit=200`),
+    rbComputeBalances(_rbTeamReps),
+  ]);
+  _rbPending  = pending||[];
+  _rbBalances = balances||{};
+  rbRenderPending(_rbPending);
+  rbRenderDiscrepancies(diffs||[]);
+  rbRenderBalances();
+}
+
+function rbRenderPending(rows){
+  const wrap = document.getElementById('rb-pending');
+  if(!rows.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش طلبات معلّقة حاليًا</div>'; return; }
+  wrap.innerHTML = rows.map(r=>{
+    const itemsTxt = (r.items||[]).map(i=>`${i.name} ×${i.qty}`).join('، ');
+    const d = new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'});
+    return `<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="font-weight:700;font-size:13px">${r.rep_name}</div>
+        <div style="font-size:11px;color:var(--text2)">${d}</div>
+      </div>
+      <div style="font-size:12px;color:#333;margin-top:5px">${itemsTxt}</div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-sm" style="background:#276749;color:#fff" onclick="rbApprove(${r.id})"><i class="ti ti-check"></i> موافقة</button>
+        <button class="btn btn-sm" style="background:#B91C1C;color:#fff" onclick="rbReject(${r.id})"><i class="ti ti-x"></i> رفض</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function rbApprove(id){
+  if(!confirm('تأكيد الموافقة على طلب البضاعة ده؟')) return;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_requests?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body: JSON.stringify({status:'approved', decided_by:cu.name, decided_at:new Date().toISOString()})
+    });
+    if(!res.ok) throw new Error(await res.text());
+    rbLoad();
+  }catch(e){ alert('حصل خطأ، حاول تاني'); }
+}
+
+async function rbReject(id){
+  const reason = prompt('سبب الرفض:');
+  if(!reason) return;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_requests?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body: JSON.stringify({status:'rejected', reject_reason:reason, decided_by:cu.name, decided_at:new Date().toISOString()})
+    });
+    if(!res.ok) throw new Error(await res.text());
+    rbLoad();
+  }catch(e){ alert('حصل خطأ، حاول تاني'); }
+}
+
+function rbRenderDiscrepancies(rows){
+  const wrap = document.getElementById('rb-diffs');
+  if(!rows.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش فروق جرد محتاجة مراجعة</div>'; return; }
+  wrap.innerHTML = rows.map(r=>{
+    const d = new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'});
+    const diffTxt = r.diff>0 ? `ناقص ${r.diff} (المسجّل أقل من المتوقع)` : `زيادة ${Math.abs(r.diff)} (المسجّل أكتر من المتوقع)`;
+    return `<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="font-weight:700;font-size:13px">${r.rep_name} — ${r.snf}</div>
+        <div style="font-size:11px;color:var(--text2)">${d}</div>
+      </div>
+      <div style="font-size:12px;color:#B45309;margin-top:5px">${diffTxt} (المتوقع ${r.computed_qty} / الفعلي ${r.counted_qty})</div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-sm" style="background:#1D4ED8;color:#fff" onclick="rbAdjust(${r.id},'${r.rep_name.replace(/'/g,"\\'")}','${r.snf.replace(/'/g,"\\'")}',${-r.diff})"><i class="ti ti-edit"></i> تصحيح الرصيد</button>
+        <button class="btn btn-sm" style="background:#9CA3AF;color:#fff" onclick="rbDismiss(${r.id})"><i class="ti ti-x"></i> تجاهل</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function rbAdjust(invId, repName, snf, suggestedDelta){
+  const input = prompt(`قيمة التصحيح (موجب = زيادة الرصيد، سالب = نقصانه):`, suggestedDelta);
+  if(input===null || input==='' || isNaN(+input)) return;
+  const reason = prompt('سبب التصحيح (اختياري):','') || '';
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{
+      method:'POST',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body: JSON.stringify({rep_name:repName, snf, qty_delta:+input, reason, adjusted_by:cu.name, source_inventory_id:invId})
+    });
+    if(!res.ok) throw new Error(await res.text());
+    await fetch(`${SUPABASE_URL}/rest/v1/rep_car_inventory?id=eq.${invId}`,{
+      method:'PATCH',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body: JSON.stringify({resolved:true})
+    });
+    rbLoad();
+  }catch(e){ alert('حصل خطأ، حاول تاني'); }
+}
+
+async function rbDismiss(invId){
+  if(!confirm('تجاهل الفرق ده من غير تصحيح الرصيد؟')) return;
+  try{
+    await fetch(`${SUPABASE_URL}/rest/v1/rep_car_inventory?id=eq.${invId}`,{
+      method:'PATCH',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body: JSON.stringify({resolved:true})
+    });
+    rbLoad();
+  }catch(e){ alert('حصل خطأ، حاول تاني'); }
+}
+
+function rbRenderBalances(){
+  const wrap = document.getElementById('rb-balances');
+  const q = (document.getElementById('rb-search')?.value||'').trim();
+  let reps = Object.keys(_rbBalances);
+  if(q) reps = reps.filter(r=>r.includes(q));
+  reps.sort((a,b)=>a.localeCompare(b,'ar'));
+  if(!reps.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش أرصدة لعرضها</div>'; return; }
+  wrap.innerHTML = reps.map(rep=>{
+    const items = Object.entries(_rbBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0);
+    const rowsHtml = items.length
+      ? items.sort((a,b)=>b[1]-a[1]).map(([name,qty])=>
+          `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:11.5px;border-bottom:1px dashed var(--border)">
+            <span>${name}</span><span style="font-weight:700">${qty}</span>
+          </div>`).join('')
+      : '<div style="font-size:11px;color:var(--text2);padding:4px 0">مفيش رصيد مسجّل حاليًا</div>';
+    return `<details style="border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin-bottom:8px">
+      <summary style="cursor:pointer;font-weight:700;font-size:13px">${rep} <span style="color:var(--text2);font-weight:400;font-size:11px">(${items.length} صنف برصيد)</span></summary>
+      <div style="margin-top:8px">${rowsHtml}</div>
+    </details>`;
+  }).join('');
 }
 
 // ══════════════════════════════════════════════════════════════
