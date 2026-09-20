@@ -2112,15 +2112,26 @@ async function ciLoadFullCatalogForInventory(){
   }catch(e){ showToast('❌ حصل خطأ أثناء تحميل الأصناف، حاول تاني'); }
 }
 
-// تاريخ بداية تسجيل أرصدة المناديب — أي حركة (توريد/مرتجع/طلب بضاعة) قبل التاريخ ده متتحسبش خالص
-const REP_BALANCE_START_DATE = '2026-09-21';
+// بداية تتبع رصيد كل مندوب مش تاريخ ثابت موحّد للكل — دي بالظبط لحظة أول جرد سجّله المندوب
+// نفسه في التطبيق. أي حركة (توريد/مرتجع/طلب بضاعة/تسوية) قبل أول جرد ليه متتحسبش خالص.
+let _ciBalanceStartDate = null; // null = لسه معملش أي جرد → مفيش رصيد يتحسب لحد ما يعمل أول جرد
+async function ciGetBalanceStartDate(){
+  const enc = encodeURIComponent(currentRep.name);
+  try{
+    const rows = await sbFetch('rep_car_inventory', `?rep_name=eq.${enc}&select=created_at&order=created_at.asc&limit=1`);
+    return (rows && rows[0] && rows[0].created_at) ? rows[0].created_at.slice(0,10) : null;
+  }catch(e){ return null; }
+}
 async function ciComputeBalances(){
+  const startDate = await ciGetBalanceStartDate();
+  _ciBalanceStartDate = startDate;
+  if(!startDate) return {}; // لسه معملش جرد افتتاحي أول
   const enc = encodeURIComponent(currentRep.name);
   const [dels, rets, reqs, adjs] = await Promise.all([
-    sbFetch('sales_deliveries',       `?rep_name=eq.${enc}&delivery_date=gte.${REP_BALANCE_START_DATE}&select=items&limit=5000`).catch(()=>[]),
-    sbFetch('sales_returns',          `?rep_name=eq.${enc}&return_date=gte.${REP_BALANCE_START_DATE}&select=items&limit=5000`).catch(()=>[]),
-    sbFetch('rep_stock_requests',     `?rep_name=eq.${enc}&status=eq.approved&created_at=gte.${REP_BALANCE_START_DATE}&select=items&limit=2000`).catch(()=>[]),
-    sbFetch('rep_balance_adjustments',`?rep_name=eq.${enc}&created_at=gte.${REP_BALANCE_START_DATE}&select=snf,qty_delta&limit=2000`).catch(()=>[]),
+    sbFetch('sales_deliveries',       `?rep_name=eq.${enc}&delivery_date=gte.${startDate}&select=items&limit=5000`).catch(()=>[]),
+    sbFetch('sales_returns',          `?rep_name=eq.${enc}&return_date=gte.${startDate}&select=items&limit=5000`).catch(()=>[]),
+    sbFetch('rep_stock_requests',     `?rep_name=eq.${enc}&status=eq.approved&created_at=gte.${startDate}&select=items&limit=2000`).catch(()=>[]),
+    sbFetch('rep_balance_adjustments',`?rep_name=eq.${enc}&created_at=gte.${startDate}&select=snf,qty_delta&limit=2000`).catch(()=>[]),
   ]);
   const bal = {};
   const add = (name, qty) => { if(!name) return; bal[name] = (bal[name]||0) + qty; };

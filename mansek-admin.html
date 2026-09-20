@@ -34893,7 +34893,9 @@ function repbalInit(){
   repbalLoad();
 }
 
-// تاريخ بداية تسجيل أرصدة المناديب — أي حركة (توريد/مرتجع/طلب بضاعة/تسوية) قبل التاريخ ده متتحسبش خالص
+// مفيش تاريخ بداية موحّد للكل — كل مندوب بداية تتبع رصيده هي بالظبط لحظة أول جرد سجّله هو نفسه
+// في التطبيق. أي حركة (توريد/مرتجع/طلب بضاعة/تسوية) قبل أول جرد للمندوب ده متتحسبش خالص.
+// الثابت ده باقي بس كحد أدنى تاريخي قديم — مش بيتفلتر بيه أي بيانات دلوقتي.
 const REP_BALANCE_START_DATE = '2026-09-21';
 let _repbalRawPending  = [];
 let _repbalRawDiffs    = [];
@@ -34912,10 +34914,17 @@ function repbalInRange(dateStr, from, to){
   if(to && d>to) return false;
   return true;
 }
-// بدون فترة: رصيد تراكمي من البداية (زي ما كان). بفترة محددة: صافي الحركة خلال الفترة بس.
+// بدون فترة: رصيد تراكمي من أول جرد سجّله كل مندوب. بفترة محددة: صافي الحركة خلال الفترة دي بس (مقيّدة برضه بعدم النزول قبل أول جرد).
 function repbalCalcBalances(raw, from, to, has){
   const bal = {};
+  const startDates = raw.startDates || {};
   const add = (rep,item,qty)=>{ if(!rep||!item) return; bal[rep]=bal[rep]||{}; bal[rep][item]=(bal[rep][item]||0)+qty; };
+  const afterStart = (rep,d)=>{
+    const sd = startDates[rep];
+    if(!sd) return false; // المندوب لسه معملش أول جرد → مفيش رصيد يتحسب له خالص
+    if(!d) return false;
+    return d.slice(0,10) >= sd;
+  };
   const inRange = (d)=>{
     if(!has) return true;
     if(!d) return false;
@@ -34924,10 +34933,10 @@ function repbalCalcBalances(raw, from, to, has){
     if(to && s>to) return false;
     return true;
   };
-  (raw.dels||[]).forEach(d=>{ if(inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
-  (raw.rets||[]).forEach(d=>{ if(inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
-  (raw.reqsApproved||[]).forEach(d=>{ if(inRange(d.decided_at||d.created_at)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
-  (raw.adjs||[]).forEach(a=>{ if(inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
+  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.delivery_date) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
+  (raw.rets||[]).forEach(d=>{ if(afterStart(d.rep_name,d.return_date) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.reqsApproved||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
   return bal;
 }
 function repbalApplyPeriod(){
@@ -34935,7 +34944,7 @@ function repbalApplyPeriod(){
   const note = document.getElementById('repbal-period-note');
   if(note) note.textContent = has
     ? 'الفترة محددة: الطلبات والفروق والسجل اللي حصل خلالها، والرصيد بقى صافي الحركة خلال الفترة دي بس.'
-    : 'بدون تحديد فترة: كل الطلبات المعلّقة والفروق الحالية والسجل الكامل، والرصيد التراكمي من 21/9/2026 (بداية تفعيل تسجيل الأرصدة) لحد النهاردة.';
+    : 'بدون تحديد فترة: كل الطلبات المعلّقة والفروق الحالية والسجل الكامل، والرصيد التراكمي لكل مندوب من تاريخ أول جرد سجّله هو نفسه لحد النهاردة (المندوب اللي لسه معملش جرد، رصيده هيفضل مش محسوب لحد ما يعمل أول جرد).';
   const pending = has ? _repbalRawPending.filter(r=>repbalInRange(r.created_at,from,to)) : _repbalRawPending;
   const diffs   = has ? _repbalRawDiffs.filter(r=>repbalInRange(r.created_at,from,to))   : _repbalRawDiffs;
   const allReqs = has ? _repbalRawAllReqs.filter(r=>repbalInRange(r.created_at,from,to)) : _repbalRawAllReqs;
@@ -34976,20 +34985,24 @@ async function repbalLoad(){
 
   const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
-  const [pending, diffs, allReqs, dels, rets, reqsApproved, adjs] = await Promise.all([
+  const [pending, diffs, allReqs, dels, rets, reqsApproved, adjs, invRows] = await Promise.all([
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&order=created_at.asc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&order=created_at.desc&limit=300`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&delivery_date=gte.${REP_BALANCE_START_DATE}&select=rep_name,items,delivery_date&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&return_date=gte.${REP_BALANCE_START_DATE}&select=rep_name,items,return_date&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&created_at=gte.${REP_BALANCE_START_DATE}&select=rep_name,items,decided_at,created_at&limit=5000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&created_at=gte.${REP_BALANCE_START_DATE}&select=rep_name,snf,qty_delta,created_at&limit=5000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at&limit=5000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at&limit=5000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
   ]);
+
+  const startDates = {};
+  (invRows||[]).forEach(row=>{ if(row.rep_name && !startDates[row.rep_name] && row.created_at) startDates[row.rep_name] = row.created_at.slice(0,10); });
 
   _repbalRawPending = pending||[];
   _repbalRawDiffs   = diffs||[];
   _repbalRawAllReqs = allReqs||[];
-  _repbalRawBalanceData = {dels:dels||[], rets:rets||[], reqsApproved:reqsApproved||[], adjs:adjs||[]};
+  _repbalRawBalanceData = {dels:dels||[], rets:rets||[], reqsApproved:reqsApproved||[], adjs:adjs||[], startDates};
   repbalApplyPeriod();
 }
 
@@ -35342,11 +35355,16 @@ function repbalRenderBalances(){
 
 // ══ بوب أب تصدير سجل جرد المندوب (PDF / Excel) ══
 let _repbalExportRep = null;
+function repbalPeriodTxt(rep, from, to, has){
+  if(has) return `الفترة: من ${from||'—'} إلى ${to||'—'}`;
+  const sd = (_repbalRawBalanceData.startDates||{})[rep];
+  return sd ? `رصيد تراكمي من أول جرد للمندوب (${sd}) لحد النهاردة` : 'لسه محتاج يعمل أول جرد عشان يتحسب له رصيد';
+}
 function repbalOpenExportModal(rep){
   _repbalExportRep = rep;
   const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
   const {from, to, has} = repbalGetPeriod();
-  const periodTxt = has ? `الفترة: من ${from||'—'} إلى ${to||'—'}` : 'رصيد تراكمي من 21/9/2026 لحد النهاردة';
+  const periodTxt = repbalPeriodTxt(rep, from, to, has);
   const title = document.getElementById('repbal-export-title');
   const meta  = document.getElementById('repbal-export-meta');
   const list  = document.getElementById('repbal-export-list');
@@ -35374,7 +35392,7 @@ function repbalExportRepPDF(){
   if(!rep){ showToast('اختر مندوب أولاً','err'); return; }
   const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
   const {from, to, has} = repbalGetPeriod();
-  const periodTxt = has ? `الفترة: من ${from||'—'} إلى ${to||'—'}` : 'رصيد تراكمي من 21/9/2026 لحد النهاردة';
+  const periodTxt = repbalPeriodTxt(rep, from, to, has);
   const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
 
   const rowsHtml = items.length
@@ -35436,7 +35454,7 @@ function repbalExportRepExcel(){
   if(typeof XLSX==='undefined'){ showToast('جاري تحميل مكتبة Excel...'); return; }
   const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
   const {from, to, has} = repbalGetPeriod();
-  const periodTxt = has ? `الفترة: من ${from||'—'} إلى ${to||'—'}` : 'رصيد تراكمي من 21/9/2026 لحد النهاردة';
+  const periodTxt = repbalPeriodTxt(rep, from, to, has);
   const now = new Date().toLocaleDateString('en-US');
 
   const C = {dark:'2C1F0A', caramel:'4B3C1A', gold:'C8A96E', cream:'EDE5D8', light:'F5F0E8', white:'FFFFFF', line:'E0D8CC'};

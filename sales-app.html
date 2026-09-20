@@ -3228,26 +3228,48 @@ let _rbRawPending = [];
 let _rbRawDiffs   = [];
 let _rbRawBalanceData = {dels:[], rets:[], reqs:[], adjs:[]};
 
-// تاريخ بداية تسجيل أرصدة المناديب — أي حركة (توريد/مرتجع/طلب بضاعة/تسوية) قبل التاريخ ده متتحسبش خالص
+// مفيش تاريخ بداية موحّد للكل — كل مندوب بداية تتبع رصيده هي بالظبط لحظة أول جرد سجّله هو نفسه
+// في التطبيق. أي حركة (توريد/مرتجع/طلب بضاعة/تسوية) قبل أول جرد للمندوب ده متتحسبش خالص.
+// الثابت ده باقي بس كحد أدنى تاريخي قديم — مش بيتفلتر بيه أي بيانات دلوقتي.
 const REP_BALANCE_START_DATE = '2026-09-21';
+async function rbGetRepStartDates(repNames){
+  if(!repNames.length) return {};
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`,{headers:H, cache:'no-store'});
+    const rows = r.ok ? await r.json() : [];
+    const map = {};
+    (rows||[]).forEach(row=>{ if(row.rep_name && !map[row.rep_name] && row.created_at) map[row.rep_name] = row.created_at.slice(0,10); });
+    return map;
+  }catch(e){ return {}; }
+}
 async function rbFetchRawBalanceData(repNames){
-  if(!repNames.length) return {dels:[], rets:[], reqs:[], adjs:[]};
+  if(!repNames.length) return {dels:[], rets:[], reqs:[], adjs:[], startDates:{}};
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
   const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
-  const [dels, rets, reqs, adjs] = await Promise.all([
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&delivery_date=gte.${REP_BALANCE_START_DATE}&select=rep_name,items,delivery_date&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&return_date=gte.${REP_BALANCE_START_DATE}&select=rep_name,items,return_date&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&created_at=gte.${REP_BALANCE_START_DATE}&select=rep_name,items,decided_at,created_at&limit=5000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&created_at=gte.${REP_BALANCE_START_DATE}&select=rep_name,snf,qty_delta,created_at&limit=5000`),
+  const [dels, rets, reqs, adjs, startDates] = await Promise.all([
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at&limit=5000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at&limit=5000`),
+    rbGetRepStartDates(repNames),
   ]);
-  return {dels:dels||[], rets:rets||[], reqs:reqs||[], adjs:adjs||[]};
+  return {dels:dels||[], rets:rets||[], reqs:reqs||[], adjs:adjs||[], startDates:startDates||{}};
 }
 
-// بدون فترة: رصيد تراكمي من البداية (زي ما كان). بفترة محددة: صافي الحركة خلال الفترة بس.
+// بدون فترة: رصيد تراكمي من أول جرد سجّله كل مندوب. بفترة محددة: صافي الحركة خلال الفترة دي بس (مقيّدة برضه بعدم النزول قبل أول جرد).
 function rbCalcBalances(raw, from, to, has){
   const bal = {};
+  const startDates = raw.startDates || {};
   const add = (rep,item,qty)=>{ if(!rep||!item) return; bal[rep]=bal[rep]||{}; bal[rep][item]=(bal[rep][item]||0)+qty; };
+  const afterStart = (rep,d)=>{
+    const sd = startDates[rep];
+    if(!sd) return false; // المندوب لسه معملش أول جرد → مفيش رصيد يتحسب له خالص
+    if(!d) return false;
+    return d.slice(0,10) >= sd;
+  };
   const inRange = (d)=>{
     if(!has) return true;
     if(!d) return false;
@@ -3256,10 +3278,10 @@ function rbCalcBalances(raw, from, to, has){
     if(to && s>to) return false;
     return true;
   };
-  (raw.dels||[]).forEach(d=>{ if(inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
-  (raw.rets||[]).forEach(d=>{ if(inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
-  (raw.reqs||[]).forEach(d=>{ if(inRange(d.decided_at||d.created_at)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
-  (raw.adjs||[]).forEach(a=>{ if(inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
+  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.delivery_date) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
+  (raw.rets||[]).forEach(d=>{ if(afterStart(d.rep_name,d.return_date) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.reqs||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
   return bal;
 }
 
@@ -3280,7 +3302,7 @@ function rbApplyPeriod(){
   const note = document.getElementById('rb-period-note');
   if(note) note.textContent = has
     ? 'الفترة محددة: الطلبات والفروق اللي حصلت خلالها، والرصيد بقى صافي الحركة خلال الفترة دي بس.'
-    : 'بدون تحديد فترة: كل الطلبات المعلّقة والفروق الحالية، والرصيد التراكمي من 21/9/2026 (بداية تفعيل تسجيل الأرصدة) لحد النهاردة.';
+    : 'بدون تحديد فترة: كل الطلبات المعلّقة والفروق الحالية، والرصيد التراكمي لكل مندوب من تاريخ أول جرد سجّله هو نفسه لحد النهاردة (المندوب اللي لسه معملش جرد، رصيده هيفضل مش محسوب لحد ما يعمل أول جرد).';
   _rbPending  = has ? _rbRawPending.filter(r=>rbInRange(r.created_at,from,to)) : _rbRawPending;
   const diffs = has ? _rbRawDiffs.filter(r=>rbInRange(r.created_at,from,to)) : _rbRawDiffs;
   _rbBalances = rbCalcBalances(_rbRawBalanceData, from, to, has);
@@ -3574,11 +3596,6 @@ async function rbDismiss(invId){
 async function rbApproveGroupOpening(repName){
   const grpRows = _rbDiffsGroups[repName] || [];
   if(!grpRows.length){ showToast('مفيش فروق لهذا المندوب حاليًا','err'); return; }
-
-  const today = new Date().toISOString().slice(0,10);
-  if(today < REP_BALANCE_START_DATE){
-    if(!confirm(`تنبيه: النهارده (${today}) لسه قبل تاريخ بداية تفعيل الأرصدة (${REP_BALANCE_START_DATE}) — أي تصحيح هيتسجل دلوقتي مش هيتحسب في الرصيد التراكمي.\nتكمل برضه؟`)) return;
-  }
 
   if(!confirm(`هيتم اعتماد ${grpRows.length} صنف لـ${repName} دفعة واحدة، وتسجيل رصيد كل صنف زي ما اتجرد فعليًا (رصيد افتتاحي). متابعة؟`)) return;
 
