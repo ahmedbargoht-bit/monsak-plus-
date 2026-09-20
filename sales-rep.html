@@ -793,10 +793,16 @@ html,body{position:fixed;inset:0;width:100%;height:100%;overflow:hidden;font-fam
 
   <!-- ── الجرد ── -->
   <div id="ci-sub-count" style="padding:12px 14px;overflow-y:auto;flex:1">
-    <div style="display:flex;gap:8px;margin-bottom:10px">
+    <div style="display:flex;gap:8px;margin-bottom:6px">
       <input type="text" id="ci-count-search" placeholder="🔍 ابحث باسم الصنف..." oninput="ciRenderCountList()"
         style="flex:1;padding:9px 10px;border:1.5px solid var(--bg2);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif;box-sizing:border-box"/>
       <button onclick="ciOpenAddItemModal()" style="flex-shrink:0;background:none;border:1.5px solid var(--c);color:var(--c);border-radius:8px;padding:0 12px;font-size:12px;font-family:Cairo,sans-serif;cursor:pointer;white-space:nowrap">➕ إضافة صنف</button>
+    </div>
+    <div style="margin-bottom:10px">
+      <button onclick="ciLoadFullCatalogForInventory()" style="width:100%;background:#276749;color:#fff;border:none;border-radius:8px;padding:9px;font-size:12px;font-family:Cairo,sans-serif;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px">
+        <span>🗓️</span> تحميل كل الأصناف — جرد شامل اليوم
+      </button>
+      <div style="font-size:10px;color:var(--t3);text-align:center;margin-top:4px">استخدمها مرة واحدة يوم الجرد الكامل للعربية عشان تقدر تسجّل كل صنف موجود معاك</div>
     </div>
     <div id="ci-count-list"><div style="text-align:center;padding:2rem;color:var(--t3);font-size:12px">⏳ جارٍ التحميل...</div></div>
     <button class="btn-main" style="margin-top:12px" onclick="ciSaveCount()">💾 حفظ الجرد</button>
@@ -2084,6 +2090,28 @@ async function ciAddItemToMyList(name){
   }catch(e){ showToast('❌ حصل خطأ، حاول تاني'); }
 }
 
+// جرد شامل: بيحمّل كل أصناف الكتالوج (مش بس اللي المندوب اشتغل بيها قبل كده) عشان يقدر
+// يسجّل عدد فعلي لكل صنف موجود معاه في العربية، ويضيفهم لقايمته الشخصية بشكل دائم.
+async function ciLoadFullCatalogForInventory(){
+  if(!confirm('هيتم تحميل كل أصناف الكتالوج في قايمة الجرد بتاعتك عشان تقدر تجرد العربية بالكامل. متابعة؟')) return;
+  const missing = _ciCatalogNames.filter(n=>!_ciAllNames.includes(n));
+  if(!missing.length){ showToast('كل الأصناف أصلاً موجودة في قايمتك'); return; }
+  showToast('⏳ جاري تحميل كل الأصناف...');
+  try{
+    const rows = missing.map(snf=>({rep_name:currentRep.name, snf}));
+    const res = await fetch(SUPABASE_URL+'/rest/v1/rep_extra_items',{
+      method:'POST',
+      headers:Object.assign({},SB_HEADERS,{'Prefer':'resolution=ignore-duplicates,return=minimal'}),
+      body:JSON.stringify(rows)
+    });
+    if(!res.ok) throw new Error(await res.text());
+    _ciAllNames = _ciAllNames.concat(missing).sort((a,b)=>a.localeCompare(b,'ar'));
+    ciRenderCountList();
+    ciRenderRequestList();
+    showToast(`✅ اتحمّلت ${missing.length} صنف — دلوقتي تقدر تسجّل جرد شامل للعربية`);
+  }catch(e){ showToast('❌ حصل خطأ أثناء تحميل الأصناف، حاول تاني'); }
+}
+
 // تاريخ بداية تسجيل أرصدة المناديب — أي حركة (توريد/مرتجع/طلب بضاعة) قبل التاريخ ده متتحسبش خالص
 const REP_BALANCE_START_DATE = '2026-09-21';
 async function ciComputeBalances(){
@@ -2190,6 +2218,8 @@ function ciOnCountInput(name, field, val){
   else delete _ciCountInputs[name];
 }
 
+// الجرد بيتعتمد فورًا كرصيد رسمي بمجرد ما المندوب يحفظ — من غير ما يستنى مراجعة/موافقة
+// من المشرف. أي صنف فيه فرق بين المتوقع والمعدود بيتسجّله تصحيح رصيد تلقائي فورًا.
 async function ciSaveCount(){
   const isFilled = (v)=> v!=null && v!=='' && !isNaN(+v);
   const entries = Object.entries(_ciCountInputs).filter(([n,v])=> isFilled(v.valid) || isFilled(v.returned));
@@ -2201,13 +2231,24 @@ async function ciSaveCount(){
     const computed    = +(_ciBalances[name]||0);
     return { rep_name:currentRep.name, grp:currentRep.grp||'', snf:name,
              counted_qty:counted, counted_valid_qty:validQty, counted_returned_qty:returnedQty,
-             computed_qty:computed, diff:computed-counted };
+             computed_qty:computed, diff:computed-counted, resolved:true };
   });
   try{
     const res = await fetch(SUPABASE_URL+'/rest/v1/rep_car_inventory',{method:'POST',headers:SB_HEADERS,body:JSON.stringify(rows)});
     if(!res.ok) throw new Error(await res.text());
-    showToast('✅ اتسجل الجرد بنجاح');
+
+    const adjRows = rows.filter(r=>r.diff!==0).map(r=>({
+      rep_name: r.rep_name, snf: r.snf, qty_delta: -r.diff,
+      reason: 'جرد ذاتي — اعتماد فوري أوتوماتيكي', adjusted_by: currentRep.name
+    }));
+    if(adjRows.length){
+      const adjRes = await fetch(SUPABASE_URL+'/rest/v1/rep_balance_adjustments',{method:'POST',headers:SB_HEADERS,body:JSON.stringify(adjRows)});
+      if(!adjRes.ok) throw new Error(await adjRes.text());
+    }
+
+    showToast('✅ اتسجل الجرد واعتمد رصيدك فورًا');
     _ciCountInputs = {};
+    _ciBalances = await ciComputeBalances();
     ciRenderCountList();
     ciLoadMyHistory();
   }catch(e){ showToast('❌ حصل خطأ، حاول تاني'); }

@@ -3494,16 +3494,19 @@ async function rbReject(id){
 
 // مجمّعة حسب المندوب (زي شكل لوحة التحكم بالظبط): عنوان بيه اسم المندوب وعدد الأصناف،
 // وتحته أصنافه بس (من غير تكرار اسمه في كل صف) مع نفس أزرار التصحيح/التجاهل.
+let _rbDiffsGroups = {}; // آخر تجميع معروض حسب المندوب — يستخدمه الاعتماد الجماعي
 function rbRenderDiscrepancies(rows){
   const wrap = document.getElementById('rb-diffs');
-  if(!rows.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش فروق جرد محتاجة مراجعة</div>'; return; }
+  if(!rows.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش فروق جرد محتاجة مراجعة</div>'; _rbDiffsGroups = {}; return; }
 
   const groups = {};
   rows.forEach(r=>{ (groups[r.rep_name] = groups[r.rep_name] || []).push(r); });
+  _rbDiffsGroups = groups;
   const repNames = Object.keys(groups).sort((a,b)=>a.localeCompare(b,'ar'));
 
   wrap.innerHTML = repNames.map(repName=>{
     const grpRows = groups[repName];
+    const safeRep = repName.replace(/'/g,"\\'");
     const itemsHtml = grpRows.map(r=>{
       const d = new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'});
       const diffTxt = r.diff>0 ? `ناقص ${r.diff} (المسجّل أقل من المتوقع)` : `زيادة ${Math.abs(r.diff)} (المسجّل أكتر من المتوقع)`;
@@ -3522,9 +3525,12 @@ function rbRenderDiscrepancies(rows){
       </div>`;
     }).join('');
     return `<div style="margin-bottom:16px;border:1px solid var(--border);border-radius:10px;overflow:hidden">
-      <div style="background:#FFF3E0;color:#B45309;padding:8px 12px;font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:space-between">
+      <div style="background:#FFF3E0;color:#B45309;padding:8px 12px;font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
         <span><i class="ti ti-user"></i> المندوب: ${repName}</span>
-        <span style="font-weight:400;font-size:11px;color:#946126">${grpRows.length} صنف</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-weight:400;font-size:11px;color:#946126">${grpRows.length} صنف</span>
+          <button onclick="rbApproveGroupOpening('${safeRep}')" style="background:#276749;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer;display:flex;align-items:center;gap:5px"><i class="ti ti-checks"></i> اعتماد الكل كرصيد افتتاحي</button>
+        </div>
       </div>
       <div style="padding:10px">${itemsHtml}</div>
     </div>`;
@@ -3561,6 +3567,42 @@ async function rbDismiss(invId){
     });
     rbLoad();
   }catch(e){ alert('حصل خطأ، حاول تاني'); }
+}
+
+// اعتماد دفعة واحدة: بياخد كل فروق مندوب معين ويسجّلها كتصحيح رصيد رسمي (رصيد افتتاحي)
+// بضغطة واحدة، بدل ما يتم مراجعة كل صنف لوحده. مفيد ليوم الجرد الشامل للعربيات.
+async function rbApproveGroupOpening(repName){
+  const grpRows = _rbDiffsGroups[repName] || [];
+  if(!grpRows.length){ showToast('مفيش فروق لهذا المندوب حاليًا','err'); return; }
+
+  const today = new Date().toISOString().slice(0,10);
+  if(today < REP_BALANCE_START_DATE){
+    if(!confirm(`تنبيه: النهارده (${today}) لسه قبل تاريخ بداية تفعيل الأرصدة (${REP_BALANCE_START_DATE}) — أي تصحيح هيتسجل دلوقتي مش هيتحسب في الرصيد التراكمي.\nتكمل برضه؟`)) return;
+  }
+
+  if(!confirm(`هيتم اعتماد ${grpRows.length} صنف لـ${repName} دفعة واحدة، وتسجيل رصيد كل صنف زي ما اتجرد فعليًا (رصيد افتتاحي). متابعة؟`)) return;
+
+  try{
+    const adjRows = grpRows.map(r=>({
+      rep_name: repName, snf: r.snf, qty_delta: -r.diff,
+      reason: 'اعتماد جرد شامل كرصيد افتتاحي', adjusted_by: cu.name, source_inventory_id: r.id
+    }));
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{
+      method:'POST',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body: JSON.stringify(adjRows)
+    });
+    if(!res.ok) throw new Error(await res.text());
+
+    const ids = grpRows.map(r=>r.id).join(',');
+    await fetch(`${SUPABASE_URL}/rest/v1/rep_car_inventory?id=in.(${ids})`,{
+      method:'PATCH',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body: JSON.stringify({resolved:true})
+    });
+    showToast(`✅ اتعمد رصيد ${grpRows.length} صنف لـ${repName}`);
+    rbLoad();
+  }catch(e){ showToast('❌ حصل خطأ أثناء الاعتماد، حاول تاني','err'); }
 }
 
 function rbRenderBalances(){
