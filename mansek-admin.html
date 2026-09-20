@@ -7558,10 +7558,16 @@ h2,h3{color:#2C1F0A}
                   <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
                     <div style="font-size:13px;font-weight:800;color:#1E3A5F">مودرن تريد</div>
                     <div style="font-size:10px;color:var(--text-secondary)">Modern Trade</div>
-                    <button onclick="promosExportPDF()"
-                      style="padding:6px 16px;background:#1E3A5F;color:#EDE5D8;border:none;border-radius:8px;font-family:Cairo,sans-serif;font-size:11px;font-weight:700;cursor:pointer;margin-top:2px">
-                      <i class="ti ti-file-type-pdf"></i> تصدير PDF
-                    </button>
+                    <div style="display:flex;gap:6px;margin-top:2px">
+                      <button onclick="promosExportPDF()"
+                        style="padding:6px 16px;background:#1E3A5F;color:#EDE5D8;border:none;border-radius:8px;font-family:Cairo,sans-serif;font-size:11px;font-weight:700;cursor:pointer">
+                        <i class="ti ti-file-type-pdf"></i> تصدير PDF
+                      </button>
+                      <button onclick="promosExportWord()"
+                        style="padding:6px 16px;background:#2563EB;color:#fff;border:none;border-radius:8px;font-family:Cairo,sans-serif;font-size:11px;font-weight:700;cursor:pointer">
+                        <i class="ti ti-file-type-doc"></i> تصدير Word
+                      </button>
+                    </div>
                   </div>
                 </div>
                 <textarea id="promo-letter" rows="18"
@@ -48018,6 +48024,118 @@ ${bodyHtml}
   const w = window.open('','_blank','width=860,height=700');
   w.document.write(html);
   w.document.close();
+}
+
+// تصدير الخطاب كملف Word (.doc) قابل للتعديل — نفس محتوى وتنسيق تصدير الـ PDF
+// بالظبط (لوجو + هيدر + جدول الأصناف + توقيعات)، لكن بدل فتح نافذة طباعة، بيتحمّل
+// كملف Word فعلي عن طريق تغليف نفس الـ HTML بترويسة Word القياسية (MSO namespaces)
+// وتنزيله بامتداد .doc، عشان يفتح مباشرة في Microsoft Word ويكون قابل للتعديل هناك.
+async function promosExportWord(){
+  const letter = document.getElementById('promo-letter').value;
+  if(!letter.trim()){ alert('لا يوجد خطاب للتصدير'); return; }
+
+  const dateFrom = document.getElementById('promo-date-from').value;
+  const dateTo   = document.getElementById('promo-date-to').value;
+  const fromFmt  = dateFrom ? new Date(dateFrom).toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'}) : '';
+  const toFmt    = dateTo   ? new Date(dateTo).toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'}) : '';
+
+  // تحميل اللوجو
+  let logoSrc = '';
+  try{
+    const blob = await fetch('لوجو.png').then(r=>r.blob());
+    logoSrc = await new Promise(res=>{ const fr=new FileReader(); fr.onload=()=>res(fr.result); fr.readAsDataURL(blob); });
+  }catch(e){}
+
+  // بناء جدول HTML للأصناف (نفس جدول تصدير الـ PDF)
+  let tableHtml = '';
+  if(_promosProdRows.length){
+    tableHtml = `<table style="width:100%;border-collapse:collapse;margin:14px 0;font-family:Cairo,Arial,sans-serif;font-size:13px" dir="rtl">
+      <thead>
+        <tr style="background:#FEF3C7">
+          <th style="padding:7px 10px;border:1px solid #FCD34D;text-align:center;font-weight:700;color:#92400E;width:36px">#</th>
+          <th style="padding:7px 10px;border:1px solid #FCD34D;text-align:right;font-weight:700;color:#92400E">اسم الصنف</th>
+          <th style="padding:7px 10px;border:1px solid #FCD34D;text-align:center;font-weight:700;color:#92400E;width:90px">السعر الأساسي</th>
+          <th style="padding:7px 10px;border:1px solid #FCD34D;text-align:center;font-weight:700;color:#92400E;width:120px">نوع العرض</th>
+          <th style="padding:7px 10px;border:1px solid #FCD34D;text-align:center;font-weight:700;color:#B45309;width:100px">السعر</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${_promosProdRows.map((r,i)=>{
+          const ot=r.type==='pct'?`خصم ${r.val}%`:r.type==='sub'?`تخفيض ${r.val} ج`:'سعر قطعي ثابت';
+          const fp=promosCalcFinal(r);
+          return `<tr style="${i%2===0?'background:#FFFBEB':''}">
+            <td style="padding:6px 10px;border:1px solid #FCD34D;text-align:center;color:#6B7280">${i+1}</td>
+            <td style="padding:6px 10px;border:1px solid #FCD34D;font-weight:600">${r.name}</td>
+            <td style="padding:6px 10px;border:1px solid #FCD34D;text-align:center;color:#6B7280">${r.base>0?r.base.toFixed(2)+' ج':'-'}</td>
+            <td style="padding:6px 10px;border:1px solid #FCD34D;text-align:center">${ot}</td>
+            <td style="padding:6px 10px;border:1px solid #FCD34D;text-align:center;font-weight:700;color:#B45309">${fp} ج</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+  }
+
+  // تقسيم الخطاب عند علامة الجدول النصي واستبداله بالجدول HTML (نفس منطق تصدير الـ PDF)
+  const esc = s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const sepMark = '━━━';
+  let bodyHtml;
+  if(_promosProdRows.length && letter.includes(sepMark)){
+    const fi = letter.indexOf(sepMark);
+    const li = letter.lastIndexOf(sepMark);
+    const endOfLastSep = li + letter.substring(li).indexOf('\n');
+    const before = letter.substring(0, fi).trim();
+    const after  = endOfLastSep>0 ? letter.substring(endOfLastSep).trim() : '';
+    bodyHtml = `<div>${esc(before).replace(/\n/g,'<br>')}</div>${tableHtml}<div>${esc(after).replace(/\n/g,'<br>')}</div>`;
+  } else {
+    bodyHtml = `<div>${esc(letter).replace(/\n/g,'<br>')}</div>`;
+  }
+
+  // ترويسة Word القياسية (xmlns:o/xmlns:w) عشان Microsoft Word يفتح الملف كمستند Word حقيقي قابل للتعديل
+  const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+<meta charset="UTF-8">
+<!--[if gte mso 9]>
+<xml><w:WordDocument><w:View>Print</w:View><w:Zoom>100</w:Zoom></w:WordDocument></xml>
+<![endif]-->
+<style>
+  body{font-family:'Cairo',Arial,sans-serif;direction:rtl;color:#1a1a1a;padding:10px 20px}
+  .header{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #D97706;padding-bottom:16px;margin-bottom:24px}
+  .logo{height:70px;width:auto}
+  .company-info{text-align:left}
+  .company-name{font-size:18px;font-weight:800;color:#1E3A5F}
+  .company-sub{font-size:11px;color:#888;margin-top:2px}
+  .date-bar{background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:8px 16px;font-size:11px;color:#92400E;font-weight:700;margin-bottom:24px;text-align:center}
+  div{font-size:14px;line-height:2.2;text-align:justify;margin-bottom:10px}
+  .footer{margin-top:40px;border-top:1px solid #eee;padding-top:16px;display:flex;justify-content:space-between;font-size:11px;color:#888}
+</style>
+</head>
+<body dir="rtl">
+<div class="header">
+  ${logoSrc?`<img src="${logoSrc}" class="logo" alt="لوجو"/>`:'<div style="font-size:20px;font-weight:800;color:#1E3A5F">مودرن تريد</div>'}
+  <div class="company-info">
+    <div class="company-name">مودرن تريد</div>
+    <div class="company-sub">Modern Trade</div>
+  </div>
+</div>
+${fromFmt&&toFmt?`<div class="date-bar">📅 الفترة: من ${fromFmt} إلى ${toFmt}</div>`:''}
+${bodyHtml}
+<div class="footer">
+  <span>مودرن تريد — Modern Trade</span>
+  <span>تاريخ الطباعة: ${new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'})}</span>
+</div>
+</body>
+</html>`;
+
+  const blob = new Blob(['﻿', html], {type:'application/msword'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `خطاب-مودرن-تريد-${new Date().toISOString().slice(0,10)}.doc`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 2000);
+  showToast('📄 جارِ تحميل ملف Word...');
 }
 
 
