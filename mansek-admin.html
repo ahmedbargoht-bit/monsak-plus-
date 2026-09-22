@@ -35391,18 +35391,26 @@ async function pdfPreviewShare(){
 }
 
 let _repbalAllReqsRows = [];
+// لو فيه طلبات محددة بمربعات الاختيار، بيحذف المحدد بس — من غير تحديد، بيحذف السجل بالكامل
 async function repbalDeleteAllRequests(){
-  const rows = _repbalAllReqsRows;
+  const rows = _repbalAllReqsRows||[];
   if(!rows.length) return;
-  if(!confirm(`متأكد إنك عايز تحذف كل السجل (${rows.length} طلب) نهائيًا من النظام؟\nالإجراء ده لا رجعة فيه، وهيمسح كل طلبات البضاعة (معلّقة وموافق عليها ومرفوضة) من تطبيق المشرف والمندوب كمان.`)) return;
-  const ids = rows.map(r=>r.id).join(',');
+  const isPartial = _repbalAllReqsSelected.size > 0;
+  const target = isPartial ? rows.filter(r=>_repbalAllReqsSelected.has(r.id)) : rows;
+  if(!target.length) return;
+  const msg = isPartial
+    ? `متأكد إنك عايز تحذف ${target.length} طلب محدد نهائيًا من النظام؟\nالإجراء ده لا رجعة فيه، والسجل هيختفي من تطبيق المشرف والمندوب كمان.`
+    : `متأكد إنك عايز تحذف كل السجل (${target.length} طلب) نهائيًا من النظام؟\nالإجراء ده لا رجعة فيه، وهيمسح كل طلبات البضاعة (معلّقة وموافق عليها ومرفوضة) من تطبيق المشرف والمندوب كمان.`;
+  if(!confirm(msg)) return;
+  const ids = target.map(r=>r.id).join(',');
   try{
     const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_requests?id=in.(${ids})`,{
       method:'DELETE',
       headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
     });
     if(!res.ok) throw new Error(await res.text());
-    showToast('✅ اتحذف السجل بالكامل بنجاح');
+    showToast(isPartial ? '✅ اتحذف المحدد بنجاح' : '✅ اتحذف السجل بالكامل بنجاح');
+    _repbalAllReqsSelected.clear();
     repbalLoad();
   }catch(e){ alert('حصل خطأ أثناء الحذف، حاول تاني'); }
 }
@@ -35437,15 +35445,19 @@ function repbalAllReqsUpdateSelUI(){
   if(pdfBtn) pdfBtn.innerHTML = _repbalAllReqsSelected.size
     ? '<i class="ti ti-file-type-pdf"></i> تصدير المحدد PDF'
     : '<i class="ti ti-file-type-pdf"></i> تصدير الكل PDF';
+  const delBtn = document.getElementById('repbal-del-allreqs-btn');
+  const total = (_repbalAllReqsRows||[]).length;
+  if(delBtn){
+    delBtn.style.display = total ? 'inline-flex' : 'none';
+    delBtn.innerHTML = _repbalAllReqsSelected.size
+      ? `<i class="ti ti-trash"></i> حذف المحدد (${_repbalAllReqsSelected.size})`
+      : `<i class="ti ti-trash"></i> حذف السجل بالكامل (${total})`;
+  }
 }
 
 function repbalRenderAllRequests(rows){
   const wrap = document.getElementById('rbadm-all-requests');
   _repbalAllReqsRows = rows||[];
-  const delBtn = document.getElementById('repbal-del-allreqs-btn');
-  const delCnt = document.getElementById('repbal-del-allreqs-count');
-  if(delCnt) delCnt.textContent = rows.length;
-  if(delBtn) delBtn.style.display = rows.length ? 'inline-flex' : 'none';
 
   // امسح تحديد أي طلب مابقاش ظاهر في القايمة الحالية (بعد تغيير فلتر الفترة/المجموعة مثلاً)
   const idsNow = new Set(rows.map(r=>r.id));
@@ -35603,8 +35615,14 @@ async function repbalExportAllRequestsPDF(){
       heightLeft -= pageH;
     }
     const blob = pdf.output('blob');
-    const fileName = `طلبات_بضاعة_${localISO()}.pdf`;
-    pdfPreviewOpen(blob, fileName, 'طلبات بضاعة المناديب', 'تقرير طلبات بضاعة المناديب — الطحان جولدن دايتس');
+    const safeName = s=>String(s||'').replace(/[\\/:*?"<>|]/g,'_').trim();
+    const repNamesInExport = [...new Set(rows.map(r=>r.rep_name))];
+    const namePart = repNamesInExport.length===1 ? safeName(repNamesInExport[0])
+      : repNamesInExport.length<=3 ? repNamesInExport.map(safeName).join('_')
+      : `${repNamesInExport.length}_مناديب`;
+    const fileName = `طلبات_بضاعة_${namePart}_${localISO()}.pdf`;
+    const docTitle = repNamesInExport.length===1 ? `طلبات بضاعة — ${repNamesInExport[0]}` : 'طلبات بضاعة المناديب';
+    pdfPreviewOpen(blob, fileName, docTitle, 'تقرير طلبات بضاعة المناديب — الطحان جولدن دايتس');
   }catch(e){
     console.warn('repbalExportAllRequestsPDF failed', e); showToast('حصل خطأ أثناء تجهيز الملف','err');
   } finally {
