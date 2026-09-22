@@ -1850,18 +1850,20 @@ h2,h3{color:#2C1F0A}
               <option value="warning">تحذير (3-4 شهور)</option>
               <option value="ok">سليمة</option>
             </select>
+            <button class="btn btn-sm" id="pr-calc-value-btn" style="background:#2C1F0A;color:#EDE5D8" onclick="productsCalcValues()"><i class="ti ti-calculator"></i> حساب قيمة البضاعة</button>
             <button class="btn btn-sm" style="background:#4E5A2B;color:#E8F5E9" onclick="productsExportExcel()"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
             <button class="btn btn-sm" style="background:#731E2E;color:#F5E8E8" onclick="productsExportPDF()"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
             <button class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C" onclick="clearAllRecords('products','products','الأصناف')"><i class="ti ti-trash"></i> مسح الكل</button>
           </div>
 
+          <div id="pr-value-summary" style="display:none;flex-wrap:wrap;gap:10px;margin:0 0 12px"></div>
           <div id="pr-group-summary" style="display:none;flex-wrap:wrap;gap:10px;margin:0 0 12px"></div>
 
           <div class="card">
             <div class="card-title"><i class="ti ti-package"></i> سجل الأصناف وحالة الصلاحية</div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>المنسق</th><th>الفرع</th><th>الصنف</th><th>الفئة</th><th>رف</th><th>مخزن</th><th>صلاحية الرف</th><th>صلاحية المخزن</th><th>موعد الرفع</th><th>الحالة</th></tr></thead>
+                <thead><tr><th>المنسق</th><th>الفرع</th><th>الصنف</th><th>الفئة</th><th>رف</th><th>مخزن</th><th>القيمة</th><th>صلاحية الرف</th><th>صلاحية المخزن</th><th>موعد الرفع</th><th>الحالة</th></tr></thead>
                 <tbody id="products-table"></tbody>
               </table>
             </div>
@@ -18910,15 +18912,81 @@ function loadProducts(){
       <td><span class="badge b-blue">${p.fea||''}</span></td>
       <td>${p.shelf_qty||0}</td>
       <td>${p.stock_qty||0}</td>
+      <td>${productItemValueTxt(p)}</td>
       <td>${expBadge(sh)}</td>
       <td>${expBadge(st)}</td>
       <td>${rafa3Badge}</td>
       <td>${sh&&sh.diff<=2||st&&st.diff<=2?'<span class="badge b-red">تحذير</span>':'<span class="badge b-green">سليم</span>'}</td>
 
       <td><button onclick="deleteRecord('products',${p.id},'products')" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px">🗑</button></td></tr>`;
-  }).join('')||'<tr><td colspan="10" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات</td></tr>';
+  }).join('')||'<tr><td colspan="11" style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات</td></tr>';
 
   window._prodLastData = data;
+  renderProductsValueSummary();
+}
+
+// ══ قيمة البضاعة (رف+مخزن)×السعر — بتتحسب بعد ضغط زرار "حساب قيمة البضاعة" ══
+let _prodValuesCalculated = false;
+
+async function ensureSplPrices(){
+  if(_splPrices && _splPrices.length) return;
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/sales_prices?select=*&order=snf_name.asc&limit=2000`, {headers:H});
+    _splPrices = r.ok ? await r.json() : (_splPrices||[]);
+  }catch(e){ console.error('ensureSplPrices error', e); }
+}
+
+function productPriceFor(snf){
+  return (_splPrices||[]).find(x=>x.snf_name===snf) || null;
+}
+
+function productItemValue(p){
+  const pr = productPriceFor(p.snf);
+  if(!pr || !pr.price) return null;
+  const qty = (+p.shelf_qty||0) + (+p.stock_qty||0);
+  return qty * (+pr.price||0);
+}
+
+function productItemValueTxt(p){
+  if(!_prodValuesCalculated) return '<span style="color:#bbb">—</span>';
+  const v = productItemValue(p);
+  return v===null ? '<span style="color:#999" title="مفيش سعر مسجّل للصنف ده">—</span>' : `${v.toLocaleString('en-US',{maximumFractionDigits:2})} ج.م`;
+}
+
+async function productsCalcValues(){
+  const btn = document.getElementById('pr-calc-value-btn');
+  if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader-2"></i> جاري الحساب...'; }
+  try{
+    await ensureSplPrices();
+    _prodValuesCalculated = true;
+    loadProducts();
+    showToast('✅ اتحسبت قيمة البضاعة');
+  }catch(e){
+    console.error(e);
+    showToast('حصل خطأ في حساب قيمة البضاعة','err');
+  }finally{
+    if(btn){ btn.disabled=false; btn.innerHTML='<i class="ti ti-calculator"></i> حساب قيمة البضاعة'; }
+  }
+}
+
+function renderProductsValueSummary(){
+  const wrap = document.getElementById('pr-value-summary');
+  if(!wrap) return;
+  if(!_prodValuesCalculated){ wrap.style.display='none'; wrap.innerHTML=''; return; }
+  const data = window._prodLastData||[];
+  let total=0, unpriced=0;
+  data.forEach(p=>{
+    const v = productItemValue(p);
+    if(v===null) unpriced++; else total += v;
+  });
+  wrap.style.display='flex';
+  wrap.innerHTML = `
+    <div class="card" style="padding:10px 14px;min-width:220px;background:#2C1F0A">
+      <div style="font-size:12px;color:#EDE5D8;opacity:.85">💰 إجمالي قيمة الأصناف</div>
+      <div style="font-size:22px;font-weight:700;color:#fff">${total.toLocaleString('en-US',{maximumFractionDigits:2})} ج.م</div>
+      ${unpriced?`<div style="font-size:10.5px;color:#E8C9A0;margin-top:2px">⚠️ ${unpriced} صنف بدون سعر مسجّل — متحسبش في الإجمالي</div>`:''}
+    </div>`;
 }
 
 // نص حالة الصلاحية بدون HTML (للتصدير Excel/PDF)
@@ -18931,10 +18999,14 @@ function expStatusText(st){
   return `${st.diff} شهر`;
 }
 
-function productsExportExcel(){
+async function productsExportExcel(){
   if(typeof XLSX==='undefined'){showToast('جاري تحميل مكتبة Excel...');return;}
   const data = window._prodLastData||[];
   if(!data.length){showToast('لا توجد بيانات للتصدير','err');return;}
+  await ensureSplPrices();
+
+  let valueTotal=0, valueUnpriced=0;
+  data.forEach(p=>{ const v=productItemValue(p); if(v===null) valueUnpriced++; else valueTotal+=v; });
 
   const C={dark:'2C1F0A',caramel:'4B3C1A',gold:'C8A96E',cream:'EDE5D8',light:'F5F0E8',red:'731E2E',white:'FFFFFF',line:'E0D8CC'};
   const fill=c=>({patternType:'solid',fgColor:{rgb:c}});
@@ -18952,7 +19024,8 @@ function productsExportExcel(){
   const now=new Date().toLocaleDateString('en-US');
   const periodTxt = (dateFrom||dateTo) ? `${dateFrom||'...'} → ${dateTo||'...'}` : 'كل الفترات';
 
-  const COLS=['#','المنسق','الفرع','الصنف','الفئة','رف','مخزن','صلاحية الرف','صلاحية المخزن','موعد الرفع','الحالة','آخر تحديث'];
+  const COLS=['#','المنسق','الفرع','الصنف','الفئة','رف','مخزن','القيمة','صلاحية الرف','صلاحية المخزن','موعد الرفع','الحالة','آخر تحديث'];
+  const NCOLS=COLS.length;
   const wb=XLSX.utils.book_new();
 
   const groups={};
@@ -18962,18 +19035,20 @@ function productsExportExcel(){
     groups[g].push(p);
   });
 
+  const valueTotalTxt = `إجمالي قيمة الأصناف: ${valueTotal.toLocaleString('en-US',{maximumFractionDigits:2})} ج.م${valueUnpriced?` (${valueUnpriced} صنف بدون سعر مسجّل)`:''}`;
   const aoa=[
-    ['الطحان جولدن دايتس — Al Tahhan Golden Dates',...Array(11).fill('')],
-    ['الأصناف — سجل الأصناف وحالة الصلاحية (آخر رصيد لكل فرع/صنف)',...Array(11).fill('')],
-    [`تاريخ التصدير: ${now}  |  المجموعة: ${grpSelTxt}${branchSelTxt?`  |  الفرع: ${branchSelTxt}`:''}  |  الصنف: ${itemSelTxt}  |  الفترة: ${periodTxt}  |  إجمالي: ${data.length}`,...Array(11).fill('')],
-    Array(12).fill(''),
+    ['الطحان جولدن دايتس — Al Tahhan Golden Dates',...Array(NCOLS-1).fill('')],
+    ['الأصناف — سجل الأصناف وحالة الصلاحية (آخر رصيد لكل فرع/صنف)',...Array(NCOLS-1).fill('')],
+    [`تاريخ التصدير: ${now}  |  المجموعة: ${grpSelTxt}${branchSelTxt?`  |  الفرع: ${branchSelTxt}`:''}  |  الصنف: ${itemSelTxt}  |  الفترة: ${periodTxt}  |  إجمالي: ${data.length}`,...Array(NCOLS-1).fill('')],
+    [valueTotalTxt,...Array(NCOLS-1).fill('')],
+    Array(NCOLS).fill(''),
     COLS
   ];
 
   const dataStart=aoa.length;
   let idx=1;
   Object.entries(groups).forEach(([grpKey,rows])=>{
-    aoa.push([`🔷 ${GROUPS[grpKey]?.label||grpKey}`,...Array(11).fill('')]);
+    aoa.push([`🔷 ${GROUPS[grpKey]?.label||grpKey}`,...Array(NCOLS-1).fill('')]);
     rows.forEach(p=>{
       const sh=calcExpMonths(p.date_shelf,p.months_shelf);
       const st=calcExpMonths(p.date_stock,p.months_stock);
@@ -18981,7 +19056,9 @@ function productsExportExcel(){
       const rafa3Txt = rafa3===null?'—':rafa3<=0?'حان الرفع!':`بعد ${rafa3} شهور`;
       const statusTxt = (sh&&sh.diff<=2)||(st&&st.diff<=2) ? 'تحذير' : 'سليم';
       const dt = p.created_at?new Date(p.created_at).toLocaleDateString('en-US'):'—';
-      aoa.push([idx++,p.name||'—',p.branch||'—',p.snf||'—',p.fea||'—',p.shelf_qty||0,p.stock_qty||0,expStatusText(sh),expStatusText(st),rafa3Txt,statusTxt,dt]);
+      const v = productItemValue(p);
+      const valCell = v===null ? '—' : Math.round(v*100)/100;
+      aoa.push([idx++,p.name||'—',p.branch||'—',p.snf||'—',p.fea||'—',p.shelf_qty||0,p.stock_qty||0,valCell,expStatusText(sh),expStatusText(st),rafa3Txt,statusTxt,dt]);
     });
   });
 
@@ -18989,38 +19066,45 @@ function productsExportExcel(){
   const enc=(r,c)=>XLSX.utils.encode_cell({r,c});
   const sty=(r,c,s)=>{if(!ws[enc(r,c)])ws[enc(r,c)]={t:'z',v:''};ws[enc(r,c)].s=s;};
 
-  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:11}},{s:{r:1,c:0},e:{r:1,c:11}},{s:{r:2,c:0},e:{r:2,c:11}},{s:{r:3,c:0},e:{r:3,c:11}}];
+  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:NCOLS-1}},{s:{r:1,c:0},e:{r:1,c:NCOLS-1}},{s:{r:2,c:0},e:{r:2,c:NCOLS-1}},{s:{r:3,c:0},e:{r:3,c:NCOLS-1}}];
   sty(0,0,{font:font(1,15,C.cream),fill:fill(C.dark),alignment:aln('center'),border:brd('medium',C.dark)});
   sty(1,0,{font:font(1,13,C.dark),fill:fill(C.gold),alignment:aln('center'),border:brd('medium',C.caramel)});
   sty(2,0,{font:font(0,10,C.caramel,true),fill:fill(C.light),alignment:aln('center'),border:brd('thin',C.line)});
-  for(let c=0;c<12;c++) sty(3,c,{fill:fill(C.dark)});
-  for(let c=0;c<12;c++) sty(4,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:aln('center'),border:brd('medium',C.dark)});
+  sty(3,0,{font:font(1,10,C.dark),fill:fill(C.light),alignment:aln('center'),border:brd('thin',C.line)});
+  for(let c=0;c<NCOLS;c++) sty(4,c,{fill:fill(C.dark)});
+  for(let c=0;c<NCOLS;c++) sty(5,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:aln('center'),border:brd('medium',C.dark)});
 
   for(let ri=dataStart;ri<aoa.length;ri++){
     const row=aoa[ri];
     const isGrp=typeof row[0]==='string'&&row[0].includes('🔷');
     if(isGrp){
-      ws['!merges'].push({s:{r:ri,c:0},e:{r:ri,c:11}});
+      ws['!merges'].push({s:{r:ri,c:0},e:{r:ri,c:NCOLS-1}});
       sty(ri,0,{font:font(1,11,C.cream),fill:fill(C.caramel),alignment:aln('right'),border:brd('thin',C.dark)});
     } else {
-      for(let c=0;c<12;c++){
+      for(let c=0;c<NCOLS;c++){
         let s={font:font(0,9,C.dark),fill:fill(C.white),alignment:aln(c===0?'center':'right',undefined,true),border:brd('thin',C.line)};
+        if(c===7 && row[7]==='—') s={...s,font:font(0,9,'999999')};
         if(c===10 && row[10]==='حان الرفع!') s={...s,font:font(1,9,C.red)};
         sty(ri,c,s);
       }
     }
   }
-  ws['!cols']=[{wch:5},{wch:16},{wch:22},{wch:34},{wch:10},{wch:7},{wch:7},{wch:18},{wch:18},{wch:14},{wch:9},{wch:12}];
-  ws['!rows']=[{hpt:36},{hpt:28},{hpt:20},{hpt:8},{hpt:26}];
+  ws['!cols']=[{wch:5},{wch:16},{wch:22},{wch:34},{wch:10},{wch:7},{wch:7},{wch:12},{wch:18},{wch:18},{wch:14},{wch:9},{wch:12}];
+  ws['!rows']=[{hpt:36},{hpt:28},{hpt:20},{hpt:20},{hpt:8},{hpt:26}];
   XLSX.utils.book_append_sheet(wb,ws,'الأصناف');
 
   XLSX.writeFile(wb,`الأصناف_${localISO()}.xlsx`);
   showToast('✅ تم تصدير الأصناف');
 }
 
-function productsExportPDF(){
+async function productsExportPDF(){
   const data = window._prodLastData||[];
   if(!data.length){showToast('لا توجد بيانات للتصدير','err');return;}
+  const win=window.open('','_blank','width=1100,height=700');
+  await ensureSplPrices();
+  let valueTotal=0, valueUnpriced=0;
+  data.forEach(p=>{ const v=productItemValue(p); if(v===null) valueUnpriced++; else valueTotal+=v; });
+  const valueTotalTxt = `${valueTotal.toLocaleString('en-US',{maximumFractionDigits:2})} ج.م${valueUnpriced?` (${valueUnpriced} صنف بدون سعر)`:''}`;
   const now=new Date().toLocaleDateString('en-US');
   const dateFrom=document.getElementById('pr-date-from')?.value||'';
   const dateTo=document.getElementById('pr-date-to')?.value||'';
@@ -19048,7 +19132,7 @@ function productsExportPDF(){
           <span>${grpLabel}</span><span>${rows.length} صنف</span>
         </div>
         <table>
-          <thead><tr><th>#</th><th>المنسق</th><th>الفرع</th><th>الصنف</th><th>الفئة</th><th>رف</th><th>مخزن</th><th>صلاحية الرف</th><th>صلاحية المخزن</th><th>موعد الرفع</th><th>الحالة</th></tr></thead>
+          <thead><tr><th>#</th><th>المنسق</th><th>الفرع</th><th>الصنف</th><th>الفئة</th><th>رف</th><th>مخزن</th><th>القيمة</th><th>صلاحية الرف</th><th>صلاحية المخزن</th><th>موعد الرفع</th><th>الحالة</th></tr></thead>
           <tbody>
           ${rows.map((p,i)=>{
             const sh=calcExpMonths(p.date_shelf,p.months_shelf);
@@ -19056,6 +19140,8 @@ function productsExportPDF(){
             const rafa3=sh?sh.rafa3Diff:null;
             const rafa3Txt = rafa3===null?'—':rafa3<=0?'حان الرفع!':`بعد ${rafa3} شهور`;
             const warn = (sh&&sh.diff<=2)||(st&&st.diff<=2);
+            const v = productItemValue(p);
+            const valTxt = v===null ? '—' : `${v.toLocaleString('en-US',{maximumFractionDigits:2})} ج.م`;
             return `<tr>
               <td style="text-align:center">${i+1}</td>
               <td><b>${p.name||'—'}</b></td>
@@ -19064,6 +19150,7 @@ function productsExportPDF(){
               <td><span style="background:#EEF4FF;color:#1565C0;border-radius:20px;padding:1px 6px;font-size:8px">${p.fea||'—'}</span></td>
               <td style="text-align:center">${p.shelf_qty||0}</td>
               <td style="text-align:center">${p.stock_qty||0}</td>
+              <td style="text-align:center;font-weight:600">${valTxt}</td>
               <td style="font-size:9px">${expStatusText(sh)}</td>
               <td style="font-size:9px">${expStatusText(st)}</td>
               <td style="font-size:9px">${rafa3Txt}</td>
@@ -19095,12 +19182,12 @@ function productsExportPDF(){
   </style></head><body>
   <div class="hdr-co">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
   <div class="hdr-title">الأصناف — سجل الأصناف وحالة الصلاحية (آخر رصيد لكل فرع/صنف)</div>
-  <div class="hdr-info">تاريخ التصدير: ${now} &nbsp;|&nbsp; المجموعة: ${grpSelTxt}${branchSelTxt?` &nbsp;|&nbsp; الفرع: ${branchSelTxt}`:''} &nbsp;|&nbsp; الصنف: ${itemSelTxt} &nbsp;|&nbsp; الفترة: ${periodTxt} &nbsp;|&nbsp; إجمالي: ${data.length} صنف</div>
+  <div class="hdr-info">تاريخ التصدير: ${now} &nbsp;|&nbsp; المجموعة: ${grpSelTxt}${branchSelTxt?` &nbsp;|&nbsp; الفرع: ${branchSelTxt}`:''} &nbsp;|&nbsp; الصنف: ${itemSelTxt} &nbsp;|&nbsp; الفترة: ${periodTxt} &nbsp;|&nbsp; إجمالي: ${data.length} صنف &nbsp;|&nbsp; إجمالي قيمة الأصناف: ${valueTotalTxt}</div>
   ${tablesHTML}
   <div class="footer">Al Tahhan Golden Dates © 2026 — نظام إدارة التنسيق الميداني</div>
   </body></html>`;
 
-  const win=window.open('','_blank','width=1100,height=700');
+  if(!win){ showToast('المتصفح منع فتح نافذة جديدة — اسمح بالنوافذ المنبثقة','err'); return; }
   win.document.write(html);
   win.document.close();
   setTimeout(()=>{win.focus();win.print();},800);
