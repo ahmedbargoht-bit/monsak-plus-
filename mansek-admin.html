@@ -6547,7 +6547,7 @@ h2,h3{color:#2C1F0A}
           <div class="page-header">
             <div>
               <h2><i class="ti ti-truck-delivery" style="color:#731E2E"></i> رصيد المناديب</h2>
-              <p>رصيد كل مندوب في عربيته (طلبات بضاعة موافق عليها + مرتجعات - فواتير توريد + تصحيحات المشرف)، مع كل طلبات البضاعة. دوس على أي مندوب في "رصيد كل مندوب" تحت عشان تشوف رصيده وسجل جرده الكامل وأي فروق لسه محتاجة مراجعة، كل حاجة في مكان واحد</p>
+              <p>رصيد كل مندوب في عربيته (طلبات بضاعة موافق عليها + مرتجعات لسه معلّقة (لم يتأكد استلامها) - فواتير توريد + تصحيحات المشرف)، مع كل طلبات البضاعة. دوس على أي مندوب في "رصيد كل مندوب" تحت عشان تشوف رصيده وسجل جرده الكامل وأي فروق لسه محتاجة مراجعة، كل حاجة في مكان واحد</p>
             </div>
             <button onclick="repbalLoad(true)" class="btn btn-ghost btn-sm"><i class="ti ti-refresh"></i> تحديث</button>
           </div>
@@ -6566,6 +6566,18 @@ h2,h3{color:#2C1F0A}
               </div>
               <div id="repbal-grp-options" style="padding:6px 4px"></div>
             </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title"><i class="ti ti-lock" style="color:#731E2E"></i> الجرد اليدوي للمناديب</div>
+            <p style="font-size:12px;color:var(--text2);margin:0 0 12px">
+              رصيد كل مندوب بيتحسب أوتوماتيك طول الوقت (طلبات بضاعة + توريد + مرتجع). الجرد اليدوي هنا استثنائي بس —
+              افتحه وقت عمل جرد دوري شامل للتصحيح، وقفله تاني بعد ما يخلص المناديب كلهم.
+            </p>
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;background:#F9F6F1;border:1.5px solid var(--border);border-radius:10px;padding:12px 16px;width:fit-content">
+              <input type="checkbox" id="repbal-manual-count-toggle" onchange="repbalToggleManualCount(this.checked)" style="width:20px;height:20px;cursor:pointer;accent-color:#731E2E"/>
+              <span id="repbal-manual-count-label" style="font-size:13px;font-weight:700;color:#5C3D2E">فتح الجرد اليدوي لكل المناديب</span>
+            </label>
           </div>
 
           <div class="card">
@@ -34982,7 +34994,42 @@ function repbalUpdateGrpLabel(){
 function repbalInit(){
   repbalRenderGrpOptions();
   repbalUpdateGrpLabel();
+  repbalLoadManualCountToggle();
   repbalLoad();
+}
+
+// إعداد عام (مفتاح واحد في products_db) بيتحكم في إتاحة تبويب "العدّ اليدوي" في تطبيق
+// المندوب — مقفول افتراضيًا، وبيتفتح بس وقت الجرد الدوري الشامل للتصحيح
+async function repbalLoadManualCountToggle(){
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.ci_manual_count_open&select=value&limit=1`,{headers:H});
+    const data = r.ok ? await r.json() : [];
+    const open = data[0]?.value === 'true';
+    const cb = document.getElementById('repbal-manual-count-toggle');
+    if(cb) cb.checked = open;
+    repbalUpdateManualCountLabel(open);
+  }catch(e){}
+}
+function repbalUpdateManualCountLabel(open){
+  const lbl = document.getElementById('repbal-manual-count-label');
+  if(lbl) lbl.textContent = open ? '✅ الجرد اليدوي مفتوح دلوقتي لكل المناديب' : 'فتح الجرد اليدوي لكل المناديب';
+}
+async function repbalToggleManualCount(checked){
+  const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  try{
+    const check = await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.ci_manual_count_open&select=id`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const rows = check.ok ? await check.json() : [];
+    if(rows.length){
+      await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.ci_manual_count_open`,{method:'PATCH',headers:H,body:JSON.stringify({value:String(checked)})});
+    } else {
+      await fetch(`${SUPABASE_URL}/rest/v1/products_db`,{method:'POST',headers:H,body:JSON.stringify({key:'ci_manual_count_open',value:String(checked)})});
+    }
+    repbalUpdateManualCountLabel(checked);
+    showToast(checked?'✅ اتفتح الجرد اليدوي لكل المناديب':'⏸ اتقفل الجرد اليدوي لكل المناديب');
+  }catch(e){
+    showToast('❌ خطأ في الحفظ');
+  }
 }
 
 // مفيش تاريخ بداية موحّد للكل — كل مندوب بداية تتبع رصيده هي بالظبط لحظة أول جرد سجّله هو نفسه
@@ -35026,7 +35073,9 @@ function repbalCalcBalances(raw, from, to, has){
     return true;
   };
   (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.delivery_date) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
-  (raw.rets||[]).forEach(d=>{ if(afterStart(d.rep_name,d.return_date) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  // المرتجع بيتحسب بس لما يكون لسه "معلّق" (المشرف لسه ما أكّدش استلامه) — لحظة ما يتأكد
+  // الاستلام، الكمية دي بتخرج فعليًا من رصيد عربية المندوب فمبتتحسبش تاني
+  (raw.rets||[]).forEach(d=>{ if(d.receipt_status==='pending' && afterStart(d.rep_name,d.return_date) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.reqsApproved||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
   return bal;
@@ -35079,20 +35128,31 @@ async function repbalLoad(){
 
   const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
-  const [pending, diffs, allReqs, dels, rets, reqsApproved, adjs, invRows, fullInv] = await Promise.all([
+  const [pending, diffs, allReqs, dels, rets, reqsApproved, adjs, invRows, fullInv, reqDateRows] = await Promise.all([
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&order=created_at.asc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&order=created_at.desc&limit=300`),
     fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status&limit=10000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at&limit=5000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at&limit=5000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&order=created_at.desc&limit=5000&select=id,rep_name,snf,counted_qty,counted_valid_qty,counted_returned_qty,computed_qty,diff,resolved,created_at`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
   ]);
 
+  // بداية تتبع رصيد كل مندوب: أبكر تاريخ بين (أول طلب بضاعة سجّله من المخزن) أو (أول جرد يدوي
+  // عمله، لو عمل قبل كده) — المناديب الجداد اللي لسه مبيعملوش جرد يدوي (بقى استثنائي/دوري بس)
+  // يبقى ليهم رصيد محسوب من أول طلب بضاعة، مش لازم ينتظروا أول جرد عشان يظهر ليهم رصيد.
   const startDates = {};
-  (invRows||[]).forEach(row=>{ if(row.rep_name && !startDates[row.rep_name] && row.created_at) startDates[row.rep_name] = row.created_at.slice(0,10); });
+  const considerStart = (rows)=>{
+    (rows||[]).forEach(row=>{
+      if(!row.rep_name || !row.created_at) return;
+      const d = row.created_at.slice(0,10);
+      if(!startDates[row.rep_name] || d < startDates[row.rep_name]) startDates[row.rep_name] = d;
+    });
+  };
+  considerStart(invRows); considerStart(reqDateRows);
 
   // سجل الجرد الكامل لكل مندوب (كل الحركات، معتمدة أو لسه محتاجة مراجعة) — ده اللي بيوريه المودال
   // بتاع كل مندوب، عشان تشوف كل حاجة عنه في مكان واحد بدل ما تتفرق على أكتر من كارت

@@ -2072,6 +2072,26 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
       </div>
       <div class="card">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+          <span><i class="ti ti-corner-down-left" style="color:#8B2635"></i> مرتجعات محتاجة تأكيد استلام</span>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:6px 0 10px">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text2)">
+            <input type="checkbox" id="rbret-selectall" onchange="rbretToggleSelectAll(this.checked)" style="width:15px;height:15px"/>
+            تحديد الكل (<span id="rbret-sel-count">0</span> مرتجع محدد)
+          </label>
+          <div style="display:flex;gap:6px">
+            <button id="rbret-confirm-btn" onclick="rbretConfirmReceipt()" style="background:#276749;color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer;display:flex;align-items:center;gap:5px">
+              <i class="ti ti-check"></i> تأكيد الاستلام
+            </button>
+            <button id="rbret-pdf-btn" onclick="rbretExportPDF()" style="background:#2C1F0A;color:#EDE5D8;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer;display:flex;align-items:center;gap:5px">
+              <i class="ti ti-file-type-pdf"></i> تصدير الكل PDF
+            </button>
+          </div>
+        </div>
+        <div id="rbret-pending"><div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جارِ التحميل...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
           <span><i class="ti ti-list-check" style="color:#2E7D32"></i> كل طلبات البضاعة (سجل كامل)</span>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:6px 0 10px">
@@ -3247,17 +3267,29 @@ let _rbRawBalanceData = {dels:[], rets:[], reqs:[], adjs:[]};
 // في التطبيق. أي حركة (توريد/مرتجع/طلب بضاعة/تسوية) قبل أول جرد للمندوب ده متتحسبش خالص.
 // الثابت ده باقي بس كحد أدنى تاريخي قديم — مش بيتفلتر بيه أي بيانات دلوقتي.
 const REP_BALANCE_START_DATE = '2026-09-21';
+// بداية تتبع رصيد كل مندوب: أبكر تاريخ بين (أول طلب بضاعة سجّله من المخزن) أو (أول جرد يدوي
+// عمله، لو عمل قبل كده) — نفس منطق sales-rep.html (ciGetBalanceStartDate)، عشان المناديب
+// الجداد اللي لسه مبيعملوش جرد يدوي أصلاً (بقى استثنائي/دوري) يبقى ليهم رصيد محسوب من أول
+// طلب بضاعة، مش لازم ينتظروا أول جرد عشان يظهر ليهم رصيد.
 async function rbGetRepStartDates(repNames){
   if(!repNames.length) return {};
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
   const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
-  try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`,{headers:H, cache:'no-store'});
-    const rows = r.ok ? await r.json() : [];
-    const map = {};
-    (rows||[]).forEach(row=>{ if(row.rep_name && !map[row.rep_name] && row.created_at) map[row.rep_name] = row.created_at.slice(0,10); });
-    return map;
-  }catch(e){ return {}; }
+  const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
+  const [invRows, reqRows] = await Promise.all([
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
+  ]);
+  const map = {};
+  const consider = (rows)=>{
+    (rows||[]).forEach(row=>{
+      if(!row.rep_name || !row.created_at) return;
+      const d = row.created_at.slice(0,10);
+      if(!map[row.rep_name] || d < map[row.rep_name]) map[row.rep_name] = d;
+    });
+  };
+  consider(invRows); consider(reqRows);
+  return map;
 }
 async function rbFetchRawBalanceData(repNames){
   if(!repNames.length) return {dels:[], rets:[], reqs:[], adjs:[], startDates:{}};
@@ -3266,7 +3298,7 @@ async function rbFetchRawBalanceData(repNames){
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
   const [dels, rets, reqs, adjs, startDates] = await Promise.all([
     fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status&limit=10000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at&limit=5000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at&limit=5000`),
     rbGetRepStartDates(repNames),
@@ -3294,7 +3326,9 @@ function rbCalcBalances(raw, from, to, has){
     return true;
   };
   (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.delivery_date) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
-  (raw.rets||[]).forEach(d=>{ if(afterStart(d.rep_name,d.return_date) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  // المرتجع بيتحسب بس لما يكون لسه "معلّق" (المشرف لسه ما أكّدش استلامه) — لحظة ما يتأكد
+  // الاستلام، الكمية دي بتخرج فعليًا من رصيد عربية المندوب فمبتتحسبش تاني
+  (raw.rets||[]).forEach(d=>{ if(d.receipt_status==='pending' && afterStart(d.rep_name,d.return_date) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.reqs||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
   return bal;
@@ -3363,6 +3397,8 @@ async function rbLoad(){
   document.getElementById('rb-balances').innerHTML  = '<div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جارِ التحميل...</div>';
   const allreqsWrap = document.getElementById('rb-allreqs');
   if(allreqsWrap) allreqsWrap.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جارِ التحميل...</div>';
+  const retWrap = document.getElementById('rbret-pending');
+  if(retWrap) retWrap.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جارِ التحميل...</div>';
 
   _rbTeamReps = await rbGetTeamReps();
   if(!_rbTeamReps.length){
@@ -3370,6 +3406,7 @@ async function rbLoad(){
     document.getElementById('rb-diffs').innerHTML    = '';
     document.getElementById('rb-balances').innerHTML = '';
     if(allreqsWrap) allreqsWrap.innerHTML = '';
+    if(retWrap) retWrap.innerHTML = '';
     return;
   }
 
@@ -3377,17 +3414,19 @@ async function rbLoad(){
   const encList = _rbTeamReps.map(n=>encodeURIComponent(n)).join(',');
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
 
-  const [pending, diffs, allReqs, raw] = await Promise.all([
+  const [pending, diffs, allReqs, raw, pendingReturns] = await Promise.all([
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&order=created_at.asc&limit=200`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc&limit=200`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&order=created_at.desc&limit=300`),
     rbFetchRawBalanceData(_rbTeamReps),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&receipt_status=eq.pending&deleted_at=is.null&order=created_at.asc&limit=300`),
   ]);
   await rbEnsurePrices(); // لازم الأسعار متحمّلة عشان عمود "القيمة" في طلبات البضاعة يظهر صح من أول تحميل
   _rbRawAllReqs = allReqs||[];
   _rbRawPending = pending||[];
   _rbRawDiffs   = diffs||[];
   _rbRawBalanceData = raw;
+  rbretRenderPending(pendingReturns||[]);
   rbApplyPeriod();
 }
 
@@ -3801,6 +3840,230 @@ async function rbReject(id){
     if(!res.ok) throw new Error(await res.text());
     rbLoad();
   }catch(e){ alert('حصل خطأ، حاول تاني'); }
+}
+
+// ══ مرتجعات محتاجة تأكيد استلام (لسه في عربية المندوب لحد ما يتأكد إن وصلت لإدارة التوالف) ══
+let _rbretPendingRows = [];
+let _rbretSelected = new Set();
+
+function rbretToggleSel(id, checked){
+  if(checked) _rbretSelected.add(id); else _rbretSelected.delete(id);
+  rbretUpdateSelUI();
+}
+function rbretToggleSelectAll(checked){
+  _rbretSelected = checked ? new Set(_rbretPendingRows.map(r=>r.id)) : new Set();
+  document.querySelectorAll('.rbret-cb').forEach(cb=>cb.checked=checked);
+  rbretUpdateSelUI();
+}
+function rbretUpdateSelUI(){
+  const cnt = document.getElementById('rbret-sel-count');
+  if(cnt) cnt.textContent = _rbretSelected.size;
+  const allCb = document.getElementById('rbret-selectall');
+  if(allCb) allCb.checked = !!(_rbretPendingRows||[]).length && _rbretSelected.size===_rbretPendingRows.length;
+  const confirmBtn = document.getElementById('rbret-confirm-btn');
+  if(confirmBtn) confirmBtn.innerHTML = _rbretSelected.size
+    ? `<i class="ti ti-check"></i> تأكيد استلام المحدد (${_rbretSelected.size})`
+    : '<i class="ti ti-check"></i> تأكيد الاستلام';
+  const pdfBtn = document.getElementById('rbret-pdf-btn');
+  if(pdfBtn) pdfBtn.innerHTML = _rbretSelected.size
+    ? '<i class="ti ti-file-type-pdf"></i> تصدير المحدد PDF'
+    : '<i class="ti ti-file-type-pdf"></i> تصدير الكل PDF';
+}
+
+function rbretRenderPending(rows){
+  const wrap = document.getElementById('rbret-pending');
+  if(!wrap) return;
+  _rbretPendingRows = rows||[];
+  const idsNow = new Set(_rbretPendingRows.map(r=>r.id));
+  [..._rbretSelected].forEach(id=>{ if(!idsNow.has(id)) _rbretSelected.delete(id); });
+  rbretUpdateSelUI();
+  if(!_rbretPendingRows.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش مرتجعات معلّقة حاليًا</div>'; return; }
+  wrap.innerHTML = _rbretPendingRows.map(r=>{
+    const d = new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'});
+    const items = r.items||[];
+    const itemsHtml = items.map(i=>{
+      const validQ = i.valid_qty!=null ? i.valid_qty : i.qty;
+      const dmgQ = i.damaged_qty!=null ? i.damaged_qty : 0;
+      return `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:5px 8px">${i.name}</td>
+        <td style="padding:5px 6px;text-align:center;color:#276749;font-weight:700">${validQ}</td>
+        <td style="padding:5px 6px;text-align:center;color:#B71C1C;font-weight:700">${dmgQ}</td>
+      </tr>`;
+    }).join('');
+    const checked = _rbretSelected.has(r.id) ? 'checked' : '';
+    const metaLine = [r.client_name?('العميل: '+r.client_name):'', r.branch_name?('الفرع: '+r.branch_name):''].filter(Boolean).join(' — ');
+    return `<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:700;font-size:13px;cursor:pointer">
+          <input type="checkbox" class="rbret-cb" ${checked} onchange="rbretToggleSel(${r.id},this.checked)" style="width:15px;height:15px"/>
+          ${r.rep_name}
+        </label>
+        <div style="font-size:11px;color:var(--text2)">${d}</div>
+      </div>
+      ${metaLine ? `<div style="font-size:11px;color:var(--text2);margin-top:4px">${metaLine}</div>` : ''}
+      <table style="width:100%;border-collapse:collapse;font-size:11.5px;margin-top:6px">
+        <tr style="background:#FAF8F3"><th style="padding:5px 8px;text-align:right;color:var(--text2);font-weight:600">الصنف</th><th style="padding:5px 6px;text-align:center;color:var(--text2);font-weight:600;width:60px">✅ صالح</th><th style="padding:5px 6px;text-align:center;color:var(--text2);font-weight:600;width:60px">🗑 تالف</th></tr>
+        ${itemsHtml}
+      </table>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-sm" style="background:#276749;color:#fff" onclick="rbretConfirmReceipt(${r.id})"><i class="ti ti-check"></i> تأكيد الاستلام</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// تأكيد استلام مرتجع/مرتجعات فعليًا (خرجت من عربية المندوب لإدارة التوالف) — لو singleId
+// اتبعت بيأكد الصف ده بس، غير كده بيستخدم المحدد بمربعات الاختيار
+async function rbretConfirmReceipt(singleId){
+  const ids = singleId ? [singleId] : [..._rbretSelected];
+  if(!ids.length){ showToast('حدد مرتجع واحد على الأقل الأول','err'); return; }
+  const label = ids.length>1 ? `${ids.length} مرتجع محدد` : 'المرتجع ده';
+  if(!confirm(`تأكيد استلام ${label} فعليًا من عربية المندوب وتسليمه لإدارة التوالف؟`)) return;
+  try{
+    const idList = ids.join(',');
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/sales_returns?id=in.(${idList})`,{
+      method:'PATCH',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body: JSON.stringify({receipt_status:'received', received_by:cu.name, received_at:new Date().toISOString()})
+    });
+    if(!res.ok) throw new Error(await res.text());
+    showToast('✅ اتأكد الاستلام بنجاح');
+    _rbretSelected.clear();
+    rbLoad();
+  }catch(e){ showToast('❌ حصل خطأ، حاول تاني','err'); }
+}
+
+// يبني مستند "تأكيد استلام مرتجعات من المناديب" (مجمّع حسب المندوب، كل مرتجع بتفصيل صالح/تالف) بهوية الطحان
+function rbretBuildDocHTML(rows){
+  const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
+  const groups = {};
+  rows.forEach(r=>{ (groups[r.rep_name] = groups[r.rep_name] || []).push(r); });
+  const repNames = Object.keys(groups).sort((a,b)=>a.localeCompare(b,'ar'));
+  let grandValid=0, grandDamaged=0;
+  const groupsHtml = repNames.map(repName=>{
+    const grpRows = groups[repName];
+    let repValid=0, repDamaged=0;
+    const reqsHtml = grpRows.map((r,i)=>{
+      const itemsRows = (r.items||[]).map(it=>{
+        const v = it.valid_qty!=null?it.valid_qty:it.qty;
+        const d = it.damaged_qty!=null?it.damaged_qty:0;
+        repValid+=v; repDamaged+=d;
+        return `<tr style="background:${i%2?'#FCF9F4':'#fff'}">
+          <td style="padding:6px 8px;border:1px solid #E0D8CC">${it.name}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;color:#276749;font-weight:700">${v}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;color:#B71C1C;font-weight:700">${d}</td>
+        </tr>`;
+      }).join('');
+      const metaLine = [r.client_name?('العميل: '+r.client_name):'', r.branch_name?('الفرع: '+r.branch_name):''].filter(Boolean).join(' — ');
+      return `<div style="margin-bottom:10px">
+        <div style="background:#EDE5D8;padding:5px 10px;font-size:10.5px;font-weight:700;color:#4B3C1A">
+          ${new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'numeric'})}${metaLine?(' — '+metaLine):''}
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:10.5px">
+          <thead><tr style="background:#8B2635;color:#fff"><th style="padding:6px;border:1px solid #5a1622">الصنف</th><th style="padding:6px;border:1px solid #5a1622;width:70px">✅ صالح</th><th style="padding:6px;border:1px solid #5a1622;width:70px">🗑 تالف</th></tr></thead>
+          <tbody>${itemsRows}</tbody>
+        </table>
+      </div>`;
+    }).join('');
+    grandValid+=repValid; grandDamaged+=repDamaged;
+    return `<div style="margin-bottom:20px">
+      <div style="background:#C8A96E;color:#2C1F0A;padding:8px 14px;border-radius:8px 8px 0 0;font-weight:800;font-size:13px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px">
+        <span>👤 المندوب: ${repName}</span>
+        <span style="font-weight:400;font-size:11px">${grpRows.length} مرتجع — صالح ${repValid} / تالف ${repDamaged}</span>
+      </div>
+      <div style="border:1px solid #EDE0CC;border-top:none;border-radius:0 0 8px 8px;padding:10px">
+        ${reqsHtml}
+      </div>
+    </div>`;
+  }).join('');
+
+  return `
+    <div style="background:#2C1F0A;color:#EDE5D8;text-align:center;padding:14px;border-radius:10px 10px 0 0;display:flex;align-items:center;justify-content:space-between;gap:12px">
+      <img src="${AT_LOGO_B64}" alt="Al Tahhan Logo" style="height:56px;width:56px;object-fit:contain;border-radius:6px;background:#fff;padding:4px"/>
+      <div>
+        <div style="font-size:19px;font-weight:900">الطحان جولدن دايتس</div>
+        <div style="font-size:10px;color:#C8A96E;margin-top:2px">Al Tahhan Golden Dates</div>
+      </div>
+      <div style="width:56px"></div>
+    </div>
+    <div style="background:#8B2635;color:#fff;text-align:center;padding:9px;font-size:14px;font-weight:700">تأكيد استلام مرتجعات من المناديب</div>
+    <div style="background:#F5F0E8;padding:12px 18px;border-radius:0 0 8px 8px;margin-bottom:18px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px">
+      <div>عدد المناديب: <b style="color:#731E2E">${repNames.length}</b></div>
+      <div>إجمالي عدد المرتجعات: <b style="color:#731E2E">${rows.length}</b></div>
+      <div>إجمالي صالح: <b style="color:#276749">${grandValid}</b></div>
+      <div>إجمالي تالف: <b style="color:#B71C1C">${grandDamaged}</b></div>
+      <div>تاريخ الإصدار: <b style="color:#731E2E">${now}</b></div>
+    </div>
+    ${groupsHtml || '<div style="text-align:center;padding:20px;color:#aaa">مفيش مرتجعات مسجّلة</div>'}
+    <div style="display:flex;justify-content:space-between;gap:24px;margin-top:44px;padding:0 12px">
+      <div style="flex:1;text-align:center">
+        <div style="border-top:1.5px solid #4B3C1A;padding-top:10px;font-size:12px;font-weight:700;color:#2C1F0A">توقيع مشرف المبيعات</div>
+      </div>
+      <div style="flex:1;text-align:center">
+        <div style="border-top:1.5px solid #4B3C1A;padding-top:10px;font-size:12px;font-weight:700;color:#2C1F0A">توقيع إدارة التوالف</div>
+      </div>
+    </div>
+    <div style="text-align:center;color:#aaa;font-size:9px;margin-top:26px">Al Tahhan Golden Dates © ${new Date().getFullYear()} — تم إنشاء التقرير من منظومة إدارة المبيعات والتنسيق</div>`;
+}
+
+// تصدير PDF لمرتجعات المناديب المعلّقة (كل المناديب أو المحدد فقط) — بألوان وهوية الطحان + توقيعات، مشاركة مباشرة أو تحميل
+async function rbretExportPDF(){
+  const all = _rbretPendingRows||[];
+  const rows = _rbretSelected.size ? all.filter(r=>_rbretSelected.has(r.id)) : all;
+  if(!rows.length){ showToast('مفيش مرتجعات لتصديرها حاليًا','err'); return; }
+  if(typeof html2canvas==='undefined' || !window.jspdf){ showToast('مكتبة PDF لسه بتتحمّل، حاول تاني بعد لحظة','err'); return; }
+
+  showToast('⏳ جاري تجهيز تقرير المرتجعات...');
+  const holder = document.createElement('div');
+  holder.style.cssText = 'position:fixed;top:0;left:-99999px;width:780px;background:#fff;z-index:-1;direction:rtl;font-family:Cairo,Arial,sans-serif';
+  holder.innerHTML = rbretBuildDocHTML(rows);
+  document.body.appendChild(holder);
+
+  try{
+    if(document.fonts && document.fonts.ready) await document.fonts.ready;
+    const canvas = await html2canvas(holder, {scale:2, useCORS:true, backgroundColor:'#ffffff'});
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({unit:'mm', format:'a4'});
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const imgW = pageW;
+    const imgH = canvas.height * imgW / canvas.width;
+    const imgData = canvas.toDataURL('image/jpeg', 0.95);
+    let heightLeft = imgH, position = 0;
+    pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH);
+    heightLeft -= pageH;
+    while(heightLeft > 0){
+      position = heightLeft - imgH;
+      pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH);
+      heightLeft -= pageH;
+    }
+    const blob = pdf.output('blob');
+    const safeName = s=>String(s||'').replace(/[\\/:*?"<>|]/g,'_').trim();
+    const repNamesInExport = [...new Set(rows.map(r=>r.rep_name))];
+    const namePart = repNamesInExport.length===1 ? safeName(repNamesInExport[0])
+      : repNamesInExport.length<=3 ? repNamesInExport.map(safeName).join('_')
+      : `${repNamesInExport.length}_مناديب`;
+    const fileName = `مرتجعات_${namePart}.pdf`;
+    const file = new File([blob], fileName, {type:'application/pdf'});
+
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file], title:'مرتجعات', text:`تقرير تأكيد استلام مرتجعات`});
+      showToast('✅ تم فتح خيارات الإرسال');
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = fileName;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 4000);
+      showToast('✅ اتحمّل ملف PDF — تقدر ترسله من الواتس يدويًا');
+    }
+  }catch(e){
+    if(e && e.name === 'AbortError'){ /* المستخدم لغى المشاركة بنفسه */ }
+    else{ console.warn('rbretExportPDF failed', e); showToast('حصل خطأ أثناء تجهيز الملف','err'); }
+  } finally {
+    holder.remove();
+  }
 }
 
 // مجمّعة حسب المندوب (زي شكل لوحة التحكم بالظبط): عنوان بيه اسم المندوب وعدد الأصناف،
