@@ -6606,7 +6606,7 @@ h2,h3{color:#2C1F0A}
               <input type="date" id="repbal-to" onchange="repbalApplyPeriod()" style="padding:6px 8px;border:1.5px solid var(--border);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif;background:#fff;color:#2C2C2A"/>
               <span onclick="repbalClearPeriod()" style="font-size:12px;color:#731E2E;cursor:pointer;text-decoration:underline">الكل</span>
             </div>
-            <div id="repbal-period-note" style="font-size:11px;color:var(--text2);margin-top:6px">بدون تحديد فترة: كل الطلبات المعلّقة والفروق الحالية والسجل الكامل، والرصيد التراكمي من 21/9/2026 (بداية تفعيل تسجيل الأرصدة) لحد النهاردة.</div>
+            <div id="repbal-period-note" style="font-size:11px;color:var(--text2);margin-top:6px">بدون تحديد فترة: الرصيد المعروض هو البضاعة الفعلية الموجودة في عربية كل مندوب دلوقتي (بعد كل حركات البيع والمرتجع من 21/9/2026 لحد النهاردة).</div>
           </div>
 
           <div class="card">
@@ -35517,7 +35517,7 @@ function repbalInRange(dateStr, from, to){
   if(to && d>to) return false;
   return true;
 }
-// بدون فترة: رصيد تراكمي من أول جرد سجّله كل مندوب. بفترة محددة: صافي الحركة خلال الفترة دي بس (مقيّدة برضه بعدم النزول قبل أول جرد).
+// بدون فترة: البضاعة الفعلية الموجودة في عربية كل مندوب دلوقتي (من تاريخ أول جرد سجّله لحد النهاردة). بفترة محددة: صافي حركة البيع/المرتجع خلال الفترة دي بس (مقيّدة برضه بعدم النزول قبل أول جرد).
 function repbalCalcBalances(raw, from, to, has){
   const bal = {};
   const startDates = raw.startDates || {};
@@ -35575,8 +35575,8 @@ function repbalApplyPeriod(){
   const {from, to, has} = repbalGetPeriod();
   const note = document.getElementById('repbal-period-note');
   if(note) note.textContent = has
-    ? 'الفترة محددة: الطلبات والفروق والسجل اللي حصل خلالها، والرصيد بقى صافي الحركة خلال الفترة دي بس.'
-    : 'بدون تحديد فترة: كل الطلبات المعلّقة والفروق الحالية والسجل الكامل، والرصيد التراكمي لكل مندوب من تاريخ أول جرد سجّله هو نفسه لحد النهاردة (المندوب اللي لسه معملش جرد، رصيده هيفضل مش محسوب لحد ما يعمل أول جرد).';
+    ? 'الفترة محددة: الطلبات والفروق والسجل اللي حصل خلالها، والرصيد بقى صافي حركة البيع/المرتجع خلال الفترة دي بس.'
+    : 'بدون تحديد فترة: الرصيد المعروض هو البضاعة الفعلية الموجودة في عربية كل مندوب دلوقتي (بعد كل حركات البيع والمرتجع من تاريخ أول جرد سجّله هو نفسه لحد النهاردة — المندوب اللي لسه معملش جرد، رصيده هيفضل مش محسوب لحد ما يعمل أول جرد).';
   const pending = has ? _repbalRawPending.filter(r=>repbalInRange(r.created_at,from,to)) : _repbalRawPending;
   const diffs   = has ? _repbalRawDiffs.filter(r=>repbalInRange(r.created_at,from,to))   : _repbalRawDiffs;
   const allReqs = has ? _repbalRawAllReqs.filter(r=>repbalInRange(r.created_at,from,to)) : _repbalRawAllReqs;
@@ -36238,12 +36238,13 @@ function repbalRenderBalances(){
 // ══ بوب أب تصدير سجل جرد المندوب (PDF / Excel) ══
 let _repbalExportRep = null;
 function repbalPeriodTxt(rep, from, to, has){
-  if(has) return `الفترة: من ${from||'—'} إلى ${to||'—'}`;
+  if(has) return `البضاعة الفعلية في العربية خلال الفترة: من ${from||'—'} إلى ${to||'—'}`;
   const sd = (_repbalRawBalanceData.startDates||{})[rep];
-  return sd ? `رصيد تراكمي من أول جرد للمندوب (${sd}) لحد النهاردة` : 'لسه محتاج يعمل أول جرد عشان يتحسب له رصيد';
+  return sd ? `البضاعة الفعلية الموجودة في العربية الآن (محسوبة من ${sd} لحد النهاردة)` : 'لسه محتاج يعمل أول جرد عشان يتحسب له رصيد';
 }
-function repbalOpenExportModal(rep){
+async function repbalOpenExportModal(rep){
   _repbalExportRep = rep;
+  await ensureSplPrices(); // كتالوج الأسعار العام (_splPrices) — لازم يكون متحمّل عشان نقيّم قيمة رصيد كل صنف
   const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
   const {from, to, has} = repbalGetPeriod();
   const periodTxt = repbalPeriodTxt(rep, from, to, has);
@@ -36252,6 +36253,7 @@ function repbalOpenExportModal(rep){
   const list  = document.getElementById('repbal-export-list');
   if(title) title.textContent = rep;
   if(meta)  meta.textContent  = `${periodTxt} — ${items.length} صنف برصيد`;
+  let totalValue = 0, pricedCount = 0;
   if(list){
     const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
     list.innerHTML = items.length
@@ -36263,12 +36265,28 @@ function repbalOpenExportModal(rep){
           if(v)  parts.push(`<span style="color:#276749">✅ صالح ${v}</span>`);
           if(rv) parts.push(`<span style="color:#1D4ED8">↩️ مرتجع صالح ${rv}</span>`);
           if(rd) parts.push(`<span style="color:#B71C1C">🗑️ مرتجع تالف ${rd}</span>`);
+          const pr = productPriceFor(name);
+          let valueTxt = '';
+          if(pr && pr.price){
+            const val = qty * (+pr.price||0);
+            totalValue += val; pricedCount++;
+            valueTxt = `<span style="color:#8A6D2F;font-weight:700">${val.toLocaleString('en-US',{maximumFractionDigits:0})} ج</span>`;
+          }
           return `<div style="padding:5px 0;font-size:12px;border-bottom:1px dashed var(--border)">
-            <div style="display:flex;justify-content:space-between"><span>${name}</span><span style="font-weight:700">Σ ${qty}</span></div>
+            <div style="display:flex;justify-content:space-between;align-items:center"><span>${name}</span><span style="display:flex;gap:8px;align-items:center"><span style="font-weight:700">Σ ${qty}</span>${valueTxt}</span></div>
             ${parts.length ? `<div style="display:flex;gap:10px;flex-wrap:wrap;font-size:10.5px;margin-top:3px;font-weight:600">${parts.join('')}</div>` : ''}
           </div>`;
         }).join('')
       : '<div style="font-size:11px;color:var(--text2);padding:4px 0">مفيش رصيد مسجّل حاليًا</div>';
+  }
+  const totalWrap = document.getElementById('repbal-export-total-value');
+  if(totalWrap){
+    totalWrap.innerHTML = !items.length ? '' : `
+      <div style="display:flex;align-items:center;justify-content:space-between;background:#2C1F0A;color:#EDE5D8;border-radius:8px;padding:10px 14px;margin-bottom:12px">
+        <span style="font-size:12.5px;font-weight:700"><i class="ti ti-cash"></i> القيمة الإجمالية للرصيد</span>
+        <span style="font-size:15px;font-weight:900;color:#C8A96E">${totalValue.toLocaleString('en-US',{maximumFractionDigits:0})} ج</span>
+      </div>
+      ${pricedCount<items.length ? `<div style="font-size:10px;color:var(--text2);margin:-6px 0 12px;text-align:center">⚠️ ${items.length-pricedCount} صنف من غير سعر مسجّل في كتالوج الأسعار — مش داخل الإجمالي</div>` : ''}`;
   }
 
   // فروق الجرد المعلّقة لهذا المندوب بس (لسه محتاجة اعتماد من تطبيق مشرف/مدير المبيعات)
@@ -36366,11 +36384,15 @@ function repbalExportRepPDF(){
   const periodTxt = repbalPeriodTxt(rep, from, to, has);
   const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
 
+  let pdfTotalValue = 0;
   const rowsHtml = items.length
     ? items.map(([name,qty],i)=>{
         const v  = (bd.valid[rep]||{})[name]||0;
         const rv = (bd.retValid[rep]||{})[name]||0;
         const rd = (bd.retDamaged[rep]||{})[name]||0;
+        const pr = productPriceFor(name);
+        const val = (pr && pr.price) ? qty*(+pr.price||0) : null;
+        if(val!=null) pdfTotalValue += val;
         return `<tr>
         <td style="text-align:center;width:36px">${i+1}</td>
         <td>${name}</td>
@@ -36378,8 +36400,9 @@ function repbalExportRepPDF(){
         <td style="text-align:center">${rv}</td>
         <td style="text-align:center">${rd}</td>
         <td style="text-align:center;font-weight:800">${qty}</td>
+        <td style="text-align:center;font-weight:800">${val!=null ? val.toLocaleString('en-US',{maximumFractionDigits:0})+' ج' : '—'}</td>
       </tr>`;}).join('')
-    : `<tr><td colspan="6" style="text-align:center;color:#8a7a5c">لا يوجد رصيد مسجّل حاليًا</td></tr>`;
+    : `<tr><td colspan="7" style="text-align:center;color:#8a7a5c">لا يوجد رصيد مسجّل حاليًا</td></tr>`;
 
   const html = `<!DOCTYPE html><html dir="rtl" lang="ar">
   <head><meta charset="UTF-8"><title>سجل جرد — ${rep}</title>
@@ -36409,9 +36432,12 @@ function repbalExportRepPDF(){
     <span>📦 عدد الأصناف: <b>${items.length}</b></span>
   </div>
   <table>
-    <thead><tr><th>#</th><th>اسم الصنف</th><th>✅ صالح</th><th>↩️ مرتجع صالح</th><th>🗑️ مرتجع تالف</th><th>Σ الإجمالي</th></tr></thead>
+    <thead><tr><th>#</th><th>اسم الصنف</th><th>✅ صالح</th><th>↩️ مرتجع صالح</th><th>🗑️ مرتجع تالف</th><th>Σ الإجمالي</th><th>القيمة</th></tr></thead>
     <tbody>${rowsHtml}</tbody>
   </table>
+  <div style="display:flex;justify-content:flex-end;margin-top:10px">
+    <div style="background:#2C1F0A;color:#EDE5D8;border-radius:8px;padding:8px 16px;font-size:12.5px;font-weight:800">القيمة الإجمالية: <span style="color:#C8A96E">${pdfTotalValue.toLocaleString('en-US',{maximumFractionDigits:0})} ج</span></div>
+  </div>
   <div class="sign-wrap">
     <div class="sign-box">توقيع المسؤول</div>
     <div class="sign-box">توقيع المندوب</div>
@@ -36442,15 +36468,26 @@ function repbalExportRepExcel(){
   const align = (h,v,wrap)=>({horizontal:h||'right',vertical:v||'center',wrapText:!!wrap,readingOrder:2});
   const brd = (s,c)=>{const b={style:s||'thin',color:{rgb:c||C.line}};return{left:b,right:b,top:b,bottom:b};};
 
-  const COLS = ['#','اسم الصنف','✅ صالح','↩️ مرتجع صالح','🗑️ مرتجع تالف','Σ الإجمالي'];
+  let xlsTotalValue = 0;
+  const itemRows = items.map(([name,qty],i)=>{
+    const pr = productPriceFor(name);
+    const val = (pr && pr.price) ? qty*(+pr.price||0) : null;
+    if(val!=null) xlsTotalValue += val;
+    return [i+1, name, (bd.valid[rep]||{})[name]||0, (bd.retValid[rep]||{})[name]||0, (bd.retDamaged[rep]||{})[name]||0, qty, val!=null?val:'—'];
+  });
+
+  const COLS = ['#','اسم الصنف','✅ صالح','↩️ مرتجع صالح','🗑️ مرتجع تالف','Σ الإجمالي','القيمة (ج)'];
   const aoa = [
-    ['الطحان جولدن دايتس — Al Tahhan Golden Dates','','','','',''],
-    [`سجل جرد رصيد مندوب — ${rep}`,'','','','',''],
-    [`${periodTxt}  |  تاريخ التصدير: ${now}  |  عدد الأصناف: ${items.length}`,'','','','',''],
-    ['','','','','',''],
+    ['الطحان جولدن دايتس — Al Tahhan Golden Dates','','','','','',''],
+    [`سجل جرد رصيد مندوب — ${rep}`,'','','','','',''],
+    [`${periodTxt}  |  تاريخ التصدير: ${now}  |  عدد الأصناف: ${items.length}`,'','','','','',''],
+    ['','','','','','',''],
     COLS,
-    ...items.map(([name,qty],i)=>[i+1, name, (bd.valid[rep]||{})[name]||0, (bd.retValid[rep]||{})[name]||0, (bd.retDamaged[rep]||{})[name]||0, qty])
+    ...itemRows,
+    ['','','','','','',''],
+    ['القيمة الإجمالية للرصيد','','','','','', xlsTotalValue],
   ];
+  const totalRowIdx = 5 + itemRows.length + 1;
 
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(aoa,{cellStyles:true});
@@ -36458,26 +36495,28 @@ function repbalExportRepExcel(){
   const sty = (r,c,s)=>{ if(!ws[enc(r,c)]) ws[enc(r,c)]={t:'z',v:''}; ws[enc(r,c)].s=s; };
 
   ws['!merges'] = [
-    {s:{r:0,c:0},e:{r:0,c:5}},
-    {s:{r:1,c:0},e:{r:1,c:5}},
-    {s:{r:2,c:0},e:{r:2,c:5}},
-    {s:{r:3,c:0},e:{r:3,c:5}},
+    {s:{r:0,c:0},e:{r:0,c:6}},
+    {s:{r:1,c:0},e:{r:1,c:6}},
+    {s:{r:2,c:0},e:{r:2,c:6}},
+    {s:{r:3,c:0},e:{r:3,c:6}},
+    {s:{r:totalRowIdx,c:0},e:{r:totalRowIdx,c:5}},
   ];
 
   sty(0,0,{font:font(1,15,C.cream),fill:fill(C.dark),alignment:align('center'),border:brd('medium',C.dark)});
   sty(1,0,{font:font(1,13,C.dark),fill:fill(C.gold),alignment:align('center'),border:brd('medium',C.caramel)});
   sty(2,0,{font:font(0,10,C.caramel),fill:fill(C.light),alignment:align('center'),border:brd('thin',C.line)});
-  for(let c=0;c<6;c++) sty(3,c,{fill:fill(C.dark)});
-  for(let c=0;c<6;c++) sty(4,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:align('center'),border:brd('medium',C.dark)});
+  for(let c=0;c<7;c++) sty(3,c,{fill:fill(C.dark)});
+  for(let c=0;c<7;c++) sty(4,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:align('center'),border:brd('medium',C.dark)});
 
-  for(let ri=5;ri<aoa.length;ri++){
-    for(let c=0;c<6;c++){
-      const bold = c===5;
+  for(let ri=5;ri<5+itemRows.length;ri++){
+    for(let c=0;c<7;c++){
+      const bold = c===5||c===6;
       sty(ri,c,{font:font(bold,10,C.dark),fill:fill(C.white),alignment:align(c===0?'center':c===1?'right':'center'),border:brd('thin',C.line)});
     }
   }
+  for(let c=0;c<7;c++) sty(totalRowIdx,c,{font:font(1,12,C.cream),fill:fill(C.dark),alignment:align(c===6?'center':'right'),border:brd('medium',C.dark)});
 
-  ws['!cols'] = [{wch:6},{wch:34},{wch:11},{wch:13},{wch:13},{wch:12}];
+  ws['!cols'] = [{wch:6},{wch:34},{wch:11},{wch:13},{wch:13},{wch:12},{wch:14}];
   ws['!rows'] = [{hpt:32},{hpt:24},{hpt:18},{hpt:8},{hpt:22}];
 
   XLSX.utils.book_append_sheet(wb, ws, 'سجل الجرد');
@@ -36606,6 +36645,7 @@ async function repbalShareRepInventory(){
       <div id="repbal-export-meta" style="background:#F5F0E8;color:#4B3C1A;border-radius:8px;padding:8px 12px;font-size:11px;margin-bottom:12px;text-align:center"></div>
       <div style="font-size:12px;font-weight:700;color:#2C1F0A;margin-bottom:6px">📦 الرصيد الحالي</div>
       <div id="repbal-export-list" style="max-height:200px;overflow-y:auto;margin-bottom:14px"></div>
+      <div id="repbal-export-total-value"></div>
       <div id="repbal-export-diffs" style="margin-bottom:14px"></div>
       <details id="repbal-export-invlog-wrap" style="margin-bottom:14px;border:1px solid var(--border);border-radius:8px;padding:8px 10px">
         <summary style="cursor:pointer;font-size:12px;font-weight:700;color:#2C1F0A">📋 سجل الجرد الكامل (كل الحركات المسجّلة)</summary>
