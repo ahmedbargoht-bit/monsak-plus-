@@ -14509,7 +14509,7 @@ async function sptLoadCampaigns(){
       const recs = records.filter(r=>r.target_id===t.id);
       // نخزّن سجلات العد اليومي لكل صف عشان نستخدمها لما الأدمن يضغط على الإجماليات (تفاصيل كل صنف)
       window._sptTargetRecordsCache = window._sptTargetRecordsCache || {};
-      window._sptTargetRecordsCache[t.id] = {recs, repName:t.rep_name, branchName:t.branch_name, viewDate, campFrom:c.date_from, campTo:c.date_to};
+      window._sptTargetRecordsCache[t.id] = {recs, repName:t.rep_name, branchName:t.branch_name, viewDate, campFrom:c.date_from, campTo:c.date_to, campItems:(t.items||c.items||[]).map(it=>it.name).filter(Boolean)};
       const openSum = recs.reduce((s,r)=>s+(r.opening_qty!=null?+r.opening_qty:0),0);
       const closeSum = recs.reduce((s,r)=>s+(r.closing_qty!=null?+r.closing_qty:0),0);
       const soldSum = recs.reduce((s,r)=>s+(r.sold_qty!=null?+r.sold_qty:0),0);
@@ -14661,19 +14661,24 @@ async function sptDetailApplyRange(){
     ]);
   }catch(e){}
 
-  // تجميع سجلات العد حسب اسم الصنف
+  // نعرض بس الأصناف المحددة للحملة/الهدف ده — مش كل صنف موجود في فاتورة التوريد
+  const campItemsSet = new Set(cache.campItems||[]);
+  // تجميع سجلات العد حسب اسم الصنف (نبدأ بكل أصناف الحملة عشان تظهر حتى لو صفر)
   const byItem = {};
+  (cache.campItems||[]).forEach(name=>{ byItem[name] = {opening:0, closing:0, sold:0, supplied:0}; });
   recs.forEach(r=>{
     const key = r.item_name || '—';
+    if(campItemsSet.size && !campItemsSet.has(key)) return; // صنف مش من ضمن أصناف الحملة
     if(!byItem[key]) byItem[key] = {opening:0, closing:0, sold:0, supplied:0};
     byItem[key].opening += (r.opening_qty!=null?+r.opening_qty:0);
     byItem[key].closing += (r.closing_qty!=null?+r.closing_qty:0);
     byItem[key].sold += (r.sold_qty!=null?+r.sold_qty:0);
   });
-  // تجميع كميات فواتير التوريد الفعلية حسب اسم الصنف
+  // تجميع كميات فواتير التوريد الفعلية حسب اسم الصنف — بنفس القيد (أصناف الحملة بس)
   deliveries.forEach(inv=>{
     (inv.items||[]).forEach(it=>{
       const key = it.name || '—';
+      if(campItemsSet.size && !campItemsSet.has(key)) return;
       if(!byItem[key]) byItem[key] = {opening:0, closing:0, sold:0, supplied:0};
       byItem[key].supplied += (it.qty!=null?+it.qty:0);
     });
@@ -35383,6 +35388,7 @@ function stkcmpExportPDF(){
 let _repbalSelectedGrps = [];
 let _repbalReps         = [];
 let _repbalBalances     = {};
+let _repbalBreakdown    = {valid:{}, retValid:{}, retDamaged:{}}; // تفصيل صالح/مرتجع صالح/مرتجع تالف لكل مندوب
 let _repbalInvLog       = {}; // سجل الجرد الكامل لكل مندوب (كل الحركات — معتمدة أو محتاجة مراجعة)
 
 function repbalToggleGrpDropdown(){
@@ -35522,6 +35528,33 @@ function repbalCalcBalances(raw, from, to, has){
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
   return bal;
 }
+// تفصيل رصيد كل مندوب لثلاث طبقات: صالح (بضاعة سليمة جاهزة للبيع) / مرتجع صالح / مرتجع تالف
+// — نفس شروط الفلترة (afterStart/inRange) المستخدمة في repbalCalcBalances بالظبط، لكن هنا
+// بنفصّل المرتجع المعلّق لصالح/تالف باستخدام valid_qty/damaged_qty المسجّلين وقت رفعه (لو
+// صنف قديم قبل ميزة الفصل ومفيهوش الحقلين دول، نحسبه "مرتجع صالح" بالكامل افتراضيًا).
+function repbalCalcBreakdown(raw, from, to, has){
+  const valid = {}, retValid = {}, retDamaged = {};
+  const startDates = raw.startDates || {};
+  const addTo = (map,rep,item,qty)=>{ if(!rep||!item) return; map[rep]=map[rep]||{}; map[rep][item]=(map[rep][item]||0)+qty; };
+  const afterStart = (rep,d)=>{ const sd=startDates[rep]; if(!sd||!d) return false; return d.slice(0,10)>=sd; };
+  const inRange = (d)=>{ if(!has) return true; if(!d) return false; const s=d.slice(0,10); if(from&&s<from) return false; if(to&&s>to) return false; return true; };
+  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.delivery_date) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,-(+it.qty||0))); });
+  (raw.reqsApproved||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) addTo(valid,a.rep_name,a.snf,+(+a.qty_delta||0)); });
+  (raw.rets||[]).forEach(d=>{
+    if(d.receipt_status!=='pending' || !afterStart(d.rep_name,d.return_date) || !inRange(d.return_date)) return;
+    (d.items||[]).forEach(it=>{
+      const qty = +it.qty||0, vq = +it.valid_qty||0, dq = +it.damaged_qty||0;
+      if(vq+dq>0){
+        if(vq) addTo(retValid,d.rep_name,it.name,vq);
+        if(dq) addTo(retDamaged,d.rep_name,it.name,dq);
+      } else if(qty){
+        addTo(retValid,d.rep_name,it.name,qty);
+      }
+    });
+  });
+  return {valid, retValid, retDamaged};
+}
 function repbalApplyPeriod(){
   const {from, to, has} = repbalGetPeriod();
   const note = document.getElementById('repbal-period-note');
@@ -35532,6 +35565,7 @@ function repbalApplyPeriod(){
   const diffs   = has ? _repbalRawDiffs.filter(r=>repbalInRange(r.created_at,from,to))   : _repbalRawDiffs;
   const allReqs = has ? _repbalRawAllReqs.filter(r=>repbalInRange(r.created_at,from,to)) : _repbalRawAllReqs;
   _repbalBalances  = repbalCalcBalances(_repbalRawBalanceData, from, to, has);
+  _repbalBreakdown = repbalCalcBreakdown(_repbalRawBalanceData, from, to, has);
   _repbalDiffsRows = diffs;
   repbalRenderPending(pending);
   repbalRenderAllRequests(allReqs);
@@ -36203,11 +36237,21 @@ function repbalOpenExportModal(rep){
   if(title) title.textContent = rep;
   if(meta)  meta.textContent  = `${periodTxt} — ${items.length} صنف برصيد`;
   if(list){
+    const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
     list.innerHTML = items.length
-      ? items.map(([name,qty])=>
-          `<div style="display:flex;justify-content:space-between;padding:5px 0;font-size:12px;border-bottom:1px dashed var(--border)">
-            <span>${name}</span><span style="font-weight:700">${qty}</span>
-          </div>`).join('')
+      ? items.map(([name,qty])=>{
+          const v  = (bd.valid[rep]||{})[name]||0;
+          const rv = (bd.retValid[rep]||{})[name]||0;
+          const rd = (bd.retDamaged[rep]||{})[name]||0;
+          const parts = [];
+          if(v)  parts.push(`<span style="color:#276749">✅ صالح ${v}</span>`);
+          if(rv) parts.push(`<span style="color:#1D4ED8">↩️ مرتجع صالح ${rv}</span>`);
+          if(rd) parts.push(`<span style="color:#B71C1C">🗑️ مرتجع تالف ${rd}</span>`);
+          return `<div style="padding:5px 0;font-size:12px;border-bottom:1px dashed var(--border)">
+            <div style="display:flex;justify-content:space-between"><span>${name}</span><span style="font-weight:700">Σ ${qty}</span></div>
+            ${parts.length ? `<div style="display:flex;gap:10px;flex-wrap:wrap;font-size:10.5px;margin-top:3px;font-weight:600">${parts.join('')}</div>` : ''}
+          </div>`;
+        }).join('')
       : '<div style="font-size:11px;color:var(--text2);padding:4px 0">مفيش رصيد مسجّل حاليًا</div>';
   }
 
@@ -36274,35 +36318,52 @@ async function repbalResetRep(){
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
   try{
     const enc = encodeURIComponent(rep);
-    await Promise.all([
+    const [delInv, delAdj] = await Promise.all([
       fetch(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=eq.${enc}`,      {method:'DELETE', headers:H}),
       fetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=eq.${enc}`,{method:'DELETE', headers:H}),
     ]);
-    await fetch(`${SUPABASE_URL}/rest/v1/rep_balance_resets`, {
+    const resetRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_balance_resets`, {
       method:'POST', headers:H,
       body: JSON.stringify({rep_name:rep, reset_at:new Date().toISOString(), created_by:CU.name})
     });
+    // لازم نتأكد إن كل طلبات الحذف/الإدراج نجحت فعليًا — لو حصل فشل صامت (مثلاً صلاحيات قاعدة
+    // البيانات) وما اتأكدناش، هيظهر "تم" للمستخدم بينما رصيد المندوب فضل زي ما هو من غير تصفير
+    if(!delInv.ok || !delAdj.ok || !resetRes.ok){
+      const errTxt = !resetRes.ok ? await resetRes.text().catch(()=>'') : '';
+      throw new Error(errTxt || 'فشل أحد طلبات التصفير');
+    }
     showToast(`✅ اتصفّر رصيد "${rep}" — هيبدأ يتحسب من جديد بعد أول عد يدوي أو طلب بضاعة جديد`);
     repbalCloseExportModal();
     repbalLoad();
-  }catch(e){ alert('حصل خطأ أثناء التصفير، حاول تاني'); }
+  }catch(e){
+    console.error('repbalResetRep error', e);
+    alert('❌ حصل خطأ أثناء التصفير ولسه رصيد المندوب زي ما هو — حاول تاني، ولو تكرر ابلغ الدعم الفني');
+  }
 }
 
 function repbalExportRepPDF(){
   const rep = _repbalExportRep;
   if(!rep){ showToast('اختر مندوب أولاً','err'); return; }
   const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
   const {from, to, has} = repbalGetPeriod();
   const periodTxt = repbalPeriodTxt(rep, from, to, has);
   const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
 
   const rowsHtml = items.length
-    ? items.map(([name,qty],i)=>`<tr>
+    ? items.map(([name,qty],i)=>{
+        const v  = (bd.valid[rep]||{})[name]||0;
+        const rv = (bd.retValid[rep]||{})[name]||0;
+        const rd = (bd.retDamaged[rep]||{})[name]||0;
+        return `<tr>
         <td style="text-align:center;width:36px">${i+1}</td>
         <td>${name}</td>
+        <td style="text-align:center">${v}</td>
+        <td style="text-align:center">${rv}</td>
+        <td style="text-align:center">${rd}</td>
         <td style="text-align:center;font-weight:800">${qty}</td>
-      </tr>`).join('')
-    : `<tr><td colspan="3" style="text-align:center;color:#8a7a5c">لا يوجد رصيد مسجّل حاليًا</td></tr>`;
+      </tr>`;}).join('')
+    : `<tr><td colspan="6" style="text-align:center;color:#8a7a5c">لا يوجد رصيد مسجّل حاليًا</td></tr>`;
 
   const html = `<!DOCTYPE html><html dir="rtl" lang="ar">
   <head><meta charset="UTF-8"><title>سجل جرد — ${rep}</title>
@@ -36332,7 +36393,7 @@ function repbalExportRepPDF(){
     <span>📦 عدد الأصناف: <b>${items.length}</b></span>
   </div>
   <table>
-    <thead><tr><th>#</th><th>اسم الصنف</th><th>الرصيد</th></tr></thead>
+    <thead><tr><th>#</th><th>اسم الصنف</th><th>✅ صالح</th><th>↩️ مرتجع صالح</th><th>🗑️ مرتجع تالف</th><th>Σ الإجمالي</th></tr></thead>
     <tbody>${rowsHtml}</tbody>
   </table>
   <div class="sign-wrap">
@@ -36354,6 +36415,7 @@ function repbalExportRepExcel(){
   if(!rep){ showToast('اختر مندوب أولاً','err'); return; }
   if(typeof XLSX==='undefined'){ showToast('جاري تحميل مكتبة Excel...'); return; }
   const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
   const {from, to, has} = repbalGetPeriod();
   const periodTxt = repbalPeriodTxt(rep, from, to, has);
   const now = new Date().toLocaleDateString('en-US');
@@ -36364,14 +36426,14 @@ function repbalExportRepExcel(){
   const align = (h,v,wrap)=>({horizontal:h||'right',vertical:v||'center',wrapText:!!wrap,readingOrder:2});
   const brd = (s,c)=>{const b={style:s||'thin',color:{rgb:c||C.line}};return{left:b,right:b,top:b,bottom:b};};
 
-  const COLS = ['#','اسم الصنف','الرصيد'];
+  const COLS = ['#','اسم الصنف','✅ صالح','↩️ مرتجع صالح','🗑️ مرتجع تالف','Σ الإجمالي'];
   const aoa = [
-    ['الطحان جولدن دايتس — Al Tahhan Golden Dates','',''],
-    [`سجل جرد رصيد مندوب — ${rep}`,'',''],
-    [`${periodTxt}  |  تاريخ التصدير: ${now}  |  عدد الأصناف: ${items.length}`,'',''],
-    ['','',''],
+    ['الطحان جولدن دايتس — Al Tahhan Golden Dates','','','','',''],
+    [`سجل جرد رصيد مندوب — ${rep}`,'','','','',''],
+    [`${periodTxt}  |  تاريخ التصدير: ${now}  |  عدد الأصناف: ${items.length}`,'','','','',''],
+    ['','','','','',''],
     COLS,
-    ...items.map(([name,qty],i)=>[i+1, name, qty])
+    ...items.map(([name,qty],i)=>[i+1, name, (bd.valid[rep]||{})[name]||0, (bd.retValid[rep]||{})[name]||0, (bd.retDamaged[rep]||{})[name]||0, qty])
   ];
 
   const wb = XLSX.utils.book_new();
@@ -36380,26 +36442,26 @@ function repbalExportRepExcel(){
   const sty = (r,c,s)=>{ if(!ws[enc(r,c)]) ws[enc(r,c)]={t:'z',v:''}; ws[enc(r,c)].s=s; };
 
   ws['!merges'] = [
-    {s:{r:0,c:0},e:{r:0,c:2}},
-    {s:{r:1,c:0},e:{r:1,c:2}},
-    {s:{r:2,c:0},e:{r:2,c:2}},
-    {s:{r:3,c:0},e:{r:3,c:2}},
+    {s:{r:0,c:0},e:{r:0,c:5}},
+    {s:{r:1,c:0},e:{r:1,c:5}},
+    {s:{r:2,c:0},e:{r:2,c:5}},
+    {s:{r:3,c:0},e:{r:3,c:5}},
   ];
 
   sty(0,0,{font:font(1,15,C.cream),fill:fill(C.dark),alignment:align('center'),border:brd('medium',C.dark)});
   sty(1,0,{font:font(1,13,C.dark),fill:fill(C.gold),alignment:align('center'),border:brd('medium',C.caramel)});
   sty(2,0,{font:font(0,10,C.caramel),fill:fill(C.light),alignment:align('center'),border:brd('thin',C.line)});
-  for(let c=0;c<3;c++) sty(3,c,{fill:fill(C.dark)});
-  for(let c=0;c<3;c++) sty(4,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:align('center'),border:brd('medium',C.dark)});
+  for(let c=0;c<6;c++) sty(3,c,{fill:fill(C.dark)});
+  for(let c=0;c<6;c++) sty(4,c,{font:font(1,10,C.cream),fill:fill(C.caramel),alignment:align('center'),border:brd('medium',C.dark)});
 
   for(let ri=5;ri<aoa.length;ri++){
-    for(let c=0;c<3;c++){
-      const bold = c===2;
-      sty(ri,c,{font:font(bold,10,C.dark),fill:fill(C.white),alignment:align(c===0?'center':c===2?'center':'right'),border:brd('thin',C.line)});
+    for(let c=0;c<6;c++){
+      const bold = c===5;
+      sty(ri,c,{font:font(bold,10,C.dark),fill:fill(C.white),alignment:align(c===0?'center':c===1?'right':'center'),border:brd('thin',C.line)});
     }
   }
 
-  ws['!cols'] = [{wch:6},{wch:38},{wch:14}];
+  ws['!cols'] = [{wch:6},{wch:34},{wch:11},{wch:13},{wch:13},{wch:12}];
   ws['!rows'] = [{hpt:32},{hpt:24},{hpt:18},{hpt:8},{hpt:22}];
 
   XLSX.utils.book_append_sheet(wb, ws, 'سجل الجرد');

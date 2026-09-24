@@ -3219,6 +3219,7 @@ function tbOpenDetail(name){
 // ══════════════════════════════════════════════════════════════
 let _rbTeamReps  = [];
 let _rbBalances  = {};
+let _rbBreakdown = {valid:{}, retValid:{}, retDamaged:{}}; // تفصيل صالح/مرتجع صالح/مرتجع تالف لكل مندوب
 let _rbPending   = [];
 
 // نفس منطق yawmLoadReps بالظبط (gm/sup/manager) بس بيرجّع array أسماء بدل ما يملى select
@@ -3343,6 +3344,32 @@ function rbCalcBalances(raw, from, to, has){
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
   return bal;
 }
+// تفصيل رصيد كل مندوب لثلاث طبقات: صالح (بضاعة سليمة جاهزة للبيع) / مرتجع صالح / مرتجع تالف
+// — نفس منطق repbalCalcBreakdown في لوحة التحكم بالظبط، بيستخدم valid_qty/damaged_qty
+// المسجّلين وقت رفع المرتجع (لو صنف قديم قبل ميزة الفصل، نحسبه "مرتجع صالح" بالكامل افتراضيًا).
+function rbCalcBreakdown(raw, from, to, has){
+  const valid = {}, retValid = {}, retDamaged = {};
+  const startDates = raw.startDates || {};
+  const addTo = (map,rep,item,qty)=>{ if(!rep||!item) return; map[rep]=map[rep]||{}; map[rep][item]=(map[rep][item]||0)+qty; };
+  const afterStart = (rep,d)=>{ const sd=startDates[rep]; if(!sd||!d) return false; return d.slice(0,10)>=sd; };
+  const inRange = (d)=>{ if(!has) return true; if(!d) return false; const s=d.slice(0,10); if(from&&s<from) return false; if(to&&s>to) return false; return true; };
+  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.delivery_date) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,-(+it.qty||0))); });
+  (raw.reqs||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) addTo(valid,a.rep_name,a.snf,+(+a.qty_delta||0)); });
+  (raw.rets||[]).forEach(d=>{
+    if(d.receipt_status!=='pending' || !afterStart(d.rep_name,d.return_date) || !inRange(d.return_date)) return;
+    (d.items||[]).forEach(it=>{
+      const qty = +it.qty||0, vq = +it.valid_qty||0, dq = +it.damaged_qty||0;
+      if(vq+dq>0){
+        if(vq) addTo(retValid,d.rep_name,it.name,vq);
+        if(dq) addTo(retDamaged,d.rep_name,it.name,dq);
+      } else if(qty){
+        addTo(retValid,d.rep_name,it.name,qty);
+      }
+    });
+  });
+  return {valid, retValid, retDamaged};
+}
 
 function rbGetPeriod(){
   const from = document.getElementById('rb-from')?.value || '';
@@ -3366,6 +3393,7 @@ function rbApplyPeriod(){
   const diffs = has ? _rbRawDiffs.filter(r=>rbInRange(r.created_at,from,to)) : _rbRawDiffs;
   const allReqs = has ? _rbRawAllReqs.filter(r=>rbInRange(r.created_at,from,to)) : _rbRawAllReqs;
   _rbBalances = rbCalcBalances(_rbRawBalanceData, from, to, has);
+  _rbBreakdown = rbCalcBreakdown(_rbRawBalanceData, from, to, has);
   rbRenderPending(_rbPending);
   rbRenderDiscrepancies(diffs);
   rbRenderAllRequests(allReqs);
@@ -4195,11 +4223,21 @@ function rbRenderBalances(){
   if(!reps.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش مناديب لعرضهم</div>'; return; }
   wrap.innerHTML = reps.map(rep=>{
     const items = Object.entries(_rbBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0);
+    const bd = _rbBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
     const rowsHtml = items.length
-      ? items.sort((a,b)=>b[1]-a[1]).map(([name,qty])=>
-          `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:11.5px;border-bottom:1px dashed var(--border)">
-            <span>${name}</span><span style="font-weight:700">${qty}</span>
-          </div>`).join('')
+      ? items.sort((a,b)=>b[1]-a[1]).map(([name,qty])=>{
+          const v  = (bd.valid[rep]||{})[name]||0;
+          const rv = (bd.retValid[rep]||{})[name]||0;
+          const rd = (bd.retDamaged[rep]||{})[name]||0;
+          const parts = [];
+          if(v)  parts.push(`<span style="color:#276749">✅ صالح ${v}</span>`);
+          if(rv) parts.push(`<span style="color:#1D4ED8">↩️ مرتجع صالح ${rv}</span>`);
+          if(rd) parts.push(`<span style="color:#B71C1C">🗑️ مرتجع تالف ${rd}</span>`);
+          return `<div style="padding:4px 0;font-size:11.5px;border-bottom:1px dashed var(--border)">
+            <div style="display:flex;justify-content:space-between"><span>${name}</span><span style="font-weight:700">Σ ${qty}</span></div>
+            ${parts.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;font-size:10px;margin-top:2px;font-weight:600">${parts.join('')}</div>` : ''}
+          </div>`;
+        }).join('')
       : '<div style="font-size:11px;color:var(--text2);padding:4px 0">مفيش رصيد مسجّل حاليًا</div>';
     const safeRep = rep.replace(/'/g,"\\'");
     return `<details style="border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin-bottom:8px">
