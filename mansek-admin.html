@@ -1776,6 +1776,9 @@ h2,h3{color:#2C1F0A}
               </div>
             </div>
             <div style="flex:1"></div>
+            <button class="btn btn-sm" onclick="dtSharePDF()" style="background:#C8A96E;color:#2C1F0A;display:flex;align-items:center;gap:5px">
+              <i class="ti ti-share"></i> مشاركة
+            </button>
             <button class="btn btn-sm" onclick="dtExportPDF()" style="background:#731E2E;color:#F5E8E8;display:flex;align-items:center;gap:5px">
               <i class="ti ti-file-type-pdf"></i> تصدير PDF
             </button>
@@ -18554,6 +18557,14 @@ function dtUpdateTypesBtnLabel(){
   btn.textContent = txt + ' ▾';
 }
 
+// اسم ملف موحّد لكل تصديرات/مشاركة "أدوات العرض" — بيعكس تفاصيل الفلتر الحالي (المجموعة/الأنواع/التاريخ)
+function dtBuildFileNameBase(){
+  const grpLbl   = document.getElementById('dt-grp-label')?.textContent || 'كل المجموعات';
+  const typesLbl = dtSelectedTypes().map(t=>DISPLAY_TOOL_META[t].label).join('+') || 'بدون أنواع';
+  const safe = s => (s||'').replace(/[\\/:*?"<>|]/g,'').replace(/\s+/g,'_');
+  return `أدوات_العرض_${safe(grpLbl)}_${safe(typesLbl)}_${localISO()}`;
+}
+
 function dtLoad(){
   dtPopulateGroups();
   dtUpdateTypesBtnLabel();
@@ -18651,7 +18662,7 @@ function dtExportPDF(){
   const _blobD = new Blob([html], {type:'text/html;charset=utf-8'});
   const _urlD = URL.createObjectURL(_blobD);
   const w = window.open(_urlD, '_blank');
-  if(!w){ const a=document.createElement('a');a.href=_urlD;a.download='أدوات_العرض.html';a.click(); }
+  if(!w){ const a=document.createElement('a');a.href=_urlD;a.download=dtBuildFileNameBase()+'.html';a.click(); }
   setTimeout(()=>URL.revokeObjectURL(_urlD), 30000);
 }
 
@@ -18712,7 +18723,7 @@ window.dtExportExcel = function(){
   styleOps.forEach(op=> set(op.r, op.c, op.style));
   ws['!sheet-rtl'] = true;
   XLSX.utils.book_append_sheet(wb, ws, 'أدوات العرض');
-  XLSX.writeFile(wb, `أدوات_العرض_${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}.xlsx`);
+  XLSX.writeFile(wb, `${dtBuildFileNameBase()}.xlsx`);
   showToast && showToast('✅ تم تصدير أدوات العرض');
 };
 
@@ -35176,7 +35187,7 @@ async function repbalLoad(){
 
   const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
-  const [pending, diffs, allReqs, dels, rets, reqsApproved, adjs, invRows, fullInv, reqDateRows] = await Promise.all([
+  const [pending, diffs, allReqs, dels, rets, reqsApproved, adjs, invRows, fullInv, reqDateRows, resets] = await Promise.all([
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&order=created_at.asc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&order=created_at.desc&limit=300`),
@@ -35187,7 +35198,17 @@ async function repbalLoad(){
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&order=created_at.desc&limit=5000&select=id,rep_name,snf,counted_qty,counted_valid_qty,counted_returned_qty,computed_qty,diff,resolved,created_at`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_resets?rep_name=in.(${encList})&select=rep_name,reset_at`),
   ]);
+
+  // لو المندوب اتعمله "تصفير رصيد" (بسبب أخطاء إدخال)، نتجاهل أي عد يدوي أو طلب بضاعة حصل
+  // قبل أو وقت لحظة التصفير دي — فآخر تصفير بيبقى نقطة قطع (cutoff)، وبداية رصيده الجديدة
+  // بقى أبكر حاجة حصلت بعد كده (عد يدوي جديد أو طلب بضاعة جديد).
+  const resetCutoff = {};
+  (resets||[]).forEach(r=>{
+    if(!r.rep_name || !r.reset_at) return;
+    if(!resetCutoff[r.rep_name] || r.reset_at > resetCutoff[r.rep_name]) resetCutoff[r.rep_name] = r.reset_at;
+  });
 
   // بداية تتبع رصيد كل مندوب: أبكر تاريخ بين (أول طلب بضاعة سجّله من المخزن) أو (أول جرد يدوي
   // عمله، لو عمل قبل كده) — المناديب الجداد اللي لسه مبيعملوش جرد يدوي (بقى استثنائي/دوري بس)
@@ -35196,6 +35217,8 @@ async function repbalLoad(){
   const considerStart = (rows)=>{
     (rows||[]).forEach(row=>{
       if(!row.rep_name || !row.created_at) return;
+      const cutoff = resetCutoff[row.rep_name];
+      if(cutoff && row.created_at <= cutoff) return; // اتجاهل — قبل/وقت آخر تصفير
       const d = row.created_at.slice(0,10);
       if(!startDates[row.rep_name] || d < startDates[row.rep_name]) startDates[row.rep_name] = d;
     });
@@ -35856,6 +35879,32 @@ function repbalCloseExportModal(){
   _repbalExportRep = null;
 }
 
+// تصفير رصيد مندوب بسبب أخطاء إدخال — بيمسح سجل الجرد والتصحيحات القديمة بتاعته ويسجّل
+// "نقطة تصفير" جديدة، من غير ما يمسّ فواتير التسليم أو المرتجعات الحقيقية بتاعته (مستخدمة في
+// تقارير تانية). بعد التصفير، حساب رصيده بيقف تمامًا (زي مندوب جديد) لحد ما يحصل أول حاجة من
+// الاتنين: يعمل عد يدوي جديد، أو يتوافق له على طلب بضاعة جديد — أيهما أسبق هو نقطة البداية
+// الجديدة لحساب الرصيد. الحركات اللي حصلت قبل التصفير بتتجاهل تمامًا في الحساب.
+async function repbalResetRep(){
+  const rep = _repbalExportRep;
+  if(!rep) return;
+  if(!confirm(`متأكد إنك عايز تصفّر رصيد "${rep}"؟\n\nهيتمسح سجل الجرد والتصحيحات المعلّقة بتاعته نهائيًا، وهيقف حساب رصيده تمامًا لحد ما يعمل هو عد يدوي جديد أو يتوافق له على طلب بضاعة جديد (أيهما أسبق).\n\nفواتير التسليم والمرتجعات الحقيقية بتاعته مش هتتأثر ومش هتتمسح.\n\nالإجراء ده لا رجعة فيه.`)) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+  try{
+    const enc = encodeURIComponent(rep);
+    await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=eq.${enc}`,      {method:'DELETE', headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=eq.${enc}`,{method:'DELETE', headers:H}),
+    ]);
+    await fetch(`${SUPABASE_URL}/rest/v1/rep_balance_resets`, {
+      method:'POST', headers:H,
+      body: JSON.stringify({rep_name:rep, reset_at:new Date().toISOString(), created_by:CU.name})
+    });
+    showToast(`✅ اتصفّر رصيد "${rep}" — هيبدأ يتحسب من جديد بعد أول عد يدوي أو طلب بضاعة جديد`);
+    repbalCloseExportModal();
+    repbalLoad();
+  }catch(e){ alert('حصل خطأ أثناء التصفير، حاول تاني'); }
+}
+
 function repbalExportRepPDF(){
   const rep = _repbalExportRep;
   if(!rep){ showToast('اختر مندوب أولاً','err'); return; }
@@ -36105,7 +36154,8 @@ async function repbalShareRepInventory(){
         <button onclick="repbalExportRepPDF()" style="flex:1;background:#2C1F0A;color:#EDE5D8;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
         <button onclick="repbalExportRepExcel()" style="flex:1;background:#4E5A2B;color:#E8F5E9;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
       </div>
-      <button onclick="repbalShareRepInventory()" style="width:100%;background:#C8A96E;color:#2C1F0A;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="ti ti-share"></i> تصدير سجل الجرد الفعلي (مشاركة/واتساب)</button>
+      <button onclick="repbalShareRepInventory()" style="width:100%;background:#C8A96E;color:#2C1F0A;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:10px"><i class="ti ti-share"></i> تصدير سجل الجرد الفعلي (مشاركة/واتساب)</button>
+      <button onclick="repbalResetRep()" style="width:100%;background:#fff;color:#B91C1C;border:1.5px solid #B91C1C;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="ti ti-restore"></i> تصفير رصيد المندوب (بسبب أخطاء إدخال)</button>
     </div>
   </div>
 </div>
