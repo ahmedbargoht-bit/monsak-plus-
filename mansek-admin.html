@@ -36309,6 +36309,7 @@ async function repbalOpenExportModal(rep){
   const invWrap = document.getElementById('repbal-export-invlog');
   if(invWrap){
     const rows = (_repbalInvLog[rep]||[]);
+    const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
     let invTotalValue = 0, invPricedCount = 0;
     const rowsHtml = rows.map(r=>{
       const statusBadge = r.resolved
@@ -36321,8 +36322,16 @@ async function repbalOpenExportModal(rep){
         invTotalValue += val; invPricedCount++;
         valueTxt = `${val.toLocaleString('en-US',{maximumFractionDigits:0})} ج`;
       }
+      const v  = (bd.valid[rep]||{})[r.snf]||0;
+      const rv = (bd.retValid[rep]||{})[r.snf]||0;
+      const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
+      const clsParts = [];
+      if(v)  clsParts.push(`<span style="color:#276749">✅ صالح ${v}</span>`);
+      if(rv) clsParts.push(`<span style="color:#1D4ED8">↩️ مرتجع صالح ${rv}</span>`);
+      if(rd) clsParts.push(`<span style="color:#B71C1C">🗑️ مرتجع تالف ${rd}</span>`);
+      const clsTxt = clsParts.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;font-size:9px;margin-top:2px;font-weight:700">${clsParts.join('')}</div>` : '';
       return `<tr style="border-bottom:1px solid var(--border)">
-        <td style="padding:5px">${r.snf}</td>
+        <td style="padding:5px">${r.snf}${clsTxt}</td>
         <td style="padding:5px;text-align:center">${r.counted_qty}</td>
         <td style="padding:5px;text-align:center;color:#8A6D2F;font-weight:700">${valueTxt}</td>
         <td style="padding:5px;text-align:center">${new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'})}</td>
@@ -36390,31 +36399,34 @@ async function repbalResetRep(){
 function repbalExportRepPDF(){
   const rep = _repbalExportRep;
   if(!rep){ showToast('اختر مندوب أولاً','err'); return; }
-  const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const rows = (_repbalInvLog[rep]||[]);
   const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
-  const {from, to, has} = repbalGetPeriod();
-  const periodTxt = repbalPeriodTxt(rep, from, to, has);
   const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
 
   let pdfTotalValue = 0;
-  const rowsHtml = items.length
-    ? items.map(([name,qty],i)=>{
-        const v  = (bd.valid[rep]||{})[name]||0;
-        const rv = (bd.retValid[rep]||{})[name]||0;
-        const rd = (bd.retDamaged[rep]||{})[name]||0;
-        const pr = productPriceFor(name);
-        const val = (pr && pr.price) ? qty*(+pr.price||0) : null;
+  const rowsHtml = rows.length
+    ? rows.map((r,i)=>{
+        const pr = productPriceFor(r.snf);
+        const val = (pr && pr.price) ? (+r.counted_qty||0)*(+pr.price||0) : null;
         if(val!=null) pdfTotalValue += val;
+        const statusTxt = r.resolved ? '✅ معتمد' : '⚠️ محتاج مراجعة';
+        const v  = (bd.valid[rep]||{})[r.snf]||0;
+        const rv = (bd.retValid[rep]||{})[r.snf]||0;
+        const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
+        const clsParts = [];
+        if(v)  clsParts.push(`✅ صالح ${v}`);
+        if(rv) clsParts.push(`↩️ مرتجع صالح ${rv}`);
+        if(rd) clsParts.push(`🗑️ مرتجع تالف ${rd}`);
+        const clsTxt = clsParts.length ? `<div style="font-size:9px;color:#6B5B3A;margin-top:2px">${clsParts.join(' · ')}</div>` : '';
         return `<tr>
         <td style="text-align:center;width:36px">${i+1}</td>
-        <td>${name}</td>
-        <td style="text-align:center">${v}</td>
-        <td style="text-align:center">${rv}</td>
-        <td style="text-align:center">${rd}</td>
-        <td style="text-align:center;font-weight:800">${qty}</td>
+        <td>${r.snf}${clsTxt}</td>
+        <td style="text-align:center;font-weight:800">${r.counted_qty}</td>
         <td style="text-align:center;font-weight:800">${val!=null ? val.toLocaleString('en-US',{maximumFractionDigits:0})+' ج' : '—'}</td>
+        <td style="text-align:center">${new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'})}</td>
+        <td style="text-align:center">${statusTxt}</td>
       </tr>`;}).join('')
-    : `<tr><td colspan="7" style="text-align:center;color:#8a7a5c">لا يوجد رصيد مسجّل حاليًا</td></tr>`;
+    : `<tr><td colspan="6" style="text-align:center;color:#8a7a5c">لا يوجد جرد مسجّل حاليًا</td></tr>`;
 
   const html = `<!DOCTYPE html><html dir="rtl" lang="ar">
   <head><meta charset="UTF-8"><title>سجل جرد — ${rep}</title>
@@ -36436,19 +36448,18 @@ function repbalExportRepPDF(){
     @media print{body{padding:6px}}
   </style></head><body>
   <div class="hdr-co">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
-  <div class="hdr-title">سجل جرد رصيد مندوب</div>
+  <div class="hdr-title">سجل الجرد الكامل (كل الحركات المسجّلة)</div>
   <div class="hdr-info">تاريخ الطباعة: ${now}</div>
   <div class="meta">
     <span>👤 المندوب: <b>${rep}</b></span>
-    <span>📅 ${periodTxt}</span>
-    <span>📦 عدد الأصناف: <b>${items.length}</b></span>
+    <span>📦 عدد الحركات: <b>${rows.length}</b></span>
   </div>
   <table>
-    <thead><tr><th>#</th><th>اسم الصنف</th><th>✅ صالح</th><th>↩️ مرتجع صالح</th><th>🗑️ مرتجع تالف</th><th>Σ الإجمالي</th><th>القيمة</th></tr></thead>
+    <thead><tr><th>#</th><th>اسم الصنف</th><th>الفعلي</th><th>القيمة</th><th>التاريخ</th><th>الحالة</th></tr></thead>
     <tbody>${rowsHtml}</tbody>
   </table>
   <div style="display:flex;justify-content:flex-end;margin-top:10px">
-    <div style="background:#2C1F0A;color:#EDE5D8;border-radius:8px;padding:8px 16px;font-size:12.5px;font-weight:800">القيمة الإجمالية: <span style="color:#C8A96E">${pdfTotalValue.toLocaleString('en-US',{maximumFractionDigits:0})} ج</span></div>
+    <div style="background:#2C1F0A;color:#EDE5D8;border-radius:8px;padding:8px 16px;font-size:12.5px;font-weight:800">إجمالي قيمة الرصيد: <span style="color:#C8A96E">${pdfTotalValue.toLocaleString('en-US',{maximumFractionDigits:0})} ج</span></div>
   </div>
   <div class="sign-wrap">
     <div class="sign-box">توقيع المسؤول</div>
@@ -36468,10 +36479,8 @@ function repbalExportRepExcel(){
   const rep = _repbalExportRep;
   if(!rep){ showToast('اختر مندوب أولاً','err'); return; }
   if(typeof XLSX==='undefined'){ showToast('جاري تحميل مكتبة Excel...'); return; }
-  const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const rows = (_repbalInvLog[rep]||[]);
   const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
-  const {from, to, has} = repbalGetPeriod();
-  const periodTxt = repbalPeriodTxt(rep, from, to, has);
   const now = new Date().toLocaleDateString('en-US');
 
   const C = {dark:'2C1F0A', caramel:'4B3C1A', gold:'C8A96E', cream:'EDE5D8', light:'F5F0E8', white:'FFFFFF', line:'E0D8CC'};
@@ -36481,23 +36490,31 @@ function repbalExportRepExcel(){
   const brd = (s,c)=>{const b={style:s||'thin',color:{rgb:c||C.line}};return{left:b,right:b,top:b,bottom:b};};
 
   let xlsTotalValue = 0;
-  const itemRows = items.map(([name,qty],i)=>{
-    const pr = productPriceFor(name);
-    const val = (pr && pr.price) ? qty*(+pr.price||0) : null;
+  const itemRows = rows.map((r,i)=>{
+    const pr = productPriceFor(r.snf);
+    const val = (pr && pr.price) ? (+r.counted_qty||0)*(+pr.price||0) : null;
     if(val!=null) xlsTotalValue += val;
-    return [i+1, name, (bd.valid[rep]||{})[name]||0, (bd.retValid[rep]||{})[name]||0, (bd.retDamaged[rep]||{})[name]||0, qty, val!=null?val:'—'];
+    const d = new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'});
+    const v  = (bd.valid[rep]||{})[r.snf]||0;
+    const rv = (bd.retValid[rep]||{})[r.snf]||0;
+    const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
+    const clsParts = [];
+    if(v)  clsParts.push(`صالح ${v}`);
+    if(rv) clsParts.push(`مرتجع صالح ${rv}`);
+    if(rd) clsParts.push(`مرتجع تالف ${rd}`);
+    return [i+1, r.snf, r.counted_qty, val!=null?val:'—', d, r.resolved?'معتمد':'محتاج مراجعة', clsParts.join(' · ')||'—'];
   });
 
-  const COLS = ['#','اسم الصنف','✅ صالح','↩️ مرتجع صالح','🗑️ مرتجع تالف','Σ الإجمالي','القيمة (ج)'];
+  const COLS = ['#','اسم الصنف','الفعلي','القيمة (ج)','التاريخ','الحالة','التصنيف'];
   const aoa = [
     ['الطحان جولدن دايتس — Al Tahhan Golden Dates','','','','','',''],
-    [`سجل جرد رصيد مندوب — ${rep}`,'','','','','',''],
-    [`${periodTxt}  |  تاريخ التصدير: ${now}  |  عدد الأصناف: ${items.length}`,'','','','','',''],
+    [`سجل الجرد الكامل — ${rep}`,'','','','','',''],
+    [`تاريخ التصدير: ${now}  |  عدد الحركات: ${rows.length}`,'','','','','',''],
     ['','','','','','',''],
     COLS,
     ...itemRows,
     ['','','','','','',''],
-    ['القيمة الإجمالية للرصيد','','','','','', xlsTotalValue],
+    ['إجمالي قيمة الرصيد','','', xlsTotalValue,'','',''],
   ];
   const totalRowIdx = 5 + itemRows.length + 1;
 
@@ -36511,7 +36528,8 @@ function repbalExportRepExcel(){
     {s:{r:1,c:0},e:{r:1,c:6}},
     {s:{r:2,c:0},e:{r:2,c:6}},
     {s:{r:3,c:0},e:{r:3,c:6}},
-    {s:{r:totalRowIdx,c:0},e:{r:totalRowIdx,c:5}},
+    {s:{r:totalRowIdx,c:0},e:{r:totalRowIdx,c:2}},
+    {s:{r:totalRowIdx,c:4},e:{r:totalRowIdx,c:6}},
   ];
 
   sty(0,0,{font:font(1,15,C.cream),fill:fill(C.dark),alignment:align('center'),border:brd('medium',C.dark)});
@@ -36522,13 +36540,13 @@ function repbalExportRepExcel(){
 
   for(let ri=5;ri<5+itemRows.length;ri++){
     for(let c=0;c<7;c++){
-      const bold = c===5||c===6;
-      sty(ri,c,{font:font(bold,10,C.dark),fill:fill(C.white),alignment:align(c===0?'center':c===1?'right':'center'),border:brd('thin',C.line)});
+      const bold = c===2||c===3;
+      sty(ri,c,{font:font(bold,10,C.dark),fill:fill(C.white),alignment:align(c===0?'center':(c===1||c===6)?'right':'center'),border:brd('thin',C.line)});
     }
   }
-  for(let c=0;c<7;c++) sty(totalRowIdx,c,{font:font(1,12,C.cream),fill:fill(C.dark),alignment:align(c===6?'center':'right'),border:brd('medium',C.dark)});
+  for(let c=0;c<7;c++) sty(totalRowIdx,c,{font:font(1,12,C.cream),fill:fill(C.dark),alignment:align(c===3?'center':'right'),border:brd('medium',C.dark)});
 
-  ws['!cols'] = [{wch:6},{wch:34},{wch:11},{wch:13},{wch:13},{wch:12},{wch:14}];
+  ws['!cols'] = [{wch:6},{wch:34},{wch:11},{wch:14},{wch:12},{wch:14},{wch:26}];
   ws['!rows'] = [{hpt:32},{hpt:24},{hpt:18},{hpt:8},{hpt:22}];
 
   XLSX.utils.book_append_sheet(wb, ws, 'سجل الجرد');
@@ -36540,47 +36558,56 @@ function repbalExportRepExcel(){
 // يبني محتوى مستند "سجل الجرد الفعلي" (كل عمليات الجرد المسجّلة، مش بس الفروق) بألوان وهوية الطحان
 function repbalBuildInventoryLogHTML(rep, rows){
   const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
+  const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
+  let shareTotalValue = 0;
   const rowsHtml = rows.length
     ? rows.map((r,i)=>{
-        const hasSplit = (+r.counted_valid_qty||0) + (+r.counted_returned_qty||0) > 0;
-        const validTxt    = hasSplit ? (r.counted_valid_qty||0)    : '—';
-        const returnedTxt = hasSplit ? (r.counted_returned_qty||0) : '—';
         const d = new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'numeric'});
-        const diffColor = r.diff>0 ? '#B91C1C' : r.diff<0 ? '#B45309' : '#276749';
-        const diffTxt = r.diff>0 ? `ناقص ${r.diff}` : r.diff<0 ? `زيادة ${Math.abs(r.diff)}` : 'مطابق';
+        const pr = productPriceFor(r.snf);
+        const val = (pr && pr.price) ? (+r.counted_qty||0)*(+pr.price||0) : null;
+        if(val!=null) shareTotalValue += val;
+        const v  = (bd.valid[rep]||{})[r.snf]||0;
+        const rv = (bd.retValid[rep]||{})[r.snf]||0;
+        const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
+        const clsParts = [];
+        if(v)  clsParts.push('صالح '+v);
+        if(rv) clsParts.push('مرتجع صالح '+rv);
+        if(rd) clsParts.push('مرتجع تالف '+rd);
+        const clsTxt = clsParts.length ? clsParts.join(' · ') : '—';
         return `<tr style="background:${i%2?'#FCF9F4':'#fff'}">
           <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${i+1}</td>
           <td style="padding:6px 8px;border:1px solid #E0D8CC">${d}</td>
           <td style="padding:6px 8px;border:1px solid #E0D8CC;font-weight:700">${r.snf}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${validTxt}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${returnedTxt}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${r.computed_qty}</td>
           <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${r.counted_qty}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800;color:${diffColor}">${diffTxt}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${val!=null ? val.toLocaleString('en-US',{maximumFractionDigits:0})+' ج' : '—'}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;font-size:10px">${clsTxt}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${r.resolved?'✅ معتمد':'⚠️ محتاج مراجعة'}</td>
         </tr>`;
       }).join('')
-    : `<tr><td colspan="8" style="padding:14px;text-align:center;color:#aaa">مفيش عمليات جرد مسجّلة لهذا المندوب</td></tr>`;
+    : `<tr><td colspan="7" style="padding:14px;text-align:center;color:#aaa">مفيش عمليات جرد مسجّلة لهذا المندوب</td></tr>`;
   return `
     <div style="background:#2C1F0A;color:#EDE5D8;text-align:center;padding:14px;font-size:20px;font-weight:900;border-radius:10px 10px 0 0">الطحان جولدن دايتس<div style="font-size:10px;color:#C8A96E;margin-top:3px;font-weight:400">Al Tahhan Golden Dates</div></div>
-    <div style="background:#C8A96E;color:#2C1F0A;text-align:center;padding:9px;font-size:14px;font-weight:700">سجل جرد فعلي — المندوب</div>
+    <div style="background:#C8A96E;color:#2C1F0A;text-align:center;padding:9px;font-size:14px;font-weight:700">سجل الجرد الكامل (كل الحركات المسجّلة)</div>
     <div style="background:#F5F0E8;padding:12px 18px;border-radius:0 0 8px 8px;margin-bottom:18px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px">
       <div>المندوب: <b style="color:#731E2E">${rep}</b></div>
       <div>عدد العمليات: <b style="color:#731E2E">${rows.length}</b></div>
       <div>تاريخ الإصدار: <b style="color:#731E2E">${now}</b></div>
     </div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:26px">
+    <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:14px">
       <thead><tr style="background:#731E2E;color:#fff">
         <th style="padding:7px;border:1px solid #5a1622">#</th>
         <th style="padding:7px;border:1px solid #5a1622">التاريخ</th>
         <th style="padding:7px;border:1px solid #5a1622">الصنف</th>
-        <th style="padding:7px;border:1px solid #5a1622">✅ صالح</th>
-        <th style="padding:7px;border:1px solid #5a1622">↩️ مرتجع</th>
-        <th style="padding:7px;border:1px solid #5a1622">المتوقع</th>
         <th style="padding:7px;border:1px solid #5a1622">الفعلي</th>
-        <th style="padding:7px;border:1px solid #5a1622">الفرق</th>
+        <th style="padding:7px;border:1px solid #5a1622">القيمة</th>
+        <th style="padding:7px;border:1px solid #5a1622">التصنيف</th>
+        <th style="padding:7px;border:1px solid #5a1622">الحالة</th>
       </tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:20px">
+      <div style="background:#2C1F0A;color:#EDE5D8;border-radius:8px;padding:8px 16px;font-size:12.5px;font-weight:800">إجمالي قيمة الرصيد: <span style="color:#C8A96E">${shareTotalValue.toLocaleString('en-US',{maximumFractionDigits:0})} ج</span></div>
+    </div>
     <div style="text-align:center;color:#aaa;font-size:9px;margin-top:24px">Al Tahhan Golden Dates © ${new Date().getFullYear()} — تم إنشاء المستند من منظومة إدارة المبيعات والتنسيق</div>`;
 }
 
@@ -36654,12 +36681,11 @@ async function repbalShareRepInventory(){
       <button onclick="repbalCloseExportModal()" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center">✕</button>
     </div>
     <div style="padding:14px 18px;max-height:80vh;overflow-y:auto">
-      <div id="repbal-export-meta" style="background:#F5F0E8;color:#4B3C1A;border-radius:8px;padding:8px 12px;font-size:11px;margin-bottom:12px;text-align:center"></div>
-      <div style="font-size:12px;font-weight:700;color:#2C1F0A;margin-bottom:6px">📦 الرصيد الحالي</div>
-      <div id="repbal-export-list" style="max-height:200px;overflow-y:auto;margin-bottom:14px"></div>
-      <div id="repbal-export-total-value"></div>
+      <div id="repbal-export-meta" style="display:none"></div>
+      <div id="repbal-export-list" style="display:none"></div>
+      <div id="repbal-export-total-value" style="display:none"></div>
       <div id="repbal-export-diffs" style="margin-bottom:14px"></div>
-      <details id="repbal-export-invlog-wrap" style="margin-bottom:14px;border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+      <details id="repbal-export-invlog-wrap" open style="margin-bottom:14px;border:1px solid var(--border);border-radius:8px;padding:8px 10px">
         <summary style="cursor:pointer;font-size:12px;font-weight:700;color:#2C1F0A">📋 سجل الجرد الكامل (كل الحركات المسجّلة)</summary>
         <div id="repbal-export-invlog" style="margin-top:10px;max-height:240px;overflow-y:auto"></div>
       </details>
