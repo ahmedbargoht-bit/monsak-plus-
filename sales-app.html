@@ -3276,14 +3276,24 @@ async function rbGetRepStartDates(repNames){
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
   const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
-  const [invRows, reqRows] = await Promise.all([
+  const [invRows, reqRows, resets] = await Promise.all([
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_resets?rep_name=in.(${encList})&select=rep_name,reset_at`),
   ]);
+  // لو المندوب اتعمله "تصفير رصيد" (بسبب أخطاء إدخال)، نتجاهل أي عد يدوي أو طلب بضاعة حصل
+  // قبل أو وقت لحظة آخر تصفير — وبداية رصيده الجديدة بقى أبكر حاجة حصلت بعد كده.
+  const resetCutoff = {};
+  (resets||[]).forEach(r=>{
+    if(!r.rep_name || !r.reset_at) return;
+    if(!resetCutoff[r.rep_name] || r.reset_at > resetCutoff[r.rep_name]) resetCutoff[r.rep_name] = r.reset_at;
+  });
   const map = {};
   const consider = (rows)=>{
     (rows||[]).forEach(row=>{
       if(!row.rep_name || !row.created_at) return;
+      const cutoff = resetCutoff[row.rep_name];
+      if(cutoff && row.created_at <= cutoff) return;
       const d = row.created_at.slice(0,10);
       if(!map[row.rep_name] || d < map[row.rep_name]) map[row.rep_name] = d;
     });

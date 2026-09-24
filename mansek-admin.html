@@ -14494,6 +14494,7 @@ async function sptLoadCampaigns(){
       ? campAcks.map(a=>`<span style="color:#1A7A4A;font-size:11px">✅ ${a.supervisor_name}</span>`).join('<br/>')
       : `<span style="color:#aaa;font-size:11px">لسه محدش من مشرفي التنسيق استلم</span>`;
     const campTargets = targets.filter(t=>t.campaign_id===c.id);
+    const campGroupsJson = encodeURIComponent(JSON.stringify(c.groups||[]));
     const targetsHtml = campTargets.length ? campTargets.map(t=>{
       const recs = records.filter(r=>r.target_id===t.id);
       const openSum = recs.reduce((s,r)=>s+(r.opening_qty!=null?+r.opening_qty:0),0);
@@ -14503,6 +14504,10 @@ async function sptLoadCampaigns(){
       return `<tr>
         <td>${t.rep_name}</td><td>${t.branch_name}</td><td>${t.assigned_by||'—'}</td>
         <td>${recvd}</td><td>${openSum||0}</td><td>${closeSum||0}</td><td>${soldSum||0}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm" style="background:#E3F2FD;color:#1565C0;padding:4px 8px;font-size:10.5px" onclick="sptOpenTransfer(${t.id},'${campGroupsJson}')"><i class="ti ti-transfer"></i> تحويل</button>
+          <button class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C;padding:4px 8px;font-size:10.5px" onclick="sptDeleteTargetRow(${t.id},'${(t.rep_name||'').replace(/'/g,"\\'")}','${(t.branch_name||'').replace(/'/g,"\\'")}')"><i class="ti ti-trash"></i> حذف</button>
+        </td>
       </tr>`;
     }).join('') : '';
     return `<div class="card" style="margin-bottom:10px">
@@ -14520,11 +14525,65 @@ async function sptLoadCampaigns(){
       </div>
       <div style="margin-top:8px;font-size:12px"><b>استلام مشرفي التنسيق:</b><br/>${ackHtml}</div>
       ${campTargets.length ? `<div class="table-wrap" style="margin-top:8px">
-        <table><thead><tr><th>المنسق</th><th>الفرع</th><th>وزّعها</th><th>استلام المنسق</th><th>إجمالي افتتاحي (${viewDate})</th><th>إجمالي ختامي (${viewDate})</th><th>إجمالي مباع (${viewDate})</th></tr></thead>
+        <table><thead><tr><th>المنسق</th><th>الفرع</th><th>وزّعها</th><th>استلام المنسق</th><th>إجمالي افتتاحي (${viewDate})</th><th>إجمالي ختامي (${viewDate})</th><th>إجمالي مباع (${viewDate})</th><th>إجراءات</th></tr></thead>
         <tbody>${targetsHtml}</tbody></table>
       </div>` : `<div style="margin-top:8px;font-size:11px;color:#aaa">لسه محدش من مشرفي التنسيق وزّعها على منسقين</div>`}
     </div>`;
   }).join('');
+}
+
+// ── حذف توزيع منسق+فرع من حملة (مع سجلات العد اليومي المرتبطة) ──
+async function sptDeleteTargetRow(targetId, repName, branchName){
+  if(!confirm(`متأكد إنك عايز تمسح توزيع "${repName}" على فرع "${branchName}"؟ هيتمسح معاه كل سجلات العد اليومي (افتتاحي/ختامي/مباع) اللي اتسجلت على الصف ده.`)) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+  try{
+    await fetch(`${SUPABASE_URL}/rest/v1/special_target_records?target_id=eq.${targetId}`,{method:'DELETE',headers:H});
+    await fetch(`${SUPABASE_URL}/rest/v1/special_targets?id=eq.${targetId}`,{method:'DELETE',headers:H});
+  }catch(e){ alert('❌ حصل خطأ أثناء الحذف'); return; }
+  sptLoadCampaigns();
+}
+
+// ── تحويل توزيع موجود لمنسق تاني (من نفس مجموعات الحملة) بدل منسق خط السير الأصلي ──
+let _sptTransferCtx = null;
+async function sptOpenTransfer(targetId, groupsJsonEnc){
+  let groups = [];
+  try{ groups = JSON.parse(decodeURIComponent(groupsJsonEnc))||[]; }catch(e){}
+  _sptTransferCtx = { targetId, groups };
+  const modal = document.getElementById('modal-spt-transfer');
+  if(modal) modal.style.display='flex';
+  const sel = document.getElementById('spt-transfer-select');
+  if(sel) sel.innerHTML = '<option value="">جاري التحميل...</option>';
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  let reps = [];
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/users?select=name,grp,user_type&role=eq.rep&status=eq.active&order=name.asc&limit=500`,{headers:H});
+    reps = r.ok ? await r.json().catch(()=>[]) : [];
+  }catch(e){}
+  const gset = new Set(groups);
+  const filtered = gset.size ? reps.filter(u=>gset.has(u.grp)) : reps;
+  if(sel) sel.innerHTML = '<option value="">اختر المنسق الجديد</option>' + filtered.map(u=>`<option value="${u.name}">${u.name}${u.user_type?' — '+u.user_type:''}</option>`).join('');
+}
+function sptCloseTransfer(){
+  const modal = document.getElementById('modal-spt-transfer');
+  if(modal) modal.style.display='none';
+  _sptTransferCtx = null;
+}
+async function sptConfirmTransfer(){
+  if(!_sptTransferCtx) return;
+  const sel = document.getElementById('spt-transfer-select');
+  const newRep = sel?.value;
+  if(!newRep){ alert('اختار المنسق الجديد الأول'); return; }
+  if(!confirm(`متأكد إنك عايز تحوّل التوزيع ده لـ"${newRep}"؟ سجلات العد اليومي المسجّلة قبل كده هتفضل زي ما هي مربوطة بنفس الصف.`)) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+  try{
+    const uRes = await fetch(`${SUPABASE_URL}/rest/v1/users?select=user_type&name=eq.${encodeURIComponent(newRep)}&role=eq.rep&limit=1`,{headers:H});
+    const uj = uRes.ok ? await uRes.json().catch(()=>[]) : [];
+    const body = { rep_name: newRep, received_at: null };
+    if(uj[0]?.user_type) body.coord_type = uj[0].user_type;
+    await fetch(`${SUPABASE_URL}/rest/v1/special_targets?id=eq.${_sptTransferCtx.targetId}`,{method:'PATCH',headers:H,body:JSON.stringify(body)});
+  }catch(e){ alert('❌ حصل خطأ أثناء التحويل'); return; }
+  sptCloseTransfer();
+  sptLoadCampaigns();
 }
 
 async function sptCancelCampaign(id){
@@ -36258,6 +36317,22 @@ async function repbalShareRepInventory(){
       </div>
       <button onclick="repbalShareRepInventory()" style="width:100%;background:#C8A96E;color:#2C1F0A;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:10px"><i class="ti ti-share"></i> تصدير سجل الجرد الفعلي (مشاركة/واتساب)</button>
       <button onclick="repbalResetRep()" style="width:100%;background:#fff;color:#B91C1C;border:1.5px solid #B91C1C;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px"><i class="ti ti-restore"></i> تصفير رصيد المندوب (بسبب أخطاء إدخال)</button>
+    </div>
+  </div>
+</div>
+<!-- ══ modal: تحويل توزيع الأهداف الخاصة لمنسق تاني ══ -->
+<div id="modal-spt-transfer" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:9999;align-items:center;justify-content:center;padding:24px 12px" onclick="if(event.target===this)sptCloseTransfer()">
+  <div style="background:var(--surface-2,#fff);border-radius:14px;width:100%;max-width:420px;box-shadow:0 8px 40px rgba(0,0,0,.35);font-family:Cairo,sans-serif;direction:rtl;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:#1565C0;color:#fff">
+      <div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:800"><i class="ti ti-transfer"></i> تحويل التوزيع لمنسق تاني</div>
+      <button onclick="sptCloseTransfer()" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center">✕</button>
+    </div>
+    <div style="padding:16px 18px">
+      <div style="font-size:11.5px;color:var(--text2);margin-bottom:10px">اختار المنسق الجديد (من نفس مجموعة الحملة) — الفرع هيفضل زي ما هو، وسجلات العد اليومي اللي اتسجلت قبل كده هتفضل مربوطة بنفس التوزيع.</div>
+      <select id="spt-transfer-select" style="width:100%;padding:9px;border:1.5px solid var(--border);border-radius:8px;font-size:13px;font-family:Cairo,sans-serif;margin-bottom:14px">
+        <option value="">اختر المنسق الجديد</option>
+      </select>
+      <button onclick="sptConfirmTransfer()" style="width:100%;background:#1565C0;color:#fff;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer">تأكيد التحويل</button>
     </div>
   </div>
 </div>
