@@ -3295,7 +3295,7 @@ async function rbGetRepStartDates(repNames){
       if(!row.rep_name || !row.created_at) return;
       const cutoff = resetCutoff[row.rep_name];
       if(cutoff && row.created_at <= cutoff) return;
-      const d = row.created_at.slice(0,10);
+      const d = row.created_at; // تاريخ+وقت كامل — عشان نفرّق حركات قبل/بعد التصفير في نفس اليوم
       if(!map[row.rep_name] || d < map[row.rep_name]) map[row.rep_name] = d;
     });
   };
@@ -3308,8 +3308,8 @@ async function rbFetchRawBalanceData(repNames){
   const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
   const [dels, rets, reqs, adjs, handovers, startDates] = await Promise.all([
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date,created_at&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status,created_at&limit=10000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at&limit=5000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at&limit=5000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_damaged_handovers?rep_name=in.(${encList})&select=rep_name,snf,qty,created_at&limit=5000`),
@@ -3327,7 +3327,7 @@ function rbCalcBalances(raw, from, to, has){
     const sd = startDates[rep];
     if(!sd) return false; // المندوب لسه معملش أول جرد → مفيش رصيد يتحسب له خالص
     if(!d) return false;
-    return d.slice(0,10) >= sd;
+    return d >= sd;
   };
   const inRange = (d)=>{
     if(!has) return true;
@@ -3337,10 +3337,10 @@ function rbCalcBalances(raw, from, to, has){
     if(to && s>to) return false;
     return true;
   };
-  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.delivery_date) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
+  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.created_at) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
   // المرتجع بيتحسب بس لما يكون لسه "معلّق" (المشرف لسه ما أكّدش استلامه) — لحظة ما يتأكد
   // الاستلام، الكمية دي بتخرج فعليًا من رصيد عربية المندوب فمبتتحسبش تاني
-  (raw.rets||[]).forEach(d=>{ if(d.receipt_status==='pending' && afterStart(d.rep_name,d.return_date) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.rets||[]).forEach(d=>{ if(d.receipt_status==='pending' && afterStart(d.rep_name,d.created_at) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.reqs||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
   // تسليم تالف لإدارة التوالف — بمجرد ما المندوب يسجّل تسليمها، بتتخصم فورًا من رصيده لأنها
@@ -3355,13 +3355,13 @@ function rbCalcBreakdown(raw, from, to, has){
   const valid = {}, retValid = {}, retDamaged = {};
   const startDates = raw.startDates || {};
   const addTo = (map,rep,item,qty)=>{ if(!rep||!item) return; map[rep]=map[rep]||{}; map[rep][item]=(map[rep][item]||0)+qty; };
-  const afterStart = (rep,d)=>{ const sd=startDates[rep]; if(!sd||!d) return false; return d.slice(0,10)>=sd; };
+  const afterStart = (rep,d)=>{ const sd=startDates[rep]; if(!sd||!d) return false; return d>=sd; };
   const inRange = (d)=>{ if(!has) return true; if(!d) return false; const s=d.slice(0,10); if(from&&s<from) return false; if(to&&s>to) return false; return true; };
-  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.delivery_date) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,-(+it.qty||0))); });
+  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.created_at) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,-(+it.qty||0))); });
   (raw.reqs||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,+(+it.qty||0))); });
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) addTo(valid,a.rep_name,a.snf,+(+a.qty_delta||0)); });
   (raw.rets||[]).forEach(d=>{
-    if(d.receipt_status!=='pending' || !afterStart(d.rep_name,d.return_date) || !inRange(d.return_date)) return;
+    if(d.receipt_status!=='pending' || !afterStart(d.rep_name,d.created_at) || !inRange(d.return_date)) return;
     (d.items||[]).forEach(it=>{
       const qty = +it.qty||0, vq = +it.valid_qty||0, dq = +it.damaged_qty||0;
       if(vq+dq>0){

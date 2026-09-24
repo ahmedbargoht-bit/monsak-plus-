@@ -35518,6 +35518,12 @@ function repbalInRange(dateStr, from, to){
   return true;
 }
 // بدون فترة: البضاعة الفعلية الموجودة في عربية كل مندوب دلوقتي (من تاريخ أول جرد سجّله لحد النهاردة). بفترة محددة: صافي حركة البيع/المرتجع خلال الفترة دي بس (مقيّدة برضه بعدم النزول قبل أول جرد).
+// ملحوظة مهمة: startDates[rep] بقى تاريخ ووقت كامل (مش تاريخ بس) عشان لو مندوب اتصفّر رصيده
+// وعمل جرد جديد في نفس اليوم، أي حركة (طلب بضاعة موافق عليه/تسوية) حصلت قبل لحظة التصفير بالظبط
+// (حتى لو في نفس اليوم) متتحسبش غلط ضمن رصيده الجديد — المقارنة بقت بالوقت مش بس بالتاريخ.
+// التوريد/المرتجع (delivery_date/return_date) نوعهم "تاريخ" بس من غير وقت في القاعدة، فبنستخدم
+// created_at بتاعهم (اللي فيه وقت كامل) في مقارنة afterStart، وبنسيب delivery_date/return_date
+// للفلترة بالفترة (from/to) زي ما هي.
 function repbalCalcBalances(raw, from, to, has){
   const bal = {};
   const startDates = raw.startDates || {};
@@ -35526,7 +35532,7 @@ function repbalCalcBalances(raw, from, to, has){
     const sd = startDates[rep];
     if(!sd) return false; // المندوب لسه معملش أول جرد → مفيش رصيد يتحسب له خالص
     if(!d) return false;
-    return d.slice(0,10) >= sd;
+    return d >= sd;
   };
   const inRange = (d)=>{
     if(!has) return true;
@@ -35536,10 +35542,10 @@ function repbalCalcBalances(raw, from, to, has){
     if(to && s>to) return false;
     return true;
   };
-  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.delivery_date) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
+  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.created_at) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,-(+it.qty||0))); });
   // المرتجع بيتحسب بس لما يكون لسه "معلّق" (المشرف لسه ما أكّدش استلامه) — لحظة ما يتأكد
   // الاستلام، الكمية دي بتخرج فعليًا من رصيد عربية المندوب فمبتتحسبش تاني
-  (raw.rets||[]).forEach(d=>{ if(d.receipt_status==='pending' && afterStart(d.rep_name,d.return_date) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.rets||[]).forEach(d=>{ if(d.receipt_status==='pending' && afterStart(d.rep_name,d.created_at) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.reqsApproved||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
   // تسليم تالف لإدارة التوالف — بمجرد ما المندوب يسجّل تسليمها، بتتخصم فورًا من رصيده لأنها
@@ -35555,13 +35561,13 @@ function repbalCalcBreakdown(raw, from, to, has){
   const valid = {}, retValid = {}, retDamaged = {};
   const startDates = raw.startDates || {};
   const addTo = (map,rep,item,qty)=>{ if(!rep||!item) return; map[rep]=map[rep]||{}; map[rep][item]=(map[rep][item]||0)+qty; };
-  const afterStart = (rep,d)=>{ const sd=startDates[rep]; if(!sd||!d) return false; return d.slice(0,10)>=sd; };
+  const afterStart = (rep,d)=>{ const sd=startDates[rep]; if(!sd||!d) return false; return d>=sd; };
   const inRange = (d)=>{ if(!has) return true; if(!d) return false; const s=d.slice(0,10); if(from&&s<from) return false; if(to&&s>to) return false; return true; };
-  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.delivery_date) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,-(+it.qty||0))); });
+  (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.created_at) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,-(+it.qty||0))); });
   (raw.reqsApproved||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,+(+it.qty||0))); });
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) addTo(valid,a.rep_name,a.snf,+(+a.qty_delta||0)); });
   (raw.rets||[]).forEach(d=>{
-    if(d.receipt_status!=='pending' || !afterStart(d.rep_name,d.return_date) || !inRange(d.return_date)) return;
+    if(d.receipt_status!=='pending' || !afterStart(d.rep_name,d.created_at) || !inRange(d.return_date)) return;
     (d.items||[]).forEach(it=>{
       const qty = +it.qty||0, vq = +it.valid_qty||0, dq = +it.damaged_qty||0;
       if(vq+dq>0){
@@ -35628,8 +35634,8 @@ async function repbalLoad(){
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&order=created_at.asc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&order=created_at.desc&limit=300`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date,created_at&limit=10000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status,created_at&limit=10000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at&limit=5000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at&limit=5000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
@@ -35651,13 +35657,16 @@ async function repbalLoad(){
   // بداية تتبع رصيد كل مندوب: أبكر تاريخ بين (أول طلب بضاعة سجّله من المخزن) أو (أول جرد يدوي
   // عمله، لو عمل قبل كده) — المناديب الجداد اللي لسه مبيعملوش جرد يدوي (بقى استثنائي/دوري بس)
   // يبقى ليهم رصيد محسوب من أول طلب بضاعة، مش لازم ينتظروا أول جرد عشان يظهر ليهم رصيد.
+  // startDates[rep] بقى تاريخ+وقت كامل (مش تاريخ بس) — لو المندوب اتصفّر رصيده وعمل جرد
+  // جديد في نفس اليوم، أي حركة قبل لحظة التصفير بالظبط (حتى لو في نفس اليوم) لازم تتجاهل، ومقارنة
+  // "تاريخ بس" مكنتش تفرّق بين قبل/بعد التصفير لو حصلوا في نفس اليوم (سبب باج رصيد منفوخ فعليًا).
   const startDates = {};
   const considerStart = (rows)=>{
     (rows||[]).forEach(row=>{
       if(!row.rep_name || !row.created_at) return;
       const cutoff = resetCutoff[row.rep_name];
       if(cutoff && row.created_at <= cutoff) return; // اتجاهل — قبل/وقت آخر تصفير
-      const d = row.created_at.slice(0,10);
+      const d = row.created_at; // الوقت الكامل، من غير قطع للتاريخ بس
       if(!startDates[row.rep_name] || d < startDates[row.rep_name]) startDates[row.rep_name] = d;
     });
   };

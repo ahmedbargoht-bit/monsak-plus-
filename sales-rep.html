@@ -2174,9 +2174,11 @@ async function ciGetBalanceStartDate(){
       sbFetch('rep_car_inventory',  `?rep_name=eq.${enc}${cutoffQ}&select=created_at&order=created_at.asc&limit=1`).catch(()=>[]),
       sbFetch('rep_stock_requests', `?rep_name=eq.${enc}${cutoffQ}&select=created_at&order=created_at.asc&limit=1`).catch(()=>[]),
     ]);
+    // بنسيب الوقت الكامل (مش تاريخ بس) — لو المندوب اتصفّر رصيده وعمل جرد جديد في نفس اليوم،
+    // مقارنة "تاريخ بس" كانت هتضم حركات حصلت قبل لحظة التصفير بالظبط في نفس اليوم غلط
     const dates=[];
-    if(invRows && invRows[0] && invRows[0].created_at) dates.push(invRows[0].created_at.slice(0,10));
-    if(reqRows && reqRows[0] && reqRows[0].created_at) dates.push(reqRows[0].created_at.slice(0,10));
+    if(invRows && invRows[0] && invRows[0].created_at) dates.push(invRows[0].created_at);
+    if(reqRows && reqRows[0] && reqRows[0].created_at) dates.push(reqRows[0].created_at);
     if(!dates.length) return null;
     return dates.sort()[0];
   }catch(e){ return null; }
@@ -2184,16 +2186,21 @@ async function ciGetBalanceStartDate(){
 // الرصيد بقى مقسوم لجزئين منفصلين: "صالح" (بضاعة سليمة جاهزة للبيع) و"مرتجع" (بضاعة رجّعها
 // المندوب من عند العملاء ولسه ماسكها في العربية، لحد ما المشرف يأكّد استلامها فعليًا).
 async function ciComputeBalances(){
-  const startDate = await ciGetBalanceStartDate();
+  const startDate = await ciGetBalanceStartDate(); // ممكن يكون تاريخ+وقت كامل دلوقتي
   _ciBalanceStartDate = startDate;
   if(!startDate) return {valid:{}, retValid:{}, retDamaged:{}};
+  // delivery_date/return_date أعمدة "تاريخ" بس من غير وقت في القاعدة، فبنفلترهم بتاريخ اليوم بس.
+  // created_at أعمدة فيها وقت كامل، فبنفلترهم بالوقت الكامل عشان نفرّق حركات قبل/بعد لحظة
+  // تصفير الرصيد لو حصلت في نفس اليوم (لو فلترنا بتاريخ بس، حركات الصبح قبل التصفير كانت هتتحسب غلط).
+  const startDateOnly = startDate.slice(0,10);
+  const startTs = encodeURIComponent(startDate);
   const enc = encodeURIComponent(currentRep.name);
   const [dels, rets, reqs, adjs, handovers] = await Promise.all([
-    sbFetch('sales_deliveries',       `?rep_name=eq.${enc}&delivery_date=gte.${startDate}&select=items&limit=5000`).catch(()=>[]),
-    sbFetch('sales_returns',          `?rep_name=eq.${enc}&return_date=gte.${startDate}&select=items,receipt_status&limit=5000`).catch(()=>[]),
-    sbFetch('rep_stock_requests',     `?rep_name=eq.${enc}&status=eq.approved&created_at=gte.${startDate}&select=items&limit=2000`).catch(()=>[]),
-    sbFetch('rep_balance_adjustments',`?rep_name=eq.${enc}&created_at=gte.${startDate}&select=snf,qty_delta&limit=2000`).catch(()=>[]),
-    sbFetch('rep_damaged_handovers',  `?rep_name=eq.${enc}&created_at=gte.${startDate}&select=snf,qty&limit=2000`).catch(()=>[]),
+    sbFetch('sales_deliveries',       `?rep_name=eq.${enc}&delivery_date=gte.${startDateOnly}&select=items&limit=5000`).catch(()=>[]),
+    sbFetch('sales_returns',          `?rep_name=eq.${enc}&return_date=gte.${startDateOnly}&select=items,receipt_status&limit=5000`).catch(()=>[]),
+    sbFetch('rep_stock_requests',     `?rep_name=eq.${enc}&status=eq.approved&created_at=gte.${startTs}&select=items&limit=2000`).catch(()=>[]),
+    sbFetch('rep_balance_adjustments',`?rep_name=eq.${enc}&created_at=gte.${startTs}&select=snf,qty_delta&limit=2000`).catch(()=>[]),
+    sbFetch('rep_damaged_handovers',  `?rep_name=eq.${enc}&created_at=gte.${startTs}&select=snf,qty&limit=2000`).catch(()=>[]),
   ]);
   const valid={}, retValid={}, retDamaged={};
   const addValid      = (name, qty) => { if(!name) return; valid[name]      = (valid[name]||0)      + qty; };
