@@ -3303,18 +3303,19 @@ async function rbGetRepStartDates(repNames){
   return map;
 }
 async function rbFetchRawBalanceData(repNames){
-  if(!repNames.length) return {dels:[], rets:[], reqs:[], adjs:[], startDates:{}};
+  if(!repNames.length) return {dels:[], rets:[], reqs:[], adjs:[], handovers:[], startDates:{}};
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
   const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
-  const [dels, rets, reqs, adjs, startDates] = await Promise.all([
+  const [dels, rets, reqs, adjs, handovers, startDates] = await Promise.all([
     fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date&limit=10000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status&limit=10000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at&limit=5000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at&limit=5000`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_damaged_handovers?rep_name=in.(${encList})&select=rep_name,snf,qty,created_at&limit=5000`),
     rbGetRepStartDates(repNames),
   ]);
-  return {dels:dels||[], rets:rets||[], reqs:reqs||[], adjs:adjs||[], startDates:startDates||{}};
+  return {dels:dels||[], rets:rets||[], reqs:reqs||[], adjs:adjs||[], handovers:handovers||[], startDates:startDates||{}};
 }
 
 // بدون فترة: رصيد تراكمي من أول جرد سجّله كل مندوب. بفترة محددة: صافي الحركة خلال الفترة دي بس (مقيّدة برضه بعدم النزول قبل أول جرد).
@@ -3342,6 +3343,9 @@ function rbCalcBalances(raw, from, to, has){
   (raw.rets||[]).forEach(d=>{ if(d.receipt_status==='pending' && afterStart(d.rep_name,d.return_date) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.reqs||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
+  // تسليم تالف لإدارة التوالف — بمجرد ما المندوب يسجّل تسليمها، بتتخصم فورًا من رصيده لأنها
+  // بقت مش موجودة فعليًا في العربية
+  (raw.handovers||[]).forEach(h=>{ if(afterStart(h.rep_name,h.created_at) && inRange(h.created_at)) add(h.rep_name,h.snf,-(+h.qty||0)); });
   return bal;
 }
 // تفصيل رصيد كل مندوب لثلاث طبقات: صالح (بضاعة سليمة جاهزة للبيع) / مرتجع صالح / مرتجع تالف
@@ -3368,6 +3372,7 @@ function rbCalcBreakdown(raw, from, to, has){
       }
     });
   });
+  (raw.handovers||[]).forEach(h=>{ if(afterStart(h.rep_name,h.created_at) && inRange(h.created_at)) addTo(retDamaged,h.rep_name,h.snf,-(+h.qty||0)); });
   return {valid, retValid, retDamaged};
 }
 
@@ -4253,47 +4258,62 @@ function rbRenderBalances(){
 // يبني محتوى مستند "سجل الجرد الفعلي" (كل عمليات الجرد المسجّلة) بألوان وهوية الطحان
 function rbBuildInventoryLogHTML(rep, rows){
   const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
+  const bd = _rbBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
+  let shareTotalValue = 0;
   const rowsHtml = rows.length
     ? rows.map((r,i)=>{
-        const hasSplit = (+r.counted_valid_qty||0) + (+r.counted_returned_qty||0) > 0;
-        const validTxt    = hasSplit ? (r.counted_valid_qty||0)    : '—';
-        const returnedTxt = hasSplit ? (r.counted_returned_qty||0) : '—';
         const d = new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'numeric'});
-        const diffColor = r.diff>0 ? '#B91C1C' : r.diff<0 ? '#B45309' : '#276749';
-        const diffTxt = r.diff>0 ? `ناقص ${r.diff}` : r.diff<0 ? `زيادة ${Math.abs(r.diff)}` : 'مطابق';
+        const pr = typeof productPriceFor==='function' ? productPriceFor(r.snf) : null;
+        const rawVal = (pr && pr.price) ? (+r.counted_qty||0)*(+pr.price||0) : null;
+        const val = rawVal!=null ? (r.isHandover?-rawVal:rawVal) : null;
+        if(val!=null) shareTotalValue += val;
+        let clsTxt = '—', statusTxt = r.resolved?'✅ معتمد':'⚠️ محتاج مراجعة';
+        if(r.isHandover){
+          statusTxt = '🗑️ تسليم تالف';
+        } else {
+          const v  = (bd.valid[rep]||{})[r.snf]||0;
+          const rv = (bd.retValid[rep]||{})[r.snf]||0;
+          const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
+          const clsParts = [];
+          if(v)  clsParts.push('صالح '+v);
+          if(rv) clsParts.push('مرتجع صالح '+rv);
+          if(rd) clsParts.push('مرتجع تالف '+rd);
+          clsTxt = clsParts.length ? clsParts.join(' · ') : '—';
+        }
         return `<tr style="background:${i%2?'#FCF9F4':'#fff'}">
           <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${i+1}</td>
           <td style="padding:6px 8px;border:1px solid #E0D8CC">${d}</td>
           <td style="padding:6px 8px;border:1px solid #E0D8CC;font-weight:700">${r.snf}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${validTxt}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${returnedTxt}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${r.computed_qty}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${r.counted_qty}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800;color:${diffColor}">${diffTxt}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${r.isHandover?'-':''}${r.counted_qty}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${val!=null ? (val<0?'-':'')+Math.abs(val).toLocaleString('en-US',{maximumFractionDigits:0})+' ج' : '—'}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;font-size:10px">${clsTxt}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${statusTxt}</td>
         </tr>`;
       }).join('')
-    : `<tr><td colspan="8" style="padding:14px;text-align:center;color:#aaa">مفيش عمليات جرد مسجّلة لهذا المندوب</td></tr>`;
+    : `<tr><td colspan="7" style="padding:14px;text-align:center;color:#aaa">مفيش عمليات جرد مسجّلة لهذا المندوب</td></tr>`;
   return `
     <div style="background:#2C1F0A;color:#EDE5D8;text-align:center;padding:14px;font-size:20px;font-weight:900;border-radius:10px 10px 0 0">الطحان جولدن دايتس<div style="font-size:10px;color:#C8A96E;margin-top:3px;font-weight:400">Al Tahhan Golden Dates</div></div>
-    <div style="background:#C8A96E;color:#2C1F0A;text-align:center;padding:9px;font-size:14px;font-weight:700">سجل جرد فعلي — المندوب</div>
+    <div style="background:#C8A96E;color:#2C1F0A;text-align:center;padding:9px;font-size:14px;font-weight:700">سجل الجرد الكامل (كل الحركات المسجّلة)</div>
     <div style="background:#F5F0E8;padding:12px 18px;border-radius:0 0 8px 8px;margin-bottom:18px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px">
       <div>المندوب: <b style="color:#731E2E">${rep}</b></div>
       <div>عدد العمليات: <b style="color:#731E2E">${rows.length}</b></div>
       <div>تاريخ الإصدار: <b style="color:#731E2E">${now}</b></div>
     </div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:26px">
+    <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:14px">
       <thead><tr style="background:#731E2E;color:#fff">
         <th style="padding:7px;border:1px solid #5a1622">#</th>
         <th style="padding:7px;border:1px solid #5a1622">التاريخ</th>
         <th style="padding:7px;border:1px solid #5a1622">الصنف</th>
-        <th style="padding:7px;border:1px solid #5a1622">✅ صالح</th>
-        <th style="padding:7px;border:1px solid #5a1622">↩️ مرتجع</th>
-        <th style="padding:7px;border:1px solid #5a1622">المتوقع</th>
         <th style="padding:7px;border:1px solid #5a1622">الفعلي</th>
-        <th style="padding:7px;border:1px solid #5a1622">الفرق</th>
+        <th style="padding:7px;border:1px solid #5a1622">القيمة</th>
+        <th style="padding:7px;border:1px solid #5a1622">التصنيف</th>
+        <th style="padding:7px;border:1px solid #5a1622">الحالة</th>
       </tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:20px">
+      <div style="background:#2C1F0A;color:#EDE5D8;border-radius:8px;padding:8px 16px;font-size:12.5px;font-weight:800">إجمالي قيمة الرصيد: <span style="color:#C8A96E">${shareTotalValue.toLocaleString('en-US',{maximumFractionDigits:0})} ج</span></div>
+    </div>
     <div style="text-align:center;color:#aaa;font-size:9px;margin-top:24px">Al Tahhan Golden Dates © ${new Date().getFullYear()} — تم إنشاء المستند من منظومة إدارة المبيعات والتنسيق</div>`;
 }
 
@@ -4305,9 +4325,15 @@ async function rbShareRepInventory(rep){
   showToast?.('⏳ جاري تجهيز سجل الجرد...');
   let rows = [];
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=eq.${encodeURIComponent(rep)}&order=created_at.desc&limit=500&select=snf,counted_qty,counted_valid_qty,counted_returned_qty,computed_qty,diff,created_at`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}, cache:'no-store'});
-    rows = res.ok ? await res.json() : [];
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const [invRes, handRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=eq.${encodeURIComponent(rep)}&order=created_at.desc&limit=500&select=snf,counted_qty,counted_valid_qty,counted_returned_qty,computed_qty,diff,resolved,created_at`, {headers:H, cache:'no-store'}),
+      fetch(`${SUPABASE_URL}/rest/v1/rep_damaged_handovers?rep_name=eq.${encodeURIComponent(rep)}&order=created_at.desc&limit=500&select=snf,qty,created_at`, {headers:H, cache:'no-store'}),
+    ]);
+    const invRows = invRes.ok ? await invRes.json() : [];
+    const handRows = handRes.ok ? await handRes.json() : [];
+    rows = [...(invRows||[]), ...(handRows||[]).map(h=>({snf:h.snf, counted_qty:h.qty, resolved:true, created_at:h.created_at, isHandover:true}))]
+      .sort((a,b)=> new Date(b.created_at)-new Date(a.created_at));
   }catch(e){ rows = []; }
 
   const holder = document.createElement('div');

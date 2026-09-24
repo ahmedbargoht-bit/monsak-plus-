@@ -35542,6 +35542,9 @@ function repbalCalcBalances(raw, from, to, has){
   (raw.rets||[]).forEach(d=>{ if(d.receipt_status==='pending' && afterStart(d.rep_name,d.return_date) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.reqsApproved||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
+  // تسليم تالف لإدارة التوالف — بمجرد ما المندوب يسجّل تسليمها، بتتخصم فورًا من رصيده لأنها
+  // بقت مش موجودة فعليًا في العربية
+  (raw.handovers||[]).forEach(h=>{ if(afterStart(h.rep_name,h.created_at) && inRange(h.created_at)) add(h.rep_name,h.snf,-(+h.qty||0)); });
   return bal;
 }
 // تفصيل رصيد كل مندوب لثلاث طبقات: صالح (بضاعة سليمة جاهزة للبيع) / مرتجع صالح / مرتجع تالف
@@ -35569,6 +35572,7 @@ function repbalCalcBreakdown(raw, from, to, has){
       }
     });
   });
+  (raw.handovers||[]).forEach(h=>{ if(afterStart(h.rep_name,h.created_at) && inRange(h.created_at)) addTo(retDamaged,h.rep_name,h.snf,-(+h.qty||0)); });
   return {valid, retValid, retDamaged};
 }
 function repbalApplyPeriod(){
@@ -35620,7 +35624,7 @@ async function repbalLoad(){
 
   const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
   const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
-  const [pending, diffs, allReqs, dels, rets, reqsApproved, adjs, invRows, fullInv, reqDateRows, resets] = await Promise.all([
+  const [pending, diffs, allReqs, dels, rets, reqsApproved, adjs, invRows, fullInv, reqDateRows, resets, handovers] = await Promise.all([
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&order=created_at.asc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc&limit=500`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&order=created_at.desc&limit=300`),
@@ -35632,6 +35636,7 @@ async function repbalLoad(){
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&order=created_at.desc&limit=5000&select=id,rep_name,snf,counted_qty,counted_valid_qty,counted_returned_qty,computed_qty,diff,resolved,created_at`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
     fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_resets?rep_name=in.(${encList})&select=rep_name,reset_at`),
+    fetchJ(`${SUPABASE_URL}/rest/v1/rep_damaged_handovers?rep_name=in.(${encList})&select=rep_name,snf,qty,created_at&order=created_at.desc&limit=5000`),
   ]);
 
   // لو المندوب اتعمله "تصفير رصيد" (بسبب أخطاء إدخال)، نتجاهل أي عد يدوي أو طلب بضاعة حصل
@@ -35659,14 +35664,21 @@ async function repbalLoad(){
   considerStart(invRows); considerStart(reqDateRows);
 
   // سجل الجرد الكامل لكل مندوب (كل الحركات، معتمدة أو لسه محتاجة مراجعة) — ده اللي بيوريه المودال
-  // بتاع كل مندوب، عشان تشوف كل حاجة عنه في مكان واحد بدل ما تتفرق على أكتر من كارت
+  // بتاع كل مندوب، عشان تشوف كل حاجة عنه في مكان واحد بدل ما تتفرق على أكتر من كارت. بندمج فيه
+  // كمان حركات "تسليم تالف لإدارة التوالف" (isHandover) عشان تبقى ظاهرة في نفس السجل.
   _repbalInvLog = {};
   (fullInv||[]).forEach(row=>{ (_repbalInvLog[row.rep_name] = _repbalInvLog[row.rep_name] || []).push(row); });
+  (handovers||[]).forEach(h=>{
+    (_repbalInvLog[h.rep_name] = _repbalInvLog[h.rep_name] || []).push({
+      rep_name:h.rep_name, snf:h.snf, counted_qty:h.qty, resolved:true, created_at:h.created_at, isHandover:true
+    });
+  });
+  Object.keys(_repbalInvLog).forEach(rep=>{ _repbalInvLog[rep].sort((a,b)=> new Date(b.created_at)-new Date(a.created_at)); });
 
   _repbalRawPending = pending||[];
   _repbalRawDiffs   = diffs||[];
   _repbalRawAllReqs = allReqs||[];
-  _repbalRawBalanceData = {dels:dels||[], rets:rets||[], reqsApproved:reqsApproved||[], adjs:adjs||[], startDates};
+  _repbalRawBalanceData = {dels:dels||[], rets:rets||[], reqsApproved:reqsApproved||[], adjs:adjs||[], handovers:handovers||[], startDates};
   await ensureSplPrices(); // لازم الأسعار متحمّلة عشان عمود "القيمة" في طلبات البضاعة يظهر صح من أول تحميل
   repbalApplyPeriod();
 }
@@ -36312,27 +36324,33 @@ async function repbalOpenExportModal(rep){
     const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
     let invTotalValue = 0, invPricedCount = 0;
     const rowsHtml = rows.map(r=>{
-      const statusBadge = r.resolved
-        ? '<span style="color:#2E7D32;font-weight:700">✅ معتمد</span>'
-        : '<span style="color:#B45309;font-weight:700">⚠️ محتاج مراجعة</span>';
+      const statusBadge = r.isHandover
+        ? '<span style="color:#B71C1C;font-weight:700">🗑️ تسليم تالف</span>'
+        : r.resolved
+          ? '<span style="color:#2E7D32;font-weight:700">✅ معتمد</span>'
+          : '<span style="color:#B45309;font-weight:700">⚠️ محتاج مراجعة</span>';
       const pr = productPriceFor(r.snf);
       let valueTxt = '—';
       if(pr && pr.price){
-        const val = (+r.counted_qty||0) * (+pr.price||0);
+        const rawVal = (+r.counted_qty||0) * (+pr.price||0);
+        const val = r.isHandover ? -rawVal : rawVal;
         invTotalValue += val; invPricedCount++;
-        valueTxt = `${val.toLocaleString('en-US',{maximumFractionDigits:0})} ج`;
+        valueTxt = `${r.isHandover?'-':''}${Math.abs(val).toLocaleString('en-US',{maximumFractionDigits:0})} ج`;
       }
-      const v  = (bd.valid[rep]||{})[r.snf]||0;
-      const rv = (bd.retValid[rep]||{})[r.snf]||0;
-      const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
-      const clsParts = [];
-      if(v)  clsParts.push(`<span style="color:#276749">✅ صالح ${v}</span>`);
-      if(rv) clsParts.push(`<span style="color:#1D4ED8">↩️ مرتجع صالح ${rv}</span>`);
-      if(rd) clsParts.push(`<span style="color:#B71C1C">🗑️ مرتجع تالف ${rd}</span>`);
-      const clsTxt = clsParts.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;font-size:9px;margin-top:2px;font-weight:700">${clsParts.join('')}</div>` : '';
+      let clsTxt = '';
+      if(!r.isHandover){
+        const v  = (bd.valid[rep]||{})[r.snf]||0;
+        const rv = (bd.retValid[rep]||{})[r.snf]||0;
+        const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
+        const clsParts = [];
+        if(v)  clsParts.push(`<span style="color:#276749">✅ صالح ${v}</span>`);
+        if(rv) clsParts.push(`<span style="color:#1D4ED8">↩️ مرتجع صالح ${rv}</span>`);
+        if(rd) clsParts.push(`<span style="color:#B71C1C">🗑️ مرتجع تالف ${rd}</span>`);
+        clsTxt = clsParts.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;font-size:9px;margin-top:2px;font-weight:700">${clsParts.join('')}</div>` : '';
+      }
       return `<tr style="border-bottom:1px solid var(--border)">
         <td style="padding:5px">${r.snf}${clsTxt}</td>
-        <td style="padding:5px;text-align:center">${r.counted_qty}</td>
+        <td style="padding:5px;text-align:center">${r.isHandover?'-':''}${r.counted_qty}</td>
         <td style="padding:5px;text-align:center;color:#8A6D2F;font-weight:700">${valueTxt}</td>
         <td style="padding:5px;text-align:center">${new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'})}</td>
         <td style="padding:5px;text-align:center">${statusBadge}</td>
@@ -36407,22 +36425,26 @@ function repbalExportRepPDF(){
   const rowsHtml = rows.length
     ? rows.map((r,i)=>{
         const pr = productPriceFor(r.snf);
-        const val = (pr && pr.price) ? (+r.counted_qty||0)*(+pr.price||0) : null;
+        const rawVal = (pr && pr.price) ? (+r.counted_qty||0)*(+pr.price||0) : null;
+        const val = rawVal!=null ? (r.isHandover?-rawVal:rawVal) : null;
         if(val!=null) pdfTotalValue += val;
-        const statusTxt = r.resolved ? '✅ معتمد' : '⚠️ محتاج مراجعة';
-        const v  = (bd.valid[rep]||{})[r.snf]||0;
-        const rv = (bd.retValid[rep]||{})[r.snf]||0;
-        const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
-        const clsParts = [];
-        if(v)  clsParts.push(`✅ صالح ${v}`);
-        if(rv) clsParts.push(`↩️ مرتجع صالح ${rv}`);
-        if(rd) clsParts.push(`🗑️ مرتجع تالف ${rd}`);
-        const clsTxt = clsParts.length ? `<div style="font-size:9px;color:#6B5B3A;margin-top:2px">${clsParts.join(' · ')}</div>` : '';
+        const statusTxt = r.isHandover ? '🗑️ تسليم تالف' : (r.resolved ? '✅ معتمد' : '⚠️ محتاج مراجعة');
+        let clsTxt = '';
+        if(!r.isHandover){
+          const v  = (bd.valid[rep]||{})[r.snf]||0;
+          const rv = (bd.retValid[rep]||{})[r.snf]||0;
+          const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
+          const clsParts = [];
+          if(v)  clsParts.push(`✅ صالح ${v}`);
+          if(rv) clsParts.push(`↩️ مرتجع صالح ${rv}`);
+          if(rd) clsParts.push(`🗑️ مرتجع تالف ${rd}`);
+          clsTxt = clsParts.length ? `<div style="font-size:9px;color:#6B5B3A;margin-top:2px">${clsParts.join(' · ')}</div>` : '';
+        }
         return `<tr>
         <td style="text-align:center;width:36px">${i+1}</td>
         <td>${r.snf}${clsTxt}</td>
-        <td style="text-align:center;font-weight:800">${r.counted_qty}</td>
-        <td style="text-align:center;font-weight:800">${val!=null ? val.toLocaleString('en-US',{maximumFractionDigits:0})+' ج' : '—'}</td>
+        <td style="text-align:center;font-weight:800">${r.isHandover?'-':''}${r.counted_qty}</td>
+        <td style="text-align:center;font-weight:800">${val!=null ? (val<0?'-':'')+Math.abs(val).toLocaleString('en-US',{maximumFractionDigits:0})+' ج' : '—'}</td>
         <td style="text-align:center">${new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'})}</td>
         <td style="text-align:center">${statusTxt}</td>
       </tr>`;}).join('')
@@ -36492,17 +36514,24 @@ function repbalExportRepExcel(){
   let xlsTotalValue = 0;
   const itemRows = rows.map((r,i)=>{
     const pr = productPriceFor(r.snf);
-    const val = (pr && pr.price) ? (+r.counted_qty||0)*(+pr.price||0) : null;
+    const rawVal = (pr && pr.price) ? (+r.counted_qty||0)*(+pr.price||0) : null;
+    const val = rawVal!=null ? (r.isHandover?-rawVal:rawVal) : null;
     if(val!=null) xlsTotalValue += val;
     const d = new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'});
-    const v  = (bd.valid[rep]||{})[r.snf]||0;
-    const rv = (bd.retValid[rep]||{})[r.snf]||0;
-    const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
-    const clsParts = [];
-    if(v)  clsParts.push(`صالح ${v}`);
-    if(rv) clsParts.push(`مرتجع صالح ${rv}`);
-    if(rd) clsParts.push(`مرتجع تالف ${rd}`);
-    return [i+1, r.snf, r.counted_qty, val!=null?val:'—', d, r.resolved?'معتمد':'محتاج مراجعة', clsParts.join(' · ')||'—'];
+    let clsJoined = '—', statusTxt = r.resolved?'معتمد':'محتاج مراجعة', qtyOut = r.counted_qty;
+    if(r.isHandover){
+      statusTxt = 'تسليم تالف لإدارة التوالف'; qtyOut = -r.counted_qty; clsJoined = '—';
+    } else {
+      const v  = (bd.valid[rep]||{})[r.snf]||0;
+      const rv = (bd.retValid[rep]||{})[r.snf]||0;
+      const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
+      const clsParts = [];
+      if(v)  clsParts.push(`صالح ${v}`);
+      if(rv) clsParts.push(`مرتجع صالح ${rv}`);
+      if(rd) clsParts.push(`مرتجع تالف ${rd}`);
+      clsJoined = clsParts.join(' · ')||'—';
+    }
+    return [i+1, r.snf, qtyOut, val!=null?val:'—', d, statusTxt, clsJoined];
   });
 
   const COLS = ['#','اسم الصنف','الفعلي','القيمة (ج)','التاريخ','الحالة','التصنيف'];
@@ -36564,24 +36593,30 @@ function repbalBuildInventoryLogHTML(rep, rows){
     ? rows.map((r,i)=>{
         const d = new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'numeric'});
         const pr = productPriceFor(r.snf);
-        const val = (pr && pr.price) ? (+r.counted_qty||0)*(+pr.price||0) : null;
+        const rawVal = (pr && pr.price) ? (+r.counted_qty||0)*(+pr.price||0) : null;
+        const val = rawVal!=null ? (r.isHandover?-rawVal:rawVal) : null;
         if(val!=null) shareTotalValue += val;
-        const v  = (bd.valid[rep]||{})[r.snf]||0;
-        const rv = (bd.retValid[rep]||{})[r.snf]||0;
-        const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
-        const clsParts = [];
-        if(v)  clsParts.push('صالح '+v);
-        if(rv) clsParts.push('مرتجع صالح '+rv);
-        if(rd) clsParts.push('مرتجع تالف '+rd);
-        const clsTxt = clsParts.length ? clsParts.join(' · ') : '—';
+        let clsTxt = '—', statusTxt = r.resolved?'✅ معتمد':'⚠️ محتاج مراجعة';
+        if(r.isHandover){
+          statusTxt = '🗑️ تسليم تالف';
+        } else {
+          const v  = (bd.valid[rep]||{})[r.snf]||0;
+          const rv = (bd.retValid[rep]||{})[r.snf]||0;
+          const rd = (bd.retDamaged[rep]||{})[r.snf]||0;
+          const clsParts = [];
+          if(v)  clsParts.push('صالح '+v);
+          if(rv) clsParts.push('مرتجع صالح '+rv);
+          if(rd) clsParts.push('مرتجع تالف '+rd);
+          clsTxt = clsParts.length ? clsParts.join(' · ') : '—';
+        }
         return `<tr style="background:${i%2?'#FCF9F4':'#fff'}">
           <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${i+1}</td>
           <td style="padding:6px 8px;border:1px solid #E0D8CC">${d}</td>
           <td style="padding:6px 8px;border:1px solid #E0D8CC;font-weight:700">${r.snf}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${r.counted_qty}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${val!=null ? val.toLocaleString('en-US',{maximumFractionDigits:0})+' ج' : '—'}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${r.isHandover?'-':''}${r.counted_qty}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${val!=null ? (val<0?'-':'')+Math.abs(val).toLocaleString('en-US',{maximumFractionDigits:0})+' ج' : '—'}</td>
           <td style="padding:6px 8px;border:1px solid #E0D8CC;font-size:10px">${clsTxt}</td>
-          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${r.resolved?'✅ معتمد':'⚠️ محتاج مراجعة'}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${statusTxt}</td>
         </tr>`;
       }).join('')
     : `<tr><td colspan="7" style="padding:14px;text-align:center;color:#aaa">مفيش عمليات جرد مسجّلة لهذا المندوب</td></tr>`;
@@ -36618,12 +36653,9 @@ async function repbalShareRepInventory(){
   if(typeof html2canvas==='undefined' || !window.jspdf){ showToast('مكتبة PDF لسه بتتحمّل، حاول تاني بعد لحظة','err'); return; }
 
   showToast('⏳ جاري تجهيز سجل الجرد...');
-  let rows = [];
-  try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=eq.${encodeURIComponent(rep)}&order=created_at.desc&limit=500&select=snf,counted_qty,counted_valid_qty,counted_returned_qty,computed_qty,diff,created_at`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}, cache:'no-store'});
-    rows = res.ok ? await res.json() : [];
-  }catch(e){ rows = []; }
+  // بنستخدم نفس _repbalInvLog المحمّل أصلاً (بيشمل حركات الجرد اليدوي + تسليمات التالف مع بعض
+  // ومرتبة بالتاريخ) بدل إعادة جلب البيانات من غير حركات التسليم
+  const rows = _repbalInvLog[rep]||[];
 
   const holder = document.createElement('div');
   holder.style.cssText = 'position:fixed;top:0;left:-99999px;width:780px;background:#fff;z-index:-1;direction:rtl;font-family:Cairo,Arial,sans-serif';

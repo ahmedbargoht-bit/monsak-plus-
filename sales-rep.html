@@ -800,6 +800,10 @@ html,body{position:fixed;inset:0;width:100%;height:100%;overflow:hidden;font-fam
     </div>
     <div id="ci-balance-list"><div style="text-align:center;padding:1.5rem;color:var(--t3);font-size:12px">⏳ جارٍ التحميل...</div></div>
 
+    <button id="ci-damaged-handover-btn" onclick="ciOpenDamagedHandoverModal()" style="display:none;width:100%;background:#B71C1C;color:#fff;border:none;border-radius:8px;padding:10px;font-family:Cairo,sans-serif;font-size:12.5px;font-weight:800;cursor:pointer;margin-bottom:12px;align-items:center;justify-content:center;gap:6px">
+      🗑️ تسليم تالف لإدارة التوالف
+    </button>
+
     <!-- الجرد اليدوي — بيتفتح بس من لوحة التحكم وقت الجرد الدوري الشامل للتصحيح -->
     <div id="ci-manual-locked" style="display:none;margin-top:18px;background:#FFF8E8;border:1.5px solid #F0DDA8;border-radius:10px;padding:14px;text-align:center">
       <div style="font-size:22px;margin-bottom:4px">🔒</div>
@@ -849,6 +853,23 @@ html,body{position:fixed;inset:0;width:100%;height:100%;overflow:hidden;font-fam
       <input type="text" id="ci-add-search" placeholder="🔍 ابحث في كل الأصناف..." oninput="ciRenderAddItemList()"
         style="width:100%;padding:9px 10px;border:1.5px solid var(--bg2);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif;margin-bottom:10px;box-sizing:border-box"/>
       <div id="ci-add-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal تسليم تالف لإدارة التوالف -->
+<div id="modal-ci-damaged" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;width:100%;max-width:380px;max-height:82vh;display:flex;flex-direction:column;overflow:hidden">
+    <div style="background:#B71C1C;padding:14px 16px;color:#fff;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+      <div style="font-size:15px;font-weight:700">🗑️ تسليم تالف لإدارة التوالف</div>
+      <button onclick="ciCloseDamagedHandoverModal()" style="background:none;border:none;color:#fff;font-size:18px;cursor:pointer;line-height:1">✕</button>
+    </div>
+    <div style="padding:12px 14px;overflow-y:auto;flex:1">
+      <div style="font-size:10.5px;color:var(--t3);margin-bottom:10px">اختار الأصناف والكمية اللي سلّمتها فعليًا لإدارة التوالف. الكمية القصوى المقترحة = التالف المسجّل عندك حاليًا.</div>
+      <div id="ci-damaged-list"></div>
+    </div>
+    <div style="padding:12px 14px;border-top:1px solid var(--bg2);flex-shrink:0">
+      <button onclick="ciSubmitDamagedHandover()" style="width:100%;background:#2C1F0A;color:#EDE5D8;border:none;border-radius:8px;padding:11px;font-family:Cairo,sans-serif;font-size:13px;font-weight:800;cursor:pointer">✅ تأكيد التسليم</button>
     </div>
   </div>
 </div>
@@ -2167,11 +2188,12 @@ async function ciComputeBalances(){
   _ciBalanceStartDate = startDate;
   if(!startDate) return {valid:{}, retValid:{}, retDamaged:{}};
   const enc = encodeURIComponent(currentRep.name);
-  const [dels, rets, reqs, adjs] = await Promise.all([
+  const [dels, rets, reqs, adjs, handovers] = await Promise.all([
     sbFetch('sales_deliveries',       `?rep_name=eq.${enc}&delivery_date=gte.${startDate}&select=items&limit=5000`).catch(()=>[]),
     sbFetch('sales_returns',          `?rep_name=eq.${enc}&return_date=gte.${startDate}&select=items,receipt_status&limit=5000`).catch(()=>[]),
     sbFetch('rep_stock_requests',     `?rep_name=eq.${enc}&status=eq.approved&created_at=gte.${startDate}&select=items&limit=2000`).catch(()=>[]),
     sbFetch('rep_balance_adjustments',`?rep_name=eq.${enc}&created_at=gte.${startDate}&select=snf,qty_delta&limit=2000`).catch(()=>[]),
+    sbFetch('rep_damaged_handovers',  `?rep_name=eq.${enc}&created_at=gte.${startDate}&select=snf,qty&limit=2000`).catch(()=>[]),
   ]);
   const valid={}, retValid={}, retDamaged={};
   const addValid      = (name, qty) => { if(!name) return; valid[name]      = (valid[name]||0)      + qty; };
@@ -2198,6 +2220,9 @@ async function ciComputeBalances(){
       }
     });
   });
+  // تسليم تالف لإدارة التوالف — بمجرد ما المندوب يسجّل إنه سلّم كمية تالفة، بتتخصم فورًا من
+  // "مرتجع تالف" لأنها بقت مش موجودة فعليًا في العربية
+  (handovers||[]).forEach(h=>addRetDamaged(h.snf, -(+h.qty||0)));
   return {valid, retValid, retDamaged};
 }
 function ciRenderBalanceList(){
@@ -2232,6 +2257,76 @@ function ciRenderBalanceList(){
       </div>
     </div>`;
   }).join('');
+  const hasDamaged = Object.values(retDamaged).some(q=>Math.round((+q||0)*100)>0);
+  const handoverBtn = document.getElementById('ci-damaged-handover-btn');
+  if(handoverBtn) handoverBtn.style.display = hasDamaged ? 'flex' : 'none';
+}
+
+// ══ تسليم تالف لإدارة التوالف ══ — المندوب بيسجّل إن كمية معيّنة من التالف نزلت فعليًا من
+// عربيته وسُلّمت لإدارة التوالف بالشركة. بمجرد التأكيد، بتتخصم فورًا من "مرتجع تالف" (من غير
+// أي مراجعة)، وتتسجل كحركة في rep_damaged_handovers عشان تبقى ظاهرة لمشرف/مدير المبيعات
+// ولوحة التحكم كمان.
+function ciOpenDamagedHandoverModal(){
+  const retDamaged = (_ciBalances&&_ciBalances.retDamaged)||{};
+  const names = Object.keys(retDamaged).filter(n=>Math.round((+retDamaged[n]||0)*100)>0).sort((a,b)=>a.localeCompare(b,'ar'));
+  const list = document.getElementById('ci-damaged-list');
+  if(list){
+    list.innerHTML = !names.length
+      ? '<div style="text-align:center;padding:1rem;color:var(--t3);font-size:12px">مفيش تالف مسجّل عندك حاليًا</div>'
+      : names.map(n=>{
+          const max = retDamaged[n];
+          const id = 'cidh_'+n.replace(/[^a-zA-Z0-9؀-ۿ]/g,'_');
+          return `<div style="border:1.5px solid var(--bg2);border-radius:8px;padding:8px 10px;margin-bottom:8px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <span style="font-size:12px;color:var(--t1)">${n}</span>
+              <span style="font-size:10px;color:#B71C1C">تالف مسجّل: ${max}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <input type="checkbox" id="${id}_chk" checked style="width:16px;height:16px;flex-shrink:0"/>
+              <span style="font-size:11px;color:var(--t3)">الكمية المسلَّمة</span>
+              <input type="number" id="${id}_qty" value="${max}" min="0" max="${max}" step="1" data-snf="${n.replace(/"/g,'&quot;')}"
+                style="width:64px;height:30px;font-size:12px;border:1.5px solid var(--bg2);border-radius:6px;padding:0 6px;font-family:Cairo,sans-serif"/>
+            </div>
+          </div>`;
+        }).join('');
+  }
+  const modal = document.getElementById('modal-ci-damaged');
+  if(modal){ modal.style.display='flex'; }
+}
+function ciCloseDamagedHandoverModal(){
+  const modal = document.getElementById('modal-ci-damaged');
+  if(modal) modal.style.display='none';
+}
+async function ciSubmitDamagedHandover(){
+  const list = document.getElementById('ci-damaged-list');
+  if(!list) return;
+  const qtyInputs = [...list.querySelectorAll('input[type=number]')];
+  const items = [];
+  qtyInputs.forEach(inp=>{
+    const chk = document.getElementById(inp.id.replace('_qty','_chk'));
+    if(!chk || !chk.checked) return;
+    const snf = inp.dataset.snf;
+    const max = +inp.max||0;
+    let qty = +inp.value||0;
+    if(qty>max) qty = max;
+    if(qty>0) items.push({snf, qty});
+  });
+  if(!items.length){ showToast('اختار صنف وكمية أولاً'); return; }
+  try{
+    const res = await Promise.all(items.map(it=>fetch(SUPABASE_URL+'/rest/v1/rep_damaged_handovers', {
+      method:'POST',
+      headers:Object.assign({},SB_HEADERS,{'Prefer':'return=minimal'}),
+      body: JSON.stringify({rep_name:currentRep.name, snf:it.snf, qty:it.qty, created_by:currentRep.name})
+    })));
+    if(res.some(r=>!r.ok)) throw new Error('فشل تسجيل حركة واحدة أو أكتر');
+    showToast('✅ اتسجّل تسليم التالف — رصيدك اتحدّث');
+    ciCloseDamagedHandoverModal();
+    _ciBalances = await ciComputeBalances();
+    ciRenderBalanceList();
+  }catch(e){
+    console.error('ciSubmitDamagedHandover error', e);
+    showToast('❌ حصل خطأ، حاول تاني');
+  }
 }
 // إعداد عام من لوحة التحكم (products_db key) بيتحكم في إتاحة العدّ اليدوي — مقفول افتراضيًا،
 // وبيتفتح بس وقت الجرد الدوري الشامل للتصحيح
