@@ -14472,13 +14472,14 @@ async function sptLoadCampaigns(){
     return;
   }
   const ids = campaigns.map(c=>c.id).join(',');
-  let acks = [], targets = [], records = [];
+  let acks = [], targets = [], records = [], allSups = [];
   try{
-    const [ar, tr] = await Promise.all([
+    const [ar, tr, sr] = await Promise.all([
       fetch(`${SUPABASE_URL}/rest/v1/special_campaign_acks?select=*&campaign_id=in.(${ids})`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
       fetch(`${SUPABASE_URL}/rest/v1/special_targets?select=*&campaign_id=in.(${ids})&status=eq.active`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      fetch(`${SUPABASE_URL}/rest/v1/users?select=name,groups,level&role=eq.supervisor&status=eq.active`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     ]);
-    acks = ar; targets = tr;
+    acks = ar; targets = tr; allSups = sr;
     if(targets.length){
       const tids = targets.map(t=>t.id).join(',');
       records = await fetch(`${SUPABASE_URL}/rest/v1/special_target_records?select=*&record_date=eq.${viewDate}&target_id=in.(${tids})`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
@@ -14490,9 +14491,18 @@ async function sptLoadCampaigns(){
     const branchesLbl = Array.isArray(c.branches) && c.branches.length ? c.branches.join('، ') : '';
     const itemsLbl = (c.items||[]).map(it=>`<span style="background:#FFF3E0;color:#B45309;border-radius:999px;padding:2px 8px;font-size:10.5px;margin:2px">${it.name}</span>`).join('');
     const campAcks = acks.filter(a=>a.campaign_id===c.id);
-    const ackHtml = campAcks.length
-      ? campAcks.map(a=>`<span style="color:#1A7A4A;font-size:11px">✅ ${a.supervisor_name}</span>`).join('<br/>')
-      : `<span style="color:#aaa;font-size:11px">لسه محدش من مشرفي التنسيق استلم</span>`;
+    const ackedByName = new Map(campAcks.map(a=>[a.supervisor_name,a]));
+    // كل مشرفي التنسيق المفروض يستلموا الحملة دي (اللي مجموعتهم من ضمن مجموعات الحملة)
+    const campGroupsSet = new Set(c.groups||[]);
+    const expectedSups = allSups.filter(u=>String(u.groups||'').split(',').map(s=>s.trim()).some(g=>campGroupsSet.has(g)));
+    const ackedRows = expectedSups.filter(u=>ackedByName.has(u.name)).map(u=>{
+      const a = ackedByName.get(u.name);
+      return `<div style="color:#1A7A4A;font-size:11px">✅ ${u.name} <span style="color:#8a8a8a">— ${fmtDateTimeAr(a.acked_at, true)}</span></div>`;
+    }).join('');
+    const pendingRows = expectedSups.filter(u=>!ackedByName.has(u.name)).map(u=>
+      `<div style="color:#B45309;font-size:11px">⏳ ${u.name} <span style="color:#aaa">— لسه ما استلمش</span></div>`
+    ).join('');
+    const ackHtml = (ackedRows+pendingRows) || `<span style="color:#aaa;font-size:11px">مفيش مشرفي تنسيق تابعين للمجموعات دي</span>`;
     const campTargets = targets.filter(t=>t.campaign_id===c.id);
     const campGroupsJson = encodeURIComponent(JSON.stringify(c.groups||[]));
     const targetsHtml = campTargets.length ? campTargets.map(t=>{
@@ -14500,7 +14510,9 @@ async function sptLoadCampaigns(){
       const openSum = recs.reduce((s,r)=>s+(r.opening_qty!=null?+r.opening_qty:0),0);
       const closeSum = recs.reduce((s,r)=>s+(r.closing_qty!=null?+r.closing_qty:0),0);
       const soldSum = recs.reduce((s,r)=>s+(r.sold_qty!=null?+r.sold_qty:0),0);
-      const recvd = t.received_at ? '✅ استلم' : '⏳ لسه ما استلمش';
+      const recvd = t.received_at
+        ? `✅ استلم<div style="color:#8a8a8a;font-size:10px;margin-top:2px">${fmtDateTimeAr(t.received_at, true)}</div>`
+        : '⏳ لسه ما استلمش';
       return `<tr>
         <td>${t.rep_name}</td><td>${t.branch_name}</td><td>${t.assigned_by||'—'}</td>
         <td>${recvd}</td><td>${openSum||0}</td><td>${closeSum||0}</td><td>${soldSum||0}</td>
@@ -14523,7 +14535,7 @@ async function sptLoadCampaigns(){
           <button class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C" onclick="sptCancelCampaign(${c.id})"><i class="ti ti-trash"></i> إلغاء</button>
         </div>
       </div>
-      <div style="margin-top:8px;font-size:12px"><b>استلام مشرفي التنسيق:</b><br/>${ackHtml}</div>
+      <div style="margin-top:8px;font-size:12px"><b>استلام مشرفي التنسيق:</b><div style="margin-top:4px">${ackHtml}</div></div>
       ${campTargets.length ? `<div class="table-wrap" style="margin-top:8px">
         <table><thead><tr><th>المنسق</th><th>الفرع</th><th>وزّعها</th><th>استلام المنسق</th><th>إجمالي افتتاحي (${viewDate})</th><th>إجمالي ختامي (${viewDate})</th><th>إجمالي مباع (${viewDate})</th><th>إجراءات</th></tr></thead>
         <tbody>${targetsHtml}</tbody></table>
