@@ -909,6 +909,22 @@ html,body{position:fixed;inset:0;width:100%;height:100%;overflow:hidden;font-fam
 // ══════════════ CONFIG ══════════════
 const SUPABASE_URL = 'https://tneeosrbxedexsrigapg.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRuZWVvc3JieGVkZXhzcmlnYXBnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxMTcxMTQsImV4cCI6MjA5NDY5MzExNH0.JHXgJ6EeDcdeofD5HShRnWvwPazCIfY7q7pCC2GMOFw';
+
+// ── تعديلات جوهرية: تطبيق هوية/ألوان/حجم خط هذا التطبيق (app_brand_settings, app_key='rep') ──
+async function brsBootstrapApply(){
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.rep&select=*`, {headers:H});
+    const rows = res.ok ? await res.json().catch(()=>[]) : [];
+    const row = (Array.isArray(rows) && rows[0]) ? rows[0] : null;
+    if(!row) return;
+    const root = document.documentElement.style;
+    if(row.color_bg) root.setProperty('--bg', row.color_bg);
+    if(row.font_size_base) document.body.style.fontSize = row.font_size_base+'px';
+    if(row.company_name) document.title = row.company_name;
+  }catch(e){}
+}
+
 const SB_HEADERS = {
   'apikey': SUPABASE_KEY,
   'Authorization': 'Bearer ' + SUPABASE_KEY,
@@ -1092,6 +1108,26 @@ async function sbFetch(table, params=''){
   return res.json();
 }
 
+// Supabase/PostgREST بيرجع بحد أقصى 1000 صف في أي طلب واحد حتى لو الـ limit في الـ params
+// المرسلة أكبر — أي زيادة عن كده بتتقطع بصمت. النسخة دي بتجيب كل الصفحات مع بعض.
+// ملحوظة: لازم الـ params متبدأش بـ limit=/offset= لأننا بنضيفهم إحنا هنا.
+async function sbFetchAll(table, params=''){
+  const pageSize=1000, hardCap=50000;
+  let all=[], offset=0;
+  const sep = params.includes('?') ? '&' : '?';
+  while(offset<hardCap){
+    try{
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}${sep}limit=${pageSize}&offset=${offset}`, {headers: SB_HEADERS});
+      const page = res.ok ? await res.json().catch(()=>[]) : [];
+      if(!Array.isArray(page) || !page.length) break;
+      all = all.concat(page);
+      if(page.length < pageSize) break;
+      offset += pageSize;
+    }catch(e){ break; }
+  }
+  return all;
+}
+
 // ══════════════ LOGIN ══════════════
 async function loadReps(){
   try{
@@ -1179,6 +1215,7 @@ async function doLogin(){
       branches: Array.isArray(user.branches) ? user.branches : [],
       repType: user.rep_type||''
     };
+    brsBootstrapApply(); // تطبيق البراند/الألوان/حجم الخط المحفوظة (تعديلات جوهرية)
     loadAllClientData();
     checkBackdateEnabled();
     await loadHomeScreen();
@@ -1297,8 +1334,8 @@ async function loadAllClientData(){
   if(_clientDiscCache) return;
   try{
     const [discRows, branchRows] = await Promise.all([
-      sbFetch('client_category_discounts','?select=client_name,cat,discount_pct&limit=5000'),
-      sbFetch('branch_client_map','?select=branch_name,client_name&limit=5000')
+      sbFetchAll('client_category_discounts','?select=client_name,cat,discount_pct'),
+      sbFetchAll('branch_client_map','?select=branch_name,client_name')
     ]);
     _clientDiscCache={};
     discRows.forEach(d=>{
@@ -1330,7 +1367,7 @@ async function loadPdb(){
 async function loadSalesPrices(){
   if(_salesPricesCache) return _salesPricesCache;
   try{
-    const rows=await sbFetch('sales_prices','?select=snf_name,price,tax_pct&limit=5000');
+    const rows=await sbFetchAll('sales_prices','?select=snf_name,price,tax_pct');
     _salesPricesCache={};
     rows.forEach(r=>{ _salesPricesCache[r.snf_name]={price:r.price||0,tax_pct:r.tax_pct||0}; });
   }catch(e){ _salesPricesCache={}; }
@@ -1840,16 +1877,16 @@ async function loadGoalTab(){
   try{
     const [tgtRes, salesRes, retRes] = await Promise.all([
       fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${month}&select=rep_name,target_amount,work_days&limit=500`,{headers:SB_HEADERS}),
-      fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=eq.${repEnc}&deleted_at=is.null&select=total_net,delivery_date&order=delivery_date.desc&limit=3000`,{headers:SB_HEADERS}),
-      fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=eq.${repEnc}&deleted_at=is.null&select=total_net,return_date&order=return_date.desc&limit=1000`,{headers:SB_HEADERS}),
+      sbFetchAll('sales_deliveries', `?rep_name=eq.${repEnc}&deleted_at=is.null&select=total_net,delivery_date`),
+      sbFetchAll('sales_returns', `?rep_name=eq.${repEnc}&deleted_at=is.null&select=total_net,return_date`),
     ]);
 
     const allTgt      = tgtRes.ok   ? await tgtRes.json()   : [];
     // مطابقة الاسم مع تنظيف المسافات عشان نتجنب اختلاف التهجئة
     const norm = s => (s||'').trim().replace(/\s+/g,' ');
     const tgtData = allTgt.filter(r => norm(r.rep_name) === norm(currentRep.name));
-    const allSales    = salesRes.ok ? await salesRes.json() : [];
-    const allRet      = retRes.ok   ? await retRes.json()   : [];
+    const allSales    = salesRes||[];
+    const allRet      = retRes||[];
 
     // فلترة بالشهر بـ JS (بيحل مشكلة timestamp vs date في Supabase)
     const salesData = allSales.filter(r=>{
@@ -2081,9 +2118,9 @@ function ciGetAllItemNames(){
 async function ciComputeMyItems(){
   const enc = encodeURIComponent(currentRep.name);
   const [dels, rets, extra] = await Promise.all([
-    sbFetch('sales_deliveries', `?rep_name=eq.${enc}&select=items&limit=5000`).catch(()=>[]),
-    sbFetch('sales_returns',    `?rep_name=eq.${enc}&select=items&limit=5000`).catch(()=>[]),
-    sbFetch('rep_extra_items',  `?rep_name=eq.${enc}&select=snf&limit=2000`).catch(()=>[]),
+    sbFetchAll('sales_deliveries', `?rep_name=eq.${enc}&select=items`).catch(()=>[]),
+    sbFetchAll('sales_returns',    `?rep_name=eq.${enc}&select=items`).catch(()=>[]),
+    sbFetchAll('rep_extra_items',  `?rep_name=eq.${enc}&select=snf`).catch(()=>[]),
   ]);
   const set = new Set();
   (dels||[]).forEach(d=>(d.items||[]).forEach(it=>{ if(it && it.name) set.add(it.name); }));
@@ -2200,11 +2237,11 @@ async function ciComputeBalances(){
     // ونفلتر بيه في الكود عشان نفرّق فواتير حصلت فعليًا قبل لحظة التصفير في نفس اليوم — لو
     // اعتمدنا على delivery_date بس، فاتورة بيع الصبح (قبل التصفير) كانت هتتخصم من رصيد بعد
     // التصفير من غير ما يكون فيه توريد يقابلها، فيطلع رصيد سالب غلط.
-    sbFetch('sales_deliveries',       `?rep_name=eq.${enc}&delivery_date=gte.${startDateOnly}&select=items,created_at&limit=5000`).catch(()=>[]),
-    sbFetch('sales_returns',          `?rep_name=eq.${enc}&return_date=gte.${startDateOnly}&select=items,receipt_status,created_at&limit=5000`).catch(()=>[]),
-    sbFetch('rep_stock_requests',     `?rep_name=eq.${enc}&status=eq.approved&created_at=gte.${startTs}&select=items&limit=2000`).catch(()=>[]),
-    sbFetch('rep_balance_adjustments',`?rep_name=eq.${enc}&created_at=gte.${startTs}&select=snf,qty_delta&limit=2000`).catch(()=>[]),
-    sbFetch('rep_damaged_handovers',  `?rep_name=eq.${enc}&created_at=gte.${startTs}&select=snf,qty&limit=2000`).catch(()=>[]),
+    sbFetchAll('sales_deliveries',       `?rep_name=eq.${enc}&delivery_date=gte.${startDateOnly}&select=items,created_at`).catch(()=>[]),
+    sbFetchAll('sales_returns',          `?rep_name=eq.${enc}&return_date=gte.${startDateOnly}&select=items,receipt_status,created_at`).catch(()=>[]),
+    sbFetchAll('rep_stock_requests',     `?rep_name=eq.${enc}&status=eq.approved&created_at=gte.${startTs}&select=items`).catch(()=>[]),
+    sbFetchAll('rep_balance_adjustments',`?rep_name=eq.${enc}&created_at=gte.${startTs}&select=snf,qty_delta`).catch(()=>[]),
+    sbFetchAll('rep_damaged_handovers',  `?rep_name=eq.${enc}&created_at=gte.${startTs}&select=snf,qty`).catch(()=>[]),
   ]);
   const valid={}, retValid={}, retDamaged={};
   const addValid      = (name, qty) => { if(!name) return; valid[name]      = (valid[name]||0)      + qty; };
@@ -2234,6 +2271,9 @@ async function ciComputeBalances(){
   // تسليم تالف لإدارة التوالف — بمجرد ما المندوب يسجّل إنه سلّم كمية تالفة، بتتخصم فورًا من
   // "مرتجع تالف" لأنها بقت مش موجودة فعليًا في العربية
   (handovers||[]).forEach(h=>addRetDamaged(h.snf, -(+h.qty||0)));
+  // مفيش رصيد سالب فعليًا في الواقع — لو حصل نتيجة حالة قديمة (مرتجع معلّق قبل تصفير الرصيد
+  // اتسلّم لإدارة التوالف بعده)، بنثبّته عند صفر بدل ما يظهر رقم سالب مش منطقي
+  [valid, retValid, retDamaged].forEach(map=>{ Object.keys(map).forEach(name=>{ if(map[name]<0) map[name]=0; }); });
   return {valid, retValid, retDamaged};
 }
 function ciRenderBalanceList(){
@@ -3774,8 +3814,7 @@ async function pbMatchTargetClients(targetClients, myBranches){
   if(!myBranches || !myBranches.length) return false;
   try{
     if(window._pbLinkedMapCache === undefined){
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?select=client_name,branch_name&limit=5000`,{headers:SB_HEADERS});
-      window._pbLinkedMapCache = r.ok ? await r.json().catch(()=>[]) : [];
+      window._pbLinkedMapCache = await sbFetchAll('branch_client_map','?select=client_name,branch_name').catch(()=>[]);
     }
     const map = window._pbLinkedMapCache||[];
     const linked = new Set(map.filter(m=>targetClients.includes(m.client_name)).map(m=>m.branch_name));

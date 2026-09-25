@@ -348,6 +348,9 @@ tr:hover td{background:rgba(197,91,72,.04)}
     <button class="tab-btn" id="settings-tab-btn-promo-banner" onclick="showSettingsTab('promo-banner')">
       📣 بانر العرض الترويجي
     </button>
+    <button class="tab-btn" id="settings-tab-btn-nav-order" onclick="showSettingsTab('nav-order')">
+      🧭 ترتيب القوائم
+    </button>
     <!-- تابات ضبط تانية هتتضاف هنا تباعًا -->
   </div>
 
@@ -2500,6 +2503,21 @@ tr:hover td{background:rgba(197,91,72,.04)}
           </div>
         </div>
       </div>
+
+      <!-- ══ ترتيب القوائم الرئيسية — مشترك بين كل الأجهزة عبر app_brand_settings (app_key='gm') ══ -->
+      <div id="panel-nav-order" class="panel">
+        <div class="page-header">
+          <div><h2><i class="ti ti-arrows-sort" style="color:var(--caramel)"></i> ترتيب القوائم الرئيسية</h2>
+          <p>رتّب أو أخفِ أقسام السايدبار الرئيسية (تنسيق / مبيعات / ضبط) — الترتيب بيتزامن تلقائيًا على كل الأجهزة</p></div>
+          <button class="btn-action" onclick="resetNavOrder()"><i class="ti ti-refresh"></i> استعادة الافتراضي</button>
+        </div>
+        <div class="card" style="padding:16px">
+          <div id="nav-reorder-list" style="display:flex;flex-direction:column;gap:8px"></div>
+          <div style="margin-top:14px">
+            <button class="btn btn-primary btn-sm" onclick="applyNavOrder()"><i class="ti ti-device-floppy"></i> حفظ وتطبيق الترتيب</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div><!-- end content -->
 </div><!-- end app -->
@@ -3171,6 +3189,245 @@ const SUPABASE_URL = 'https://tneeosrbxedexsrigapg.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRuZWVvc3JieGVkZXhzcmlnYXBnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxMTcxMTQsImV4cCI6MjA5NDY5MzExNH0.JHXgJ6EeDcdeofD5HShRnWvwPazCIfY7q7pCC2GMOFw';
 const GM_PASS_DEFAULT = 'gm2026'; // باسورد المدير الافتراضي
 
+// ── تعديلات جوهرية: تطبيق هوية/ألوان/حجم خط هذا التطبيق (app_brand_settings, app_key='gm') ──
+async function brsBootstrapApply(){
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.gm&select=*`, {headers:H});
+    const rows = res.ok ? await res.json().catch(()=>[]) : [];
+    const row = (Array.isArray(rows) && rows[0]) ? rows[0] : null;
+    if(!row) return;
+    const root = document.documentElement.style;
+    const map = {navy:'color_navy', red:'color_red', orange:'color_orange', yellow:'color_yellow',
+      green:'color_green', blue:'color_blue', purple:'color_purple', bg:'color_bg', card:'color_card', text:'color_text'};
+    Object.keys(map).forEach(cssVar=>{
+      const val = row[map[cssVar]];
+      if(val) root.setProperty('--'+cssVar, val);
+    });
+    if(row.font_size_base) document.body.style.fontSize = row.font_size_base+'px';
+    if(row.company_name) document.title = row.company_name;
+  }catch(e){}
+}
+
+// ══════════════════════════════════════════════════════════════
+// إعادة ترتيب قوائم السايدبار الرئيسية (مشترك بين كل الأجهزة عبر app_brand_settings)
+// السايدبار الرئيسي هنا عبارة عن 3 أقسام فقط: تنسيق/مبيعات/ضبط (sidebar-mode-switcher)
+// ══════════════════════════════════════════════════════════════
+
+// الترتيب الافتراضي لأقسام السايدبار الرئيسية
+const NAV_DEFAULT = [
+  {id:'coord',    icon:'🧭', label:'التنسيق',  visible:true},
+  {id:'sales',    icon:'💰', label:'المبيعات', visible:true},
+  {id:'settings', icon:'⚙️', label:'الضبط',    visible:true},
+];
+
+let navOrder = [];
+
+// لا توجد أقسام محذوفة حاليًا في هذا الملف
+const REMOVED_PANELS = [];
+
+function getNavOrder(){
+  try{
+    const saved = localStorage.getItem('nav_order_gm');
+    if(saved){
+      const arr = JSON.parse(saved);
+      const cleaned = arr.filter(item=>{
+        const id = typeof item==='string'?item:(item?.id||'');
+        return !REMOVED_PANELS.includes(id);
+      });
+      if(cleaned.length !== arr.length)
+        localStorage.setItem('nav_order_gm', JSON.stringify(cleaned));
+      return cleaned;
+    }
+  }catch(e){}
+  return JSON.parse(JSON.stringify(NAV_DEFAULT));
+}
+
+// بناء قايمة navOrder كاملة (id/icon/label/visible) من مجرد مصفوفتين IDs (ترتيب + مخفي)
+// — ده الشكل المخزن في قاعدة البيانات (app_brand_settings.sidebar_order/sidebar_hidden)
+function navBuildFromIdsHidden(orderIds, hiddenIds){
+  orderIds = Array.isArray(orderIds) ? orderIds : [];
+  hiddenIds = Array.isArray(hiddenIds) ? hiddenIds : [];
+  const byId = {}; NAV_DEFAULT.forEach(d=>byId[d.id]=d);
+  const seen = new Set(); const list = [];
+  orderIds.forEach(id=>{
+    if(REMOVED_PANELS.includes(id) || seen.has(id) || !byId[id]) return;
+    seen.add(id);
+    list.push({...byId[id], visible: !hiddenIds.includes(id)});
+  });
+  NAV_DEFAULT.forEach(d=>{
+    if(!seen.has(d.id)) list.push({...d, visible: !hiddenIds.includes(d.id)});
+  });
+  return list;
+}
+
+// جلب ترتيب السايدبار من قاعدة البيانات (مشترك بين كل الأجهزة) — مع fallback على
+// localStorage ثم الترتيب الافتراضي لو فشل الاتصال أو محدش حفظ ترتيب لسه
+async function navFetchFromDB(){
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.gm&select=sidebar_order,sidebar_hidden`, {headers:H});
+    const rows = res.ok ? await res.json().catch(()=>[]) : [];
+    const row = rows && rows[0];
+    if(row && Array.isArray(row.sidebar_order) && row.sidebar_order.length){
+      return navBuildFromIdsHidden(row.sidebar_order, row.sidebar_hidden||[]);
+    }
+  }catch(e){}
+  return getNavOrder();
+}
+
+async function navSaveToDB(){
+  try{
+    const order = navOrder.map(i=>i.id);
+    const hidden = navOrder.filter(i=>!i.visible).map(i=>i.id);
+    const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+    await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.gm`,{method:'PATCH', headers:H,
+      body:JSON.stringify({sidebar_order:order, sidebar_hidden:hidden, updated_at:new Date().toISOString()})});
+  }catch(e){}
+}
+
+function saveNavOrder(){
+  try{ localStorage.setItem('nav_order_gm', JSON.stringify(navOrder)); }catch(e){}
+  navSaveToDB(); // مشترك بين كل الأجهزة — مش محلي بس
+}
+
+async function loadNavReorder(){
+  const container = document.getElementById('nav-reorder-list');
+  if(container) container.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text2);font-size:12px">جاري التحميل...</div>';
+  navOrder = await navFetchFromDB();
+  renderNavReorderList();
+}
+
+function renderNavReorderList(){
+  const container = document.getElementById('nav-reorder-list');
+  if(!container) return;
+
+  container.innerHTML = navOrder.map((item,i)=>`
+    <div class="nav-reorder-item" id="nri-${item.id}" draggable="true"
+      ondragstart="navDragStart(event,'${item.id}')"
+      ondragover="navDragOver(event)"
+      ondrop="navDrop(event,'${item.id}')"
+      ondragleave="navDragLeave(event)"
+      style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:${item.visible?'#FFFDF8':'#F5F5F5'};
+        border:1.5px solid ${item.visible?'#E8D9C0':'#ddd'};border-radius:10px;cursor:grab;
+        opacity:${item.visible?1:.5};transition:all .15s;user-select:none">
+      <i class="ti ti-grip-vertical" style="color:#C4B49A;font-size:16px;cursor:grab;flex-shrink:0"></i>
+      <span style="font-size:16px;flex-shrink:0">${item.icon}</span>
+      <span style="flex:1;font-size:13px;font-weight:600;color:${item.visible?'#2C1F0A':'#aaa'}">${item.label}</span>
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <button onclick="navMoveUp(${i})" ${i===0?'disabled':''} title="أعلى"
+          style="padding:2px 6px;border:1px solid #D4C4A8;border-radius:4px;background:#F5F0E8;cursor:pointer;font-size:10px;${i===0?'opacity:.3':''}">▲</button>
+        <button onclick="navMoveDown(${i})" ${i===navOrder.length-1?'disabled':''} title="أسفل"
+          style="padding:2px 6px;border:1px solid #D4C4A8;border-radius:4px;background:#F5F0E8;cursor:pointer;font-size:10px;${i===navOrder.length-1?'opacity:.3':''}">▼</button>
+      </div>
+      <button onclick="navToggleVisible('${item.id}')" title="${item.visible?'إخفاء':'إظهار'}"
+        style="padding:5px 10px;border:1px solid ${item.visible?'#D4C4A8':'#C55B48'};border-radius:6px;
+          background:${item.visible?'#F5F0E8':'#FFF0EE'};cursor:pointer;font-size:11px;font-weight:600;
+          color:${item.visible?'#8B6F47':'#C55B48'}">
+        ${item.visible?'👁️ ظاهر':'🚫 مخفي'}
+      </button>
+      <button onclick="navDeleteItem('${item.id}','${item.label}')" title="حذف"
+        style="padding:5px 8px;border:1px solid #FFCDD2;border-radius:6px;background:#FFEBEE;cursor:pointer;color:#B71C1C;font-size:12px">
+        <i class="ti ti-trash"></i>
+      </button>
+    </div>`).join('');
+
+  container.querySelectorAll('.nav-reorder-item').forEach(el=>{
+    el.addEventListener('dragstart', e=>{ e.dataTransfer.setData('text/plain', el.id.replace('nri-','')); el.style.opacity='.4'; });
+    el.addEventListener('dragend',   e=>{ el.style.opacity=''; });
+  });
+}
+
+// ── Drag & Drop ──
+let _dragId = null;
+function navDragStart(e, id){ _dragId=id; e.dataTransfer.effectAllowed='move'; }
+function navDragOver(e){ e.preventDefault(); e.currentTarget.style.background='#FFF0EE'; e.currentTarget.style.borderColor='#C55B48'; }
+function navDragLeave(e){ e.currentTarget.style.background=''; e.currentTarget.style.borderColor=''; }
+function navDrop(e, targetId){
+  e.preventDefault();
+  e.currentTarget.style.background='';
+  e.currentTarget.style.borderColor='';
+  if(!_dragId || _dragId===targetId) return;
+  const fromIdx = navOrder.findIndex(n=>n.id===_dragId);
+  const toIdx   = navOrder.findIndex(n=>n.id===targetId);
+  if(fromIdx===-1||toIdx===-1) return;
+  const [moved] = navOrder.splice(fromIdx,1);
+  navOrder.splice(toIdx,0,moved);
+  renderNavReorderList();
+}
+
+// ── أعلى/أسفل ──
+function navMoveUp(i){
+  if(i===0) return;
+  [navOrder[i-1],navOrder[i]]=[navOrder[i],navOrder[i-1]];
+  renderNavReorderList();
+}
+function navMoveDown(i){
+  if(i>=navOrder.length-1) return;
+  [navOrder[i],navOrder[i+1]]=[navOrder[i+1],navOrder[i]];
+  renderNavReorderList();
+}
+
+// ── إخفاء/إظهار ──
+function navToggleVisible(id){
+  const item = navOrder.find(n=>n.id===id);
+  if(item) item.visible=!item.visible;
+  renderNavReorderList();
+}
+
+// ── حذف ──
+function navDeleteItem(id, label){
+  if(!confirm('حذف قسم: '+label+'؟')) return;
+  navOrder = navOrder.filter(n=>n.id!==id);
+  saveNavOrder();
+  renderNavReorderList();
+  applyNavOrder();
+}
+
+// ── تطبيق الترتيب فعليًا على DOM السايدبار (من غير حفظ — للاستخدام الصامت عند فتح الصفحة) ──
+function navApplyToDOM(){
+  const navSection = document.getElementById('sidebar-mode-switcher');
+  if(!navSection) return;
+
+  const allNavItems = navSection.querySelectorAll('.sidebar-mode-btn');
+  const itemsMap = {};
+  allNavItems.forEach(el=>{
+    const match = el.getAttribute('onclick')?.match(/switchSidebarMode\('([^']+)'\)/);
+    if(match) itemsMap[match[1]] = el;
+  });
+
+  navOrder.forEach(item=>{
+    const el = itemsMap[item.id];
+    if(!el) return;
+    el.style.display = item.visible ? '' : 'none';
+    navSection.appendChild(el);
+  });
+}
+
+// ── تطبيق الترتيب على الـ nav الفعلي (فعل مقصود من المستخدم — بيحفظ) ──
+function applyNavOrder(){
+  saveNavOrder();
+  navApplyToDOM();
+  alert('✅ تم تطبيق الترتيب الجديد!');
+}
+
+// ── تطبيق صامت عند فتح الصفحة (كل جهاز يجيب نفس الترتيب المحفوظ في القاعدة) ──
+async function navBootstrapApply(){
+  try{
+    navOrder = await navFetchFromDB();
+    navApplyToDOM();
+  }catch(e){}
+}
+
+// ── استعادة الافتراضي ──
+function resetNavOrder(){
+  if(!confirm('استعادة الترتيب الافتراضي؟')) return;
+  navOrder = JSON.parse(JSON.stringify(NAV_DEFAULT));
+  saveNavOrder();
+  renderNavReorderList();
+  applyNavOrder();
+}
+
 // تاريخ اليوم/أي تاريخ بصيغة YYYY-MM-DD بالتوقيت المحلي — ممنوع استخدام toISOString() هنا
 // لأنها بتحول لتوقيت UTC وترجّع تاريخ يوم قبل الصحيح في أول ساعتين/تلاتة بعد نص الليل بتوقيت مصر
 function localISO(d){
@@ -3299,6 +3556,27 @@ async function sbGet(table, params={}, opts={}){
     const r=await fetch(url,{headers:H()});
     return r.ok?await r.json():[];
   }catch(e){return[];}
+}
+
+// نسخة من allPages بتاعة sbGet لكن بتاخد URL كامل جاهز (مبني من الأدمن بفلاتر ديناميكية معقدة
+// زي sinvLoad/sinvRetLoad) بدل جدول+params — عشان أي مكان مبني بطريقة fetch مباشرة يقدر يستخدمها
+// من غير ما نعيد كتابة URL building بتاعه بالكامل.
+async function sbFetchAllAdmin(baseUrl, headers){
+  const pageSize=1000, hardCap=50000;
+  let all=[], offset=0;
+  while(offset<hardCap){
+    const sep = baseUrl.includes('?') ? '&' : '?';
+    const pageUrl = `${baseUrl}${sep}limit=${pageSize}&offset=${offset}`;
+    try{
+      const r = await fetch(pageUrl,{headers});
+      const page = r.ok ? await r.json().catch(()=>[]) : [];
+      if(!Array.isArray(page) || !page.length) break;
+      all = all.concat(page);
+      if(page.length < pageSize) break;
+      offset += pageSize;
+    }catch(e){ break; }
+  }
+  return all;
 }
 
 async function sbInsert(table,data){
@@ -3609,8 +3887,9 @@ async function filterLocations(){
     window._locReturnsRangeKey = rangeKey;
     try{
       const Hh = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/returns?select=name,created_at&limit=5000`,{headers:Hh});
-      window._locReturnsCache = r.ok ? await r.json().catch(()=>[]) : [];
+      // كان limit=5000 بيرجع 1000 بس فعليًا (سقف Supabase)، وجدول returns فيه أكتر من 5000 صف
+      // فكانت بعض عدادات المرتجعات لكل مندوب بتطلع ناقصة بصمت. دلوقتي بنجيب كل الصفحات.
+      window._locReturnsCache = await sbFetchAllAdmin(`${SUPABASE_URL}/rest/v1/returns?select=name,created_at`, Hh);
     }catch(e){ window._locReturnsCache = []; }
   }
   const returnsCountByName = countByName(window._locReturnsCache);
@@ -10054,14 +10333,15 @@ async function sinvLoad(){
       d.forEach(u=>{const o=document.createElement('option');o.value=u.name;o.textContent=u.name;repSel.appendChild(o);});
     }catch(e){}
   }
-  let url=`${SUPABASE_URL}/rest/v1/sales_deliveries?select=*&deleted_at=is.null&order=created_at.desc&limit=1000`;
+  let url=`${SUPABASE_URL}/rest/v1/sales_deliveries?select=*&deleted_at=is.null&order=created_at.desc`;
   if(rep)  url+=`&rep_name=eq.${encodeURIComponent(rep)}`;
   if(type) url+=`&invoice_type=eq.${type}`;
   if(from) url+=`&delivery_date=gte.${from}`;
   if(to)   url+=`&delivery_date=lte.${to}`;
   try{
-    const res=await fetch(url,{headers:H});
-    _sinvData=res.ok?await res.json():[];
+    // كان limit=1000 بيقطع صامت أي فاتورة زيادة عن الـ1000 الأحدث لما محدش يحدد مندوب/فترة —
+    // في العرض الافتراضي كان بيخفي حوالي 73% من الفواتير. دلوقتي بنجيب كل الصفحات.
+    _sinvData=await sbFetchAllAdmin(url,H);
     const totalNet=_sinvData.reduce((s,r)=>s+(r.total_net||0),0);
     const totalBefore=_sinvData.reduce((s,r)=>s+(r.total_before_discount||0),0);
     const totalTax=_sinvData.reduce((s,r)=>s+(r.total_tax||0),0);
@@ -10182,14 +10462,13 @@ async function sinvRetLoad(){
   const tbody = document.getElementById('sinvret-tbody');
   const statsEl = document.getElementById('sinvret-stats');
   if(tbody) tbody.innerHTML='<tr><td colspan="13" style="text-align:center;padding:30px;color:#888">جاري التحميل...</td></tr>';
-  let url=`${SUPABASE_URL}/rest/v1/sales_returns?select=*&deleted_at=is.null&order=created_at.desc&limit=1000`;
+  let url=`${SUPABASE_URL}/rest/v1/sales_returns?select=*&deleted_at=is.null&order=created_at.desc`;
   if(rep)  url+=`&rep_name=eq.${encodeURIComponent(rep)}`;
   if(type) url+=`&invoice_type=eq.${type}`;
   if(from) url+=`&return_date=gte.${from}`;
   if(to)   url+=`&return_date=lte.${to}`;
   try{
-    const res=await fetch(url,{headers:H});
-    _sinvRetData=res.ok?await res.json():[];
+    _sinvRetData=await sbFetchAllAdmin(url,H);
     const totalNet=_sinvRetData.reduce((s,r)=>s+(r.total_net||0),0);
     const totalBefore=_sinvRetData.reduce((s,r)=>s+(r.total_before_discount||0),0);
     const totalTax=_sinvRetData.reduce((s,r)=>s+(r.total_tax||0),0);
@@ -13568,6 +13847,8 @@ async function doLogin(){
   err.style.display='none';
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').style.display='flex';
+  brsBootstrapApply(); // تطبيق البراند/الألوان/حجم الخط المحفوظة (تعديلات جوهرية)
+  navBootstrapApply(); // تطبيق ترتيب/إخفاء أقسام السايدبار المحفوظة (مشترك بين الأجهزة)
   await syncGroupsFromDB();
   refreshAllStaticGroupSelects(); // يضيف أي مجموعة جديدة (زي delta) لكل قوائم فلتر المجموعات الثابتة في الصفحة
   buildGroupSelects();
@@ -13958,6 +14239,9 @@ function showSettingsTab(tab){
   }
   else if(tab==='promo-banner'){
     pbLoadList();
+  }
+  else if(tab==='nav-order'){
+    loadNavReorder();
   }
 }
 

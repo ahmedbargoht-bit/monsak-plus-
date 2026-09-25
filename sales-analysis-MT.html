@@ -442,6 +442,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       <button class="maintabbtn" data-maintab="items-branches">الأصناف والفروع</button>
       <button class="maintabbtn" data-maintab="reps-time">المناديب والتقارير الزمنية</button>
       <button class="maintabbtn" data-maintab="collections">التحصيل والخصومات</button>
+      <button class="maintabbtn" data-maintab="settings">الإعدادات</button>
     </div>
 
     <div class="tabbar no-print">
@@ -492,6 +493,11 @@ table.datatable details summary:hover { text-decoration: underline; }
         <button class="tabbtn" data-tab="panel-debtaging" data-label="أعمار الديون"><i class="ti ti-hourglass" aria-hidden="true"></i><span>أعمار الديون</span></button>
         <div class="tabgroup-cap">الديون</div>
       </div>
+
+      <div class="tabgroup" data-maintab="settings" style="display:none">
+        <button class="tabbtn" data-tab="panel-navorder" data-label="ترتيب التابات"><i class="ti ti-adjustments-horizontal" aria-hidden="true"></i><span>ترتيب التابات</span></button>
+        <div class="tabgroup-cap">الإعدادات</div>
+      </div>
     </div>
 
     <div class="print-only" id="printFilterSummary"></div>
@@ -517,6 +523,21 @@ table.datatable details summary:hover { text-decoration: underline; }
       <div class="tabpanel" id="panel-collectedchecks"></div>
       <div class="tabpanel" id="panel-debtaging"></div>
       <div class="tabpanel" id="panel-duecollections"></div>
+      <div class="tabpanel" id="panel-navorder">
+        <div class="card" style="border:1.5px solid #E8D9C0">
+          <h2><i class="ti ti-adjustments-horizontal"></i> ترتيب وإخفاء تابات الأداة</h2>
+          <div style="font-size:11px;color:#8B6F47;margin-bottom:12px;background:#FFF8E1;padding:8px 12px;border-radius:8px;border:1px solid #FFD54F">
+            💡 اسحب التاب لتغيير ترتيبه داخل مجموعته — أو استخدم أزرار ↑↓ — الترتيب هنا داخل كل مجموعة فقط
+            (المجموعات الرئيسية نفسها ثابتة). التغييرات تُحفظ وتُشارك بين كل الأجهزة.
+          </div>
+          <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            <button class="btn secondary" style="padding:7px 14px;font-size:12.5px" onclick="resetNavOrder()"><i class="ti ti-refresh"></i> استعادة الترتيب الافتراضي</button>
+            <button class="btn" style="padding:7px 14px;font-size:12.5px;background:#1A7A4A" onclick="applyNavOrder()"><i class="ti ti-check"></i> تطبيق الترتيب</button>
+          </div>
+          <div id="nav-reorder-msg" style="font-size:12px;font-weight:700;color:#1A7A4A;margin-bottom:8px;display:none"></div>
+          <div id="nav-reorder-list" style="display:flex;flex-direction:column;gap:6px"></div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1216,8 +1237,17 @@ table.datatable details summary:hover { text-decoration: underline; }
     if (!sb || state.coordBranches || state.coordBranchesLoading) return;
     state.coordBranchesLoading = true;
     try {
-      const { data, error } = await sb.from('branches').select('branch_name,route').not('route', 'is', null).not('branch_name', 'is', null);
-      if (error) throw error;
+      // بيتصفح بالصفحات (.range) عشان نتجنب حد الـ1000 صف الافتراضي في PostgREST
+      let allRows = [], from = 0; const pageSize = 1000;
+      while (true) {
+        const { data, error } = await sb.from('branches').select('branch_name,route').not('route', 'is', null).not('branch_name', 'is', null).range(from, from + pageSize - 1);
+        if (error) throw error;
+        if (!data || !data.length) break;
+        allRows = allRows.concat(data);
+        if (data.length < pageSize) break;
+        from += pageSize;
+      }
+      const data = allRows;
       state.coordBranches = (data || []).map(r => ({
         branchName: r.branch_name,
         route: r.route,
@@ -1273,7 +1303,255 @@ table.datatable details summary:hover { text-decoration: underline; }
     sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   }
 
+  // ── تعديلات جوهرية: تطبيق هوية/حجم خط هذه الأداة (app_brand_settings, app_key='mt') ──
+  // ملحوظة: هذه الأداة بتستخدم متغيرات CSS خاصة بيها (--caramel/--sand/--ink...) مش نفس
+  // أسماء متغيرات الألوان العشرة الموحدة (navy/red/orange/...)، فبنطبق حجم الخط والعنوان بس
+  // وبنسيب الألوان زي ما هي عشان ما نكسرش شكل الأداة الحالي.
+  async function brsBootstrapApply(){
+    try{
+      const H = {'apikey':SUPABASE_ANON_KEY,'Authorization':`Bearer ${SUPABASE_ANON_KEY}`};
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.mt&select=*`, {headers:H});
+      const rows = res.ok ? await res.json().catch(()=>[]) : [];
+      const row = (Array.isArray(rows) && rows[0]) ? rows[0] : null;
+      if(!row) return;
+      if(row.font_size_base) document.body.style.fontSize = row.font_size_base+'px';
+      if(row.company_name) document.title = row.company_name;
+    }catch(e){}
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // ترتيب/إخفاء تابات الريبون (مشترك بين كل الأجهزة عبر app_brand_settings, app_key='mt')
+  // ══════════════════════════════════════════════════════════════
+  // ملحوظة هامة: الأداة دي شكلها "ريبون" مكوّن من مجموعات رئيسية (maintab) وكل مجموعة
+  // جوّاها مجموعة تانية فرعية (tabgroup) بتحتوي زراير (tabbtn). إعادة الترتيب هنا بتشتغل
+  // فقط جوّه نفس الـ tabgroup الأصلي لكل زرار — مفيش نقل زرار من مجموعة لمجموعة تانية،
+  // عشان منكسرش منطق mtShowMainTabGroups/mtSwitchMainTab اللي بيعتمد على إن كل tabgroup
+  // له data-maintab ثابت. الإخفاء/الإظهار بيتم بـ style.display على الزرار نفسه بس.
+  const NAV_DEFAULT = [
+    {id:'panel-overview',            icon:'ti-chart-donut',      label:'نظرة عامة',                    visible:true},
+    {id:'panel-items',               icon:'ti-package',          label:'الأصناف',                       visible:true},
+    {id:'panel-itemmerge',           icon:'ti-git-merge',        label:'دمج الأصناف',                   visible:true},
+    {id:'panel-branches',            icon:'ti-building-store',   label:'الفروع',                        visible:true},
+    {id:'panel-customers',           icon:'ti-users',            label:'العملاء',                       visible:true},
+    {id:'panel-customernet',         icon:'ti-report-money',     label:'صافي مسحوبات عملاء MT',          visible:true},
+    {id:'panel-customerdiscounts',   icon:'ti-discount-2',       label:'خصومات العملاء',                visible:true},
+    {id:'panel-customerinvoicematch',icon:'ti-file-search',      label:'مطابقة فواتير جريد',            visible:true},
+    {id:'panel-indirect',            icon:'ti-percentage',       label:'الخصم غير المباشر',             visible:true},
+    {id:'panel-linkindirect',        icon:'ti-link',             label:'ربط عملاء الخصم',               visible:true},
+    {id:'panel-branchindirect',      icon:'ti-transfer',         label:'توزيع الخصم على الفروع',        visible:true},
+    {id:'panel-reps',                icon:'ti-user',             label:'المناديب وخطوط السير',          visible:true},
+    {id:'panel-reproutes',           icon:'ti-route',            label:'خطوط سير مناديب',               visible:true},
+    {id:'panel-linkroutes',          icon:'ti-map-2',            label:'ربط خطوط السير',                visible:true},
+    {id:'panel-quarterly',           icon:'ti-calendar-stats',   label:'الأرباع',                       visible:true},
+    {id:'panel-monthly',             icon:'ti-calendar-month',   label:'الشهور',                        visible:true},
+    {id:'panel-yoy',                 icon:'ti-calendar-repeat',  label:'مقارنة سنوية',                  visible:true},
+    {id:'panel-collectedchecks',     icon:'ti-checkbook',        label:'الشيكات المحصلة',               visible:true},
+    {id:'panel-duecollections',      icon:'ti-cash',             label:'التحصيلات المستحقة',            visible:true},
+    {id:'panel-debtaging',           icon:'ti-hourglass',        label:'أعمار الديون',                  visible:true},
+  ];
+  let navOrder = [];
+  const REMOVED_PANELS = [];
+
+  function getNavOrder(){
+    try{
+      const saved = localStorage.getItem('nav_order_mt');
+      if(saved){
+        const arr = JSON.parse(saved);
+        const cleaned = arr.filter(item=>{
+          const id = typeof item==='string'?item:(item?.id||'');
+          return !REMOVED_PANELS.includes(id);
+        });
+        if(cleaned.length !== arr.length) localStorage.setItem('nav_order_mt', JSON.stringify(cleaned));
+        return cleaned;
+      }
+    }catch(e){}
+    return JSON.parse(JSON.stringify(NAV_DEFAULT));
+  }
+
+  function navBuildFromIdsHidden(orderIds, hiddenIds){
+    orderIds = Array.isArray(orderIds) ? orderIds : [];
+    hiddenIds = Array.isArray(hiddenIds) ? hiddenIds : [];
+    const byId = {}; NAV_DEFAULT.forEach(d=>byId[d.id]=d);
+    const seen = new Set(); const list = [];
+    orderIds.forEach(id=>{
+      if(REMOVED_PANELS.includes(id) || seen.has(id) || !byId[id]) return;
+      seen.add(id);
+      list.push({...byId[id], visible: !hiddenIds.includes(id)});
+    });
+    NAV_DEFAULT.forEach(d=>{
+      if(!seen.has(d.id)) list.push({...d, visible: !hiddenIds.includes(d.id)});
+    });
+    return list;
+  }
+
+  async function navFetchFromDB(){
+    try{
+      const H = {'apikey':SUPABASE_ANON_KEY,'Authorization':`Bearer ${SUPABASE_ANON_KEY}`};
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.mt&select=sidebar_order,sidebar_hidden`, {headers:H});
+      const rows = res.ok ? await res.json().catch(()=>[]) : [];
+      const row = rows && rows[0];
+      if(row && Array.isArray(row.sidebar_order) && row.sidebar_order.length){
+        return navBuildFromIdsHidden(row.sidebar_order, row.sidebar_hidden||[]);
+      }
+    }catch(e){}
+    return getNavOrder();
+  }
+
+  async function navSaveToDB(){
+    try{
+      const order = navOrder.map(i=>i.id);
+      const hidden = navOrder.filter(i=>!i.visible).map(i=>i.id);
+      const H = {'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY,'Authorization':`Bearer ${SUPABASE_ANON_KEY}`,'Prefer':'return=minimal'};
+      await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.mt`,{method:'PATCH', headers:H,
+        body:JSON.stringify({sidebar_order:order, sidebar_hidden:hidden, updated_at:new Date().toISOString()})});
+    }catch(e){}
+  }
+
+  function saveNavOrder(){
+    try{ localStorage.setItem('nav_order_mt', JSON.stringify(navOrder)); }catch(e){}
+    navSaveToDB();
+  }
+
+  function navShowMsg(msg){
+    const el = document.getElementById('nav-reorder-msg');
+    if(!el) return;
+    el.textContent = msg; el.style.display = 'block';
+    setTimeout(()=>{ el.style.display='none'; }, 3000);
+  }
+
+  async function loadNavReorder(){
+    const container = document.getElementById('nav-reorder-list');
+    if(container) container.innerHTML = '<div style="text-align:center;padding:20px;color:var(--ink-light,#999);font-size:12px">جاري التحميل...</div>';
+    navOrder = await navFetchFromDB();
+    renderNavReorderList();
+  }
+
+  function renderNavReorderList(){
+    const container = document.getElementById('nav-reorder-list');
+    if(!container) return;
+
+    container.innerHTML = navOrder.map((item,i)=>`
+      <div class="nav-reorder-item" id="nri-${item.id}" draggable="true"
+        ondragstart="navDragStart(event,'${item.id}')"
+        ondragover="navDragOver(event)"
+        ondrop="navDrop(event,'${item.id}')"
+        ondragleave="navDragLeave(event)"
+        style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:${item.visible?'#FFFDF8':'#F5F5F5'};
+          border:1.5px solid ${item.visible?'#E8D9C0':'#ddd'};border-radius:10px;cursor:grab;
+          opacity:${item.visible?1:.5};transition:all .15s;user-select:none">
+        <i class="ti ti-grip-vertical" style="color:#C4B49A;font-size:16px;cursor:grab;flex-shrink:0"></i>
+        <i class="ti ${item.icon}" style="font-size:15px;color:${item.visible?'#C55B48':'#aaa'};flex-shrink:0"></i>
+        <span style="flex:1;font-size:13px;font-weight:600;color:${item.visible?'#2C1F0A':'#aaa'}">${item.label}</span>
+        <div style="display:flex;flex-direction:column;gap:2px">
+          <button onclick="navMoveUp(${i})" ${i===0?'disabled':''} title="أعلى"
+            style="padding:2px 6px;border:1px solid #D4C4A8;border-radius:4px;background:#F5F0E8;cursor:pointer;font-size:10px;${i===0?'opacity:.3':''}">▲</button>
+          <button onclick="navMoveDown(${i})" ${i===navOrder.length-1?'disabled':''} title="أسفل"
+            style="padding:2px 6px;border:1px solid #D4C4A8;border-radius:4px;background:#F5F0E8;cursor:pointer;font-size:10px;${i===navOrder.length-1?'opacity:.3':''}">▼</button>
+        </div>
+        <button onclick="navToggleVisible('${item.id}')" title="${item.visible?'إخفاء':'إظهار'}"
+          style="padding:5px 10px;border:1px solid ${item.visible?'#D4C4A8':'#C55B48'};border-radius:6px;
+            background:${item.visible?'#F5F0E8':'#FFF0EE'};cursor:pointer;font-size:11px;font-weight:600;
+            color:${item.visible?'#8B6F47':'#C55B48'}">
+          ${item.visible?'👁️ ظاهر':'🚫 مخفي'}
+        </button>
+      </div>`).join('');
+
+    container.querySelectorAll('.nav-reorder-item').forEach(el=>{
+      el.addEventListener('dragstart', e=>{ e.dataTransfer.setData('text/plain', el.id.replace('nri-','')); el.style.opacity='.4'; });
+      el.addEventListener('dragend',   e=>{ el.style.opacity=''; });
+    });
+  }
+
+  let _dragId = null;
+  function navDragStart(e, id){ _dragId=id; e.dataTransfer.effectAllowed='move'; }
+  function navDragOver(e){ e.preventDefault(); e.currentTarget.style.background='#FFF0EE'; e.currentTarget.style.borderColor='#C55B48'; }
+  function navDragLeave(e){ e.currentTarget.style.background=''; e.currentTarget.style.borderColor=''; }
+  function navDrop(e, targetId){
+    e.preventDefault();
+    e.currentTarget.style.background='';
+    e.currentTarget.style.borderColor='';
+    if(!_dragId || _dragId===targetId) return;
+    const fromIdx = navOrder.findIndex(n=>n.id===_dragId);
+    const toIdx   = navOrder.findIndex(n=>n.id===targetId);
+    if(fromIdx===-1||toIdx===-1) return;
+    const [moved] = navOrder.splice(fromIdx,1);
+    navOrder.splice(toIdx,0,moved);
+    renderNavReorderList();
+  }
+
+  function navMoveUp(i){
+    if(i===0) return;
+    [navOrder[i-1],navOrder[i]]=[navOrder[i],navOrder[i-1]];
+    renderNavReorderList();
+  }
+  function navMoveDown(i){
+    if(i>=navOrder.length-1) return;
+    [navOrder[i],navOrder[i+1]]=[navOrder[i+1],navOrder[i]];
+    renderNavReorderList();
+  }
+
+  function navToggleVisible(id){
+    const item = navOrder.find(n=>n.id===id);
+    if(item) item.visible=!item.visible;
+    renderNavReorderList();
+  }
+
+  function navDeleteItem(id, label){
+    if(!confirm(`هل تريد حذف تاب "${label}" من القائمة؟`)) return;
+    navOrder = navOrder.filter(n=>n.id!==id);
+    saveNavOrder();
+    renderNavReorderList();
+    applyNavOrder();
+    navShowMsg(`🗑️ تم حذف تاب: ${label}`);
+  }
+
+  // تطبيق الترتيب فعليًا على DOM الريبون — بيعيد ترتيب الزراير جوّه نفس الـ tabgroup الأصلي
+  // بتاعها بس (من غير نقل بين المجموعات) + إخفاء/إظهار الزرار نفسه
+  function navApplyToDOM(){
+    const groupsInOrder = [];
+    const itemsByGroup = new Map();
+    navOrder.forEach(item=>{
+      const btn = document.querySelector(`.tabbtn[data-tab="${item.id}"]`);
+      if(!btn) return;
+      const grp = btn.closest('.tabgroup');
+      if(!grp) return;
+      btn.style.display = item.visible ? '' : 'none';
+      if(!itemsByGroup.has(grp)){ itemsByGroup.set(grp, []); groupsInOrder.push(grp); }
+      itemsByGroup.get(grp).push(btn);
+    });
+    groupsInOrder.forEach(grp=>{
+      const btns = itemsByGroup.get(grp);
+      btns.forEach(btn=>grp.appendChild(btn));
+      const cap = grp.querySelector('.tabgroup-cap');
+      if(cap) grp.appendChild(cap); // يفضل آخر عنصر في مجموعته
+    });
+  }
+
+  function applyNavOrder(){
+    saveNavOrder();
+    navApplyToDOM();
+    navShowMsg('✅ تم تطبيق الترتيب الجديد!');
+  }
+
+  async function navBootstrapApply(){
+    try{
+      navOrder = await navFetchFromDB();
+      navApplyToDOM();
+    }catch(e){}
+  }
+
+  function resetNavOrder(){
+    if(!confirm('استعادة الترتيب الافتراضي؟')) return;
+    navOrder = JSON.parse(JSON.stringify(NAV_DEFAULT));
+    saveNavOrder();
+    renderNavReorderList();
+    applyNavOrder();
+    navShowMsg('✅ تم استعادة الترتيب الافتراضي');
+  }
+
   function initLoginFlow() {
+    brsBootstrapApply(); // تطبيق البراند/حجم الخط المحفوظة (تعديلات جوهرية)
+    navBootstrapApply(); // تطبيق ترتيب/إخفاء تابات الريبون المحفوظة (مشتركة بين الأجهزة)
     loadFromCloud();
   }
 
@@ -6010,6 +6288,7 @@ table.datatable details summary:hover { text-decoration: underline; }
     'panel-collectedchecks': renderCollectedChecks,
     'panel-debtaging': renderDebtAging,
     'panel-duecollections': renderDueCollections,
+    'panel-navorder': loadNavReorder,
   };
   let _mtDirtyTabs = null; // null = لسه ماحصلش renderAll() خالص (أول تحميل)
 
