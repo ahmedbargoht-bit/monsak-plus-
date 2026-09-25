@@ -48146,8 +48146,8 @@ async function chnLoad(){
   const to     =document.getElementById('chn-to')?.value||'';
 
   // تحميل البيانات
-  let delUrl=`${SUPABASE_URL}/rest/v1/sales_deliveries?select=*&deleted_at=is.null&order=delivery_date.desc&limit=5000`;
-  let retUrl=`${SUPABASE_URL}/rest/v1/sales_returns?select=*&deleted_at=is.null&order=return_date.desc&limit=5000`;
+  let delUrl=`${SUPABASE_URL}/rest/v1/sales_deliveries?select=*&deleted_at=is.null&order=delivery_date.desc`;
+  let retUrl=`${SUPABASE_URL}/rest/v1/sales_returns?select=*&deleted_at=is.null&order=return_date.desc`;
   if(rep)    { delUrl+=`&rep_name=eq.${encodeURIComponent(rep)}`;   retUrl+=`&rep_name=eq.${encodeURIComponent(rep)}`; }
   if(from)   { delUrl+=`&delivery_date=gte.${from}`;  retUrl+=`&return_date=gte.${from}`; }
   if(to)     { delUrl+=`&delivery_date=lte.${to}`;    retUrl+=`&return_date=lte.${to}`; }
@@ -48155,10 +48155,24 @@ async function chnLoad(){
   document.getElementById('chn-del-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;padding:20px"><div class="spinner" style="margin:0 auto"></div></td></tr>';
   document.getElementById('chn-ret-tbody').innerHTML='<tr><td colspan="6" style="text-align:center;padding:20px"></td></tr>';
 
+  // Supabase/PostgREST بيقطع أي رد على 1000 صف حتى لو الـ limit المطلوب أكبر — فبنجيب كل الصفحات
+  // (زي نفس الأسلوب المستخدم في أماكن تانية بالنظام، مثلاً sciLoadMt2026) بدل ما نعتمد على limit=5000
+  // اللي كان بيرجع أول ~1000 صف بس وبيخلي أي فلترة بعد كده (بالمجموعة/السلسلة) ناقصة.
+  const fetchAllPages = async (baseUrl)=>{
+    const pageSize=1000, maxPages=20;
+    const jobs=[];
+    for(let p=0;p<maxPages;p++){
+      jobs.push(fetch(`${baseUrl}&limit=${pageSize}&offset=${p*pageSize}`,{headers:H}).then(r=>r.ok?r.json().catch(()=>[]):[]).catch(()=>[]));
+    }
+    const pages=await Promise.all(jobs);
+    let rows=[];
+    pages.forEach(pg=>{ if(Array.isArray(pg)&&pg.length) rows=rows.concat(pg); });
+    return rows;
+  };
+
   try{
-    const [delRes,retRes]=await Promise.all([fetch(delUrl,{headers:H}),fetch(retUrl,{headers:H})]);
-    _chnDel=delRes.ok?await delRes.json():[];
-    _chnRet=retRes.ok?await retRes.json():[];
+    const [delRows,retRows]=await Promise.all([fetchAllPages(delUrl),fetchAllPages(retUrl)]);
+    _chnDel=delRows; _chnRet=retRows;
   }catch(e){ _chnDel=[]; _chnRet=[]; }
 
   // فلترة جانب العميل
