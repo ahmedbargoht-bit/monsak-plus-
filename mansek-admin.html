@@ -6101,6 +6101,9 @@ h2,h3{color:#2C1F0A}
             <div id="sinv-tab-settings" onclick="sinvSwitchTab('settings')" style="padding:9px 22px;font-size:13px;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;color:var(--text2)">
               <i class="ti ti-settings"></i> إعدادات تاريخ الفاتورة
             </div>
+            <div id="sinv-tab-items" onclick="sinvSwitchTab('items')" style="padding:9px 22px;font-size:13px;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;color:var(--text2)">
+              <i class="ti ti-package"></i> أصناف المبيعات
+            </div>
           </div>
 
           <!-- ══ تاب التسليم ══ -->
@@ -6295,6 +6298,31 @@ h2,h3{color:#2C1F0A}
                   </thead>
                   <tbody id="sinv-backdate-tbody">
                     <tr><td colspan="2" style="text-align:center;padding:20px;color:#888">جاري التحميل...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- ══ تاب أصناف المبيعات (توريد/مرتجع لكل صنف حسب الفلاتر الحالية) ══ -->
+          <div id="sinv-section-items" style="display:none">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:12px" id="sinv-items-stats"></div>
+            <div class="card" style="padding:0;overflow:hidden">
+              <div class="table-wrap">
+                <table style="width:100%;border-collapse:collapse;font-size:12px">
+                  <thead>
+                    <tr style="background:#4B3C1A;color:#EDE5D8">
+                      <th style="padding:9px 14px;text-align:right">الصنف</th>
+                      <th style="padding:9px 10px;text-align:center">كمية التوريد (فواتير التسليم)</th>
+                      <th style="padding:9px 10px;text-align:center">قيمة التوريد</th>
+                      <th style="padding:9px 10px;text-align:center">كمية المرتجع</th>
+                      <th style="padding:9px 10px;text-align:center">قيمة المرتجع</th>
+                      <th style="padding:9px 10px;text-align:center">الصافي (كمية)</th>
+                      <th style="padding:9px 10px;text-align:center">الصافي (قيمة)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sinv-items-tbody">
+                    <tr><td colspan="7" style="text-align:center;padding:30px;color:#888">جاري التحميل...</td></tr>
                   </tbody>
                 </table>
               </div>
@@ -33337,7 +33365,7 @@ let _sinvBackdateLoaded=false;
 
 function sinvSwitchTab(tab){
   _sinvActiveTab=tab;
-  ['del','ret','sum','yawm','settings'].forEach(t=>{
+  ['del','ret','sum','yawm','settings','items'].forEach(t=>{
     const sec=document.getElementById('sinv-section-'+t);
     const tb=document.getElementById('sinv-tab-'+t);
     if(sec) sec.style.display=t===tab?'':'none';
@@ -33355,11 +33383,62 @@ function sinvSwitchTab(tab){
   });
   // زرار الحذف — يظهر فقط في تاب التسليم والمرتجع
   const delBtn=document.querySelector('[onclick="sinvDeleteSelectedAll()"]');
-  if(delBtn) delBtn.style.display=(tab==='sum'||tab==='yawm'||tab==='settings')?'none':'';
+  if(delBtn) delBtn.style.display=(tab==='sum'||tab==='yawm'||tab==='settings'||tab==='items')?'none':'';
   // تحميل اليومية عند التبديل إليها
   if(tab==='yawm') sinvYawmLoad();
   // تحميل إعدادات تاريخ الفاتورة أول مرة بس
   if(tab==='settings' && !_sinvBackdateLoaded){ _sinvBackdateLoaded=true; sinvBackdateLoad(); }
+  // تحميل/تحديث تقرير أصناف المبيعات عند التبديل إليه (من البيانات المحمّلة بالفعل بنفس فلاتر الصفحة)
+  if(tab==='items') sinvItemsLoad();
+}
+
+// ══ تاب "أصناف المبيعات" — تجميع كل صنف: كمية/قيمة التوريد (فواتير التسليم) مقابل كمية/قيمة
+// المرتجع، بنفس الفلاتر الحالية المطبّقة على الصفحة (فترة/مندوب/فرع/عميل) — بيستخدم البيانات
+// المحمّلة بالفعل في _sinvData و_sinvRetData (من غير أي طلب جديد لقاعدة البيانات)
+function sinvItemsLoad(){
+  const tbody = document.getElementById('sinv-items-tbody');
+  const statsEl = document.getElementById('sinv-items-stats');
+  const dels = _sinvData||[];
+  const rets = _sinvRetData||[];
+  const agg = {}; // name -> {delQty, delVal, retQty, retVal}
+  const get = (name)=>{ if(!agg[name]) agg[name]={delQty:0,delVal:0,retQty:0,retVal:0}; return agg[name]; };
+  dels.forEach(r=>{
+    (r.items||[]).forEach(it=>{
+      const name = it.name; if(!name) return;
+      const a = get(name);
+      a.delQty += (+it.qty||0);
+      a.delVal += (+it.total!=null ? +it.total : (+it.qty||0)*(+it.price||0));
+    });
+  });
+  rets.forEach(r=>{
+    (r.items||[]).forEach(it=>{
+      const name = it.name; if(!name) return;
+      const a = get(name);
+      a.retQty += (+it.qty||0);
+      a.retVal += (+it.total!=null ? +it.total : (+it.qty||0)*(+it.price||0));
+    });
+  });
+  const names = Object.keys(agg).sort((a,b)=>agg[b].delVal-agg[a].delVal);
+  let totDelQty=0, totDelVal=0, totRetQty=0, totRetVal=0;
+  names.forEach(n=>{ totDelQty+=agg[n].delQty; totDelVal+=agg[n].delVal; totRetQty+=agg[n].retQty; totRetVal+=agg[n].retVal; });
+  if(statsEl) statsEl.innerHTML = `
+    <div class="card" style="text-align:center;padding:12px"><div style="font-size:11px;color:var(--text2)">عدد الأصناف</div><div style="font-size:22px;font-weight:800;color:#731E2E">${names.length}</div></div>
+    <div class="card" style="text-align:center;padding:12px"><div style="font-size:11px;color:var(--text2)">إجمالي كمية التوريد</div><div style="font-size:18px;font-weight:800">${totDelQty.toLocaleString('en-US')}</div></div>
+    <div class="card" style="text-align:center;padding:12px"><div style="font-size:11px;color:var(--text2)">إجمالي قيمة التوريد</div><div style="font-size:18px;font-weight:800;color:#1A7A4A">${totDelVal.toLocaleString('en-US',{maximumFractionDigits:0})} ج</div></div>
+    <div class="card" style="text-align:center;padding:12px"><div style="font-size:11px;color:var(--text2)">صافي القيمة (توريد − مرتجع)</div><div style="font-size:18px;font-weight:800;color:#731E2E">${(totDelVal-totRetVal).toLocaleString('en-US',{maximumFractionDigits:0})} ج</div></div>`;
+  if(tbody) tbody.innerHTML = names.length ? names.map(n=>{
+    const a = agg[n];
+    const netQty = a.delQty - a.retQty, netVal = a.delVal - a.retVal;
+    return `<tr style="border-bottom:0.5px solid var(--border)">
+      <td style="padding:8px 12px;font-weight:600">${n}</td>
+      <td style="padding:8px;text-align:center;font-weight:700">${a.delQty.toLocaleString('en-US')}</td>
+      <td style="padding:8px;text-align:center;color:#1A7A4A;font-weight:700">${a.delVal.toLocaleString('en-US',{maximumFractionDigits:0})} ج</td>
+      <td style="padding:8px;text-align:center;font-weight:700;color:#C05621">${a.retQty.toLocaleString('en-US')}</td>
+      <td style="padding:8px;text-align:center;color:#C05621;font-weight:700">${a.retVal.toLocaleString('en-US',{maximumFractionDigits:0})} ج</td>
+      <td style="padding:8px;text-align:center;font-weight:700">${netQty.toLocaleString('en-US')}</td>
+      <td style="padding:8px;text-align:center;font-weight:800;color:#731E2E">${netVal.toLocaleString('en-US',{maximumFractionDigits:0})} ج</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="7" style="text-align:center;padding:40px;color:#aaa">لا توجد بيانات مطابقة للفلاتر الحالية</td></tr>';
 }
 
 // ══ إعدادات تاريخ الفاتورة (اختيار تاريخ سابق للمندوب) ══
@@ -33482,6 +33561,7 @@ async function sinvRefreshAll(){
   await Promise.all([sinvLoad(), sinvRetLoad()]);
   sinvSummaryLoad();
   if(_sinvActiveTab==='yawm') sinvYawmLoad();
+  if(_sinvActiveTab==='items') sinvItemsLoad();
   // حدّث قائمة العملاء/الفروع في دروب داون "تخصيص التقرير" بعد أي تحميل بيانات جديد
   if(typeof sinvBuildCBOptions==='function') sinvBuildCBOptions();
 }
