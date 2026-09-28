@@ -6313,12 +6313,12 @@ h2,h3{color:#2C1F0A}
                   <thead>
                     <tr style="background:#4B3C1A;color:#EDE5D8">
                       <th style="padding:9px 14px;text-align:right">الصنف</th>
-                      <th style="padding:9px 10px;text-align:center">كمية التوريد (فواتير التسليم)</th>
-                      <th style="padding:9px 10px;text-align:center">قيمة التوريد</th>
-                      <th style="padding:9px 10px;text-align:center">كمية المرتجع</th>
+                      <th style="padding:9px 10px;text-align:center">كمية المبيعات (فواتير التسليم للعميل)</th>
+                      <th style="padding:9px 10px;text-align:center">قيمة المبيعات</th>
+                      <th style="padding:9px 10px;text-align:center">كمية المرتجع من العميل</th>
                       <th style="padding:9px 10px;text-align:center">قيمة المرتجع</th>
-                      <th style="padding:9px 10px;text-align:center">الصافي (كمية)</th>
-                      <th style="padding:9px 10px;text-align:center">الصافي (قيمة)</th>
+                      <th style="padding:9px 10px;text-align:center">صافي المبيعات (كمية)</th>
+                      <th style="padding:9px 10px;text-align:center">صافي المبيعات (قيمة)</th>
                     </tr>
                   </thead>
                   <tbody id="sinv-items-tbody">
@@ -6726,6 +6726,38 @@ h2,h3{color:#2C1F0A}
             <input type="text" id="rbadm-search" placeholder="🔍 ابحث باسم المندوب..." oninput="repbalRenderBalances()"
               style="width:100%;max-width:320px;padding:9px 10px;border:1.5px solid var(--border);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif;margin-bottom:10px"/>
             <div id="rbadm-balances"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+              <span><i class="ti ti-transfer" style="color:#1D4ED8"></i> سجل تحويلات البضاعة بين المناديب</span>
+              <select id="rstadm-status-filter" onchange="rstadmRender()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-size:12px;font-family:Cairo,sans-serif">
+                <option value="">كل الحالات</option>
+                <option value="pending_source">بانتظار تأكيد المُحوِّل</option>
+                <option value="pending_target">بانتظار تأكيد المستلم</option>
+                <option value="completed">مكتمل</option>
+                <option value="rejected_source">رفضه المُحوِّل</option>
+                <option value="disputed">متنازع عليه</option>
+                <option value="cancelled">ملغي</option>
+              </select>
+            </div>
+            <p style="font-size:12px;color:var(--text2);margin:0 0 10px">التحويل بيتم من تطبيق مشرف/مدير المبيعات، وبيحتاج تأكيد المندوب المُحوِّل ثم المندوب المستلم. الحالات "متنازع عليها" بتتحل يدويًا من نفس التطبيق (مشرف/مدير).</p>
+            <div style="overflow-x:auto">
+              <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+                <thead><tr style="background:#F5F0E8">
+                  <th style="padding:8px;border:1px solid var(--border);text-align:right">من</th>
+                  <th style="padding:8px;border:1px solid var(--border);text-align:right">إلى</th>
+                  <th style="padding:8px;border:1px solid var(--border);text-align:right">الأصناف</th>
+                  <th style="padding:8px;border:1px solid var(--border);text-align:center">الحالة</th>
+                  <th style="padding:8px;border:1px solid var(--border);text-align:right">طلبه</th>
+                  <th style="padding:8px;border:1px solid var(--border);text-align:right">تاريخ الطلب</th>
+                  <th style="padding:8px;border:1px solid var(--border);text-align:right">تأكيد المُحوِّل</th>
+                  <th style="padding:8px;border:1px solid var(--border);text-align:right">تأكيد المستلم</th>
+                  <th style="padding:8px;border:1px solid var(--border);text-align:right">ملاحظة الحل اليدوي</th>
+                </tr></thead>
+                <tbody id="rstadm-tbody"><tr><td colspan="9" style="padding:14px;text-align:center;color:var(--text2)">جارِ التحميل...</td></tr></tbody>
+              </table>
+            </div>
           </div>
         </div>
 
@@ -35831,6 +35863,48 @@ function repbalInit(){
   repbalUpdateGrpLabel();
   repbalLoadManualCountToggle();
   repbalLoad();
+  rstadmLoad();
+}
+
+// ══ سجل تحويلات البضاعة بين المناديب (قراءة فقط — التنفيذ من تطبيق المشرف/المدير) ══
+let _rstadmRows = [];
+function rstadmStatusLabel(s){
+  return {pending_source:'⏳ بانتظار تأكيد المُحوِّل', pending_target:'⏳ بانتظار تأكيد المستلم', completed:'✅ مكتمل', rejected_source:'❌ رفضه المُحوِّل', disputed:'⚠️ متنازع عليه', cancelled:'🚫 ملغي'}[s] || s;
+}
+function rstadmStatusColor(s){
+  return {pending_source:'#B45309', pending_target:'#1D4ED8', completed:'#276749', rejected_source:'#731E2E', disputed:'#B71C1C', cancelled:'#666'}[s] || '#666';
+}
+async function rstadmLoad(){
+  const tbody = document.getElementById('rstadm-tbody');
+  if(!tbody) return;
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    _rstadmRows = await fetchAllRows(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?order=requested_at.desc`, H);
+  }catch(e){ _rstadmRows = []; }
+  rstadmRender();
+}
+function rstadmRender(){
+  const tbody = document.getElementById('rstadm-tbody');
+  if(!tbody) return;
+  const filter = document.getElementById('rstadm-status-filter')?.value || '';
+  const rows = filter ? _rstadmRows.filter(r=>r.status===filter) : _rstadmRows;
+  if(!rows.length){ tbody.innerHTML = '<tr><td colspan="9" style="padding:14px;text-align:center;color:var(--text2)">مفيش عمليات تحويل مسجّلة</td></tr>'; return; }
+  const fmt = d => d ? new Date(d).toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'}) : '—';
+  tbody.innerHTML = rows.map(r=>{
+    const items = (r.items||[]).map(it=>`${it.name} × ${it.qty}`).join('، ');
+    const resolveNote = r.resolve_note ? `${r.resolve_note}${r.resolved_by?' — '+r.resolved_by:''}` : (r.reject_reason||'—');
+    return `<tr>
+      <td style="padding:8px;border:1px solid var(--border);font-weight:700">${r.from_rep}</td>
+      <td style="padding:8px;border:1px solid var(--border);font-weight:700">${r.to_rep}</td>
+      <td style="padding:8px;border:1px solid var(--border);font-size:11.5px">${items}</td>
+      <td style="padding:8px;border:1px solid var(--border);text-align:center;font-weight:800;color:${rstadmStatusColor(r.status)}">${rstadmStatusLabel(r.status)}</td>
+      <td style="padding:8px;border:1px solid var(--border)">${r.requested_by||'—'}</td>
+      <td style="padding:8px;border:1px solid var(--border);font-size:11px">${fmt(r.requested_at)}</td>
+      <td style="padding:8px;border:1px solid var(--border);font-size:11px">${r.source_confirmed_by ? r.source_confirmed_by+' — '+fmt(r.source_confirmed_at) : '—'}</td>
+      <td style="padding:8px;border:1px solid var(--border);font-size:11px">${r.target_confirmed_by ? r.target_confirmed_by+' — '+fmt(r.target_confirmed_at) : '—'}</td>
+      <td style="padding:8px;border:1px solid var(--border);font-size:11px">${resolveNote}</td>
+    </tr>`;
+  }).join('');
 }
 
 // إعداد عام (مفتاح واحد في products_db) بيتحكم في إتاحة تبويب "العدّ اليدوي" في تطبيق
@@ -36007,20 +36081,26 @@ async function repbalLoad(){
   }
 
   const encList = repNames.map(n=>encodeURIComponent(n)).join(',');
-  const fetchJ = async (url)=>{ try{ const r=await fetch(url,{headers:H, cache:'no-store'}); return r.ok?await r.json():[]; }catch(e){ return []; } };
+  // ملحوظة مهمة: كل الاستعلامات دي كانت بتستخدم fetchJ (طلب واحد بس، من غير Pagination) مع
+  // limit كبير في الرابط — لكن PostgREST بيطبّق سقف أقصى فعلي على عدد الصفوف المرجوعة (max-rows)
+  // بغض النظر عن الـ limit المكتوب في الرابط، فلو عدد الصفوف الحقيقي (كل المناديب × كل الوقت)
+  // تعدّى السقف ده، كان بيحصل قطع صامت لبعض الصفوف (زي فواتير تسليم مندوب معيّن) من غير أي error
+  // ظاهر — وده كان بيخلي رصيد بعض المناديب يفضل منفوخ (توريد من غير خصم بيعه الفعلي). عشان كده
+  // اتحول كل استعلام هنا لـ fetchAllJ اللي بيعمل صفحات (pagination) لحد ما يجيب كل الصفوف فعليًا.
+  const fetchAllJ = async (url)=>{ try{ return await fetchAllRows(url,H); }catch(e){ return []; } };
   const [pending, diffs, allReqs, dels, rets, reqsApproved, adjs, invRows, fullInv, reqDateRows, resets, handovers] = await Promise.all([
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&order=created_at.asc&limit=500`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc&limit=500`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&order=created_at.desc&limit=300`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date,created_at&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status,created_at&limit=10000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at&limit=5000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at&limit=5000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&order=created_at.desc&limit=5000&select=id,rep_name,snf,counted_qty,counted_valid_qty,counted_returned_qty,computed_qty,diff,resolved,created_at`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc&limit=20000`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_balance_resets?rep_name=in.(${encList})&select=rep_name,reset_at`),
-    fetchJ(`${SUPABASE_URL}/rest/v1/rep_damaged_handovers?rep_name=in.(${encList})&select=rep_name,snf,qty,created_at&order=created_at.desc&limit=5000`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&order=created_at.asc`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&order=created_at.desc`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date,created_at`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status,created_at`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&order=created_at.desc&select=id,rep_name,snf,counted_qty,counted_valid_qty,counted_returned_qty,computed_qty,diff,resolved,created_at`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_balance_resets?rep_name=in.(${encList})&select=rep_name,reset_at`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_damaged_handovers?rep_name=in.(${encList})&select=rep_name,snf,qty,created_at&order=created_at.desc`),
   ]);
 
   // لو المندوب اتعمله "تصفير رصيد" (بسبب أخطاء إدخال)، نتجاهل أي عد يدوي أو طلب بضاعة حصل

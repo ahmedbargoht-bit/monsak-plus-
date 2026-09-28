@@ -798,6 +798,7 @@ html,body{position:fixed;inset:0;width:100%;height:100%;overflow:hidden;font-fam
       <div style="font-size:12.5px;font-weight:800;color:#276749;margin-bottom:2px">📦 رصيدك الحالي (بيتحدّث أوتوماتيك)</div>
       <div style="font-size:10.5px;color:var(--t3)">إيه اللي المفروض يكون موجود معاك في العربية دلوقتي، محسوب من طلبات البضاعة والتوريد والمرتجع</div>
     </div>
+    <div id="ci-transfer-requests"></div>
     <div id="ci-pending-note" style="display:none;background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:11px;color:#92400E;font-weight:700"></div>
     <div id="ci-balance-list"><div style="text-align:center;padding:1.5rem;color:var(--t3);font-size:12px">⏳ جارٍ التحميل...</div></div>
 
@@ -2416,6 +2417,73 @@ async function ciLoad(){
   ciRenderRequestList();
   ciLoadMyHistory();
   ciLoadMyRequests();
+  ciLoadTransfers();
+}
+
+// ══ تحويل بضاعة من/إلى مندوب تاني (بيبدأها المشرف/المدير من sales-app.html) ══
+// المندوب هنا بس بيأكّد أو يرفض — التسليم لو هو المُحوِّل منه، والاستلام لو هو المُحوَّل عليه.
+let _ciTransfers = [];
+async function ciLoadTransfers(){
+  const wrap = document.getElementById('ci-transfer-requests');
+  if(!wrap) return;
+  try{
+    const enc = encodeURIComponent(currentRep.name);
+    const rows = await sbFetch('rep_stock_transfers', `?or=(from_rep.eq.${enc},to_rep.eq.${enc})&status=in.(pending_source,pending_target)&order=requested_at.asc`).catch(()=>[]);
+    _ciTransfers = rows||[];
+  }catch(e){ _ciTransfers = []; }
+  ciRenderTransfers();
+}
+function ciRenderTransfers(){
+  const wrap = document.getElementById('ci-transfer-requests');
+  if(!wrap) return;
+  const mine = _ciTransfers.filter(t=>
+    (t.from_rep===currentRep.name && t.status==='pending_source') ||
+    (t.to_rep===currentRep.name && t.status==='pending_target')
+  );
+  if(!mine.length){ wrap.innerHTML=''; return; }
+  wrap.innerHTML = mine.map(t=>{
+    const items = (t.items||[]).map(it=>`${it.name} × ${it.qty}`).join('، ');
+    const asSource = t.from_rep===currentRep.name && t.status==='pending_source';
+    const title = asSource ? `طلب تحويل بضاعة منك إلى ${t.to_rep}` : `بضاعة قادمة إليك من ${t.from_rep}`;
+    const actions = asSource
+      ? `<button onclick="ciConfirmTransfer(${t.id},'source_confirm')" style="flex:1;background:#276749;color:#fff;border:none;border-radius:8px;padding:9px;font-family:Cairo,sans-serif;font-size:12px;font-weight:800;cursor:pointer">✅ تأكيد التسليم</button>
+         <button onclick="ciConfirmTransfer(${t.id},'source_reject')" style="flex:1;background:#B71C1C;color:#fff;border:none;border-radius:8px;padding:9px;font-family:Cairo,sans-serif;font-size:12px;font-weight:800;cursor:pointer">❌ رفض</button>`
+      : `<button onclick="ciConfirmTransfer(${t.id},'target_confirm')" style="flex:1;background:#276749;color:#fff;border:none;border-radius:8px;padding:9px;font-family:Cairo,sans-serif;font-size:12px;font-weight:800;cursor:pointer">✅ تأكيد الاستلام</button>
+         <button onclick="ciConfirmTransfer(${t.id},'target_reject')" style="flex:1;background:#B71C1C;color:#fff;border:none;border-radius:8px;padding:9px;font-family:Cairo,sans-serif;font-size:12px;font-weight:800;cursor:pointer">❌ رفض الاستلام</button>`;
+    return `<div style="background:#EAF2FF;border:1.5px solid #BFDBFE;border-radius:10px;padding:10px 12px;margin-bottom:10px">
+      <div style="font-size:12.5px;font-weight:800;color:#1D4ED8;margin-bottom:4px">🔁 ${title}</div>
+      <div style="font-size:11.5px;color:#2C2C2A;margin-bottom:8px">${items}</div>
+      <div style="display:flex;gap:8px">${actions}</div>
+    </div>`;
+  }).join('');
+}
+async function ciConfirmTransfer(id, action){
+  const t = _ciTransfers.find(x=>x.id===id);
+  if(!t) return;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
+  try{
+    if(action==='source_confirm'){
+      if(!confirm(`تأكيد تسليم البضاعة دي لـ${t.to_rep}؟ هتتخصم من رصيدك فورًا.`)) return;
+      const adjRows = (t.items||[]).map(it=>({rep_name:t.from_rep, snf:it.name, qty_delta:-it.qty, reason:`تحويل بضاعة إلى ${t.to_rep}`, adjusted_by:currentRep.name, source_transfer_id:t.id}));
+      const r1 = await fetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{method:'POST',headers:H,body:JSON.stringify(adjRows)});
+      if(!r1.ok) throw new Error(await r1.text());
+      await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'pending_target', source_confirmed_by:currentRep.name, source_confirmed_at:new Date().toISOString()})});
+    } else if(action==='source_reject'){
+      if(!confirm('رفض طلب التحويل ده؟')) return;
+      await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'rejected_source', rejected_by:currentRep.name, rejected_at:new Date().toISOString()})});
+    } else if(action==='target_confirm'){
+      if(!confirm(`تأكيد استلام البضاعة دي من ${t.from_rep}؟ هتتضاف لرصيدك فورًا.`)) return;
+      const adjRows = (t.items||[]).map(it=>({rep_name:t.to_rep, snf:it.name, qty_delta:+it.qty, reason:`تحويل بضاعة من ${t.from_rep}`, adjusted_by:currentRep.name, source_transfer_id:t.id}));
+      const r1 = await fetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{method:'POST',headers:H,body:JSON.stringify(adjRows)});
+      if(!r1.ok) throw new Error(await r1.text());
+      await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'completed', target_confirmed_by:currentRep.name, target_confirmed_at:new Date().toISOString()})});
+    } else if(action==='target_reject'){
+      if(!confirm('رفض استلام البضاعة دي؟ الحالة هتفضل معلّقة لحد ما المشرف يتدخل يدويًا.')) return;
+      await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'disputed', rejected_by:currentRep.name, rejected_at:new Date().toISOString(), reject_reason:'رفض المندوب المستلم تأكيد الاستلام'})});
+    }
+    showToast?.('✅ تم');
+    ciLoad();
+  }catch(e){ showToast?.('❌ حصل خطأ، حاول تاني','err') || alert('حصل خطأ، حاول تاني'); }
 }
 
 // فلتر الفترة (من/إلى) على سجل الجرد وسجل الطلبات — بدون فترة = آخر السجلات زي ما كانت
