@@ -545,7 +545,7 @@ table.datatable details summary:hover { text-decoration: underline; }
   </div>
 </div>
 
-<script>
+<script id="salesParserSrc">
 /*
  * Parser for "تقرير بالمبيعات لعميل معين خلال فترة" invoice-detail Excel reports.
  * Token-stream / label-anchored approach: robust to column-position drift between
@@ -1581,6 +1581,107 @@ table.datatable details summary:hover { text-decoration: underline; }
     const workers = Array.from({ length: Math.min(limit, tasks.length) }, worker);
     await Promise.all(workers);
     return results;
+  }
+
+  // ══════════ Web Worker Pool لتحليل ملفات الإكسل خارج الـ Main Thread ══════════
+  // السبب الجذري في "التجمّد" وقت رفع ملف كبير (500+ فاتورة): XLSX.read() وتحليل الصفوف
+  // (SalesParser.parseSheet) عمليات حسابية ثقيلة، ولو شغّلناها في نفس الـ Thread اللي بيرسم
+  // الشاشة، المتصفح بيتجمد تمامًا لحد ما يخلصوا - مفيش تحديث لرسالة "جاري القراءة والتحليل..."
+  // ولا استجابة لأي حاجة، فالمستخدم بيحس إن الأداة "واقفة" حتى لو كانت شغالة فعليًا. الحل: ننقل
+  // القراءة والتحليل لـ Web Worker (Thread تاني بالكامل)، فالـ Main Thread يفضل فاضي يرسم
+  // ويستجيب، وكمان لو فيه أكتر من ملف بيتحلل مع بعض بنستفيد من أكتر من كور بالمعالج.
+  // SalesParser (فوق) UMD وقائم بذاته (مفيش أي اعتماد على الـ DOM أو Supabase)، فبناخد نص
+  // السكريبت بتاعه زي ما هو (من الـ <script id="salesParserSrc">) ونحقنه جوه الـ Worker.
+  const MtWorkerPool = (function () {
+    const XLSX_CDN_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    const SIZE = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2)));
+    let workers = null; // [{ worker, busy }]
+    const queue = [];
+    let seq = 0;
+
+    function ensureWorkers() {
+      if (workers) return workers;
+      const parserSrc = document.getElementById('salesParserSrc').textContent;
+      const code = `
+        importScripts(${JSON.stringify(XLSX_CDN_URL)});
+        ${parserSrc}
+        self.onmessage = function (e) {
+          const { id, kind, buf, fileName } = e.data;
+          try {
+            const wb = XLSX.read(buf, { type: 'array', cellDates: kind !== 'route' });
+            const ws = wb.Sheets[wb.SheetNames[0]];
+            const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
+            let result;
+            if (kind === 'route') result = { routeIndex: SalesParser.parseRouteSheet(rows) };
+            else if (kind === 'invoice') result = SalesParser.parseSheet(rows, { fileName: fileName });
+            else if (kind === 'returns') result = SalesParser.parseReturnsSheet(rows);
+            else if (kind === 'indirect') result = SalesParser.parseIndirectDiscountSheet(rows);
+            else if (kind === 'statement') result = SalesParser.parseAccountStatementSheet(rows, fileName);
+            else if (kind === 'customerInv') result = SalesParser.parseCustomerInvoiceRawSheet(rows);
+            self.postMessage({ id: id, ok: true, result: result });
+          } catch (err) {
+            self.postMessage({ id: id, ok: false, error: (err && err.message) || String(err) });
+          }
+        };
+      `;
+      const blobUrl = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+      workers = Array.from({ length: SIZE }, () => ({ worker: new Worker(blobUrl), busy: false }));
+      return workers;
+    }
+
+    function pump() {
+      if (!queue.length) return;
+      const pool = ensureWorkers();
+      const free = pool.find(w => !w.busy);
+      if (!free) return;
+      const task = queue.shift();
+      free.busy = true;
+      const id = ++seq;
+      const onMsg = (e) => {
+        if (e.data.id !== id) return;
+        free.worker.removeEventListener('message', onMsg);
+        free.busy = false;
+        if (e.data.ok) task.resolve(e.data.result); else task.reject(new Error(e.data.error));
+        pump();
+      };
+      free.worker.addEventListener('message', onMsg);
+      free.worker.postMessage({ id, kind: task.kind, buf: task.buf, fileName: task.fileName }, [task.buf]);
+    }
+
+    function run(kind, buf, fileName) {
+      return new Promise((resolve, reject) => {
+        queue.push({ kind, buf, fileName, resolve, reject });
+        pump();
+      });
+    }
+
+    return { run };
+  })();
+
+  // نفس منطق تحليل الـ Worker بالظبط، لكن شغال على الـ Main Thread مباشرة - شبكة أمان لو تعذر
+  // إنشاء الـ Worker لأي سبب (مثلًا بيئة متصفح مقيّدة بتمنع blob: workers)، عشان رفع الملفات
+  // ميقفش كليًا حتى لو من غير فايدة السرعة/الاستجابة بتاعة الـ Worker.
+  function mtParseWorkbookSync(kind, buf, fileName) {
+    const wb = XLSX.read(buf, { type: 'array', cellDates: kind !== 'route' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
+    if (kind === 'route') return { routeIndex: SalesParser.parseRouteSheet(rows) };
+    if (kind === 'invoice') return SalesParser.parseSheet(rows, { fileName });
+    if (kind === 'returns') return SalesParser.parseReturnsSheet(rows);
+    if (kind === 'indirect') return SalesParser.parseIndirectDiscountSheet(rows);
+    if (kind === 'statement') return SalesParser.parseAccountStatementSheet(rows, fileName);
+    if (kind === 'customerInv') return SalesParser.parseCustomerInvoiceRawSheet(rows);
+  }
+
+  async function mtParseFile(kind, file, fileName) {
+    const buf = await file.arrayBuffer();
+    try {
+      return await MtWorkerPool.run(kind, buf, fileName);
+    } catch (workerErr) {
+      // فشل الـ Worker (مش فشل بيانات) - نرجع نحلل نفس الملف على الـ Main Thread كـ fallback
+      const buf2 = await file.arrayBuffer(); // لازم قراءة تانية لأن buf ممكن يكون تم "نقله" (transfer) للـ Worker
+      return mtParseWorkbookSync(kind, buf2, fileName);
+    }
   }
 
   // ملحوظة مهمة: رقم الفاتورة بيتصفر ويتكرر لكل فرع على حدة (مش رقم واحد لكل الشركة)،
@@ -3132,45 +3233,44 @@ table.datatable details summary:hover { text-decoration: underline; }
     statusLog.innerHTML = '';
     logStatus('جاري القراءة والتحليل...');
 
+    // ملحوظة معمارية: كل قراءة/تحليل ملف تحت بتنادي mtParseFile بدل XLSX.read المباشر - ده
+    // بيبعت الملف لـ Web Worker منفصل (تفاصيل فوق عند تعريف MtWorkerPool) عشان الـ Main Thread
+    // (اللي بيرسم الشاشة) يفضل فاضي ومستجيب وقت التحليل، وكمان ملفات القسم الواحد بقت بتتحلل
+    // بالتوازي مع بعض (Promise.all) بدل التتابع، فبتستفيد من أكتر من كور في المعالج.
+
     // route file first
     if (routeFile) {
       try {
-        const buf = await routeFile.arrayBuffer();
-        const wb = XLSX.read(buf, { type: 'array' });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
-        state.routeIndex = SalesParser.parseRouteSheet(rows);
+        const { routeIndex } = await mtParseFile('route', routeFile, routeFile.name);
+        state.routeIndex = routeIndex;
         logStatus('تم تحميل ملف خطوط السير (' + Object.keys(state.routeIndex.lookup).length + ' صف)', 'ok');
       } catch (e) {
-        logStatus('تعذر قراءة ملف خطوط السير: ' + e.message, 'err');
+        logStatus('تعذر قراءة ملف خطوط السير: ' + (e.message || e), 'err');
       }
     } else {
       logStatus('لم يتم رفع ملف خطوط السير - لن تظهر بيانات المناطق/خطوط السير', 'err');
     }
 
     let totalInv = 0, totalErr = 0;
-    let newInvoices = [];
-    for (const q of state.queue.filter(q => q.kind === 'invoice')) {
+    const invoiceQueue = state.queue.filter(q => q.kind === 'invoice');
+    const invoiceResults = await Promise.all(invoiceQueue.map(async (q) => {
       try {
-        const buf = await q.file.arrayBuffer();
-        const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
-        const { invoices: parsedInvoices, errors } = SalesParser.parseSheet(rows, { fileName: q.file.name });
+        const { invoices: parsedInvoices, errors } = await mtParseFile('invoice', q.file, q.file.name);
         // فواتير البضاعة المجانية/العروض الترويجية (ستاندات عرض، عروض 2×1...) بتتسجل بقيمة فاتورة
         // وبعدين خصم 100% يخليها صافي صفر - دي مش خصم تجاري حقيقي، فبنستبعدها تمامًا من كل الحسابات
         // بناءً على طلب المستخدم (بدل ما تتحسب غلط ضمن "خصم مباشر").
         const freeGoodsCount = parsedInvoices.filter(isFreeGoodsInvoice).length;
         const invoices = parsedInvoices.filter(inv => !isFreeGoodsInvoice(inv));
         invoices.forEach(inv => tagInvoice(inv, q.activity, q.file.name));
-        newInvoices = newInvoices.concat(invoices);
-        totalInv += invoices.length;
-        totalErr += errors.length;
         logStatus(`${q.file.name}: ${invoices.length} فاتورة${freeGoodsCount ? ' (' + freeGoodsCount + ' فاتورة بضاعة مجانية/عروض تم استبعادها)' : ''}${errors.length ? ' (' + errors.length + ' سطر لم يُفهم)' : ''}`, errors.length ? 'err' : 'ok');
+        return { invoices, errCount: errors.length };
       } catch (e) {
-        logStatus('خطأ في قراءة ' + q.file.name + ': ' + e.message, 'err');
+        logStatus('خطأ في قراءة ' + q.file.name + ': ' + (e.message || e), 'err');
+        return { invoices: [], errCount: 0 };
       }
-    }
+    }));
+    let newInvoices = [];
+    for (const r of invoiceResults) { newInvoices = newInvoices.concat(r.invoices); totalInv += r.invoices.length; totalErr += r.errCount; }
 
     const newItemRows = buildItemRowsFor(newInvoices);
     state.invoices = mergeByKey(state.invoices, newInvoices, invoiceKey);
@@ -3180,17 +3280,13 @@ table.datatable details summary:hover { text-decoration: underline; }
     let newReturns = [];
     if (returnsFile) {
       try {
-        const buf = await returnsFile.arrayBuffer();
-        const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
-        const { returns, errors } = SalesParser.parseReturnsSheet(rows);
+        const { returns, errors } = await mtParseFile('returns', returnsFile, returnsFile.name);
         returns.forEach(r => tagReturn(r, returnsFile.name));
         newReturns = returns;
         state.returns = mergeByKey(state.returns, newReturns, returnKey);
         logStatus(`${returnsFile.name}: ${returns.length} سطر مرتجع${errors.length ? ' (' + errors.length + ' سطر لم يُفهم)' : ''}`, errors.length ? 'err' : 'ok');
       } catch (e) {
-        logStatus('خطأ في قراءة ملف المرتجعات: ' + e.message, 'err');
+        logStatus('خطأ في قراءة ملف المرتجعات: ' + (e.message || e), 'err');
       }
     }
     // لو فيه دمج أصناف محفوظ من قبل، نطبّقه على أي أسطر أصناف/مرتجعات جديدة لسه واصلة في الرفعة دي
@@ -3198,60 +3294,53 @@ table.datatable details summary:hover { text-decoration: underline; }
 
     let newIndirectDiscounts = [];
     if (indirectFiles.length) {
-      for (const f of indirectFiles) {
+      const indResults = await Promise.all(indirectFiles.map(async (f) => {
         try {
-          const buf = await f.arrayBuffer();
-          const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-          const ws = wb.Sheets[wb.SheetNames[0]];
-          const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
-          const { discounts, errors } = SalesParser.parseIndirectDiscountSheet(rows);
+          const { discounts, errors } = await mtParseFile('indirect', f, f.name);
           discounts.forEach(d => tagIndirectDiscount(d, f.name));
-          newIndirectDiscounts = newIndirectDiscounts.concat(discounts);
           logStatus(`${f.name}: ${discounts.length} قيد خصم غير مباشر${errors.length ? ' (' + errors.length + ' - تعذر التعرف على شكل الملف)' : ''}`, errors.length ? 'err' : 'ok');
+          return discounts;
         } catch (e) {
-          logStatus('خطأ في قراءة ' + f.name + ': ' + e.message, 'err');
+          logStatus('خطأ في قراءة ' + f.name + ': ' + (e.message || e), 'err');
+          return [];
         }
-      }
+      }));
+      for (const arr of indResults) newIndirectDiscounts = newIndirectDiscounts.concat(arr);
       state.indirectDiscounts = mergeByKey(state.indirectDiscounts, newIndirectDiscounts, indirectDiscountKey);
     }
 
     let newChecks = [];
     let newLedger = [];
     if (statementFiles.length) {
-      for (const f of statementFiles) {
+      const stResults = await Promise.all(statementFiles.map(async (f) => {
         try {
-          const buf = await f.arrayBuffer();
-          const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-          const ws = wb.Sheets[wb.SheetNames[0]];
-          const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
-          const { checks, ledger } = SalesParser.parseAccountStatementSheet(rows, f.name);
-          newChecks = newChecks.concat(checks);
-          newLedger = newLedger.concat(ledger);
+          const { checks, ledger } = await mtParseFile('statement', f, f.name);
           logStatus(`${f.name}: ${checks.length} شيك محصل، ${ledger.length} حركة حساب عميل`, 'ok');
+          return { checks, ledger };
         } catch (e) {
-          logStatus('خطأ في قراءة ' + f.name + ': ' + e.message, 'err');
+          logStatus('خطأ في قراءة ' + f.name + ': ' + (e.message || e), 'err');
+          return { checks: [], ledger: [] };
         }
-      }
+      }));
+      for (const r of stResults) { newChecks = newChecks.concat(r.checks); newLedger = newLedger.concat(r.ledger); }
       state.collectedChecks = mergeByKey(state.collectedChecks, newChecks, checkKey);
       state.accountLedger = mergeByKey(state.accountLedger, newLedger, ledgerKey);
     }
 
     let newCustomerInvoicesRaw = [];
     if (customerInvFiles.length) {
-      for (const f of customerInvFiles) {
+      const ciResults = await Promise.all(customerInvFiles.map(async (f) => {
         try {
-          const buf = await f.arrayBuffer();
-          const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-          const ws = wb.Sheets[wb.SheetNames[0]];
-          const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
-          const { invoices: rawInvoices, errors } = SalesParser.parseCustomerInvoiceRawSheet(rows);
+          const { invoices: rawInvoices, errors } = await mtParseFile('customerInv', f, f.name);
           rawInvoices.forEach(r => { r.fileName = f.name; });
-          newCustomerInvoicesRaw = newCustomerInvoicesRaw.concat(rawInvoices);
           logStatus(`${f.name}: ${rawInvoices.length} فاتورة (جريد)${errors.length ? ' (تعذر التعرف على شكل الملف)' : ''}`, errors.length ? 'err' : 'ok');
+          return rawInvoices;
         } catch (e) {
-          logStatus('خطأ في قراءة ' + f.name + ': ' + e.message, 'err');
+          logStatus('خطأ في قراءة ' + f.name + ': ' + (e.message || e), 'err');
+          return [];
         }
-      }
+      }));
+      for (const arr of ciResults) newCustomerInvoicesRaw = newCustomerInvoicesRaw.concat(arr);
       state.customerInvoicesRaw = mergeByKey(state.customerInvoicesRaw, newCustomerInvoicesRaw, customerInvoiceRawKey);
     }
 
