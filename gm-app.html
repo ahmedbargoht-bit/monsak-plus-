@@ -479,9 +479,12 @@ tr:hover td{background:rgba(197,91,72,.04)}
         <div class="card">
           <div class="card-title">
             <i class="ti ti-users"></i> إدارة المنسقين
-            <button class="btn btn-blue btn-sm" onclick="openModal('modal-add-user');nuLoadRoutes()" style="margin-right:auto">
-              <i class="ti ti-plus"></i> إضافة منسق
-            </button>
+            <div style="margin-right:auto;display:flex;gap:8px">
+              <button class="btn btn-ghost btn-sm" onclick="loadCoordUsers().then(loadUsers)"><i class="ti ti-refresh"></i> تحديث</button>
+              <button class="btn btn-blue btn-sm" onclick="openModal('modal-add-user');nuLoadRoutes()">
+                <i class="ti ti-plus"></i> إضافة منسق
+              </button>
+            </div>
           </div>
           <div class="filter-bar">
             <select id="usr-group" onchange="loadUsers()">
@@ -2559,10 +2562,14 @@ tr:hover td{background:rgba(197,91,72,.04)}
       </select>
     </div>
     <div class="form-fld" id="nu-fixed-branch-wrap" style="display:none">
-      <label class="form-lbl">اسم الفرع (للمنسق الثابت)</label>
-      <select id="nu-fixed-branch" style="width:100%">
-        <option value="">— اختر الفرع —</option>
-      </select>
+      <label class="form-lbl">فروع المنسق الثابت — حدد فرع واحد أو أكتر</label>
+      <div style="font-size:10px;color:#8B6F47;margin-bottom:4px">فرع واحد محدد = هيتقفل تلقائياً عليه في تطبيق المنسق · أكتر من فرع = هيختار بينهم كل يوم — نفس منطق مودال التعديل</div>
+      <input type="text" id="nu-fixed-branch-search" placeholder="🔍 بحث عن فرع..." style="width:100%;margin-bottom:6px" oninput="nuFilterFixedBranches()"/>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <button type="button" class="btn btn-sm" style="background:#E8F5E9;color:#1A7A4A" onclick="nuSelectAllFixedBranches(true)"><i class="ti ti-checkbox"></i> تحديد الكل</button>
+        <button type="button" class="btn btn-sm" style="background:#FFEBEE;color:#B71C1C" onclick="nuSelectAllFixedBranches(false)"><i class="ti ti-square"></i> إلغاء التحديد كله</button>
+      </div>
+      <div id="nu-fixed-branch-list" style="max-height:220px;overflow-y:auto;border:1px solid #E8D9C0;border-radius:8px;padding:6px;background:#FFFDF8;margin-bottom:4px;font-size:12px"></div>
     </div>
     <div class="form-fld">
       <label class="form-lbl">يوم الإجازة الأسبوعية</label>
@@ -4077,7 +4084,7 @@ function exportLocationPDF(){
   <div class="header">
     <div class="header-left">
       <div class="header-title">📍 الموقع الحالي</div>
-      <div class="header-sub">الطحان جولدن دايتس</div>
+      <div class="header-sub">الطحان جولدن داتس</div>
     </div>
   </div>
   <div class="info-bar">
@@ -4089,7 +4096,7 @@ function exportLocationPDF(){
     <thead><tr><th>المنسق</th><th>المجموعة</th><th>خط السير</th><th>آخر فرع</th><th>لوكيشن حضور</th><th>لوكيشن انصراف</th><th>الحالة</th></tr></thead>
     <tbody>${tRows}</tbody>
   </table>
-  <div class="footer">تم إنشاء هذا التقرير من منظومة منسق بلس — الطحان جولدن دايتس</div>
+  <div class="footer">تم إنشاء هذا التقرير من منظومة منسق بلس — الطحان جولدن داتس</div>
   <${'script'}>window.onload=()=>window.print();</${'script'}>
   </body></html>`;
 
@@ -4496,7 +4503,7 @@ function exportAttendancePDF(){
   <div class="header">
     <div class="header-left">
       <div class="header-title">🕐 سجل الحضور والانصراف</div>
-      <div class="header-sub">الطحان جولدن دايتس — منظومة منسق بلس</div>
+      <div class="header-sub">الطحان جولدن داتس — منظومة منسق بلس</div>
     </div>
   </div>
   <div class="info-bar">
@@ -4728,13 +4735,66 @@ async function nuOnTypeChange(){
   if(nuIsFixedType()){
     if(wrapRoute)  wrapRoute.style.display='none';
     if(wrapBranch) wrapBranch.style.display='';
-    const grp = document.getElementById('nu-group')?.value||'giza';
-    const branches = await _fetchBranchesForGrp(grp);
-    _fillBranchSelect('nu-fixed-branch', branches, document.getElementById('nu-fixed-branch')?.value||'');
+    await nuLoadFixedBranches();
   } else {
     if(wrapRoute)  wrapRoute.style.display='';
     if(wrapBranch) wrapBranch.style.display='none';
   }
+}
+
+// ── فروع المنسق الثابت لمودال "إضافة منسق" — checkbox متعدد، نفس منطق مودال التعديل
+// (euLoadFixedBranches) بس هنا المنسق لسه مش موجود في القاعدة، فالاختيار بيتخزن محلياً بس
+// (_nuFixedSelectedSet) ولحد ما يتحفظ فعلياً في coord_route_assignments جوه addUser() بعد نجاح الإضافة ──
+let _nuFixedAllBranches = [];
+let _nuFixedSelectedSet = new Set();
+
+async function nuLoadFixedBranches(){
+  const list = document.getElementById('nu-fixed-branch-list');
+  const searchInp = document.getElementById('nu-fixed-branch-search');
+  if(!list) return;
+  if(searchInp) searchInp.value='';
+  _nuFixedSelectedSet = new Set(); // بنبدأ فاضي مع كل فتح/تغيير مجموعة — منسق جديد
+  list.innerHTML='<div style="color:#999;text-align:center;padding:8px">جاري التحميل...</div>';
+  const grp = document.getElementById('nu-group')?.value||'giza';
+  try{
+    const branches = await _fetchBranchesForGrp(grp);
+    _nuFixedAllBranches = [...new Set((branches||[]).map(b=>b.branch_name||b).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+    nuRenderFixedBranchList(_nuFixedAllBranches);
+  }catch(e){
+    list.innerHTML='<div style="color:#B71C1C;text-align:center;padding:8px">تعذر التحميل</div>';
+  }
+}
+
+function nuRenderFixedBranchList(branches){
+  const list = document.getElementById('nu-fixed-branch-list');
+  if(!list) return;
+  if(!branches.length){
+    list.innerHTML='<div style="color:#999;text-align:center;padding:8px">لا توجد فروع في هذه المجموعة</div>';
+    return;
+  }
+  list.innerHTML = branches.map(b=>`
+    <div style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-bottom:1px solid #F0E8D8">
+      <input type="checkbox" class="nu-fixed-branch-cb" data-branch="${b.replace(/"/g,'&quot;')}"
+        ${_nuFixedSelectedSet.has(b)?'checked':''} onchange="nuToggleFixedBranchSelect(this)"
+        style="cursor:pointer;width:16px;height:16px"/>
+      <span style="flex:1">${b}</span>
+    </div>`).join('');
+}
+
+function nuFilterFixedBranches(){
+  const q=(document.getElementById('nu-fixed-branch-search')?.value||'').toLowerCase();
+  const filtered = q ? _nuFixedAllBranches.filter(b=>b.toLowerCase().includes(q)) : _nuFixedAllBranches;
+  nuRenderFixedBranchList(filtered);
+}
+
+function nuToggleFixedBranchSelect(cb){
+  if(cb.checked) _nuFixedSelectedSet.add(cb.dataset.branch);
+  else _nuFixedSelectedSet.delete(cb.dataset.branch);
+}
+
+function nuSelectAllFixedBranches(checked){
+  const boxes = [...document.querySelectorAll('#nu-fixed-branch-list .nu-fixed-branch-cb')];
+  boxes.forEach(cb=>{ cb.checked=checked; nuToggleFixedBranchSelect(cb); });
 }
 
 function euIsFixedType(){
@@ -5134,9 +5194,12 @@ async function addUser(){
   const type=document.getElementById('nu-type').value;
   const dayOff=document.getElementById('nu-dayoff').value||'none';
   const isFixed=nuIsFixedType();
-  const fixedBranch=isFixed ? (document.getElementById('nu-fixed-branch')?.value||'').trim() : '';
+  // مودال الإضافة بقى بيدعم فروع متعددة (زي مودال التعديل) بدل فرع واحد بس — الاختيار محلي
+  // في _nuFixedSelectedSet لحد ما المنسق يتحفظ فعلياً هنا وبعدين نكتب كل فرع في coord_route_assignments
+  const selectedBranches = isFixed ? [..._nuFixedSelectedSet] : [];
   if(!name||!pass){alert('أدخل الاسم والباسورد');return;}
   try{
+    // fixed_branch القديم بيتسجل بأول فرع مختار (fallback فقط — المصدر الحقيقي بقى coord_route_assignments)
     const res = await fetch(`${SUPABASE_URL}/rest/v1/users?on_conflict=name`,{
       method:'POST',
       headers:{
@@ -5145,9 +5208,20 @@ async function addUser(){
         'Authorization':`Bearer ${SUPABASE_KEY}`,
         'Prefer':'resolution=merge-duplicates,return=minimal'
       },
-      body: JSON.stringify({name, pass_hash:pass, role:'rep', route, grp, groups:grp, user_type:type, level:'rep', status:'active', goal:1, day_off:dayOff, fixed_branch:fixedBranch||null})
+      body: JSON.stringify({name, pass_hash:pass, role:'rep', route, grp, groups:grp, user_type:type, level:'rep', status:'active', goal:1, day_off:dayOff, fixed_branch:selectedBranches[0]||null})
     });
     if(res.ok){
+      // بعد نجاح إضافة المنسق، سجّل كل فرع مختار في coord_route_assignments — المصدر الوحيد
+      // لفرع المنسق الثابت اللي باقي النظام كله بيقرا منه (نفس منطق euToggleFixedBranchAssign)
+      if(isFixed && selectedBranches.length){
+        const H2={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+        await Promise.all(selectedBranches.map(branchName=>
+          fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments`,{
+            method:'POST', headers:H2,
+            body: JSON.stringify({grp, route:'', branch_name:branchName, rep_name:name, coord_type:type, shift:'كامل'})
+          }).catch(()=>{})
+        ));
+      }
       await loadCoordUsers();
       showOk('nu-ok','✓ تم إضافة '+name+' بنجاح');
     } else {
@@ -5160,7 +5234,8 @@ async function addUser(){
   document.getElementById('nu-name').value='';
   document.getElementById('nu-pass').value='';
   document.getElementById('nu-route').value='';
-  if(document.getElementById('nu-fixed-branch')) document.getElementById('nu-fixed-branch').value='';
+  _nuFixedSelectedSet = new Set();
+  const nuList=document.getElementById('nu-fixed-branch-list'); if(nuList) nuList.innerHTML='';
   closeModal('modal-add-user');
   loadUsers();
 }
@@ -6309,7 +6384,7 @@ async function teamPlansExportExcel(){
     const numCols = COLS.length;
 
     const aoa = [
-      ['الطحان جولدن دايتس — Al Tahhan Golden Dates', ...Array(numCols-1).fill('')],
+      ['الطحان جولدن داتس — Al Tahhan Golden Dates', ...Array(numCols-1).fill('')],
       [`خطة العمل الأسبوعية — ${plan.supervisor_name}`, ...Array(numCols-1).fill('')],
       [`الفترة: ${plan.week_start} ← ${plan.week_end}  |  إجمالي: ${total}  |  تم: ${done}  |  إنجاز: ${pct}%`, ...Array(numCols-1).fill('')],
       [`المسمى الوظيفي: ${_supInfoMap[plan.supervisor_name]?.roleLabel||'مشرف تنسيق'}  |  المجموعة: ${_supInfoMap[plan.supervisor_name]?.groupLabel||'—'}  |  خطوط السير: ${_supInfoMap[plan.supervisor_name]?.routesCount||'—'}  |  المنسقون: ${_supInfoMap[plan.supervisor_name]?.repsCount||'—'}  |  الفروع: ${_supInfoMap[plan.supervisor_name]?.branchesCount||'—'}`, ...Array(numCols-1).fill('')],
@@ -6454,7 +6529,7 @@ async function teamPlansExportPDF(){
     const stLabel = {draft:'مسودة',submitted:'مرفوعة للاعتماد',approved:'معتمدة',gm_approved:'معتمدة GM',rejected:'مرفوضة'}[plan.status]||plan.status;
 
     html += `<div class="plan-wrap ${pi>0?'page-break':''}">
-      <div class="hdr-co">الطحان جولدن دايتس — Al Tahhan Golden Dates</div>
+      <div class="hdr-co">الطحان جولدن داتس — Al Tahhan Golden Dates</div>
       <div class="hdr-title">خطة العمل الأسبوعية — ${plan.supervisor_name}</div>
       <div class="hdr-info">الفترة: ${plan.week_start} ← ${plan.week_end} &nbsp;|&nbsp; الحالة: ${stLabel}</div>
       <div style="background:#FFF8E1;border:1px solid #FFD54F;padding:6px 10px;font-size:10px;color:#4B3C1A;display:flex;gap:16px;flex-wrap:wrap;justify-content:center">
@@ -13768,7 +13843,7 @@ function splExportPriceListPDF(){
           <span style="background:#C55B4822;color:#C55B48;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:700">${data.length} صنف</span>
         </div>
       </div>
-      <div style="font-size:15px;font-weight:700;color:#C55B48;text-align:left">الطحان جولدن دايتس<br><span style="font-size:11px;font-weight:400;color:#888">Al Tahhan Golden Dates</span></div>
+      <div style="font-size:15px;font-weight:700;color:#C55B48;text-align:left">الطحان جولدن داتس<br><span style="font-size:11px;font-weight:400;color:#888">Al Tahhan Golden Dates</span></div>
     </div>
     <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:24px">
       <thead><tr style="background:#C55B48;color:#fff">
@@ -14456,29 +14531,9 @@ function openEditRep(i){
   openModal('modal-edit-rep');
 }
 
-async function addRep(){
-  const name=document.getElementById('nr-name').value.trim();
-  const pass=document.getElementById('nr-pass').value.trim();
-  const route=document.getElementById('nr-route').value.trim();
-  const grp=document.getElementById('nr-group').value;
-  const type=document.getElementById('nr-type').value;
-  const msg=document.getElementById('nr-msg');
-  if(!name||!pass){showFormMsg(msg,'❌ الاسم والباسورد مطلوبان','#B71C1C');return;}
-
-  showFormMsg(msg,'⏳ جاري الإضافة...','#F77F00');
-  const data={name,pass_hash:pass,role:'rep',route,grp,groups:grp,user_type:type,level:'rep',status:'active',goal:1};
-  const ok=await sbInsert('users',data);
-  if(ok){
-    showToast('✅ تم إضافة '+name);
-    closeModal('modal-add-rep');
-    document.getElementById('nr-name').value='';
-    document.getElementById('nr-pass').value='';
-    document.getElementById('nr-route').value='';
-    await loadReps();
-  } else {
-    showFormMsg(msg,'❌ خطأ في الإضافة — تحقق من الاتصال','#B71C1C');
-  }
-}
+// ملحوظة: كانت هنا دالة addRep() قديمة (nr-name/nr-pass/...) بتشير لحقول مش موجودة في أي
+// مودال حالي، ومش متصلة بأي زرار ظاهر في الواجهة — كود ميت من نسخة قديمة للملف، اتمسحت في
+// التنظيف. إضافة المنسقين الفعلية بتتم عن طريق addUser() + modal-add-user.
 
 async function saveRep(){
   const id=document.getElementById('er-id').value;
