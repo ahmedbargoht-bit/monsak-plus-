@@ -3710,7 +3710,11 @@ h2,h3{color:#2C1F0A}
         <div id="panel-sector-strength" class="panel">
           <div class="page-header">
             <div><h2>قوة القطاع</h2><p>الهيكل التنظيمي الفعلي لكل منطقة — عرض فقط، بالأسماء الحقيقية المسجلة والنشطة فقط، بدون حسابات "بيع اداري" الوهمية</p></div>
-            <button class="btn btn-ghost btn-sm" onclick="ssLoad(true)"><i class="ti ti-refresh"></i> تحديث</button>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-ghost btn-sm" onclick="ssLoad(true)"><i class="ti ti-refresh"></i> تحديث</button>
+              <button class="btn btn-ghost btn-sm" onclick="ssExportExcel()"><i class="ti ti-file-spreadsheet" style="color:#1A7A4A"></i> تصدير Excel</button>
+              <button class="btn btn-ghost btn-sm" onclick="ssExportPDF()"><i class="ti ti-file-type-pdf" style="color:#731E2E"></i> تصدير PDF</button>
+            </div>
           </div>
 
           <div class="stats-grid" id="ss-stats" style="margin-bottom:16px"></div>
@@ -22999,12 +23003,12 @@ function ssRender(){
   }
 
   body.innerHTML = `<style>
-    .ss-chip{display:inline-flex;align-items:center;gap:4px;font-size:12px;background:#fff;border:1px solid var(--border);border-radius:20px;padding:4px 10px;margin:3px}
-    .ss-chip-sub{color:var(--text2);font-size:11px}
-    .ss-chip-vacant{background:#FFF3E0;border-color:#FFCC80;color:#B36A00;font-weight:700}
+    .ss-chip{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px;background:#fff;border:1px solid var(--border);border-radius:8px;padding:8px 12px}
+    .ss-chip-sub{color:var(--text2);font-size:12px;white-space:nowrap}
+    .ss-chip-vacant{background:#FFF3E0;border-color:#FFCC80;color:#B36A00;font-weight:700;justify-content:center}
     .ss-sub-block{margin-top:10px;padding:10px 12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)}
     .ss-sub-title{font-weight:700;font-size:13px;margin-bottom:6px}
-    .ss-chip-row{display:flex;flex-wrap:wrap}
+    .ss-chip-row{display:flex;flex-direction:column;gap:6px}
   </style>` + cardsHtml;
 }
 
@@ -23027,6 +23031,221 @@ function ssManagerCardHtml(managerName, groupsLabel, subCount, subLabel, leafCou
     </div>
     <div class="ss-region-body" style="display:none;padding:0 16px 14px 16px">${innerHtml}</div>
   </div>`;
+}
+
+// ── تجميع صفوف مسطّحة (مدير/مشرف/فرد/خط سير) لاستخدامها في تصدير PDF وExcel — بنفس منطق ssRender بالضبط ──
+function ssBuildFlatRows(){
+  if(!SS_DATA) return [];
+  const {salesReps, coordinators, staff, grpSupMap, coordBranchMap} = SS_DATA;
+  const isSales = SS_SIDE === 'sales';
+  const _dsn = ssNorm;
+
+  const managers = staff.filter(s=> s.level==='dm' && s.app_type===(isSales?'sales':'coord'));
+  const allSups  = staff.filter(s=> s.level==='sup' && s.app_type===(isSales?'sales':'coord'));
+
+  const coveredGroups = new Set();
+  managers.forEach(m=>(m.groups||[]).forEach(g=>coveredGroups.add(g)));
+  const allRelevantGroups = new Set(coveredGroups);
+  allSups.forEach(s=>(s.groups||[]).forEach(g=>allRelevantGroups.add(g)));
+  if(isSales){
+    salesReps.forEach(r=>{
+      if(Array.isArray(r.grps)) r.grps.forEach(g=>g&&allRelevantGroups.add(g));
+      if(r.grp) allRelevantGroups.add(r.grp);
+    });
+  }else{
+    Object.keys(grpSupMap).forEach(g=>allRelevantGroups.add(g));
+    coordinators.forEach(c=>{ if(c.group) allRelevantGroups.add(c.group); });
+  }
+  const orphanGroups = Array.from(allRelevantGroups).filter(g=>!coveredGroups.has(g));
+
+  const rows = [];
+  function processManager(managerName, groups){
+    const groupsLabel = ssGroupsLabel(groups);
+    const mgrLabel = managerName || 'تحت التعيين';
+
+    if(isSales){
+      let sups = [];
+      if(managerName){
+        sups = allSups.filter(s=>_dsn(s.reports_to)===_dsn(managerName));
+        if(!sups.length) sups = allSups.filter(s=>!s.reports_to && (s.groups||[]).some(g=>groups.includes(g)));
+      }else{
+        sups = allSups.filter(s=>(s.groups||[]).some(g=>groups.includes(g)));
+      }
+      const seen = new Set(); sups = sups.filter(s=>{ if(seen.has(s.name)) return false; seen.add(s.name); return true; });
+
+      if(!sups.length){
+        rows.push({manager:mgrLabel, managerGroups:groupsLabel, supervisor:'تحت التعيين', supGroups:'', person:'', route:''});
+      }else{
+        sups.forEach(sup=>{
+          const reps = salesReps.filter(r=>ssSupMatch(r.supervisors, sup.name));
+          const supGroupsLabel = ssGroupsLabel(sup.groups);
+          if(!reps.length){
+            rows.push({manager:mgrLabel, managerGroups:groupsLabel, supervisor:sup.name, supGroups:supGroupsLabel, person:'تحت التعيين', route:''});
+          }else{
+            reps.forEach(r=>{
+              const routes = Array.isArray(r.routes) && r.routes.length ? r.routes : (r.route ? [r.route] : []);
+              rows.push({manager:mgrLabel, managerGroups:groupsLabel, supervisor:sup.name, supGroups:supGroupsLabel, person:r.name, route: routes.length?routes.join('، '):'تحت التعيين'});
+            });
+          }
+        });
+      }
+    }else{
+      const bySup = {};
+      groups.forEach(g=>{ const sName = grpSupMap[g] || ''; (bySup[sName] ||= []).push(g); });
+      const entries = Object.entries(bySup);
+      if(!entries.length){
+        rows.push({manager:mgrLabel, managerGroups:groupsLabel, supervisor:'تحت التعيين', supGroups:'', person:'', route:''});
+      }else{
+        entries.forEach(([sName, gGroups])=>{
+          const coords = coordinators.filter(c=>gGroups.includes(c.group));
+          const gLabel = ssGroupsLabel(gGroups);
+          if(!coords.length){
+            rows.push({manager:mgrLabel, managerGroups:groupsLabel, supervisor:sName||'تحت التعيين', supGroups:gLabel, person:'تحت التعيين', route:''});
+          }else{
+            coords.forEach(c=>{
+              const route = ssCoordRouteLabel(c, coordBranchMap);
+              rows.push({manager:mgrLabel, managerGroups:groupsLabel, supervisor:sName||'تحت التعيين', supGroups:gLabel, person:c.name, route: route||'تحت التعيين'});
+            });
+          }
+        });
+      }
+    }
+  }
+
+  managers.forEach(m=>processManager(m.name, m.groups||[]));
+  if(orphanGroups.length) processManager(null, orphanGroups);
+  return rows;
+}
+
+// ── تصدير PDF مبرند بهوية الطحان (شعار + ألوان) لتاب قوة القطاع — بنفس نمط sptGenerateTargetDetailPDF ──
+function ssBuildExportDocHTML(){
+  const rows = ssBuildFlatRows();
+  const isSales = SS_SIDE === 'sales';
+  const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
+  const tRows = rows.map((r,i)=>`<tr style="background:${i%2?'#FCF9F4':'#fff'}">
+      <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${i+1}</td>
+      <td style="padding:6px 8px;border:1px solid #E0D8CC;font-weight:700">${ssEsc(r.manager)}</td>
+      <td style="padding:6px 8px;border:1px solid #E0D8CC">${ssEsc(r.supervisor)}</td>
+      <td style="padding:6px 8px;border:1px solid #E0D8CC">${ssEsc(r.person)||'—'}</td>
+      <td style="padding:6px 8px;border:1px solid #E0D8CC;color:#1A7A4A;font-weight:700">${ssEsc(r.route)||'—'}</td>
+    </tr>`).join('');
+  return `
+    <div style="background:#2C1F0A;color:#EDE5D8;text-align:center;padding:14px;border-radius:10px 10px 0 0;display:flex;align-items:center;justify-content:space-between;gap:12px">
+      <img src="${SPT_LOGO_BASE64}" alt="Al Tahhan Logo" style="height:54px;border-radius:6px;background:#fff;padding:4px"/>
+      <div>
+        <div style="font-size:19px;font-weight:900">الطحان جولدن داتس</div>
+        <div style="font-size:10px;color:#C8A96E;margin-top:2px">Al Tahhan Golden Dates</div>
+      </div>
+      <div style="width:54px"></div>
+    </div>
+    <div style="background:#C8A96E;color:#2C1F0A;text-align:center;padding:9px;font-size:14px;font-weight:700">قوة القطاع — ${isSales?'قسم البيع':'قسم التنسيق'}</div>
+    <div style="background:#F5F0E8;padding:12px 18px;border-radius:0 0 8px 8px;margin-bottom:18px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px">
+      <div>تاريخ الإصدار: <b style="color:#731E2E">${now}</b></div>
+      <div>إجمالي الصفوف: <b style="color:#731E2E">${rows.length}</b></div>
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:11px">
+      <thead><tr style="background:#731E2E;color:#fff">
+        <th style="padding:7px;border:1px solid #5a1622">#</th>
+        <th style="padding:7px;border:1px solid #5a1622">المدير</th>
+        <th style="padding:7px;border:1px solid #5a1622">المشرف</th>
+        <th style="padding:7px;border:1px solid #5a1622">${isSales?'المندوب':'المنسق'}</th>
+        <th style="padding:7px;border:1px solid #5a1622">${isSales?'خط السير':'خط السير / الفرع'}</th>
+      </tr></thead>
+      <tbody>${tRows || `<tr><td colspan="5" style="padding:14px;text-align:center;color:#aaa">مفيش بيانات</td></tr>`}</tbody>
+    </table>
+    <div style="text-align:center;color:#aaa;font-size:9px;margin-top:26px">Al Tahhan Golden Dates © ${new Date().getFullYear()} — تم إنشاء التقرير من منظومة إدارة المبيعات والتنسيق</div>`;
+}
+
+async function ssGenerateExportPDF(){
+  if(typeof html2canvas==='undefined' || !window.jspdf){ showToast('مكتبة PDF لسه بتتحمّل، حاول تاني بعد لحظة','err'); return null; }
+  const holder = document.createElement('div');
+  holder.style.cssText = 'position:fixed;top:0;left:-99999px;width:780px;background:#fff;z-index:-1;direction:rtl;font-family:Cairo,Arial,sans-serif';
+  holder.innerHTML = ssBuildExportDocHTML();
+  document.body.appendChild(holder);
+  try{
+    if(document.fonts && document.fonts.ready) await document.fonts.ready;
+    const canvas = await html2canvas(holder, {scale:2, useCORS:true, backgroundColor:'#ffffff'});
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({unit:'mm', format:'a4'});
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const imgW = pageW;
+    const imgH = canvas.height * imgW / canvas.width;
+    const imgData = canvas.toDataURL('image/jpeg', 0.95);
+    let heightLeft = imgH, position = 0;
+    pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH);
+    heightLeft -= pageH;
+    while(heightLeft > 0){
+      position = heightLeft - imgH;
+      pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH);
+      heightLeft -= pageH;
+    }
+    return pdf;
+  } finally {
+    holder.remove();
+  }
+}
+
+async function ssExportPDF(){
+  if(!SS_DATA){ alert('البيانات لسه بتتحمل، حاول تاني بعد لحظة'); return; }
+  const pdf = await ssGenerateExportPDF();
+  if(!pdf) return;
+  pdf.save(`قوة_القطاع_${SS_SIDE==='sales'?'البيع':'التنسيق'}_${localISO()}.pdf`);
+}
+
+// ── تصدير Excel ملوّن بهوية الطحان لتاب قوة القطاع — بنفس نمط brExportExcel ──
+function ssExportExcel(){
+  if(!SS_DATA){ alert('البيانات لسه بتتحمل، حاول تاني بعد لحظة'); return; }
+  const rows = ssBuildFlatRows();
+  if(!rows.length){ alert('لا توجد بيانات للتصدير'); return; }
+  if(typeof XLSX==='undefined'){ showToast('جاري تحميل مكتبة Excel...'); return; }
+  const isSales = SS_SIDE === 'sales';
+
+  const C={dark:'2C1F0A',caramel:'4B3C1A',gold:'C8A96E',cream:'EDE5D8',light:'F5F0E8',
+    maroon:'731E2E',green:'1A7A4A',white:'FFFFFF',line:'E0D8CC'};
+  const fill=c=>({patternType:'solid',fgColor:{rgb:c}});
+  const font=(bold,sz,color,italic)=>({bold:!!bold,sz:sz||11,color:{rgb:color||C.dark},italic:!!italic,name:'Cairo'});
+  const aln=(h,v,wrap)=>({horizontal:h||'right',vertical:v||'center',wrapText:!!wrap,readingOrder:2});
+  const brd=(s,c)=>{const b={style:s||'thin',color:{rgb:c||C.line}};return{left:b,right:b,top:b,bottom:b};};
+  const now = new Date().toLocaleDateString('en-GB');
+
+  const COLS = ['#','المدير','المشرف', isSales?'المندوب':'المنسق', isSales?'خط السير':'خط السير / الفرع'];
+  const nc = COLS.length;
+  const aoa=[
+    ['الطحان جولدن داتس — Al Tahhan Golden Dates',...Array(nc-1).fill('')],
+    [`قوة القطاع — ${isSales?'قسم البيع':'قسم التنسيق'}`,...Array(nc-1).fill('')],
+    [`تاريخ التصدير: ${now}  |  إجمالي الصفوف: ${rows.length}`,...Array(nc-1).fill('')],
+    Array(nc).fill(''),
+    COLS,
+    ...rows.map((r,i)=>[i+1, r.manager, r.supervisor, r.person||'—', r.route||'—'])
+  ];
+
+  const wb=XLSX.utils.book_new();
+  const ws=XLSX.utils.aoa_to_sheet(aoa,{cellStyles:true});
+  const enc=(r,c)=>XLSX.utils.encode_cell({r,c});
+  const sty=(r,c,s)=>{if(!ws[enc(r,c)])ws[enc(r,c)]={t:'z',v:''};ws[enc(r,c)].s=s;};
+
+  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:nc-1}},{s:{r:1,c:0},e:{r:1,c:nc-1}},{s:{r:2,c:0},e:{r:2,c:nc-1}},{s:{r:3,c:0},e:{r:3,c:nc-1}}];
+  sty(0,0,{font:font(1,15,C.cream),fill:fill(C.maroon),alignment:aln('center'),border:brd('medium',C.maroon)});
+  sty(1,0,{font:font(1,13,C.dark),fill:fill(C.gold),alignment:aln('center'),border:brd('medium',C.caramel)});
+  sty(2,0,{font:font(0,10,C.caramel,true),fill:fill(C.light),alignment:aln('center'),border:brd('thin',C.line)});
+  for(let c=0;c<nc;c++) sty(3,c,{fill:fill(C.dark)});
+  for(let c=0;c<nc;c++) sty(4,c,{font:font(1,11,C.cream),fill:fill(C.caramel),alignment:aln('center'),border:brd('medium',C.dark)});
+
+  const dataStart=5;
+  for(let ri=dataStart;ri<aoa.length;ri++){
+    const rowBg=(ri-dataStart)%2?'FAF7F0':C.white;
+    for(let c=0;c<nc;c++){
+      sty(ri,c,{font:font(0,10,C.dark),fill:fill(rowBg),alignment:aln(c===0?'center':'right',undefined,true),border:brd('thin',C.line)});
+    }
+  }
+
+  ws['!cols']=[{wch:6},{wch:24},{wch:24},{wch:26},{wch:30}];
+  ws['!rows']=[{hpt:22},{hpt:18},{hpt:15},{hpt:6},{hpt:20}];
+
+  XLSX.utils.book_append_sheet(wb,ws, isSales?'قسم البيع':'قسم التنسيق');
+  XLSX.writeFile(wb,`قوة_القطاع_${isSales?'البيع':'التنسيق'}_${localISO()}.xlsx`);
 }
 
 function renderSupervisors(){
