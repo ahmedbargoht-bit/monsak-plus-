@@ -1744,6 +1744,11 @@ table.datatable details summary:hover { text-decoration: underline; }
     let workers = null; // [{ worker, busy }]
     const queue = [];
     let seq = 0;
+    // لو الـ Worker فشل (مثلاً حظر شبكي لـ importScripts CDN جوه بيئة معزولة) أو ماردش خالص خلال
+    // مهلة معقولة، بنقفل الـ Pool كله فورًا بدل ما نستنى نفس الفشل يتكرر لكل ملف على حدة، وده اللي
+    // كان بيسبب توقف الشاشة على "جاري القراءة والتحليل..." من غير أي رسالة خطأ - الوعد كان فاضل
+    // معلّق للأبد لأن مفيش حد بيسمع لحدث onerror ولا فيه مهلة زمنية.
+    let disabled = false;
 
     function ensureWorkers() {
       if (workers) return workers;
@@ -1775,26 +1780,54 @@ table.datatable details summary:hover { text-decoration: underline; }
       return workers;
     }
 
+    function rejectAllQueued(err) {
+      while (queue.length) queue.shift().reject(err);
+    }
+
     function pump() {
+      if (disabled) { rejectAllQueued(new Error('Worker pool disabled')); return; }
       if (!queue.length) return;
-      const pool = ensureWorkers();
+      let pool;
+      try { pool = ensureWorkers(); } catch (e) {
+        disabled = true;
+        rejectAllQueued(e);
+        return;
+      }
       const free = pool.find(w => !w.busy);
       if (!free) return;
       const task = queue.shift();
       free.busy = true;
       const id = ++seq;
-      const onMsg = (e) => {
-        if (e.data.id !== id) return;
+      let settled = false;
+      const finish = (fn, arg) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         free.worker.removeEventListener('message', onMsg);
+        free.worker.removeEventListener('error', onErr);
         free.busy = false;
-        if (e.data.ok) task.resolve(e.data.result); else task.reject(new Error(e.data.error));
+        fn(arg);
         pump();
       };
+      const onMsg = (e) => {
+        if (e.data.id !== id) return;
+        if (e.data.ok) finish(task.resolve, e.data.result); else finish(task.reject, new Error(e.data.error));
+      };
+      // فشل تهيئة الـ Worker نفسه (مش فشل تحليل بيانات) - غالبًا سبب عام (شبكة/CSP) هيتكرر مع أي Worker
+      // تاني بنفس الطريقة، فبنقفل الـ Pool كله بدل ما نجرب ونستنى نفس الفشل من جديد.
+      const onErr = (e) => {
+        disabled = true;
+        finish(task.reject, new Error((e && e.message) || 'فشل تهيئة الـ Worker'));
+      };
+      // مهلة أمان: لو الـ Worker ماردش خالص (حتى من غير حدث error صريح) خلال 20 ثانية، نعتبره فاشل
+      const timer = setTimeout(() => { onErr({ message: 'انتهت مهلة انتظار الـ Worker' }); }, 20000);
       free.worker.addEventListener('message', onMsg);
+      free.worker.addEventListener('error', onErr);
       free.worker.postMessage({ id, kind: task.kind, buf: task.buf, fileName: task.fileName }, [task.buf]);
     }
 
     function run(kind, buf, fileName) {
+      if (disabled) return Promise.reject(new Error('Worker pool disabled'));
       return new Promise((resolve, reject) => {
         queue.push({ kind, buf, fileName, resolve, reject });
         pump();
@@ -1819,12 +1852,17 @@ table.datatable details summary:hover { text-decoration: underline; }
     if (kind === 'customerInv') return SalesParser.parseCustomerInvoiceRawSheet(rows);
   }
 
+  let mtWorkerFallbackWarned = false;
   async function mtParseFile(kind, file, fileName) {
     const buf = await file.arrayBuffer();
     try {
       return await MtWorkerPool.run(kind, buf, fileName);
     } catch (workerErr) {
       // فشل الـ Worker (مش فشل بيانات) - نرجع نحلل نفس الملف على الـ Main Thread كـ fallback
+      if (!mtWorkerFallbackWarned) {
+        mtWorkerFallbackWarned = true;
+        try { logStatus('تعذّر استخدام المعالجة المتوازية (Worker) - جاري المتابعة بالطريقة العادية (أبطأ شوية بس هتخلص)', 'err'); } catch (e) {}
+      }
       const buf2 = await file.arrayBuffer(); // لازم قراءة تانية لأن buf ممكن يكون تم "نقله" (transfer) للـ Worker
       return mtParseWorkbookSync(kind, buf2, fileName);
     }
