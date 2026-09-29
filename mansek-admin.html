@@ -22870,53 +22870,63 @@ function ssCoordRouteLabel(c, coordBranchMap){
   return c.route || null;
 }
 
+function ssGroupLabel(g){ return (GROUPS[g]&&GROUPS[g].label) || g; }
+function ssGroupsLabel(groups){ return (groups&&groups.length) ? groups.map(ssGroupLabel).join('، ') : ''; }
+
 function ssRender(){
   const body = document.getElementById('ss-body');
   const statsEl = document.getElementById('ss-stats');
   if(!body || !SS_DATA) return;
   const {salesReps, coordinators, staff, grpSupMap, coordBranchMap} = SS_DATA;
   const isSales = SS_SIDE === 'sales';
-
-  // ── تحديد كل المناطق ذات الصلة بهذا القسم ──
-  const grpSet = new Set();
-  if(isSales){
-    staff.filter(s=>s.app_type==='sales').forEach(s=>(s.groups||[]).forEach(g=>grpSet.add(g)));
-    salesReps.forEach(r=>{
-      if(Array.isArray(r.grps)) r.grps.forEach(g=>g&&grpSet.add(g));
-      if(r.grp) grpSet.add(r.grp);
-    });
-  }else{
-    staff.filter(s=>s.app_type==='coord').forEach(s=>(s.groups||[]).forEach(g=>grpSet.add(g)));
-    Object.keys(grpSupMap).forEach(g=>grpSet.add(g));
-    coordinators.forEach(c=>{ if(c.group) grpSet.add(c.group); });
-  }
-  const orderedKeys = Object.keys(GROUPS).filter(g=>grpSet.has(g));
-  Array.from(grpSet).filter(g=>!orderedKeys.includes(g)).sort().forEach(g=>orderedKeys.push(g));
+  const _dsn = ssNorm;
 
   let totalManagers=0, totalSups=0, totalLeaves=0, totalVacant=0;
   let cardsHtml = '';
 
-  orderedKeys.forEach(grp=>{
-    const meta  = GROUPS[grp] || {label: grp, color:'#888'};
-    let subBlocksHtml = '';
-    let subCount = 0, leafCount = 0;
+  const managers = staff.filter(s=> s.level==='dm' && s.app_type===(isSales?'sales':'coord'));
+  const allSups  = staff.filter(s=> s.level==='sup' && s.app_type===(isSales?'sales':'coord'));
+
+  // كل المناطق اللي فعليًا تحت مدير حقيقي
+  const coveredGroups = new Set();
+  managers.forEach(m=>(m.groups||[]).forEach(g=>coveredGroups.add(g)));
+
+  // كل المناطق ذات الصلة (بيها مشرفين/مناديب/منسقين) — عشان نمسك أي منطقة بلا مدير أصلاً
+  const allRelevantGroups = new Set(coveredGroups);
+  allSups.forEach(s=>(s.groups||[]).forEach(g=>allRelevantGroups.add(g)));
+  if(isSales){
+    salesReps.forEach(r=>{
+      if(Array.isArray(r.grps)) r.grps.forEach(g=>g&&allRelevantGroups.add(g));
+      if(r.grp) allRelevantGroups.add(r.grp);
+    });
+  }else{
+    Object.keys(grpSupMap).forEach(g=>allRelevantGroups.add(g));
+    coordinators.forEach(c=>{ if(c.group) allRelevantGroups.add(c.group); });
+  }
+  const orphanGroups = Array.from(allRelevantGroups).filter(g=>!coveredGroups.has(g));
+
+  function renderManagerCard(managerName, groups){
+    if(managerName) totalManagers++; else totalVacant++;
+    const groupsLabel = ssGroupsLabel(groups);
+    let subCount=0, leafCount=0, bodyHtml='';
 
     if(isSales){
-      const manager = staff.find(s=> s.level==='dm' && s.app_type==='sales' && s.role==='sales_manager' && (s.groups||[]).includes(grp));
-      const managerName = manager ? manager.name : null;
-      if(managerName) totalManagers++; else totalVacant++;
+      let sups = [];
+      if(managerName){
+        sups = allSups.filter(s=>_dsn(s.reports_to)===_dsn(managerName));
+        if(!sups.length) sups = allSups.filter(s=>!s.reports_to && (s.groups||[]).some(g=>groups.includes(g)));
+      }else{
+        sups = allSups.filter(s=>(s.groups||[]).some(g=>groups.includes(g)));
+      }
+      const seen = new Set(); sups = sups.filter(s=>{ if(seen.has(s.name)) return false; seen.add(s.name); return true; });
 
-      const sups = staff.filter(s=> s.level==='sup' && s.app_type==='sales' && (s.groups||[]).includes(grp));
       if(!sups.length){
         totalVacant++;
-        subBlocksHtml = `<span class="ss-chip ss-chip-vacant">تحت التعيين</span>`;
+        bodyHtml = `<span class="ss-chip ss-chip-vacant">تحت التعيين</span>`;
       }else{
         sups.forEach(sup=>{
           subCount++; totalSups++;
-          const reps = salesReps.filter(r=>{
-            const inGrp = (Array.isArray(r.grps) && r.grps.includes(grp)) || r.grp===grp;
-            return inGrp && ssSupMatch(r.supervisors, sup.name);
-          });
+          const reps = salesReps.filter(r=>ssSupMatch(r.supervisors, sup.name));
           let repsHtml;
           if(!reps.length){
             totalVacant++;
@@ -22929,43 +22939,51 @@ function ssRender(){
               return `<span class="ss-chip">${ssEsc(r.name)} <span class="ss-chip-sub">(${routeStr})</span></span>`;
             }).join('');
           }
-          subBlocksHtml += `<div class="ss-sub-block">
-            <div class="ss-sub-title"><i class="ti ti-user-shield" style="color:#1A7A4A"></i> ${ssEsc(sup.name)}</div>
+          const supGroupsLabel = ssGroupsLabel(sup.groups);
+          bodyHtml += `<div class="ss-sub-block">
+            <div class="ss-sub-title"><i class="ti ti-user-shield" style="color:#1A7A4A"></i> ${ssEsc(sup.name)}${supGroupsLabel?` <span class="ss-chip-sub">— يغطي: ${ssEsc(supGroupsLabel)}</span>`:''}</div>
             <div class="ss-chip-row">${repsHtml}</div>
           </div>`;
         });
       }
-      cardsHtml += ssRegionCardHtml(meta, managerName, subCount, 'مشرف', leafCount, 'مندوب', subBlocksHtml, '#1A7A4A');
-
     }else{
-      const manager = staff.find(s=> s.level==='dm' && s.app_type==='coord' && (s.groups||[]).includes(grp));
-      const managerName = manager ? manager.name : null;
-      if(managerName) totalManagers++; else totalVacant++;
-
-      const supName = grpSupMap[grp] || '';
-      if(supName) totalSups++; else totalVacant++;
-      subCount = supName ? 1 : 0;
-
-      const coordsInGrp = coordinators.filter(c=>c.group===grp);
-      let leavesHtml;
-      if(!coordsInGrp.length){
+      const bySup = {};
+      groups.forEach(g=>{ const sName = grpSupMap[g] || ''; (bySup[sName] ||= []).push(g); });
+      const entries = Object.entries(bySup);
+      if(!entries.length){
         totalVacant++;
-        leavesHtml = `<span class="ss-chip ss-chip-vacant">تحت التعيين</span>`;
+        bodyHtml = `<span class="ss-chip ss-chip-vacant">تحت التعيين</span>`;
       }else{
-        leavesHtml = coordsInGrp.map(c=>{
-          leafCount++; totalLeaves++;
-          const route = ssCoordRouteLabel(c, coordBranchMap);
-          const routeStr = route ? ssEsc(route) : 'تحت التعيين';
-          return `<span class="ss-chip">${ssEsc(c.name)} <span class="ss-chip-sub">(${routeStr})</span></span>`;
-        }).join('');
+        entries.forEach(([sName, gGroups])=>{
+          subCount++;
+          if(sName) totalSups++; else totalVacant++;
+          const coords = coordinators.filter(c=>gGroups.includes(c.group));
+          let coordsHtml;
+          if(!coords.length){
+            totalVacant++;
+            coordsHtml = `<span class="ss-chip ss-chip-vacant">تحت التعيين</span>`;
+          }else{
+            coordsHtml = coords.map(c=>{
+              leafCount++; totalLeaves++;
+              const route = ssCoordRouteLabel(c, coordBranchMap);
+              const routeStr = route ? ssEsc(route) : 'تحت التعيين';
+              return `<span class="ss-chip">${ssEsc(c.name)} <span class="ss-chip-sub">(${routeStr})</span></span>`;
+            }).join('');
+          }
+          const gLabel = ssGroupsLabel(gGroups);
+          bodyHtml += `<div class="ss-sub-block">
+            <div class="ss-sub-title"><i class="ti ti-user-shield" style="color:#005CBF"></i> ${sName?ssEsc(sName):'<span class="ss-chip-vacant" style="border-radius:6px">تحت التعيين</span>'}${gLabel?` <span class="ss-chip-sub">— يغطي: ${ssEsc(gLabel)}</span>`:''}</div>
+            <div class="ss-chip-row">${coordsHtml}</div>
+          </div>`;
+        });
       }
-      subBlocksHtml = `<div class="ss-sub-block">
-        <div class="ss-sub-title"><i class="ti ti-user-shield" style="color:#005CBF"></i> ${supName ? ssEsc(supName) : '<span class="ss-chip-vacant" style="border:none;background:none;padding:0">تحت التعيين</span>'}</div>
-        <div class="ss-chip-row">${leavesHtml}</div>
-      </div>`;
-      cardsHtml += ssRegionCardHtml(meta, managerName, subCount, 'مشرف', leafCount, 'منسق', subBlocksHtml, '#005CBF');
     }
-  });
+
+    return ssManagerCardHtml(managerName, groupsLabel, subCount, 'مشرف', leafCount, isSales?'مندوب':'منسق', bodyHtml, isSales?'#1A7A4A':'#005CBF');
+  }
+
+  managers.forEach(m=>{ cardsHtml += renderManagerCard(m.name, m.groups||[]); });
+  if(orphanGroups.length) cardsHtml += renderManagerCard(null, orphanGroups);
 
   if(!cardsHtml){
     cardsHtml = '<div style="text-align:center;padding:50px;color:var(--text2)">لا توجد بيانات لعرضها</div>';
@@ -22990,7 +23008,7 @@ function ssRender(){
   </style>` + cardsHtml;
 }
 
-function ssRegionCardHtml(meta, managerName, subCount, subLabel, leafCount, leafLabel, innerHtml, accent){
+function ssManagerCardHtml(managerName, groupsLabel, subCount, subLabel, leafCount, leafLabel, innerHtml, accent){
   const managerBadge = managerName
     ? `<span style="font-weight:700">${ssEsc(managerName)}</span>`
     : `<span class="ss-chip-vacant" style="border-radius:6px">تحت التعيين</span>`;
@@ -22998,8 +23016,9 @@ function ssRegionCardHtml(meta, managerName, subCount, subLabel, leafCount, leaf
     <div class="ss-region-head" onclick="ssToggleRegion(this)" style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;cursor:pointer;background:var(--card)">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span style="width:10px;height:10px;border-radius:50%;background:${accent};display:inline-block"></span>
-        <strong style="font-size:14px">${ssEsc(meta.label)}</strong>
-        <span style="font-size:12px;color:var(--text2)">المدير: ${managerBadge}</span>
+        <span style="font-size:12px;color:var(--text2)">المدير:</span>
+        ${managerBadge}
+        ${groupsLabel?`<span style="font-size:12px;color:var(--text2)">(${ssEsc(groupsLabel)})</span>`:''}
       </div>
       <div style="display:flex;align-items:center;gap:10px">
         <span style="font-size:12px;color:var(--text2)">${subCount} ${subLabel} · ${leafCount} ${leafLabel}</span>
