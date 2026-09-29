@@ -16369,6 +16369,7 @@ let _lbActiveType = 'متحرك';
 let _lbReturns    = null;   // كاش returns — بيتحمّل مرة، يتحدّث بزرار "تحديث" بس
 let _lbRatings    = null;   // كاش coordinator_weekly_ratings
 let _lbDeliveries = null;   // كاش sales_deliveries (آخر 90 يوم) — لمطابقة زيادة رصيد الصنف بتوريد فعلي
+let _lbProducts   = null;   // كاش products مخصص للوحة الشرف (آخر 90 يوم، allPages) — بعيد عن كاش الـ500 صف العام
 let _lbLastResults = null;  // آخر نتيجة محسوبة — تُستخدم في تصدير PDF
 let _lbLastWeights = null;
 let _lbSelectedGrps = [];   // فاضية = كل المجموعات — فلتر مربع اختيار متعدد لمجموعات لوحة الشرف
@@ -16522,18 +16523,24 @@ function lbHaversine(lat1,lng1,lat2,lng2){
 
 // جلب returns + coordinator_weekly_ratings + sales_deliveries (مش موجودين في cachedData العام) — مرة واحدة إلا لو forceRefresh
 async function lbFetchExtra(forceRefresh){
-  if(_lbReturns && _lbRatings && _lbDeliveries && !forceRefresh) return;
+  if(_lbReturns && _lbRatings && _lbDeliveries && _lbProducts && !forceRefresh) return;
   // نفس نافذة الـ90 يوم اللي products بتتحمّل بيها في loadStaticData — عشان مقارنة الأرصدة (شوف
   // lbBalanceAccuracyCriterion) تتم في نفس مدى البيانات المتاحة فعليًا.
   const deliveriesFrom = new Date(Date.now() - 90*24*60*60*1000).toISOString().slice(0,10);
-  const [ret, rat, del] = await Promise.all([
+  const [ret, rat, del, prod] = await Promise.all([
     sb('returns', {}, {limit:1000, allPages:true}).catch(()=>[]),
     sb('coordinator_weekly_ratings', {}, {limit:1000, allPages:true}).catch(()=>[]),
     sb('sales_deliveries', {delivery_date:'gte.'+deliveriesFrom, deleted_at:'is.null'}, {limit:2000, allPages:true}).catch(()=>[]),
+    // ملحوظة مهمة: ماينفعش نستخدم cachedData.products هنا — ده كاش عام محدود بآخر 500 صف بس على
+    // مستوى الشركة كلها (كل الأنواع مجتمعة)، فمعيار "دقة تسجيل الأرصدة" كان بيوصله بيانات قليلة
+    // جدًا أو صفر لمعظم المنسقين رغم إن الأصناف مسجّلة فعلاً في القاعدة. هنا بنجيب نسخة مخصصة
+    // للوحة الشرف بحد أعلى مفتوح (allPages) على مدى نفس نافذة الـ90 يوم بس، بعيدًا عن الكاش العام.
+    sb('products', {created_at:'gte.'+deliveriesFrom}, {limit:2000, allPages:true}).catch(()=>[]),
   ]);
   _lbReturns    = Array.isArray(ret) ? ret : [];
   _lbRatings    = Array.isArray(rat) ? rat : [];
   _lbDeliveries = Array.isArray(del) ? del : [];
+  _lbProducts   = Array.isArray(prod) ? prod : [];
 }
 
 // ── دقة تسجيل الأرصدة: لو رصيد صنف (رف+مخزن) في فرع معين زاد بين زيارتين متتاليتين للمنسق
@@ -16623,7 +16630,11 @@ async function renderLB(forceRefresh){
     if(_lbActiveType==='متحرك'){
       // متوسط عدد الأصناف الموجودة على الرف لكل زيارة (sku_on) — 25 صنف أو أكتر = 100%
       const avgSku = myVisits.length ? myVisits.reduce((s,v)=>s+(+v.sku_on||0),0)/myVisits.length : 0;
-      crit.quality = Math.min(100, Math.round(avgSku/25*100));
+      // لو المنسق أصلاً معندوش ولا زيارة واحدة فيها صنف مسجّل (avgSku=0 عبر كل زياراته) —
+      // ده يعني تاب "الأصناف" مش بيُستخدم خالص في زياراته (اختياري حاليًا)، فمعندناش قياس حقيقي
+      // للجودة، مش إن جودته صفر فعليًا. نسيبها null (غير مقاسة) عشان توزيع الوزن يستبعدها من
+      // المجموع بدل ما تجيبله صفر قاسي يوهم إن أداءه سيء وهو أصلاً غير مقاس.
+      crit.quality = (myVisits.length && avgSku>0) ? Math.min(100, Math.round(avgSku/25*100)) : null;
     } else {
       // متوسط نقاط الـKPI المصوّرة (من 7 بنود × 10 = 70) لكل زيارة
       const avgKpi = myVisits.length ? myVisits.reduce((s,v)=>s+(+v.kpi_pts||0),0)/myVisits.length : 0;
@@ -16692,13 +16703,20 @@ async function renderLB(forceRefresh){
     crit.rating = myRatings.length ? Math.round(myRatings.reduce((s,r)=>s+(+r.rating||0),0)/myRatings.length/5*100) : 0;
 
     // ── دقة تسجيل الأرصدة: زيادة رصيد صنف بين زيارتين من غير توريد فعلي = تسجيل غلط ──
-    crit.balanceAccuracy = lbBalanceAccuracyCriterion(name, cachedData.products, _lbDeliveries, hasPeriod, lbFrom, lbTo);
+    crit.balanceAccuracy = lbBalanceAccuracyCriterion(name, _lbProducts, _lbDeliveries, hasPeriod, lbFrom, lbTo);
 
-    // ── المجموع المرجّح ──
-    let total=0;
-    Object.keys(weights).forEach(k=>{ total += (crit[k]||0)*(weights[k]||0); });
+    // ── المجموع المرجّح — معيار قيمته null (غير مقاس، زي quality لمنسق مفيش عنده بيانات أصناف
+    // خالص) بيُستبعد من الحساب تمامًا وبيتوزّع وزنه على باقي المعايير المقاسة، بدل ما يجيبله صفر
+    // قاسي يوهم بأداء سيء وهو أصلاً غير مقاس ──
+    let total=0, weightSum=0;
+    Object.keys(weights).forEach(k=>{
+      if(crit[k]===null || crit[k]===undefined) return;
+      total += (crit[k]||0)*(weights[k]||0);
+      weightSum += (weights[k]||0);
+    });
+    const finalScore = weightSum>0 ? (total/weightSum) : 0;
 
-    return {name, route:rep.route||'', group:rep.group||'', score:Math.round(total), crit, visitsCount:myVisits.length};
+    return {name, route:rep.route||'', group:rep.group||'', score:Math.round(finalScore), crit, visitsCount:myVisits.length};
   }).sort((a,b)=>b.score-a.score);
 
   _lbLastResults = lb;
@@ -16724,11 +16742,15 @@ function lbExportPDF(){
     const tierBd  = i===0?'#F0D48A':i===1?'#DADADA':i===2?'#E8C39C':'#E8E5DC';
     const rankClr = i===0?'#B8860B':i===1?'#6B6B6B':i===2?'#9C5A24':'#4A4A45';
     const breakdown = Object.keys(weights).map(k=>{
-      const v = r.crit[k]||0;
+      // قيمة null = معيار غير مقاس لهذا المنسق (زي جودة التنفيذ لمنسق مفيش عنده بيانات أصناف
+      // خالص) — بيتم استبعاده من المجموع فعليًا، فمينفعش نعرضه هنا كـ 0% ده بيبقى مضلل
+      const raw = r.crit[k];
+      const unmeasured = (raw===null || raw===undefined);
+      const v = unmeasured ? 0 : raw;
       return `<div style="display:flex;align-items:center;gap:4px;font-size:9px;font-weight:700;color:#6B6B6B">
         <span style="width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0">${LB_CRIT_LABELS[k]}</span>
-        <div style="flex:1;height:5px;background:#E8E5DC;border-radius:2px;overflow:hidden"><div style="width:${v}%;height:100%;background:${gc}"></div></div>
-        <span style="width:26px;text-align:left;flex-shrink:0">${v}%</span>
+        <div style="flex:1;height:5px;background:#E8E5DC;border-radius:2px;overflow:hidden">${unmeasured?'':`<div style="width:${v}%;height:100%;background:${gc}"></div>`}</div>
+        <span style="width:26px;text-align:left;flex-shrink:0">${unmeasured?'—':v+'%'}</span>
       </div>`;
     }).join('');
     return `<div style="background:${tierBg};border:1px solid ${tierBd};border-radius:8px;padding:10px 12px;margin-bottom:8px;page-break-inside:avoid">
@@ -16812,13 +16834,16 @@ function renderLBUI(lb, weights){
     const pct=Math.round(r.score/max*100);
     const medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
     const breakdown = Object.keys(weights).map(k=>{
-      const v = r.crit[k]||0;
+      // قيمة null = معيار غير مقاس لهذا المنسق — مستبعد فعليًا من المجموع، فمينفعش نعرضه 0%
+      const raw = r.crit[k];
+      const unmeasured = (raw===null || raw===undefined);
+      const v = unmeasured ? 0 : raw;
       return `<div style="display:flex;align-items:center;gap:4px;font-size:10px;font-weight:700;color:#6B6B6B">
         <span style="width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0">${LB_CRIT_LABELS[k]}</span>
         <div style="flex:1;height:5px;background:#E8E5DC;border-radius:2px;overflow:hidden">
-          <div style="width:${v}%;height:100%;background:${gc}"></div>
+          ${unmeasured?'':`<div style="width:${v}%;height:100%;background:${gc}"></div>`}
         </div>
-        <span style="width:28px;text-align:left;flex-shrink:0">${v}%</span>
+        <span style="width:28px;text-align:left;flex-shrink:0">${unmeasured?'—':v+'%'}</span>
       </div>`;
     }).join('');
     return`<div class="lb-row-item ${rowCls[i]||'others'}" style="flex-direction:column;align-items:stretch;gap:6px">
