@@ -1565,6 +1565,24 @@ table.datatable details summary:hover { text-decoration: underline; }
   }
   function chunk(arr, n) { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; }
 
+  // بيشغّل مجموعة "مهام" (دوال بترجع Promise) بالتوازي لكن بحد أقصى معين في نفس اللحظة
+  // (worker pool) بدل ما ينتظر كل مهمة تخلص قبل ما يبدأ اللي بعدها بالتتابع. ده اللي بيسرّع
+  // رفع الدفعات للسحابة في syncToCloud من غير ما نضغط على بوستجرست بعدد لا نهائي من الطلبات
+  // مرة واحدة (نفس المنطق المتحفظ المستخدم في fetchAllRows فوق مع CONCURRENCY).
+  async function runWithConcurrency(tasks, limit) {
+    const results = new Array(tasks.length);
+    let idx = 0;
+    async function worker() {
+      while (idx < tasks.length) {
+        const i = idx++;
+        results[i] = await tasks[i]();
+      }
+    }
+    const workers = Array.from({ length: Math.min(limit, tasks.length) }, worker);
+    await Promise.all(workers);
+    return results;
+  }
+
   // ملحوظة مهمة: رقم الفاتورة بيتصفر ويتكرر لكل فرع على حدة (مش رقم واحد لكل الشركة)،
   // فلازم الفرع يكون جزء من المفتاح وإلا فواتير من فروع مختلفة بنفس الرقم هتستبدل بعضها وتضيع بيانات.
   function invoiceKey(inv) { return (inv.__fileName || '') + '||' + (inv['الفرع'] || '') + '||' + (inv['رقم_الفاتورة'] || ''); }
@@ -2331,59 +2349,45 @@ table.datatable details summary:hover { text-decoration: underline; }
       logStatus('جاري حفظ التقرير في السحابة...');
       const invRows = newInvoices.map(invoiceToDbRow);
       const itemRowsDb = newItemRows.map(itemRowToDbRow);
-      for (const c of chunk(invRows, 500)) {
-        const { error } = await sb.from('tamr_sales_invoices').upsert(c, { onConflict: 'file_name,branch,invoice_no' });
-        if (error) throw error;
-      }
-      for (const c of chunk(itemRowsDb, 500)) {
-        const { error } = await sb.from('tamr_sales_items').upsert(c, { onConflict: 'file_name,branch,invoice_no,line_no' });
-        if (error) throw error;
-      }
-      let retMsg = '';
-      if (newReturns && newReturns.length) {
-        const retRows = newReturns.map(returnToDbRow);
-        for (const c of chunk(retRows, 500)) {
-          const { error } = await sb.from('tamr_sales_returns').upsert(c, { onConflict: 'file_name,invoice_no,line_no' });
-          if (error) throw error;
+      const retRows     = (newReturns && newReturns.length) ? newReturns.map(returnToDbRow) : [];
+      const indRows      = (newIndirectDiscounts && newIndirectDiscounts.length) ? newIndirectDiscounts.map(indirectDiscountToDbRow) : [];
+      const chkRows      = (newChecks && newChecks.length) ? newChecks.map(checkToDbRow) : [];
+      const ledRows       = (newLedger && newLedger.length) ? newLedger.map(ledgerToDbRow) : [];
+      const custInvRows = (newCustomerInvoicesRaw && newCustomerInvoicesRaw.length) ? newCustomerInvoicesRaw.map(customerInvoiceRawToDbRow) : [];
+
+      // بدل ما نرفع كل جدول لوحده بالتتابع (فاتورة بعد فاتورة، صنف بعد صنف...) وكل ده بعد ما
+      // يخلص اللي قبله، بنجمع كل "دفعات" الرفع (لكل الجداول مع بعض) في قائمة واحدة ونشغّلها
+      // بالتوازي بحد أقصى معين في نفس اللحظة (runWithConcurrency فوق) - ده اللي بيقلل زمن الحفظ
+      // بشكل كبير للملفات الكبيرة (مئات الفواتير) لأن الجداول دي مالها علاقة ببعض (لا فيه Foreign
+      // Keys تربطها) فالرفع المتوازي بينها آمن 100%. مستخدمين حد 3 (بدل 2 المستخدمة في القراءة)
+      // لأن كل دفعة هنا upsert واحد بس (مش صفحات متتابعة)، لكن برضه بحد أقصى عشان منضغطش على
+      // بوستجرست زيادة عن اللازم (نفس التحفظ المطبق في fetchAllRows).
+      const tasks = [];
+      const errors = [];
+      function addTasks(table, rows, onConflict) {
+        for (const c of chunk(rows, 500)) {
+          tasks.push(async () => {
+            const { error } = await sb.from(table).upsert(c, { onConflict });
+            if (error) errors.push({ table, error });
+          });
         }
-        retMsg = ` و${retRows.length} سطر مرتجع`;
       }
-      let indMsg = '';
-      if (newIndirectDiscounts && newIndirectDiscounts.length) {
-        const indRows = newIndirectDiscounts.map(indirectDiscountToDbRow);
-        for (const c of chunk(indRows, 500)) {
-          const { error } = await sb.from('tamr_sales_indirect_discounts').upsert(c, { onConflict: 'file_name,customer,line_no' });
-          if (error) throw error;
-        }
-        indMsg = ` و${indRows.length} قيد خصم غير مباشر`;
-      }
-      let chkMsg = '';
-      if (newChecks && newChecks.length) {
-        const chkRows = newChecks.map(checkToDbRow);
-        for (const c of chunk(chkRows, 500)) {
-          const { error } = await sb.from('tamr_sales_collected_checks').upsert(c, { onConflict: 'file_name,customer,seq' });
-          if (error) throw error;
-        }
-        chkMsg = ` و${chkRows.length} شيك محصل`;
-      }
-      let ledMsg = '';
-      if (newLedger && newLedger.length) {
-        const ledRows = newLedger.map(ledgerToDbRow);
-        for (const c of chunk(ledRows, 500)) {
-          const { error } = await sb.from('tamr_sales_account_ledger').upsert(c, { onConflict: 'file_name,statement_branch,customer,seq' });
-          if (error) throw error;
-        }
-        ledMsg = ` و${ledRows.length} حركة حساب عميل`;
-      }
-      let custInvMsg = '';
-      if (newCustomerInvoicesRaw && newCustomerInvoicesRaw.length) {
-        const custInvRows = newCustomerInvoicesRaw.map(customerInvoiceRawToDbRow);
-        for (const c of chunk(custInvRows, 500)) {
-          const { error } = await sb.from('tamr_customer_invoices_raw').upsert(c, { onConflict: 'invoice_no,invoice_date' });
-          if (error) throw error;
-        }
-        custInvMsg = ` و${custInvRows.length} فاتورة جريد`;
-      }
+      addTasks('tamr_sales_invoices', invRows, 'file_name,branch,invoice_no');
+      addTasks('tamr_sales_items', itemRowsDb, 'file_name,branch,invoice_no,line_no');
+      addTasks('tamr_sales_returns', retRows, 'file_name,invoice_no,line_no');
+      addTasks('tamr_sales_indirect_discounts', indRows, 'file_name,customer,line_no');
+      addTasks('tamr_sales_collected_checks', chkRows, 'file_name,customer,seq');
+      addTasks('tamr_sales_account_ledger', ledRows, 'file_name,statement_branch,customer,seq');
+      addTasks('tamr_customer_invoices_raw', custInvRows, 'invoice_no,invoice_date');
+
+      await runWithConcurrency(tasks, 3);
+      if (errors.length) throw errors[0].error;
+
+      const retMsg     = retRows.length     ? ` و${retRows.length} سطر مرتجع` : '';
+      const indMsg      = indRows.length      ? ` و${indRows.length} قيد خصم غير مباشر` : '';
+      const chkMsg      = chkRows.length      ? ` و${chkRows.length} شيك محصل` : '';
+      const ledMsg       = ledRows.length       ? ` و${ledRows.length} حركة حساب عميل` : '';
+      const custInvMsg = custInvRows.length ? ` و${custInvRows.length} فاتورة جريد` : '';
       logStatus(`تم حفظ ${invRows.length} فاتورة و${itemRowsDb.length} سطر صنف${retMsg}${indMsg}${chkMsg}${ledMsg}${custInvMsg} في السحابة بنجاح ✓ (لن تُفقد حتى لو رجعت للأداة تاني)`, 'ok');
     } catch (e) {
       logStatus('تعذر الحفظ في السحابة - البيانات معروضة الآن لكنها لن تُحفظ للمرة القادمة (' + (e.message || e) + ')', 'err');
