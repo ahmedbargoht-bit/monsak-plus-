@@ -35508,7 +35508,9 @@ async function stkcmpLoad(){
   if(from) mtUrl += `&invoice_date=gte.${from}`;
   if(to)   mtUrl += `&invoice_date=lte.${to}`;
   if(type) mtUrl += `&tax_type=eq.${encodeURIComponent(type==='taxed' ? 'ضريبية' : 'غير ضريبية')}`;
-  if(branch) mtUrl += `&customer_site=eq.${encodeURIComponent(branch)}`;
+  // ملحوظة: فلتر الفرع بقى بيتطبّق بعد الجلب (بعد تحويل customer_site لاسمه الرسمي عبر
+  // stkcmpResolveBranch) مش على مستوى السيرفر — لأن الاسم الخام في MT ممكن يختلف شكليًا
+  // عن الاسم الرسمي المختار في الدروب داون (شوف stkcmpResolveBranch فوق لتفاصيل السبب)
 
   let prodUrl = `${SUPABASE_URL}/rest/v1/products?select=snf,branch,shelf_qty,stock_qty,created_at,name&order=created_at.desc`;
   if(grps.length) prodUrl += `&grp=in.(${grps.map(g=>encodeURIComponent(g)).join(',')})`;
@@ -35521,27 +35523,32 @@ async function stkcmpLoad(){
     let [mtRows, prodRows] = await Promise.all([fetchAllRows(mtUrl,H), fetchAllRows(prodUrl,H)]);
     if(mySeq !== _stkcmpLoadSeq) return; // فيه طلب أحدث اتبعت في الأثناء — تجاهل الرد القديم ده
 
+    stkcmpEnsureBranchIndex();
     // tamr_sales_items معندهاش عمود grp مباشر — فلترة المجموعة بتتم بمطابقة اسم الفرع
-    // (customer_site) بفروع branches اللي فيها grp (نفس الفروع اللي تظهر في باقي التابات)
+    // (customer_site، بعد تحويله لاسمه الرسمي) بفروع branches اللي فيها grp
     let mtFiltered = mtRows;
     if(grps.length){
       const branchGrpMap = {};
       (cachedData.branches||[]).forEach(b=>{ if(b.branch_name) branchGrpMap[b.branch_name.trim()] = b.grp||''; });
       const gset = new Set(grps);
-      mtFiltered = mtFiltered.filter(r=>gset.has(branchGrpMap[(r.customer_site||'').trim()]));
+      mtFiltered = mtFiltered.filter(r=>gset.has(branchGrpMap[stkcmpResolveBranch(r.customer_site)]));
     }
     // فلتر العميل: بنفس خريطة _stkcmpClientBranches الموجودة (عميل→مجموعة أسماء فروع) —
     // مفيش داعي لمطابقة tamr_sales_items.customer (اسم الشركة القانوني الطويل) بيها
     if(!branch && client && _stkcmpClientBranches[client]){
       const bset = _stkcmpClientBranches[client];
-      mtFiltered = mtFiltered.filter(r=>bset.has((r.customer_site||'').trim()));
+      mtFiltered = mtFiltered.filter(r=>bset.has(stkcmpResolveBranch(r.customer_site)));
       prodRows   = prodRows.filter(r=>bset.has((r.branch||'').trim()));
+    }
+    // فلتر الفرع (بعد تحليل الاسم الرسمي — شوف الملحوظة عند بناء mtUrl فوق)
+    if(branch){
+      mtFiltered = mtFiltered.filter(r=>stkcmpResolveBranch(r.customer_site)===branch);
     }
 
     // تحويل كل سطر فاتورة لعدد قطع موحد (نفس صيغة sales-analysis-MT.html بالظبط):
     // لو الصنف معروف في الكتالوج وله عدد قطع بالكرتونة → كراتين×العدد + قطع فردية، غير كده قطع فردية فقط
     const delRows = mtFiltered.map(r=>{
-      const branchName = (r.customer_site||'').trim() || '—';
+      const branchName = stkcmpResolveBranch(r.customer_site);
       const ppc = _stkcmpItemCatalogMap.get(normItemName(r.item)) || null;
       const cartons = Number(r.qty_carton)||0;
       const pieces  = Number(r.qty_piece)||0;
@@ -35558,15 +35565,94 @@ async function stkcmpLoad(){
   }
 }
 
+// ── مطابقة أسماء الأصناف بين قايمة الفلتر (كتالوج tamr_sales_item_catalog) وبين النص الخام
+// في فواتير MT (tamr_sales_items.item): الاتنين بيوصفوا نفس الصنف لكن بفروق تنسيق بسيطة —
+// مسافات زيادة، مسافة جوه القوسين "( تمراتى )" مقابل "(تمراتى)"، وأشكال حروف مختلفة (ة/ه, ى/ي).
+// من غير التطبيع ده، اختيار صنف من الفلتر ممكن يفشل في مطابقة أي سطر فاتورة رغم إنه نفس الصنف
+// فعليًا — وده كان بالظبط سبب ظهور "التورد للفرع" صفر لكل الفروع لما بيتحدد فلتر أصناف ──
+function stkcmpNormItemKey(s){
+  return sciNormalizeItemKey(s).replace(/\(\s+/g,'(').replace(/\s+\)/g,')');
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ── مطابقة أسماء الفروع بين customer_site (النص الخام في فواتير MT) وبين
+// branches.branch_name (الاسم الرسمي المستخدم في باقي النظام كله). فحص مباشر
+// في القاعدة أثبت إن ~25% من أسماء الفروع في MT مختلفة شكليًا عن الاسم الرسمي
+// (شرطات، مسافات، قوسين، همزات، ة/ه، ى/ي) — وهو السبب في عدم دمج بيانات
+// التوريد مع رصيد المنسق لهذه الفروع (تظهر كصف منفصل "بدون رصيد" أو تختفي).
+// ══════════════════════════════════════════════════════════════════════════
+
+// تطبيع عام لاسم الفرع: بالإضافة لتطبيع sciNormalizeItemKey (همزات/ة‑ه/ى‑ي)
+// بيوحّد كل أنواع الشرطات والقوسين كمسافات عشان يمسك فروق التنسيق البحتة
+function stkcmpNormBranchKey(s){
+  return sciNormalizeItemKey(s)
+    .replace(/[-–ـ()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// جدول أسماء بديلة صريح للحالات اللي فرق التسمية فيها أعمق من مجرد تنسيق
+// (كلمة ناقصة/زايدة، خطأ إملائي في أحد المصدرين) — تم تأكيدها بفحص مباشر في
+// القاعدة (مقارنة تشابه نصي + مراجعة منطقية لاسم الفرع ومنطقته) بتاريخ 2026-09-29.
+// المفتاح = نص customer_site الخام كما هو مسجّل في فواتير MT، القيمة = الاسم
+// الرسمي المطابق في جدول branches.
+const STKCMP_BRANCH_ALIASES = {
+  'اسواق فتح الله ابو يوسف': 'اسواق فتح الله -ابويوسف',
+  'بيت الجملة الدرايسه': 'بيت الجمله -الدريسه',
+  'جمله ماركت محرم بك': 'جمله مار كت -محرم بك',
+  'جمله ماركت منشا': 'جمله ماركت -المنشا',
+  'سيركل كا ( وصال 2 )': 'سيركا كا - وصال 2',
+  'ميجكورب-موبيل المعادى': 'سيركل ميجكورب-موبيل المعادى',
+  'اسواق فتح الله العجمى ستار': 'أسواق فتح الله-عجمي ستار',
+  'اوسكار - التجمع': 'اوسكار التجمع الخامس',
+  'اوسكار - مصنع التجمع': 'مصنع اوسكار',
+  'هايبر وان - مدينة بدر': 'هايبر وان بدر',
+  'هايبر وان - هايبر زايد': 'هايبروان زايد',
+  'هايبر وان - هايبر سفنكس': 'هايبر وان سفنكس',
+  'هايبر وان - العاشر من رمضان': 'هايبروان العاشر',
+  'كارفور سيتى سنتر': 'كارفور سيتي سنتر اسكندرية',
+  'سيركل كا ( موبيل كم 27 مرغم )': 'سيركل كا -مرغم',
+  'جملة ماركت - اللاسلكي': 'جمله ماركت المعادي ( اللاسلكي )',
+};
+
+let _stkcmpBranchSet = null, _stkcmpBranchNormMap = null;
+function stkcmpEnsureBranchIndex(){
+  const list = cachedData.branches || [];
+  _stkcmpBranchSet = new Set();
+  _stkcmpBranchNormMap = new Map();
+  list.forEach(b=>{
+    const nm = (b.branch_name||'').trim();
+    if(!nm) return;
+    _stkcmpBranchSet.add(nm);
+    const nk = stkcmpNormBranchKey(nm);
+    if(!_stkcmpBranchNormMap.has(nk)) _stkcmpBranchNormMap.set(nk, nm);
+  });
+}
+
+// يحوّل اسم فرع خام (customer_site من فاتورة MT) لاسمه الرسمي في branches —
+// بالترتيب: تطابق حرفي مباشر ← جدول الأسماء البديلة الصريح ← تطابق بعد التطبيع.
+// لو مفيش تطابق بأي طريقة، بيرجع الاسم الخام كما هو (يظهر كصف منفصل في الجدول
+// بدل ما يندمج غلط مع فرع تاني — أمان أهم من تغطية كاملة لفرع مش متأكدين منه)
+function stkcmpResolveBranch(rawSite){
+  const s = (rawSite||'').trim();
+  if(!s) return '—';
+  if(!_stkcmpBranchSet) stkcmpEnsureBranchIndex();
+  if(_stkcmpBranchSet.has(s)) return s;
+  if(STKCMP_BRANCH_ALIASES[s]) return STKCMP_BRANCH_ALIASES[s];
+  const nk = stkcmpNormBranchKey(s);
+  if(_stkcmpBranchNormMap.has(nk)) return _stkcmpBranchNormMap.get(nk);
+  return s;
+}
+
 // ── حساب المقارنة على مستوى الفرع من الكاش المحمّل ──
 function stkcmpComputeRows(){
   const itemsSel = [...stkcmpGetSelectedItemsSet()];
-  const itemsSet = itemsSel.length ? new Set(itemsSel) : null;
+  const itemsSet = itemsSel.length ? new Set(itemsSel.map(stkcmpNormItemKey)) : null;
 
   const delivered = {};
   (_stkcmpDeliveries||[]).forEach(r=>{
     const items = Array.isArray(r.items) ? r.items : [];
-    const hits = itemsSet ? items.filter(it=>itemsSet.has(((it&&it.name)||'').trim())) : items;
+    const hits = itemsSet ? items.filter(it=>itemsSet.has(stkcmpNormItemKey((it&&it.name)||''))) : items;
     if(!hits.length) return;
     const branch = r.branch_name || '—';
     if(!delivered[branch]) delivered[branch] = { qty:0, client: r.client_name || '' };
@@ -35578,7 +35664,7 @@ function stkcmpComputeRows(){
   const latestByBranchItem = {};
   (_stkcmpProducts||[]).forEach(row=>{
     const nm = (row.snf||'').trim();
-    if(itemsSet && !itemsSet.has(nm)) return;
+    if(itemsSet && !itemsSet.has(stkcmpNormItemKey(nm))) return;
     const branch = row.branch || '—';
     const key = branch + '||' + nm;
     const cur = latestByBranchItem[key];
