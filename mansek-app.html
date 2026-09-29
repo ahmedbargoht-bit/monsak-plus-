@@ -2436,11 +2436,33 @@ async function logout(){
   }
 }
 
-function confirmLogout(){
+async function confirmLogout(){
   document.getElementById('modal-logout-confirm').style.display = 'none';
   if(locInterval) clearInterval(locInterval);
   if(window._notifInterval) clearInterval(window._notifInterval);
   if(shiftTimerInterval) clearInterval(shiftTimerInterval);
+  // ── شبكة أمان: لو لسه فيه زيارة اليوم متسجّلة بدون وقت انصراف حقيقي (حالة نادرة، أو بيانات
+  // قديمة قبل إصلاح توقيت الحفظ) — اقفلها بوقت الخروج من التطبيق دلوقتي، عشان ما تفضلش
+  // "مفتوحة" للأبد وتوهم معيار اكتمال الزيارة. المستخدم شاف التحذير بالفعل واختار يخرج برضو.
+  if(cu?.name){
+    try{
+      const today = localDateStr();
+      const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+      const openRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(cu.name)}&date=eq.${today}&select=id,time_out&order=created_at.desc&limit=20`,
+        {headers:H}
+      );
+      const openData = openRes.ok ? await openRes.json() : [];
+      const openIds = (Array.isArray(openData)?openData:[]).filter(v=>!v.time_out || v.time_out==='--').map(v=>v.id);
+      if(openIds.length){
+        const nowTime = new Date().toTimeString().slice(0,5);
+        await fetch(
+          `${SUPABASE_URL}/rest/v1/visits?id=in.(${openIds.join(',')})`,
+          {method:'PATCH', headers:{...H,'Content-Type':'application/json','Prefer':'return=minimal'}, body: JSON.stringify({time_out: nowTime})}
+        ).catch(()=>{});
+      }
+    }catch(e){ console.warn('auto-close open visits on logout failed:', e); }
+  }
   try{ localStorage.removeItem('cu_session'); sessionStorage.removeItem('cu_session'); }catch(e){}
   // جهّز التطبيق لاستقبال فرع وزيارة جديدة في المرة الجاية —
   // هنا فقط (الخروج الكامل من التطبيق) تُمسح كل بيانات الزيارة الحالية
@@ -3999,7 +4021,10 @@ async function saveVisit(){
     action:'saveVisit',
     name:cu.name,route:cu.route,group:cu.group||'',branch,
     date:localDateStr(),
-    timeIn:nowTime,timeOut:attOut?attOut.time:'--',
+    // وقت الانصراف = لحظة حفظ الزيارة نفسها (ده فعليًا وقت خروج المنسق من الفرع ده) — قبل كده كان
+    // بيتاخد من وقت انصراف الشيفت الكامل (attOut) اللي عادة لسه مش موجود وقت حفظ زيارة في نص اليوم،
+    // فكانت الزيارة تفضل "مفتوحة" (بدون وقت انصراف) طول الوقت تقريبًا وتوهم معيار "اكتمال الزيارة"
+    timeIn:nowTime,timeOut:nowTime,
     lat:freshLoc.lat,lng:freshLoc.lng,
     clientType:document.getElementById('f-ctype').value,
     skuOn:skuOn||0,skuStock:products.reduce((s,p)=>s+(parseInt(p.stock)||0),0)||0,
