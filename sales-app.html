@@ -2841,6 +2841,25 @@ const GROUPS = {
   fuel_alex:     {label:'⛽ وقود الإسكندرية',     color:'#78909C'},
 };
 
+// مناطق مجمّعة: أي مجموعات ضمن نفس المنطقة بيبقى مشرف/مدير أي مجموعة منهم شايف بيانات ومناديب
+// باقي مجموعات نفس المنطقة كمان (مش بس مجموعته هو) - مطلوب تحديدًا عشان مشرف الجيزة يقدر يشوف
+// مناديب التجمعات مثلاً (الاتنين ضمن "منطقة القاهرة" هنا). المجموعات اللي مش مذكورة هنا مالهاش
+// توسعة - بتفضل شغالة زي ما هي (مجموعة كل مشرف لوحدها بس).
+const REGION_GROUPS = [
+  ['giza', 'tajmuat', 'cairo', 'south'], // منطقة القاهرة
+];
+function expandRegionGroups(groupsArr){
+  const input = (Array.isArray(groupsArr) ? groupsArr : (groupsArr||'').toString().split(','))
+    .map(g=>(g||'').toString().trim()).filter(Boolean);
+  const out = new Set(input);
+  input.forEach(g=>{
+    REGION_GROUPS.forEach(region=>{
+      if(region.includes(g)) region.forEach(rg=>out.add(rg));
+    });
+  });
+  return Array.from(out);
+}
+
 // ── State ──
 let cu = null;
 let SALES_USERS = [];
@@ -3150,6 +3169,8 @@ function setupApp(){
       if(g==='private_chains_alex') return ['private_alex'];
       return [g];
     });
+    // ✅ توسعة منطقة القاهرة (الجيزة/التجمعات/وسط القاهرة/جنوب وشرق) - شوف REGION_GROUPS فوق
+    cu.groups = expandRegionGroups(cu.groups);
   }
   // ✅ مزامنة الفروع من Supabase — وحدّث أي تاب مفتوح فورًا بعد اكتمالها
   syncBranchesFromDB().then(ok=>{
@@ -3562,9 +3583,33 @@ async function rbGetTeamReps(){
       const d = r.ok ? await r.json() : [];
       return Array.isArray(d) ? d.map(x=>x.name).filter(Boolean) : [];
     } else if(cu.level === 'sup'){
+      // الأساسي: المناديب المعيّنين على المشرف الحالي مباشرة بالاسم
       const r = await fetch(`${SUPABASE_URL}/rest/v1/users?supervisors=eq.${encodeURIComponent(cu.name)}&status=eq.active&select=name&order=name.asc&limit=500`,{headers:H});
       const d = r.ok ? await r.json() : [];
-      return Array.isArray(d) ? d.map(x=>x.name).filter(Boolean) : [];
+      const names = new Set(Array.isArray(d) ? d.map(x=>x.name).filter(Boolean) : []);
+
+      // + توسعة: أي مشرف تاني مجموعته ضمن نفس مجموعات المشرف الحالي (بعد توسعة منطقة القاهرة -
+      // شوف REGION_GROUPS/expandRegionGroups فوق) بيبان مناديبه هنا كمان، عشان مثلاً مشرف الجيزة
+      // يقدر يشوف/يحوّل بضاعة مع مناديب التجمعات.
+      try{
+        const myGrps = expandRegionGroups(cu.groups);
+        if(myGrps.length){
+          const allSupsRes = await fetch(`${SUPABASE_URL}/rest/v1/staff?active=eq.true&select=name,grp&limit=300`,{headers:H});
+          const allSups = allSupsRes.ok ? await allSupsRes.json() : [];
+          const peerSupNames = (Array.isArray(allSups)?allSups:[]).filter(s=>{
+            const sg = Array.isArray(s.grp) ? s.grp : (s.grp||'').toString().split(',').map(g=>g.trim()).filter(Boolean);
+            return sg.some(g=>myGrps.includes(g));
+          }).map(s=>s.name).filter(n=>n && n!==cu.name);
+          if(peerSupNames.length){
+            const encSups = peerSupNames.map(n=>encodeURIComponent(n)).join(',');
+            const peerRepsRes = await fetch(`${SUPABASE_URL}/rest/v1/users?supervisors=in.(${encSups})&status=eq.active&select=name&limit=500`,{headers:H});
+            const peerReps = peerRepsRes.ok ? await peerRepsRes.json() : [];
+            (Array.isArray(peerReps)?peerReps:[]).forEach(x=>{ if(x.name) names.add(x.name); });
+          }
+        }
+      }catch(e){ /* لو فشلت توسعة المنطقة، بيفضل شغال بالمناديب المباشرين بس */ }
+
+      return Array.from(names).sort((a,b)=>a.localeCompare(b,'ar'));
     } else if(cu.level === 'manager'){
       const supsRes = await fetch(`${SUPABASE_URL}/rest/v1/staff?reports_to=eq.${encodeURIComponent(cu.name)}&active=eq.true&select=name,grp&limit=200`,{headers:H});
       const mySups = supsRes.ok ? await supsRes.json() : [];
