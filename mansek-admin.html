@@ -45208,7 +45208,7 @@ async function revLoadContext(){
   const H = PLANS_H();
   const prevM = revPrevMonthRange(start);
 
-  const repsRes = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&status=eq.active&name=neq.${encodeURIComponent('تحت التعيين')}&select=id,name,grp,grps,route,routes,user_type,day_off,supervisors&order=name.asc&limit=500`,{headers:H});
+  const repsRes = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&status=eq.active&name=neq.${encodeURIComponent('تحت التعيين')}&select=id,name,grp,grps,route,routes,user_type,day_off,supervisors,created_at&order=name.asc&limit=500`,{headers:H});
   let reps = repsRes.ok ? await repsRes.json().catch(()=>[]) : [];
   if(!Array.isArray(reps)) reps = [];
   reps = reps.filter(r=>r.name && !r.name.startsWith('بيع اداري'));
@@ -45327,9 +45327,14 @@ function revAttendanceCriterion(rep, ctx){
   ctx.deliveries.forEach(d=>{ if(d.rep_name===rep.name) activeDates.add((d.delivery_date||'').slice(0,10)); });
   ctx.returns.forEach(r=>{ if(r.rep_name===rep.name) activeDates.add((r.return_date||'').slice(0,10)); });
 
+  // لو المندوب اتضاف للنظام في نص الفترة، نبدأ عدّ أيام الخمول من تاريخ تعيينه مش من أول الفترة —
+  // عشان مانعاقبوش على أيام قبل ما يبقى أصلًا موجود كمندوب
+  const joinDate = rep.created_at ? (rep.created_at||'').slice(0,10) : null;
+  const loopStart = (joinDate && joinDate > ctx.start) ? joinDate : ctx.start;
+
   let idleDays = 0;
   const idleDatesList = [];
-  for(let d=new Date(ctx.start+'T00:00:00'); d<=new Date(ctx.end+'T00:00:00'); d.setDate(d.getDate()+1)){
+  for(let d=new Date(loopStart+'T00:00:00'); d<=new Date(ctx.end+'T00:00:00'); d.setDate(d.getDate()+1)){
     const dISO = localISO(d);
     if(dISO >= todayISO) continue;
     if(dayOffNum>=0 && dayOffNum===d.getDay()) continue;
@@ -45341,9 +45346,10 @@ function revAttendanceCriterion(rep, ctx){
     return `⚪ ${g[0]} إلى ${g[g.length-1]} (${g.length} أيام) — من غير أي فاتورة تسليم أو مرتجع مسجلة`;
   });
   const level = idleDays===0 ? 'excellent' : idleDays<=2 ? 'good' : 'needsWork';
+  const joinNote = loopStart>ctx.start ? ` (احتُسب من تاريخ تعيينه ${loopStart} مش من أول الفترة)` : '';
   return {
     level,
-    text: idleDays===0 ? `فيه نشاط مسجل في كل أيام العمل ${ctx.periodLabel}` : `${idleDays} يوم عمل من غير أي نشاط مسجل (تسليم/مرتجع) ${ctx.periodLabel}`,
+    text: (idleDays===0 ? `فيه نشاط مسجل في كل أيام العمل ${ctx.periodLabel}` : `${idleDays} يوم عمل من غير أي نشاط مسجل (تسليم/مرتجع) ${ctx.periodLabel}`) + joinNote,
     details: idleDetails,
   };
 }
@@ -45353,6 +45359,12 @@ function revCoverageCriterion(rep, ctx){
   const routes = Array.isArray(rep.routes) && rep.routes.length ? rep.routes : (rep.route ? [rep.route] : []);
   if(!routes.length){
     return { level:'needsWork', text:'مفيش خط سير محدد لهذا المندوب', details:[] };
+  }
+  // لو مفيش أي فاتورة تسليم للمندوب في الفترة خالص (مندوب جديد اتضاف حديثًا، أو إجازة، إلخ) —
+  // مينفعش نحكم عليه بصفر% تغطية، لأن مفيش بيانات كفاية أصلًا للحكم
+  const hasAnyDelivery = ctx.deliveries.some(d=>d.rep_name===rep.name);
+  if(!hasAnyDelivery){
+    return { level:'good', text:`مفيش فواتير تسليم مسجلة للمندوب ${ctx.periodLabel} لتقييم تغطية خط السير عليها`, details:[] };
   }
   const allBranches = new Set();
   routes.forEach(rt => (ctx.routeBranches[rt]||[]).forEach(b=>allBranches.add(b)));
@@ -45436,6 +45448,11 @@ function revGrowthCriterion(rep, ctx){
 // 7) تنوع الأصناف المباعة — عدد الأصناف المختلفة اللي باعها المندوب فعليًا من إجمالي الأصناف اللي
 // اتباعت لكل المناديب في نفس الفترة (بنش مارك نسبي، مش رقم مطلق لأن قاعدة الأصناف بتتغير وبتختلف باختلاف خط السير)
 function revVarietyCriterion(rep, ctx){
+  // لو مفيش أي فاتورة تسليم للمندوب في الفترة خالص، مينفعش نحكم عليه بـ0% تنوع — مفيش بيانات كفاية
+  const hasAnyDelivery = ctx.deliveries.some(d=>d.rep_name===rep.name);
+  if(!hasAnyDelivery){
+    return { level:'good', text:`مفيش فواتير تسليم مسجلة للمندوب ${ctx.periodLabel} لتقييم تنوع الأصناف عليها`, details:[] };
+  }
   const repItems = new Set();
   const allItems = new Set();
   ctx.deliveries.forEach(d=>{
@@ -45731,7 +45748,14 @@ async function repEvalRefresh(){
       revRenderStats([]); revRenderLeaderboard([]);
       return;
     }
-    _revResults = ctx.reps.map(rep => revComputeForRep(rep, ctx));
+    // استبعاد أي مندوب اتضاف للنظام بعد نهاية الفترة المختارة — لسه ما كانش موجود أصلًا وقتها،
+    // فمش منطقي يتقيّم عليها (كان بيطلع ظالم: كل أيام الفترة قبل تعيينه بتتحسب "يوم من غير نشاط")
+    const evalReps = ctx.reps.filter(rep => {
+      if(!rep.created_at) return true;
+      const joinDate = (rep.created_at||'').slice(0,10);
+      return joinDate <= ctx.end;
+    });
+    _revResults = evalReps.map(rep => revComputeForRep(rep, ctx));
     repEvalRender();
   }catch(e){
     listEl.innerHTML = `<div style="text-align:center;padding:40px;color:#C55B48">تعذر التحميل: ${e.message}</div>`;
