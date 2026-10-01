@@ -34470,43 +34470,62 @@ async function tdLoad(){
   msgEl.style.color = 'var(--ink-soft)';
 
   try{
-    const [repRes, salesData, retsData] = await Promise.all([
+    const [repRes, branchesRes, salesData, retsData] = await Promise.all([
       fetch(`${SUPABASE_URL}/rest/v1/users?select=id,name,route,routes,grp,groups,supervisors,status&role=eq.sales&level=eq.rep&status=eq.active&order=name.asc&limit=500`,{headers:H}),
-      fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,total_net,total_tax,delivery_date&delivery_date=gte.${rangeFrom}&delivery_date=lte.${rangeTo}&deleted_at=is.null`, H),
-      fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,total_net,total_tax,return_date&return_date=gte.${rangeFrom}&return_date=lte.${rangeTo}&deleted_at=is.null`, H),
+      fetchAllRows(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route&status=eq.active`, H),
+      fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=branch_name,route,total_net,total_tax,delivery_date&delivery_date=gte.${rangeFrom}&delivery_date=lte.${rangeTo}&deleted_at=is.null`, H),
+      fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=branch_name,route,total_net,total_tax,return_date&return_date=gte.${rangeFrom}&return_date=lte.${rangeTo}&deleted_at=is.null`, H),
     ]);
     let reps = repRes.ok ? await repRes.json() : [];
     if(!Array.isArray(reps)) reps = [];
     reps = reps.filter(r=>r.name && !r.name.startsWith('بيع اداري') && r.name!=='تحت التعيين');
 
-    // صافي كل مندوب لكل شهر — مفتاح: اسم المندوب → مفتاح الشهر (YYYY-MM) → صافي
+    // مفتاح: اسم الفرع → خط سيره الحالي (من جدول الفروع)، عشان نحسب المبيعات القديمة
+    // على أساس خط السير اللي الفرع تابعله دلوقتي، مش القيمة اللي كانت متسجلة في الفاتورة وقتها
+    const branchToCurrentRoute = {};
+    (branchesRes||[]).forEach(b=>{ if(b.branch_name && b.route) branchToCurrentRoute[b.branch_name] = b.route; });
+
+    // الاحتساب على مستوى "خط السير" مش "اسم المندوب" — عشان مندوب جديد نازل على خط سير
+    // ليه تاريخ مبيعات (حتى لو بمندوب سابق أو فرع نُقل من خط لخط) ياخد متوسط الخط ده، مش يتصفر لمجرد إنه جديد.
+    // صافي كل خط سير لكل شهر — مفتاح: اسم خط السير الحالي للفرع → مفتاح الشهر (YYYY-MM) → صافي
     const monthKeyOf = (dateStr)=> dateStr ? dateStr.slice(0,7) : null;
-    const repMonthNet = {};
+    const routeOf = (row)=> branchToCurrentRoute[row.branch_name] || row.route; // fallback لقيمة الفاتورة لو الفرع مش موجود في جدول الفروع
+    const routeMonthNet = {};
     (salesData||[]).forEach(s=>{
-      const mk = monthKeyOf(s.delivery_date); if(!mk) return;
-      (repMonthNet[s.rep_name] ||= {});
-      repMonthNet[s.rep_name][mk] = (repMonthNet[s.rep_name][mk]||0) + ((s.total_net||0)-(s.total_tax||0));
+      const mk = monthKeyOf(s.delivery_date); const rt = routeOf(s); if(!mk || !rt) return;
+      (routeMonthNet[rt] ||= {});
+      routeMonthNet[rt][mk] = (routeMonthNet[rt][mk]||0) + ((s.total_net||0)-(s.total_tax||0));
     });
     (retsData||[]).forEach(r=>{
-      const mk = monthKeyOf(r.return_date); if(!mk) return;
-      (repMonthNet[r.rep_name] ||= {});
-      repMonthNet[r.rep_name][mk] = (repMonthNet[r.rep_name][mk]||0) - ((r.total_net||0)-(r.total_tax||0));
+      const mk = monthKeyOf(r.return_date); const rt = routeOf(r); if(!mk || !rt) return;
+      (routeMonthNet[rt] ||= {});
+      routeMonthNet[rt][mk] = (routeMonthNet[rt][mk]||0) - ((r.total_net||0)-(r.total_tax||0));
     });
 
-    // متوسط كل مندوب = مجموع صافي الشهور اللي فيها بيانات فعلية ÷ عددها بس (مندوب جديد لسه مالوش
-    // كل الشهور بياخد متوسطه من الشهور المتاحة، مش بيتقسم على شهور هو أصلًا ما كانش موجود فيها)
+    // متوسط كل خط سير = مجموع صافي الشهور اللي فيها بيانات فعلية ÷ عددها بس (خط سير جديد لسه مالوش
+    // كل الشهور بياخد متوسطه من الشهور المتاحة، مش بيتقسم على شهور هو أصلًا ما كانش فيها بيانات)
     const histKeys = histMonths.map(h=>h.key);
-    const repsComputed = reps.map(rep=>{
-      const monthMap = repMonthNet[rep.name] || {};
+    const routeAvg = (routeName)=>{
+      const monthMap = routeMonthNet[routeName] || {};
       const availableKeys = histKeys.filter(k=>Object.prototype.hasOwnProperty.call(monthMap, k));
       const sum = availableKeys.reduce((s,k)=>s+(monthMap[k]||0), 0);
-      const avg = availableKeys.length ? sum/availableKeys.length : 0;
+      return { avg: availableKeys.length ? sum/availableKeys.length : 0, monthsCount: availableKeys.length };
+    };
+
+    // هدف كل مندوب = مجموع متوسطات خطوط سيره الحالية (مش متوسط مبيعاته هو باسمه)
+    const repsComputed = reps.map(rep=>{
       const routesArr = Array.isArray(rep.routes) && rep.routes.length ? rep.routes : (rep.route ? [rep.route] : []);
       const supervisorsArr = (rep.supervisors||'').split(',').map(s=>s.trim()).filter(Boolean);
+      let avg = 0, monthsCount = 0;
+      routesArr.forEach(rt=>{
+        const r = routeAvg(rt);
+        avg += r.avg;
+        monthsCount = Math.max(monthsCount, r.monthsCount);
+      });
       return {
         name: rep.name, routes: routesArr, supervisor: supervisorsArr[0] || 'بدون مشرف محدد',
         avg: Math.max(0, avg), // مينفعش مندوب ياخد نصيب سالب لو صافيه طلع بالسالب (مرتجعات أكتر من مبيعات)
-        monthsCount: availableKeys.length,
+        monthsCount,
       };
     });
 
