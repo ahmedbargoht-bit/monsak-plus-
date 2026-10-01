@@ -3148,15 +3148,18 @@ h2,h3{color:#2C1F0A}
                   <div id="sev-who-options" style="padding:6px"></div>
                 </div>
               </div>
-              <select id="sev-week-filter" onchange="sevRefresh()" style="flex:1;min-width:140px">
+              <select id="sev-week-filter" onchange="sevOnPeriodTypeChange()" style="flex:1;min-width:140px">
                 <option value="current">الأسبوع الحالي</option>
                 <option value="prev">الأسبوع الماضي</option>
                 <option value="next">الأسبوع القادم</option>
                 <option value="month">شهري (الشهر الحالي)</option>
+                <option value="prevmonth">الشهر الماضي</option>
+                <option value="custom_month">اختيار شهر محدد...</option>
                 <option value="quarter">ربع سنوي (3 شهور)</option>
                 <option value="half">نصف سنوي (6 شهور)</option>
                 <option value="year">سنوي (السنة الحالية)</option>
               </select>
+              <input type="month" id="sev-custom-month" onchange="sevRefresh()" style="display:none;flex:1;min-width:140px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
             </div>
           </div>
           <p id="sev-crit-note" style="display:none"></p>
@@ -43998,6 +44001,20 @@ const SEV_PERIOD_LABELS = {
   current:'الأسبوع ده', prev:'الأسبوع اللي فات', next:'الأسبوع الجاي',
   month:'الشهر ده', quarter:'الربع ده', half:'النص سنة ده', year:'السنة دي',
 };
+function sevOnPeriodTypeChange() {
+  const sel = document.getElementById('sev-week-filter');
+  const customEl = document.getElementById('sev-custom-month');
+  if (customEl) {
+    customEl.style.display = (sel && sel.value === 'custom_month') ? '' : 'none';
+    // تعبئة افتراضية بالشهر اللي فات أول ما تتفتح، عشان المستخدم ميضطرش يختار يدوي كل مرة
+    if (sel && sel.value === 'custom_month' && !customEl.value) {
+      const d = new Date();
+      d.setDate(1); d.setMonth(d.getMonth() - 1);
+      customEl.value = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+    }
+  }
+  sevRefresh();
+}
 function sevGetPeriodRange(type = 'current') {
   if (type==='current' || type==='prev' || type==='next') return plansGetWeekRange(type);
   const now = new Date();
@@ -44005,6 +44022,19 @@ function sevGetPeriodRange(type = 'current') {
   if (type==='month') {
     start = new Date(now.getFullYear(), now.getMonth(), 1);
     end   = new Date(now.getFullYear(), now.getMonth()+1, 0);
+  } else if (type==='prevmonth') {
+    start = new Date(now.getFullYear(), now.getMonth()-1, 1);
+    end   = new Date(now.getFullYear(), now.getMonth(), 0);
+  } else if (type==='custom_month') {
+    const v = (document.getElementById('sev-custom-month')||{}).value; // "YYYY-MM"
+    if (v && /^\d{4}-\d{2}$/.test(v)) {
+      const [y, m] = v.split('-').map(Number);
+      start = new Date(y, m-1, 1);
+      end   = new Date(y, m, 0);
+    } else {
+      start = new Date(now.getFullYear(), now.getMonth(), 1);
+      end   = new Date(now.getFullYear(), now.getMonth()+1, 0);
+    }
   } else if (type==='quarter') {
     const q = Math.floor(now.getMonth()/3);
     start = new Date(now.getFullYear(), q*3, 1);
@@ -45025,8 +45055,9 @@ function sevExportExcel(onlyName){
 
 // ══════════════════════════════════════════════════════════════
 // تقييم المناديب — بانل مستقل "تقييم المناديب"
-// (8 معايير: تحقيق الهدف الشهري / الحضور والغياب (نشاط) / تغطية خط السير / نسبة المرتجعات /
-// متوسط قيمة الفاتورة / نمو المبيعات شهر عن شهر / تنوع الأصناف المباعة / استغلال العروض النشطة)
+// (11 معيار: تحقيق الهدف الشهري / الحضور والغياب (نشاط) / تغطية خط السير / نسبة المرتجعات /
+// متوسط قيمة الفاتورة / نمو المبيعات شهر عن شهر / تنوع الأصناف المباعة / استغلال العروض النشطة /
+// دقة الجرد (مخزن المندوب) / الصالح والتالف من المرتجع / حركة الصنف داخل المخزن)
 // مستبعد منه تلقائيًا أي حساب اسمه بيبدأ بـ"بيع اداري"
 // ══════════════════════════════════════════════════════════════
 let _revResults = [];
@@ -45182,9 +45213,9 @@ async function revLoadContext(){
   if(!Array.isArray(reps)) reps = [];
   reps = reps.filter(r=>r.name && !r.name.startsWith('بيع اداري'));
 
-  const [deliveries, returns, branchesRaw, targets, overrides, holidayRows, promos, prevDeliveries, prevReturns] = await Promise.all([
+  const [deliveries, returns, branchesRaw, targets, overrides, holidayRows, promos, prevDeliveries, prevReturns, carInventory, stockRequests] = await Promise.all([
     fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,branch_name,route,client_name,total_net,total_tax,delivery_date,items&delivery_date=gte.${start}&delivery_date=lte.${end}&deleted_at=is.null`, H),
-    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,branch_name,route,total_net,total_tax,return_date&return_date=gte.${start}&return_date=lte.${end}&deleted_at=is.null`, H),
+    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,branch_name,route,total_net,total_tax,return_date,items&return_date=gte.${start}&return_date=lte.${end}&deleted_at=is.null`, H),
     fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route&limit=3000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/rep_targets?select=*&deleted_at=is.null&limit=2000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?select=*&limit=2000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
@@ -45192,6 +45223,8 @@ async function revLoadContext(){
     fetch(`${SUPABASE_URL}/rest/v1/sales_promotions?select=client_name,snf_name,date_from,date_to&active=eq.true`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,total_net,total_tax,delivery_date&delivery_date=gte.${prevM.start}&delivery_date=lte.${prevM.end}&deleted_at=is.null`, H),
     fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=rep_name,total_net,total_tax,return_date&return_date=gte.${prevM.start}&return_date=lte.${prevM.end}&deleted_at=is.null`, H),
+    fetchAllRows(`${SUPABASE_URL}/rest/v1/rep_car_inventory?select=rep_name,snf,diff,created_at&created_at=gte.${start}T00:00:00&created_at=lte.${end}T23:59:59`, H),
+    fetchAllRows(`${SUPABASE_URL}/rest/v1/rep_stock_requests?select=rep_name,items,status,created_at&status=eq.approved&created_at=gte.${start}T00:00:00&created_at=lte.${end}T23:59:59`, H),
   ]);
 
   const routeBranches = {};
@@ -45209,6 +45242,8 @@ async function revLoadContext(){
     prevDeliveries: Array.isArray(prevDeliveries)?prevDeliveries:[],
     prevReturns: Array.isArray(prevReturns)?prevReturns:[],
     prevMonthLabel: prevM.label,
+    carInventory: Array.isArray(carInventory)?carInventory:[],
+    stockRequests: Array.isArray(stockRequests)?stockRequests:[],
     now: Date.now(),
   };
 }
@@ -45452,6 +45487,88 @@ function revPromoCriterion(rep, ctx){
   };
 }
 
+// 9) دقة الجرد (مخزن المندوب) — نسبة عمليات جرد السيارة اللي طلعت مطابقة تمامًا (فرق = صفر) من
+// إجمالي عمليات الجرد المسجلة للمندوب في الفترة (rep_car_inventory.diff)
+function revStockAccuracyCriterion(rep, ctx){
+  const repCounts = (ctx.carInventory||[]).filter(c=>c.rep_name===rep.name);
+  if(!repCounts.length) return { level:'good', text:`مفيش عمليات جرد سيارة مسجلة للمندوب ${ctx.periodLabel}`, details:[] };
+  const accurate = repCounts.filter(c=>Number(c.diff||0)===0).length;
+  const pct = Math.round(accurate/repCounts.length*100);
+  const level = pct>=90 ? 'excellent' : pct>=70 ? 'good' : 'needsWork';
+  const mismatches = repCounts.filter(c=>Number(c.diff||0)!==0)
+    .map(c=>`📦 ${c.snf||'صنف غير معروف'} — فرق ${Number(c.diff)>0?'+':''}${c.diff} (${(c.created_at||'').slice(0,10)})`);
+  return {
+    level,
+    text: `${accurate}/${repCounts.length} عملية جرد مطابقة تمامًا بدون فروق (${pct}%)`,
+    details: mismatches,
+  };
+}
+
+// 10) الصالح والتالف من المرتجع — نسبة الكمية التالفة من إجمالي كمية المرتجعات (صالح + تالف)
+// المسجلة على المندوب في الفترة (sales_returns.items[].valid_qty/damaged_qty)، كل ما قلّت كان أحسن
+function revReturnQualityCriterion(rep, ctx){
+  let validQty=0, damagedQty=0;
+  (ctx.returns||[]).forEach(r=>{
+    if(r.rep_name!==rep.name) return;
+    (Array.isArray(r.items)?r.items:[]).forEach(it=>{
+      const v = Number(it.valid_qty!=null ? it.valid_qty : (it.qty||0));
+      const d = Number(it.damaged_qty||0);
+      validQty += v; damagedQty += d;
+    });
+  });
+  const total = validQty + damagedQty;
+  if(!total) return { level:'good', text:`مفيش مرتجعات بأصناف مسجلة للمندوب ${ctx.periodLabel}`, details:[] };
+  const pct = Math.round(damagedQty/total*100);
+  const level = pct<=5 ? 'excellent' : pct<=15 ? 'good' : 'needsWork';
+  return {
+    level,
+    text: `${damagedQty} وحدة تالفة من إجمالي ${total} وحدة مرتجعة (${pct}%) — ${validQty} وحدة صالحة`,
+    details: [],
+  };
+}
+
+// 11) حركة الصنف داخل المخزن — أصناف استلمها المندوب من المخزن (طلبات بضاعة موافَق عليها) وفضلت
+// في عربيته من غير ما تتسلم لعميل (مفيش فاتورة تسليم بيها نفس الصنف) خلال نفس الفترة
+function revStockMovementCriterion(rep, ctx){
+  const received = {};
+  (ctx.stockRequests||[]).forEach(req=>{
+    if(req.rep_name!==rep.name) return;
+    (Array.isArray(req.items)?req.items:[]).forEach(it=>{
+      const nm=(it.name||'').trim(); if(!nm) return;
+      received[nm] = (received[nm]||0) + Number(it.qty||0);
+    });
+  });
+  const totalReceived = Object.values(received).reduce((s,q)=>s+q,0);
+  if(!totalReceived) return { level:'good', text:`مفيش طلبات بضاعة موافَق عليها للمندوب ${ctx.periodLabel}`, details:[] };
+
+  const delivered = {};
+  (ctx.deliveries||[]).forEach(d=>{
+    if(d.rep_name!==rep.name) return;
+    (Array.isArray(d.items)?d.items:[]).forEach(it=>{
+      const nm=(it.name||'').trim(); if(!nm) return;
+      delivered[nm] = (delivered[nm]||0) + Number(it.qty||0);
+    });
+  });
+
+  let stuckTotal = 0;
+  const stuckDetails = [];
+  Object.keys(received).forEach(nm=>{
+    const stuck = Math.max(0, received[nm] - (delivered[nm]||0));
+    if(stuck>0){
+      stuckTotal += stuck;
+      stuckDetails.push(`📦 ${nm} — استلم ${received[nm]} ومتسلمش لعميل منه ${stuck}`);
+    }
+  });
+
+  const pct = Math.round(stuckTotal/totalReceived*100);
+  const level = pct<=10 ? 'excellent' : pct<=25 ? 'good' : 'needsWork';
+  return {
+    level,
+    text: `${stuckTotal} وحدة موجودة في المخزن ومتسلمتش لعميل من إجمالي ${totalReceived} وحدة استلمها من المخزن (${pct}%)`,
+    details: stuckDetails,
+  };
+}
+
 function revComputeForRep(rep, ctx){
   const crits = [
     {icon:'🎯', title:'تحقيق الهدف الشهري', ...revTargetCriterion(rep, ctx)},
@@ -45462,6 +45579,9 @@ function revComputeForRep(rep, ctx){
     {icon:'📈', title:'نمو المبيعات شهر عن شهر', ...revGrowthCriterion(rep, ctx)},
     {icon:'🧺', title:'تنوع الأصناف المباعة', ...revVarietyCriterion(rep, ctx)},
     {icon:'🎁', title:'استغلال العروض النشطة', ...revPromoCriterion(rep, ctx)},
+    {icon:'📋', title:'دقة الجرد (مخزن المندوب)', ...revStockAccuracyCriterion(rep, ctx)},
+    {icon:'♻️', title:'الصالح والتالف من المرتجع', ...revReturnQualityCriterion(rep, ctx)},
+    {icon:'🚚', title:'حركة الصنف داخل المخزن', ...revStockMovementCriterion(rep, ctx)},
   ];
   const overall = sevOverallFromCrits(crits);
   const pct = sevPctFromCrits(crits);
