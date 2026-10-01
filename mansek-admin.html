@@ -34689,8 +34689,31 @@ async function tdLoad(){
       markets: { reps: marketsReps, totalAvg: marketsReps.reduce((s,r)=>s+r.avg,0) },
       histKeys, targetMonth: monthEl.value,
     };
+
+    // لو فيه توزيع اتحوّل فعليًا لنفس الشهر ده قبل كده (زرار "تحويل الأهداف")، رجّعه تلقائي
+    // بدل ما الشاشة تفضل فاضية — نفس الأرقام والتعديلات اليدوية اللي كانت متسجلة وقت التحويل
+    let restoredNote = '';
+    try{
+      const snapRes = await fetch(`${SUPABASE_URL}/rest/v1/target_distribution_snapshots?target_month=eq.${monthEl.value}&select=*&limit=1`, {headers:H});
+      const snapRows = snapRes.ok ? await snapRes.json() : [];
+      const snap = Array.isArray(snapRows) && snapRows[0];
+      if(snap){
+        const cairoInp = document.getElementById('td-total-input-cairo');
+        const alexInp  = document.getElementById('td-total-input-alex');
+        const marketsInp = document.getElementById('td-total-input-markets');
+        if(cairoInp && snap.cairo_total)     cairoInp.value = Math.round(snap.cairo_total);
+        if(alexInp && snap.alex_total)       alexInp.value  = Math.round(snap.alex_total);
+        if(marketsInp && snap.markets_total) marketsInp.value = Math.round(snap.markets_total);
+        _tdOverrides = { cairo: snap.cairo_overrides||{}, alex: snap.alex_overrides||{}, markets: snap.markets_overrides||{} };
+        _tdSupOverrides = { cairo: snap.cairo_sup_overrides||{}, alex: snap.alex_sup_overrides||{}, markets: snap.markets_sup_overrides||{} };
+        restoredNote = ` — تم استرجاع آخر توزيع محوَّل لهذا الشهر (${snap.transferred_count||0} مندوب) تلقائيًا.`;
+      } else {
+        _tdOverrides = {}; _tdSupOverrides = {};
+      }
+    }catch(e){ _tdOverrides = {}; _tdSupOverrides = {}; }
+
     tdRender();
-    msgEl.textContent = `تم حساب المتوسط من ${histKeys.join('، ')} لـ ${repsComputed.length} مندوب نشط (${cairoReps.length} قاهرة، ${alexReps.length} إسكندرية، ${marketsReps.length} أسواق خاصة).`;
+    msgEl.textContent = `تم حساب المتوسط من ${histKeys.join('، ')} لـ ${repsComputed.length} مندوب نشط (${cairoReps.length} قاهرة، ${alexReps.length} إسكندرية، ${marketsReps.length} أسواق خاصة).${restoredNote}`;
     msgEl.style.color = '#1A7A4A';
   }catch(e){
     msgEl.textContent = 'تعذر الحساب: ' + (e.message||e);
@@ -34886,9 +34909,11 @@ async function tdTransferTargets(){
   const regionsMeta = [['cairo',cairo], ['alex',alex], ['markets',markets]];
   const allRepTargets = [];
   const skippedRegions = [];
+  const totalsByRegion = {};
   regionsMeta.forEach(([key, regionData])=>{
     if(!regionData.reps.length) return;
     const totalInput = tdSanitizeNumber(document.getElementById(`td-total-input-${key}`)?.value);
+    totalsByRegion[key] = totalInput;
     if(totalInput<=0){ skippedRegions.push(key); return; }
     const { supRows } = tdComputeRegion(key, regionData, totalInput);
     supRows.forEach(sup=>{
@@ -34939,6 +34964,23 @@ async function tdTransferTargets(){
       if(skippedRegions.length) msg += ` (اتجاهلت مناطق مفيهاش رقم مدخل: ${skippedRegions.join('، ')})`;
       if(msgEl){ msgEl.textContent = msg; msgEl.style.color = '#1A7A4A'; }
       alert(msg);
+
+      // حفظ "أرشيف" بالتوزيع اللي اتحوّل فعليًا لنفس الشهر ده — عشان لو رجعت تفتح نفس
+      // الشهر تاني (حتى بعد ما تسيب التاب أو تقفل المتصفح)، يرجع يظهر زي ما سبته بالظبط
+      try{
+        const snapBody = {
+          target_month: targetMonth,
+          cairo_total: totalsByRegion.cairo||0, alex_total: totalsByRegion.alex||0, markets_total: totalsByRegion.markets||0,
+          cairo_overrides: _tdOverrides.cairo||{}, alex_overrides: _tdOverrides.alex||{}, markets_overrides: _tdOverrides.markets||{},
+          cairo_sup_overrides: _tdSupOverrides.cairo||{}, alex_sup_overrides: _tdSupOverrides.alex||{}, markets_sup_overrides: _tdSupOverrides.markets||{},
+          hist_months: parseInt(document.getElementById('td-months-count')?.value)||3,
+          transferred_count: allRepTargets.length,
+          created_by: 'admin',
+          updated_at: new Date().toISOString(),
+        };
+        const HJ = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=minimal'};
+        await fetch(`${SUPABASE_URL}/rest/v1/target_distribution_snapshots?on_conflict=target_month`, {method:'POST', headers:HJ, body:JSON.stringify(snapBody)});
+      }catch(e){ console.warn('tdSaveSnapshot error:', e); }
     }else{
       if(msgEl){ msgEl.textContent = '⚠️ حصل خطأ في بعض عمليات الحفظ — راجع تاب الأهداف للتأكد.'; msgEl.style.color = '#C0392B'; }
     }
