@@ -544,6 +544,14 @@ table.datatable details summary:hover { text-decoration: underline; }
             </label>
             <button class="btn" style="padding:9px 18px" onclick="mtArchiveLoad()"><i class="ti ti-search"></i> بحث</button>
             <button class="btn secondary" style="padding:9px 18px" onclick="mtArchiveClear()"><i class="ti ti-x"></i> مسح</button>
+            <button id="mtarc-analyze-btn" class="btn" style="padding:9px 18px;background:#1A7A4A" onclick="mtArchiveAnalyze()"><i class="ti ti-chart-bar"></i> تحليل هذه الفترة</button>
+          </div>
+          <div style="font-size:11px;color:#8B6F47;margin-bottom:8px">
+            💡 "بحث" بيوريك جدول خام للفترة المختارة. "تحليل هذه الفترة" بيحمّل فواتير/أصناف/مرتجعات
+            الفترة دي (من الأرشيف) مؤقتًا جوه الأداة عشان تقدر تشوفها في كل التابات التانية (الربع سنوي،
+            الشهري، حرارة الفروع، تحليل العملاء، قوة القطاع...) بالظبط زي أي بيانات حديثة — خط سير،
+            منطقة، عميل... إلخ. التحميل ده مؤقت بس ومش بيتحفظ ولا بيتعدل في قاعدة البيانات؛ اضغط "رجوع
+            للبيانات الحالية" من الشريط اللي هيظهر فوق عشان ترجع تلقائيًا.
           </div>
           <div id="mtarc-msg" style="font-size:12.5px;font-weight:700;color:var(--ink-soft);margin-bottom:8px"></div>
           <div class="table-wrap">
@@ -1561,6 +1569,121 @@ table.datatable details summary:hover { text-decoration: underline; }
       msgEl.style.color = '#C0392B';
       tbodyEl.innerHTML = '<tr><td style="padding:20px;text-align:center;color:var(--ink-soft)">—</td></tr>';
     }
+  }
+
+  // ── تحليل مؤقت لفترة مؤرشفة ──
+  // بيسحب فواتير/أصناف/مرتجعات الفترة المختارة من جداول الأرشيف (كاملة - مش مقصوصة على 2000 زي
+  // معاينة "بحث" فوق) ويحطها في نفس state اللي كل تابات التحليل (الربع سنوي/الشهري/حرارة الفروع/
+  // تحليل العملاء/قوة القطاع...) بتقرا منه، عشان المستخدم يقدر يشوف خط السير/المنطقة/العميل لفترة
+  // قديمة بالظبط زي ما بيشوفها لبيانات حديثة. البيانات الأصلية (الحية) بتتحفظ في _mtArchiveBackupState
+  // وبترجع تاني بزرار "رجوع للبيانات الحالية" - مفيش أي كتابة أو حذف فعلي في قاعدة البيانات هنا،
+  // البيانات المؤرشفة فضلت زي ما هي في جداول الأرشيف طول الوقت.
+  let _mtArchiveBackupState = null;
+
+  async function fetchArchiveRangeRows(table, dateField, from, to) {
+    const pageSize = 1000;
+    let offset = 0, all = [];
+    while (true) {
+      const { data, error } = await sb.from(table).select('*')
+        .gte(dateField, from).lte(dateField, to)
+        .range(offset, offset + pageSize - 1);
+      if (error) throw error;
+      const rows = data || [];
+      all = all.concat(rows);
+      if (rows.length < pageSize) break;
+      offset += pageSize;
+    }
+    return all;
+  }
+
+  async function mtArchiveAnalyze() {
+    const from = document.getElementById('mtarc-from').value;
+    const to = document.getElementById('mtarc-to').value;
+    const msgEl = document.getElementById('mtarc-msg');
+    if (!from || !to) {
+      msgEl.textContent = '⚠️ لازم تحدد "من تاريخ" و"إلى تاريخ" الأول.';
+      msgEl.style.color = '#C0392B';
+      return;
+    }
+    if (!sb) {
+      msgEl.textContent = '⚠️ مفيش اتصال بالسحابة حاليًا.';
+      msgEl.style.color = '#C0392B';
+      return;
+    }
+    const btn = document.getElementById('mtarc-analyze-btn');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ti ti-loader-2"></i> جاري التحميل...'; }
+    msgEl.textContent = 'جاري تجهيز بيانات التحليل من الأرشيف...';
+    msgEl.style.color = 'var(--ink-soft)';
+    try {
+      const [invRows, itemRows, returnRows] = await Promise.all([
+        fetchArchiveRangeRows('tamr_sales_invoices_archive', 'invoice_date', from, to),
+        fetchArchiveRangeRows('tamr_sales_items_archive', 'invoice_date', from, to),
+        fetchArchiveRangeRows('tamr_sales_returns_archive', 'invoice_date', from, to),
+      ]);
+      if (!invRows.length) {
+        msgEl.textContent = 'مفيش فواتير مؤرشفة في الفترة دي للتحليل.';
+        msgEl.style.color = 'var(--ink-soft)';
+        return;
+      }
+      if (!_mtArchiveBackupState) {
+        _mtArchiveBackupState = { invoices: state.invoices, itemRows: state.itemRows, returns: state.returns };
+      }
+      // نفس استبعاد فواتير البضاعة المجانية/العروض الترويجية المطبّق على البيانات الحية (applyCloudRowsToState)
+      const isFreeGoodsRow = (row) => { const g = Number(row.gross) || 0, d = Number(row.discount) || 0; return g > 0 && Math.abs(g - d) < 0.01; };
+      const excludedInvKeys = new Set();
+      const keptInvRows = invRows.filter(row => {
+        if (isFreeGoodsRow(row)) { excludedInvKeys.add((row.file_name || '') + '||' + (row.branch || '') + '||' + (row.invoice_no || '')); return false; }
+        return true;
+      });
+      state.invoices = keptInvRows.map(dbRowToInvoice);
+      state.itemRows = itemRows.filter(row => !excludedInvKeys.has((row.file_name || '') + '||' + (row.branch || '') + '||' + (row.invoice_no || ''))).map(dbRowToItemRow);
+      state.returns = returnRows.map(dbRowToReturn);
+      reapplyManualRoutesToState();
+      applyItemAliasesToState();
+      rebuildInvoiceCustomerIndex();
+      populateFilters();
+      document.getElementById('dashboardSection').style.display = 'block';
+      renderAll();
+      mtArchiveShowBanner(from, to, invRows.length);
+      msgEl.textContent = `تم تحميل ${invRows.length} فاتورة مؤرشفة للتحليل — تقدر تتنقل بين التابات التانية دلوقتي.`;
+      msgEl.style.color = '#1A7A4A';
+    } catch (e) {
+      msgEl.textContent = 'تعذر تجهيز بيانات التحليل: ' + (e.message || e);
+      msgEl.style.color = '#C0392B';
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-chart-bar"></i> تحليل هذه الفترة'; }
+    }
+  }
+
+  function mtArchiveShowBanner(from, to, count) {
+    let bar = document.getElementById('mtarc-analyze-bar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'mtarc-analyze-bar';
+      bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#4B3C1A;color:#EDE5D8;padding:10px 18px;font-size:12.5px;font-weight:700;display:flex;align-items:center;justify-content:center;gap:14px;box-shadow:0 2px 10px rgba(0,0,0,.3);flex-wrap:wrap;text-align:center';
+      document.body.appendChild(bar);
+      document.body.style.paddingTop = '46px';
+    }
+    bar.innerHTML = `<i class="ti ti-archive"></i> وضع تحليل أرشيف مؤقت: من ${from} إلى ${to} (${count} فاتورة) — البيانات دي مش بتتحفظ ومش بتتعدل في القاعدة` +
+      `<button onclick="mtArchiveExitAnalysis()" style="background:#C8A96E;color:#2C1F0A;border:none;border-radius:6px;padding:5px 14px;font-size:12.5px;font-weight:800;cursor:pointer"><i class="ti ti-arrow-back"></i> رجوع للبيانات الحالية</button>`;
+  }
+
+  function mtArchiveExitAnalysis() {
+    if (!_mtArchiveBackupState) return;
+    state.invoices = _mtArchiveBackupState.invoices;
+    state.itemRows = _mtArchiveBackupState.itemRows;
+    state.returns = _mtArchiveBackupState.returns;
+    _mtArchiveBackupState = null;
+    reapplyManualRoutesToState();
+    applyItemAliasesToState();
+    rebuildInvoiceCustomerIndex();
+    populateFilters();
+    renderAll();
+    const bar = document.getElementById('mtarc-analyze-bar');
+    if (bar) bar.remove();
+    document.body.style.paddingTop = '';
+    const msgEl = document.getElementById('mtarc-msg');
+    if (msgEl) { msgEl.textContent = 'رجعت لعرض البيانات الحالية.'; msgEl.style.color = 'var(--ink-soft)'; }
   }
 
   function initLoginFlow() {
@@ -5928,6 +6051,8 @@ table.datatable details summary:hover { text-decoration: underline; }
   // لازم يتعرّضوا على window عشان الكود جوه الـ IIFE دي مش بيوصله أي حدث onclick inline
   window.mtArchiveLoad = mtArchiveLoad;
   window.mtArchiveClear = mtArchiveClear;
+  window.mtArchiveAnalyze = mtArchiveAnalyze;
+  window.mtArchiveExitAnalysis = mtArchiveExitAnalysis;
   window.applyNavOrder = applyNavOrder;
   window.navMoveUp = navMoveUp;
   window.navMoveDown = navMoveDown;
