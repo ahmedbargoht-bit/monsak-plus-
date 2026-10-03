@@ -1066,6 +1066,9 @@ table.datatable details summary:hover { text-decoration: underline; }
   'use strict';
 
   const PALETTE = ['#C55B48', '#8C3E2F', '#D98C6E', '#A67C52', '#6B4226', '#E8B04B', '#7A9E7E', '#4A6D7C', '#B23B3B', '#D9A441'];
+  // متجر بيانات نافذة "تفصيل الفروع" المنبثقة (دوس على عدد الفروع في جداول أداء المبيعات
+  // حسب المجموعة/خط السير) — بيتصفّر مع كل renderRepRoutes جديد
+  let _rrBranchDetailStore = [];
   const MONTH_NAMES_AR = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
 
   const state = {
@@ -6058,6 +6061,8 @@ table.datatable details summary:hover { text-decoration: underline; }
   window.navMoveDown = navMoveDown;
   window.navToggleVisible = navToggleVisible;
   window.resetNavOrder = resetNavOrder;
+  window.rrShowBranchDetail = rrShowBranchDetail;
+  window.rrCloseBranchDetail = rrCloseBranchDetail;
 
 
 /* ============================================================
@@ -6066,6 +6071,42 @@ table.datatable details summary:hover { text-decoration: underline; }
     fmt, fmtMoney, fmtPct, makeChart, barConfig, pieConfig, lineConfig,
     و PALETTE المعرّفة مسبقًا في app.js)
    ============================================================ */
+
+/* ---------------- نافذة منبثقة "تفصيل الفروع" (اسم الفرع + صافي مبيعاته) تفتح بالضغط على عدد الفروع ---------------- */
+function rrEnsureBranchDetailModal() {
+  let overlay = document.getElementById('rr-branch-modal-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'rr-branch-modal-overlay';
+  overlay.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(20,14,6,.55);z-index:9999;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:12px;max-width:560px;width:100%;max-height:82vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.3)">
+      <div style="background:#4B3C1A;color:#EDE5D8;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <div id="rr-branch-modal-title" style="font-weight:800;font-size:14px"></div>
+        <button onclick="rrCloseBranchDetail()" style="background:rgba(255,255,255,.15);border:none;color:#EDE5D8;border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:16px">✕</button>
+      </div>
+      <div id="rr-branch-modal-body" style="overflow:auto;padding:0"></div>
+    </div>`;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) rrCloseBranchDetail(); });
+  document.body.appendChild(overlay);
+  return overlay;
+}
+function rrShowBranchDetail(idx) {
+  const entry = _rrBranchDetailStore[idx];
+  if (!entry) return;
+  const overlay = rrEnsureBranchDetailModal();
+  document.getElementById('rr-branch-modal-title').textContent = `${entry.title} (${entry.rows.length} فرع)`;
+  const total = entry.rows.reduce((s, r) => s + r[1], 0);
+  const headers = ['#', 'اسم الفرع', 'صافي المبيعات'];
+  const rows = entry.rows.map((r, i) => [i + 1, escapeHtml(r[0]), fmtMoney(r[1])]);
+  const footer = ['', 'الإجمالي', fmtMoney(total)];
+  document.getElementById('rr-branch-modal-body').innerHTML = tableHTML(headers, rows, footer);
+  overlay.style.display = 'flex';
+}
+function rrCloseBranchDetail() {
+  const overlay = document.getElementById('rr-branch-modal-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
 
 function tableHTML(headers, rows, footerRow) {
   let h = '<table class="datatable"><thead><tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
@@ -7934,6 +7975,20 @@ function renderRepRoutes() {
   const matched = withRR.filter(x => x.rr);
   const unmatched = withRR.filter(x => !x.rr);
 
+  // متجر بيانات نافذة "تفصيل الفروع" (اسم كل فرع + صافي مبيعاته) — بيتصفّر مع كل رندر جديد،
+  // وكل خلية "عدد الفروع" قابلة للضغط بتخزن تفصيلها هنا وتفتحها بالـ index بدل تمرير الاسم
+  // نفسه في onclick (تفاديًا لمشاكل أقواس/علامات تنصيص في أسماء المجموعات وخطوط السير)
+  _rrBranchDetailStore = [];
+  function rrBranchDetailCell(title, rowsOfKey, sitesCount) {
+    if (!sitesCount) return fmt(sitesCount);
+    const branchNets = new Map();
+    rowsOfKey.forEach(m => { branchNets.set(m.rr.branchName, (branchNets.get(m.rr.branchName) || 0) + m.inv.__net); });
+    const detailRows = Array.from(branchNets.entries()).sort((a, b) => b[1] - a[1]);
+    const idx = _rrBranchDetailStore.length;
+    _rrBranchDetailStore.push({ title, rows: detailRows });
+    return `<a href="javascript:void(0)" onclick="rrShowBranchDetail(${idx})" style="color:#8a5a1e;font-weight:700;text-decoration:underline;cursor:pointer">${fmt(sitesCount)}</a>`;
+  }
+
   /* ----- أداء المبيعات حسب المجموعة ----- */
   const byGroup = groupSum(matched, x => x.rr.group || '(بدون مجموعة)', x => x.inv.__net);
   byGroup.sort((a, b) => b.sum - a.sum);
@@ -7942,11 +7997,13 @@ function renderRepRoutes() {
     ? ['المجموعة', 'عدد الفروع', ...yearColumnHeaders(years)]
     : ['المجموعة', 'عدد الفروع', 'صافي المبيعات'];
   const groupRows = byGroup.map(x => {
-    const sites = new Set(matched.filter(m => (m.rr.group || '(بدون مجموعة)') === x.key).map(m => m.rr.branchName)).size;
+    const rowsOfGroup = matched.filter(m => (m.rr.group || '(بدون مجموعة)') === x.key);
+    const sites = new Set(rowsOfGroup.map(m => m.rr.branchName)).size;
+    const sitesCell = rrBranchDetailCell(`فروع مجموعة: ${x.key}`, rowsOfGroup, sites);
     if (years.length >= 2) {
-      return [x.key, fmt(sites), ...yearColumnCells(groupBmap, x.key, years, fmtMoney)];
+      return [x.key, sitesCell, ...yearColumnCells(groupBmap, x.key, years, fmtMoney)];
     }
-    return [x.key, fmt(sites), fmtMoney(x.sum)];
+    return [x.key, sitesCell, fmtMoney(x.sum)];
   });
   const groupKeys = byGroup.map(x => x.key);
   const totalGroupSites = new Set(matched.map(m => m.rr.branchName)).size;
@@ -7981,10 +8038,11 @@ function renderRepRoutes() {
     const rowsOfRoute = matched.filter(m => m.rr.route === x.key);
     const sites = new Set(rowsOfRoute.map(m => m.rr.branchName)).size;
     const group = rowsOfRoute[0] ? (rowsOfRoute[0].rr.group || '') : '';
+    const sitesCell = rrBranchDetailCell(`فروع خط سير: ${x.key}`, rowsOfRoute, sites);
     if (years.length >= 2) {
-      return [x.key, group, fmt(sites), ...yearColumnCells(routeBmap, x.key, years, fmtMoney)];
+      return [x.key, group, sitesCell, ...yearColumnCells(routeBmap, x.key, years, fmtMoney)];
     }
-    return [x.key, group, fmt(sites), fmtMoney(x.sum)];
+    return [x.key, group, sitesCell, fmtMoney(x.sum)];
   });
   const routeKeys = byRoute.map(x => x.key);
   const totalRouteSites = new Set(matched.map(m => m.rr.branchName)).size;
