@@ -130,6 +130,7 @@ html, body {
 .export-dd-menu button:hover { background: var(--sand); }
 .export-dd-menu button.dd-pdf i { color:#A32D2D; font-size:15px; }
 .export-dd-menu button.dd-excel i { color:#3B6D11; font-size:15px; }
+.export-dd-menu button.dd-share i { color:#1F8A3B; font-size:15px; }
 .btn.secondary:hover { background: var(--sand); }
 
 .status-log { margin-top: 14px; font-size: 12.5px; color: var(--ink-soft); max-height: 130px; overflow-y:auto; background:#FAF7F2; border-radius:8px; padding:8px 12px;}
@@ -284,6 +285,13 @@ table.datatable details summary:hover { text-decoration: underline; }
      التقرير المُجهّز مسبقًا بس */
   body.print-only-allitemsreport #panel-items > *:not(#allItemsPrintWrap) { display: none !important; }
   body.print-only-allitemsreport #allItemsPrintWrap { display: block !important; }
+
+  /* طباعة جدول "أداء المبيعات حسب المجموعة" أو "أداء المبيعات حسب خط السير" بس (كل واحد له زرار
+     تصدير منفصل) - بيخفي كل حاجة تانية في تاب "خطوط سير منسقين" ويبين الجدول المطلوب بس */
+  body.print-only-rrgroup #panel-reproutes > *:not(#rrGroupPrintWrap) { display: none !important; }
+  body.print-only-rrgroup #rrGroupPrintWrap { display: block !important; }
+  body.print-only-rrroute #panel-reproutes > *:not(#rrRoutePrintWrap) { display: none !important; }
+  body.print-only-rrroute #rrRoutePrintWrap { display: block !important; }
 
   /* إظهار كل تفاصيل الفروع (details/summary) كاملة عند الطباعة حتى لو مقفولة على الشاشة */
   table.datatable details:not([open]) > *:not(summary) { display: block !important; }
@@ -1068,6 +1076,10 @@ table.datatable details summary:hover { text-decoration: underline; }
   // متجر بيانات نافذة "تفصيل الفروع" المنبثقة (دوس على عدد الفروع في جداول أداء المبيعات
   // حسب المجموعة/خط السير) — بيتصفّر مع كل renderRepRoutes جديد
   let _rrBranchDetailStore = [];
+  // آخر بيانات محسوبة لجدولي "أداء المبيعات حسب المجموعة" و"حسب خط السير" (خطوط سير منسقين) —
+  // بتتخزن هنا كل مرة renderRepRoutes تترندر عشان أزرار التصدير (PDF/Excel/واتساب) تقدر توصلها
+  // من غير ما تعيد كل الحسابات تاني
+  let _rrExportData = { group: null, route: null };
   const MONTH_NAMES_AR = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
 
   const state = {
@@ -8163,6 +8175,21 @@ function renderRepRoutes() {
     ? ['الإجمالي', fmt(totalGroupSites), ...yearColumnCells(sumYearTotalsBmap(groupBmap, groupKeys, years), '__TOTAL__', years, fmtMoney)]
     : ['الإجمالي', fmt(totalGroupSites), fmtMoney(totalGroupNet)];
 
+  // نسخة نص صافي (بدون روابط HTML، وبإجمالي كل الفترة المختارة في عمود واحد بس حتى لو فيه
+  // أكتر من سنة) لنفس جدول "أداء المبيعات حسب المجموعة" - تُستخدم في تصدير Excel/PDF/واتساب
+  // بدل الخلية القابلة للضغط اللي فيها رابط onclick
+  const groupExportRows = byGroup.map(x => {
+    const rowsOfGroup = matched.filter(m => (m.rr.group || '(بدون مجموعة)') === x.key);
+    const sites = new Set(rowsOfGroup.map(m => m.rr.branchName)).size;
+    return [x.key, sites, x.sum];
+  });
+  _rrExportData.group = {
+    title: 'أداء المبيعات حسب المجموعة',
+    headers: ['المجموعة', 'عدد الفروع', 'صافي المبيعات'],
+    rows: groupExportRows,
+    footer: ['الإجمالي', totalGroupSites, totalGroupNet]
+  };
+
   /* ----- أداء المبيعات حسب خط السير ----- */
   const byRoute = groupSum(matched, x => x.rr.route, x => x.inv.__net);
   // ترتيب خطوط السير: كل خطوط نفس المجموعة تحت بعض (بنفس ترتيب المجموعات في جدول "أداء المبيعات
@@ -8202,6 +8229,21 @@ function renderRepRoutes() {
   const routeFooter = years.length >= 2
     ? ['الإجمالي', '-', '-', fmt(totalRouteSites), ...yearColumnCells(sumYearTotalsBmap(routeBmap, routeKeys, years), '__TOTAL__', years, fmtMoney)]
     : ['الإجمالي', '-', '-', fmt(totalRouteSites), fmtMoney(totalRouteNet)];
+
+  // نسخة نص صافي لنفس جدول "أداء المبيعات حسب خط السير" (إجمالي الفترة في عمود واحد) - للتصدير
+  const routeExportRows = byRoute.map(x => {
+    const rowsOfRoute = matched.filter(m => m.rr.route === x.key);
+    const sites = new Set(rowsOfRoute.map(m => m.rr.branchName)).size;
+    const group = rowsOfRoute[0] ? (rowsOfRoute[0].rr.group || '') : '';
+    const coordName = resolveRouteCoordinatorName(x.key, routeCoordinatorMap) || '—';
+    return [x.key, group, coordName, sites, x.sum];
+  });
+  _rrExportData.route = {
+    title: 'أداء المبيعات حسب خط السير',
+    headers: ['خط السير', 'المجموعة', 'المنسق', 'عدد الفروع', 'صافي المبيعات'],
+    rows: routeExportRows,
+    footer: ['الإجمالي', '-', '-', totalRouteSites, totalRouteNet]
+  };
 
   const coveragePct = inv.length ? matched.length / inv.length : 0;
   const unmatchedSites = new Set(unmatched.map(x => x.inv['فرع_العميل']).filter(Boolean));
@@ -8352,14 +8394,44 @@ function renderRepRoutes() {
   `;
 
   el.innerHTML = `
-    <div class="table-title">أداء المبيعات حسب المجموعة</div>
-    <div class="grid2">
-      <div class="chart-box"><canvas id="chRepRouteGroups"></canvas></div>
-      <div class="table-wrap">${tableHTML(groupHeaders, groupRows, groupFooter)}</div>
+    <div id="rrGroupPrintWrap">
+      <div class="print-only">الطحان جولدن داتس - تقرير أداء المبيعات حسب المجموعة - ${new Date().toLocaleDateString('ar-EG')}</div>
+      <div class="table-title" style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+        <span>أداء المبيعات حسب المجموعة</span>
+        <span class="no-print">
+          <div class="export-dd">
+            <button type="button" class="export-dd-btn" onclick="toggleExportDD(this,event)"><i class="ti ti-download"></i> تصدير <i class="ti ti-chevron-down"></i></button>
+            <div class="export-dd-menu">
+              <button type="button" class="dd-pdf" onclick="rrPrintSection('rrgroup')"><i class="ti ti-file-type-pdf"></i> طباعة PDF</button>
+              <button type="button" class="dd-excel" onclick="rrExportTableExcel('group')"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+              <button type="button" class="dd-share" onclick="rrShareTableWhatsApp('group')"><i class="ti ti-brand-whatsapp"></i> إرسال واتساب</button>
+            </div>
+          </div>
+        </span>
+      </div>
+      <div class="grid2">
+        <div class="chart-box no-print"><canvas id="chRepRouteGroups"></canvas></div>
+        <div class="table-wrap">${tableHTML(groupHeaders, groupRows, groupFooter)}</div>
+      </div>
     </div>
-    <div class="table-title">أداء المبيعات حسب خط السير</div>
-    ${warn}
-    <div class="table-wrap">${tableHTML(routeHeaders, routeRows, routeFooter)}</div>
+    <div id="rrRoutePrintWrap">
+      <div class="print-only">الطحان جولدن داتس - تقرير أداء المبيعات حسب خط السير - ${new Date().toLocaleDateString('ar-EG')}</div>
+      <div class="table-title" style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+        <span>أداء المبيعات حسب خط السير</span>
+        <span class="no-print">
+          <div class="export-dd">
+            <button type="button" class="export-dd-btn" onclick="toggleExportDD(this,event)"><i class="ti ti-download"></i> تصدير <i class="ti ti-chevron-down"></i></button>
+            <div class="export-dd-menu">
+              <button type="button" class="dd-pdf" onclick="rrPrintSection('rrroute')"><i class="ti ti-file-type-pdf"></i> طباعة PDF</button>
+              <button type="button" class="dd-excel" onclick="rrExportTableExcel('route')"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
+              <button type="button" class="dd-share" onclick="rrShareTableWhatsApp('route')"><i class="ti ti-brand-whatsapp"></i> إرسال واتساب</button>
+            </div>
+          </div>
+        </span>
+      </div>
+      ${warn}
+      <div class="table-wrap">${tableHTML(routeHeaders, routeRows, routeFooter)}</div>
+    </div>
 
     ${routeLinkSectionHtml}
 
@@ -8546,6 +8618,124 @@ function renderRepRoutes() {
     refreshDirTable();
   });
 }
+
+/* ---------------- تصدير جدولي "أداء المبيعات حسب المجموعة" و"حسب خط السير" (PDF/Excel/واتساب) ---------------- */
+// طباعة قسم واحد بس (نفس أسلوب printIndirectBlock الموجود فوق) - which: 'rrgroup' أو 'rrroute'
+window.rrPrintSection = function (which) {
+  const cls = 'print-only-' + which;
+  document.body.classList.add(cls);
+  const cleanup = () => document.body.classList.remove(cls);
+  window.addEventListener('afterprint', cleanup, { once: true });
+  window.print();
+  setTimeout(cleanup, 30000);
+};
+
+// تصدير Excel مبرند بهوية الطحان (نفس ألوان INK/SAND المستخدمة في باقي تصديرات الملف) لجدول
+// "أداء المبيعات حسب المجموعة" أو "حسب خط السير" - which: 'group' أو 'route'
+window.rrExportTableExcel = async function (which) {
+  const data = _rrExportData[which];
+  if (!data) { alert('لا توجد بيانات جاهزة للتصدير - جدد الصفحة وحاول تاني.'); return; }
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'نظام تحليل مبيعات تمور الطحان';
+  wb.created = new Date();
+  const ws = wb.addWorksheet(data.title, { views: [{ rightToLeft: true }] });
+
+  const INK = 'FF3A2417', SAND = 'FFEDE5D8', BAND = 'FFFAF7F2';
+  const nCols = data.headers.length;
+  const colLetter = (n) => { let s = ''; while (n > 0) { const rem = (n - 1) % 26; s = String.fromCharCode(65 + rem) + s; n = Math.floor((n - 1) / 26); } return s; };
+
+  try {
+    const logoEl = document.querySelector('img.logo');
+    const src = logoEl ? logoEl.getAttribute('src') : '';
+    if (src && src.indexOf('base64,') > -1) {
+      const base64 = src.split('base64,')[1];
+      const imgId = wb.addImage({ base64, extension: 'png' });
+      ws.addImage(imgId, { tl: { col: 0.15, row: 0.15 }, ext: { width: 64, height: 64 } });
+    }
+  } catch (e) { /* لو فشل تحميل الشعار، نكمل التصدير من غيره */ }
+
+  ws.mergeCells(1, 2, 2, nCols);
+  const titleCell = ws.getCell(1, 2);
+  titleCell.value = 'نظام تحليل مبيعات تمور الطحان - ' + data.title;
+  titleCell.font = { bold: true, size: 15, color: { argb: INK } };
+  titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+
+  ws.mergeCells(3, 2, 3, nCols);
+  const infoCell = ws.getCell(3, 2);
+  const now = new Date();
+  infoCell.value = 'تاريخ التصدير: ' + String(now.getDate()).padStart(2, '0') + '/' + String(now.getMonth() + 1).padStart(2, '0') + '/' + now.getFullYear();
+  infoCell.font = { size: 11, color: { argb: 'FF6B5647' } };
+  infoCell.alignment = { horizontal: 'center' };
+
+  ws.addRow([]);
+  const headerRow = ws.addRow(data.headers);
+  headerRow.eachCell(cell => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: INK } };
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+  });
+
+  data.rows.forEach((r, i) => {
+    const row = ws.addRow(r);
+    const isMoneyCol = (ci) => ci === nCols; // آخر عمود دايمًا هو صافي المبيعات في الجدولين
+    row.eachCell((cell, colNumber) => {
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      if (isMoneyCol(colNumber) && typeof cell.value === 'number') cell.numFmt = '#,##0';
+      if (colNumber === 2 && typeof cell.value === 'number') cell.numFmt = '#,##0';
+      if (i % 2 === 1) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } };
+    });
+  });
+
+  if (data.footer) {
+    const footerRow = ws.addRow(data.footer);
+    footerRow.eachCell(cell => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SAND } };
+      cell.font = { bold: true, color: { argb: INK } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      if (typeof cell.value === 'number') cell.numFmt = '#,##0';
+    });
+  }
+
+  ws.columns.forEach((col, i) => { col.width = i === 0 ? 28 : 18; });
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = data.title + ' - الطحان جولدن داتس.xlsx';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+// إرسال ملخص نصي للجدول عبر واتساب (مافيش مكتبة توليد PDF مرفقة في الصفحة دي، فالمشاركة بصيغة
+// نص منسق بدل ملف PDF مرفق فعلي) - which: 'group' أو 'route'
+window.rrShareTableWhatsApp = function (which) {
+  const data = _rrExportData[which];
+  if (!data) { alert('لا توجد بيانات جاهزة للمشاركة - جدد الصفحة وحاول تاني.'); return; }
+  const now = new Date();
+  const dateStr = String(now.getDate()).padStart(2, '0') + '/' + String(now.getMonth() + 1).padStart(2, '0') + '/' + now.getFullYear();
+  let lines = [];
+  lines.push('*الطحان جولدن داتس*');
+  lines.push('*' + data.title + '*');
+  lines.push('تاريخ: ' + dateStr);
+  lines.push('');
+  data.rows.forEach(r => {
+    // آخر عمود = صافي المبيعات رقم، وباقي الأعمدة نصوص/أرقام مساعدة - بنعرضهم في سطر واحد لكل صف
+    const label = r[0];
+    const net = r[r.length - 1];
+    lines.push('• ' + label + ': ' + fmtMoney(net));
+  });
+  if (data.footer) {
+    const totalNet = data.footer[data.footer.length - 1];
+    lines.push('');
+    lines.push('*الإجمالي: ' + fmtMoney(totalNet) + '*');
+  }
+  const text = encodeURIComponent(lines.join('\n'));
+  window.open('https://wa.me/?text=' + text, '_blank');
+};
 
 /* ---------------- دمج الأصناف ---------------- */
 // بتخلّي اليوزر يدمج صنفين أو أكتر (سواء ليهم كود أو لأ) تحت اسم موحد جديد يختاره - عشان لو نفس
