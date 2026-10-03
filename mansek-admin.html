@@ -2944,9 +2944,27 @@ h2,h3{color:#2C1F0A}
               <h2><i class="ti ti-truck-delivery" style="color:#731E2E"></i> خطوط سير مناديب البيع</h2>
               <p id="asr-header-sub">جاري التحميل...</p>
             </div>
-            <button class="btn btn-ghost btn-sm" onclick="asrInit(true)">
-              <i class="ti ti-refresh"></i> تحديث
-            </button>
+            <div style="display:flex;gap:8px">
+              <div class="asr-export-dd" style="position:relative">
+                <button class="btn btn-sm" style="background:#731E2E;color:#fff" onclick="asrToggleExportDD(event)">
+                  <i class="ti ti-download"></i> تصدير
+                </button>
+                <div class="asr-export-dd-menu" id="asr-export-dd-menu" style="display:none;position:absolute;top:calc(100% + 4px);left:0;background:#fff;border:1px solid #E0D8CC;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.15);min-width:170px;z-index:50;overflow:hidden">
+                  <button onclick="asrExportPDF();asrToggleExportDD()" style="display:flex;align-items:center;gap:8px;width:100%;padding:10px 14px;background:#fff;border:none;border-bottom:1px solid #F3EDE5;cursor:pointer;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;color:#731E2E;text-align:right">
+                    <i class="ti ti-file-type-pdf"></i> PDF
+                  </button>
+                  <button onclick="asrExportExcel();asrToggleExportDD()" style="display:flex;align-items:center;gap:8px;width:100%;padding:10px 14px;background:#fff;border:none;border-bottom:1px solid #F3EDE5;cursor:pointer;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;color:#4E5A2B;text-align:right">
+                    <i class="ti ti-file-spreadsheet"></i> Excel
+                  </button>
+                  <button onclick="asrShareWhatsApp();asrToggleExportDD()" style="display:flex;align-items:center;gap:8px;width:100%;padding:10px 14px;background:#fff;border:none;cursor:pointer;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;color:#1F8A3B;text-align:right">
+                    <i class="ti ti-brand-whatsapp"></i> واتساب
+                  </button>
+                </div>
+              </div>
+              <button class="btn btn-ghost btn-sm" onclick="asrInit(true)">
+                <i class="ti ti-refresh"></i> تحديث
+              </button>
+            </div>
           </div>
 
           <!-- فلاتر -->
@@ -41304,6 +41322,168 @@ function asrToggleCard(repId){
   const rep = _ASR_REPS.find(r=>r.id==repId);
   const count = rep ? (Array.isArray(rep.routes)?rep.routes.length:1) : 0;
   if(toggle) toggle.innerHTML = isOpen ? `▼ عرض الخطوط (${count})` : `▲ إخفاء الخطوط`;
+}
+
+// ── تصدير خطوط سير المناديب (PDF / Excel / واتساب) — بيصدّر بالظبط اللي ظاهر على الشاشة
+// دلوقتي: نفس فلاتر المجموعة/النوع (ميداني-اداري)/البحث المفعّلة، ومجمّع حسب المشرف زي العرض ──
+function asrToggleExportDD(ev){
+  if(ev) ev.stopPropagation();
+  const menu = document.getElementById('asr-export-dd-menu');
+  if(!menu) return;
+  const willOpen = menu.style.display==='none';
+  menu.style.display = willOpen ? 'block' : 'none';
+  if(willOpen){
+    const closeOnce = ()=>{ menu.style.display='none'; document.removeEventListener('click', closeOnce); };
+    setTimeout(()=>document.addEventListener('click', closeOnce), 0);
+  }
+}
+
+// بيعيد بناء نفس مجموعات asrRender (فلترة + تجميع حسب المشرف) عشان التصدير يطابق الشاشة بالظبط
+function asrBuildExportGroups(){
+  const search = (document.getElementById('asr-search')?.value||'').trim().toLowerCase();
+  let reps = _ASR_REPS.filter(r=>{
+    if(_ASR_GRP_FILTER!=='all'){
+      const grps = Array.isArray(r.grps)&&r.grps.length ? r.grps : (r.grp?[r.grp]:[]);
+      if(!grps.includes(_ASR_GRP_FILTER)) return false;
+    }
+    const rIsAdmin = (r.name||'').startsWith('بيع اداري');
+    if(_ASR_TYPE_FILTER==='field' && rIsAdmin) return false;
+    if(_ASR_TYPE_FILTER==='admin' && !rIsAdmin) return false;
+    if(search){
+      const nm = (r.name||'').toLowerCase().includes(search);
+      const rt = (Array.isArray(r.routes)?r.routes:[]).some(x=>x.toLowerCase().includes(search));
+      if(!nm && !rt) return false;
+    }
+    return true;
+  });
+  const bySup = {}; const supOrder = [];
+  reps.forEach(rep=>{
+    const sup = rep.supervisors || 'بدون مشرف';
+    if(!bySup[sup]){ bySup[sup]=[]; supOrder.push(sup); }
+    const routes  = Array.isArray(rep.routes)&&rep.routes.length ? rep.routes : (rep.route?[rep.route]:[]);
+    const totalBr = routes.reduce((s,rt)=>s+((_ASR_ROUTE_BRANCHES[rt]||[]).length),0);
+    const lastDel = _ASR_LAST_DEL[rep.name];
+    bySup[sup].push({
+      name: rep.name,
+      type: (rep.name||'').startsWith('بيع اداري') ? 'اداري' : 'ميداني',
+      grp: (ASR_GRP_META[(Array.isArray(rep.grps)&&rep.grps.length?rep.grps:(rep.grp?[rep.grp]:[]))[0]]||{}).label || '—',
+      routesCount: routes.length,
+      branchesCount: totalBr,
+      lastDel: asrDaysAgo(lastDel) || 'لا يوجد'
+    });
+  });
+  supOrder.sort((a,b)=>{
+    if(a==='بدون مشرف') return 1;
+    if(b==='بدون مشرف') return -1;
+    return a.localeCompare(b,'ar');
+  });
+  return supOrder.map(sup=>({supervisor:sup, reps:bySup[sup]}));
+}
+
+function asrExportPDF(){
+  const groups = asrBuildExportGroups();
+  if(!groups.length){ showToast('مفيش بيانات للتصدير بالفلاتر الحالية','err'); return; }
+  const DR = '731E2E';
+  const win = window.open('', '_blank');
+  if(!win){ showToast('المتصفح منع فتح نافذة الطباعة — اسمح بالنوافذ المنبثقة وحاول تاني','err'); return; }
+  const today = new Date().toLocaleDateString('en-GB');
+  let groupsHtml = groups.map(g=>`
+    <div style="margin-top:16px;page-break-inside:avoid">
+      <div style="background:#F3EDE5;color:${DR};font-weight:800;font-size:13px;padding:7px 12px;border-radius:8px 8px 0 0;display:flex;justify-content:space-between">
+        <span>👤 المشرف: ${g.supervisor}</span><span>${g.reps.length} مندوب</span>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:11.5px;font-family:Cairo,Arial,sans-serif">
+        <thead><tr style="background:${DR};color:#fff">
+          <th style="padding:6px;border:1px solid #ddd">المندوب</th>
+          <th style="padding:6px;border:1px solid #ddd">النوع</th>
+          <th style="padding:6px;border:1px solid #ddd">المجموعة</th>
+          <th style="padding:6px;border:1px solid #ddd">خطوط السير</th>
+          <th style="padding:6px;border:1px solid #ddd">الفروع</th>
+          <th style="padding:6px;border:1px solid #ddd">آخر تسليم</th>
+        </tr></thead>
+        <tbody>${g.reps.map((r,i)=>`<tr style="background:${i%2?'#FCF9F4':'#fff'}">
+          <td style="padding:6px;border:1px solid #ddd;font-weight:700">${r.name}</td>
+          <td style="padding:6px;border:1px solid #ddd;text-align:center">${r.type}</td>
+          <td style="padding:6px;border:1px solid #ddd;text-align:center">${r.grp}</td>
+          <td style="padding:6px;border:1px solid #ddd;text-align:center">${r.routesCount}</td>
+          <td style="padding:6px;border:1px solid #ddd;text-align:center">${r.branchesCount}</td>
+          <td style="padding:6px;border:1px solid #ddd;text-align:center">${r.lastDel}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>`).join('');
+  win.document.write(`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8">
+    <title>خطوط سير مناديب البيع</title>
+    <style>body{font-family:Cairo,Arial,sans-serif;margin:24px;color:#1C1C1C}
+      @media print{ @page{ margin:14mm } }</style></head>
+    <body>
+      <div style="text-align:center;border-bottom:3px solid ${DR};padding-bottom:10px;margin-bottom:6px">
+        <div style="font-size:18px;font-weight:900;color:${DR}">الطحان جولدن داتس</div>
+        <div style="font-size:14px;font-weight:700;margin-top:4px">تقرير خطوط سير مناديب البيع</div>
+        <div style="font-size:11px;color:#888;margin-top:2px">تاريخ التقرير: ${today}</div>
+      </div>
+      ${groupsHtml}
+      <div style="text-align:center;color:#aaa;font-size:9px;margin-top:18px">Al Tahhan Golden Dates © ${new Date().getFullYear()} — تم إنشاء التقرير من منظومة إدارة المبيعات والتنسيق</div>
+      <script>window.onload=()=>{setTimeout(()=>window.print(),300)}<\/script>
+    </body></html>`);
+  win.document.close();
+}
+
+function asrExportExcel(){
+  if(typeof XLSX==='undefined'){ showToast('مكتبة تصدير الإكسل مش محمّلة','err'); return; }
+  const groups = asrBuildExportGroups();
+  if(!groups.length){ showToast('مفيش بيانات للتصدير بالفلاتر الحالية','err'); return; }
+  const DR = '731E2E', OL = '4E5A2B';
+  const aoa = [['خطوط سير مناديب البيع — الطحان جولدن داتس','','','','','']];
+  aoa.push([`تاريخ التقرير: ${new Date().toLocaleDateString('en-GB')}`,'','','','','']);
+  const S = (bg,fc,b,sz,right)=>({fill:{fgColor:{rgb:bg}},font:{bold:b,color:{rgb:fc},sz,name:'Cairo'},alignment:{horizontal:right?'right':'center',vertical:'center',wrapText:true,readingOrder:2},border:{top:{style:'thin'},bottom:{style:'thin'},left:{style:'thin'},right:{style:'thin'}}});
+  const styles = []; // {r,c,s}
+  styles.push({r:0,c:0,s:S(DR,'FFFFFF',true,14)});
+  for(let c=1;c<6;c++) styles.push({r:0,c,s:S(DR,'FFFFFF',true,14)});
+  for(let c=0;c<6;c++) styles.push({r:1,c,s:S('F5E8E8',DR,true,10,true)});
+  const merges = [{s:{r:0,c:0},e:{r:0,c:5}},{s:{r:1,c:0},e:{r:1,c:5}}];
+  let r = 2;
+  groups.forEach(g=>{
+    merges.push({s:{r,c:0},e:{r,c:5}});
+    aoa.push([`👤 المشرف: ${g.supervisor} — ${g.reps.length} مندوب`,'','','','','']);
+    for(let c=0;c<6;c++) styles.push({r,c,s:S(OL,'FFFFFF',true,11,true)});
+    r++;
+    aoa.push(['المندوب','النوع','المجموعة','خطوط السير','الفروع','آخر تسليم']);
+    for(let c=0;c<6;c++) styles.push({r,c,s:S('EEF2E6',OL,true,10)});
+    r++;
+    g.reps.forEach((rep,i)=>{
+      const bg = i%2===0?'FFFFFF':'FBF0F0';
+      aoa.push([rep.name, rep.type, rep.grp, rep.routesCount, rep.branchesCount, rep.lastDel]);
+      styles.push({r,c:0,s:S(bg,'000000',true,11,true)});
+      styles.push({r,c:1,s:S(bg,'000000',false,10)});
+      styles.push({r,c:2,s:S(bg,'000000',false,10)});
+      styles.push({r,c:3,s:S(bg,DR,true,10)});
+      styles.push({r,c:4,s:S(bg,DR,true,10)});
+      styles.push({r,c:5,s:S(bg,'555555',false,10)});
+      r++;
+    });
+  });
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{wch:26},{wch:12},{wch:20},{wch:12},{wch:10},{wch:14}];
+  ws['!merges'] = merges;
+  const set=(rr,cc,s)=>{ const a=XLSX.utils.encode_cell({r:rr,c:cc}); if(!ws[a]) ws[a]={t:'z',v:''}; ws[a].s=s; };
+  styles.forEach(x=>set(x.r,x.c,x.s));
+  XLSX.utils.book_append_sheet(wb, ws, 'خطوط سير المناديب');
+  XLSX.writeFile(wb, `خطوط_سير_مناديب_البيع_${new Date().toLocaleDateString('en-US').replace(/\//g,'-')}.xlsx`);
+}
+
+function asrShareWhatsApp(){
+  const groups = asrBuildExportGroups();
+  if(!groups.length){ showToast('مفيش بيانات للمشاركة بالفلاتر الحالية','err'); return; }
+  let txt = `*خطوط سير مناديب البيع — الطحان جولدن داتس*\nتاريخ التقرير: ${new Date().toLocaleDateString('en-GB')}\n\n`;
+  groups.forEach(g=>{
+    txt += `👤 *المشرف: ${g.supervisor}* (${g.reps.length} مندوب)\n`;
+    g.reps.forEach(r=>{
+      txt += `  • ${r.name} (${r.type}) — ${r.routesCount} خط سير، ${r.branchesCount} فرع، آخر تسليم: ${r.lastDel}\n`;
+    });
+    txt += '\n';
+  });
+  window.open(`https://wa.me/?text=${encodeURIComponent(txt)}`, '_blank');
 }
 
 // ══════════════════════════════════════════════════════════════
