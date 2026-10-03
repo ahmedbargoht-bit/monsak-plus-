@@ -39158,15 +39158,17 @@ async function wrLoad(){
   const monthsInClause = wrMonths.map(m=>`"${m}"`).join(',');
 
   const _wrH = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-  const [deliveries_, returns_, targets_] = await Promise.all([
-    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=id,rep_name,grp,branch_name,total_net,delivery_date&deleted_at=is.null${grpFilter}${delDateFilter}`, _wrH).catch(()=>[]),
-    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=id,rep_name,grp,branch_name,total_net,return_date,items&deleted_at=is.null${grpFilter}${retDateFilter}`, _wrH).catch(()=>[]),
+  const [deliveries_, returns_, targets_, overrides_] = await Promise.all([
+    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=id,rep_name,grp,branch_name,total_net,total_tax,delivery_date&deleted_at=is.null${grpFilter}${delDateFilter}`, _wrH).catch(()=>[]),
+    fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=id,rep_name,grp,branch_name,total_net,total_tax,return_date,items&deleted_at=is.null${grpFilter}${retDateFilter}`, _wrH).catch(()=>[]),
     monthsInClause ? fetchAllRows(`${SUPABASE_URL}/rest/v1/rep_targets?select=rep_name,month,target_amount&deleted_at=is.null&month=in.(${monthsInClause})`, _wrH).catch(()=>[]) : Promise.resolve([]),
+    monthsInClause ? fetchAllRows(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?select=rep_name,month,amount,range_to&month=in.(${monthsInClause})`, _wrH).catch(()=>[]) : Promise.resolve([]),
   ]);
 
   const DL = Array.isArray(deliveries_)?deliveries_:[];
   const RT = Array.isArray(returns_)?returns_:[];
   const TG = Array.isArray(targets_)?targets_:[];
+  const OV = Array.isArray(overrides_)?overrides_:[];
 
   // فلتر المجموعة على المناديب المسجلين في users
   let filteredReps = grp==='all' ? allReps : allReps.filter(r=>r.grp===grp);
@@ -39227,7 +39229,25 @@ async function wrLoad(){
       const daysInMonth = monthEnd.getDate();
       target += (+t.target_amount||0) * (overlapDays/daysInMonth);
     });
-    const achievedNet = netSales - netReturns;
+    // المحقق الصافي (سيستم الشركة) — نفس المنطق بالظبط المستخدم في تاب "يومية المندوب" / شاشة الأهداف:
+    // صافي بعد خصم الضريبة (total_net - total_tax)، ولو فيه تعديل يدوي على المحقق لشهر معين (rep_achieved_overrides)
+    // فالمحقق = قيمة التعديل + أي فواتير بعد "تاريخ القطع" بتتضاف تلقائي فوقه (مش بتستبدله)
+    let achievedNet = 0;
+    wrMonths.forEach(ym=>{
+      const monthDels = rd.filter(x=>(x.delivery_date||'').slice(0,7)===ym);
+      const monthRets = rr.filter(x=>(x.return_date||'').slice(0,7)===ym);
+      const ov = OV.find(o=>o.rep_name===rn && o.month===ym);
+      if(ov){
+        const cutoff = ov.range_to || `${ym}-31`;
+        let after = 0;
+        monthDels.forEach(x=>{ if((x.delivery_date||'')>cutoff) after += (+x.total_net||0)-(+x.total_tax||0); });
+        monthRets.forEach(x=>{ if((x.return_date||'')>cutoff) after -= (+x.total_net||0)-(+x.total_tax||0); });
+        achievedNet += (+ov.amount||0) + after;
+      } else {
+        const netM = monthDels.reduce((s,x)=>s+(+x.total_net||0)-(+x.total_tax||0),0) - monthRets.reduce((s,x)=>s+(+x.total_net||0)-(+x.total_tax||0),0);
+        achievedNet += netM;
+      }
+    });
     const damagedRatio = netSales>0 ? (damagedValue/netSales*100) : 0;
     // تقييم = 80% تحقيق الهدف + 10% سلامة المرتجع (التالف ≤2%) + 10% أيام الحضور
     const score = wrScore({achievedNet, target, days, workDays: wrWorkDays, damagedRatio});
