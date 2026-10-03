@@ -2846,7 +2846,7 @@ const GROUPS = {
 // مناديب التجمعات مثلاً (الاتنين ضمن "منطقة القاهرة" هنا). المجموعات اللي مش مذكورة هنا مالهاش
 // توسعة - بتفضل شغالة زي ما هي (مجموعة كل مشرف لوحدها بس).
 const REGION_GROUPS = [
-  ['giza', 'tajmuat', 'cairo', 'south'], // منطقة القاهرة
+  ['giza', 'tajmuat', 'cairo', 'south', 'hyper'], // منطقة القاهرة (+ الهايبر ماركت)
 ];
 function expandRegionGroups(groupsArr){
   const input = (Array.isArray(groupsArr) ? groupsArr : (groupsArr||'').toString().split(','))
@@ -3761,6 +3761,11 @@ function rbCalcBreakdown(raw, from, to, has){
   return {valid, retValid, retDamaged};
 }
 
+// الرصيد الفعلي الحالي الحقيقي لأي مندوب — بيتجاهل فلتر الفترة (من/إلى) فوق في الصفحة
+// تمامًا، عشان كارت كل مندوب (والمشاركة بتاعته) يوريوا دايمًا إيه اللي موجود في عربيته
+// دلوقتي بالظبط، من غير ما المستخدم يحتاج يمسح الفلتر أو يختار حاجة الأول.
+function rbCurrentBalances(){ return rbCalcBalances(_rbRawBalanceData, '', '', false); }
+function rbCurrentBreakdown(){ return rbCalcBreakdown(_rbRawBalanceData, '', '', false); }
 function rbGetPeriod(){
   const from = document.getElementById('rb-from')?.value || '';
   const to   = document.getElementById('rb-to')?.value || '';
@@ -4611,9 +4616,10 @@ function rbRenderBalances(){
   if(q) reps = reps.filter(r=>r.includes(q));
   reps.sort((a,b)=>a.localeCompare(b,'ar'));
   if(!reps.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش مناديب لعرضهم</div>'; return; }
+  const curBal = rbCurrentBalances(), curBd = rbCurrentBreakdown();
   wrap.innerHTML = reps.map(rep=>{
-    const items = Object.entries(_rbBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0);
-    const bd = _rbBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
+    const items = Object.entries(curBal[rep]||{}).filter(([,q])=>Math.round(q*100)!==0);
+    const bd = curBd || {valid:{}, retValid:{}, retDamaged:{}};
     const rowsHtml = items.length
       ? items.sort((a,b)=>b[1]-a[1]).map(([name,qty])=>{
           const v  = (bd.valid[rep]||{})[name]||0;
@@ -4633,7 +4639,7 @@ function rbRenderBalances(){
     return `<details style="border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin-bottom:8px">
       <summary style="cursor:pointer;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:space-between">
         <span>${rep} <span style="color:var(--text2);font-weight:400;font-size:11px">(${items.length} صنف برصيد)</span></span>
-        <button onclick="event.preventDefault();event.stopPropagation();rbShareRepInventory('${safeRep}')" style="background:#C8A96E;color:#2C1F0A;border:none;border-radius:6px;padding:5px 10px;font-size:10.5px;font-family:Cairo,sans-serif;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:4px"><i class="ti ti-share"></i> سجل الجرد</button>
+        <button onclick="event.preventDefault();event.stopPropagation();rbShareRepBalance('${safeRep}')" style="background:#C8A96E;color:#2C1F0A;border:none;border-radius:6px;padding:5px 10px;font-size:10.5px;font-family:Cairo,sans-serif;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:4px"><i class="ti ti-share"></i> رصيد مخزن المندوب</button>
       </summary>
       <div style="margin-top:8px">${rowsHtml}</div>
     </details>`;
@@ -4822,6 +4828,119 @@ function rbBuildInventoryLogHTML(rep, rows){
       <div style="background:#2C1F0A;color:#EDE5D8;border-radius:8px;padding:8px 16px;font-size:12.5px;font-weight:800">إجمالي قيمة الرصيد: <span style="color:#C8A96E">${shareTotalValue.toLocaleString('en-US',{maximumFractionDigits:0})} ج</span></div>
     </div>
     <div style="text-align:center;color:#aaa;font-size:9px;margin-top:24px">Al Tahhan Golden Dates © ${new Date().getFullYear()} — تم إنشاء المستند من منظومة إدارة المبيعات والتنسيق</div>`;
+}
+
+// يبني محتوى مستند "رصيد مخزن المندوب" — رقم واحد ثابت لكل صنف (الرصيد الفعلي الموجود في
+// العربية دلوقتي)، مش سجل الحركات التاريخية. المصدر rbCurrentBalances/rbCurrentBreakdown
+// بيتجاهل فلتر الفترة فوق في الصفحة تمامًا.
+function rbBuildCurrentBalanceHTML(rep){
+  const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
+  const bd = rbCurrentBreakdown();
+  const items = Object.entries(rbCurrentBalances()[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  let totalValue = 0;
+  const rowsHtml = items.length
+    ? items.map(([name,qty],i)=>{
+        const v  = (bd.valid[rep]||{})[name]||0;
+        const rv = (bd.retValid[rep]||{})[name]||0;
+        const rd = (bd.retDamaged[rep]||{})[name]||0;
+        const clsParts = [];
+        if(v)  clsParts.push('صالح '+v);
+        if(rv) clsParts.push('مرتجع صالح '+rv);
+        if(rd) clsParts.push('مرتجع تالف '+rd);
+        const clsTxt = clsParts.length ? clsParts.join(' · ') : '—';
+        const pr = typeof productPriceFor==='function' ? productPriceFor(name) : null;
+        let valueTxt = '—';
+        if(pr && pr.price){
+          const val = qty * (+pr.price||0);
+          totalValue += val;
+          valueTxt = `${val.toLocaleString('en-US',{maximumFractionDigits:0})} ج`;
+        }
+        return `<tr style="background:${i%2?'#FCF9F4':'#fff'}">
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center">${i+1}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;font-weight:700">${name}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${qty}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;text-align:center;font-weight:800">${valueTxt}</td>
+          <td style="padding:6px 8px;border:1px solid #E0D8CC;font-size:10px">${clsTxt}</td>
+        </tr>`;
+      }).join('')
+    : `<tr><td colspan="5" style="padding:14px;text-align:center;color:#aaa">مفيش رصيد مسجّل حاليًا لهذا المندوب</td></tr>`;
+  return `
+    <div style="background:#2C1F0A;color:#EDE5D8;text-align:center;padding:14px;font-size:20px;font-weight:900;border-radius:10px 10px 0 0">الطحان جولدن داتس<div style="font-size:10px;color:#C8A96E;margin-top:3px;font-weight:400">Al Tahhan Golden Dates</div></div>
+    <div style="background:#C8A96E;color:#2C1F0A;text-align:center;padding:9px;font-size:14px;font-weight:700">رصيد مخزن المندوب (الفعلي الحالي)</div>
+    <div style="background:#F5F0E8;padding:12px 18px;border-radius:0 0 8px 8px;margin-bottom:18px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px">
+      <div>المندوب: <b style="color:#731E2E">${rep}</b></div>
+      <div>عدد الأصناف: <b style="color:#731E2E">${items.length}</b></div>
+      <div>تاريخ الإصدار: <b style="color:#731E2E">${now}</b></div>
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:14px">
+      <thead><tr style="background:#731E2E;color:#fff">
+        <th style="padding:7px;border:1px solid #5a1622">#</th>
+        <th style="padding:7px;border:1px solid #5a1622">الصنف</th>
+        <th style="padding:7px;border:1px solid #5a1622">الفعلي</th>
+        <th style="padding:7px;border:1px solid #5a1622">القيمة</th>
+        <th style="padding:7px;border:1px solid #5a1622">التصنيف</th>
+      </tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:20px">
+      <div style="background:#2C1F0A;color:#EDE5D8;border-radius:8px;padding:8px 16px;font-size:12.5px;font-weight:800">إجمالي قيمة الرصيد: <span style="color:#C8A96E">${totalValue.toLocaleString('en-US',{maximumFractionDigits:0})} ج</span></div>
+    </div>
+    <div style="text-align:center;color:#aaa;font-size:9px;margin-top:24px">Al Tahhan Golden Dates © ${new Date().getFullYear()} — تم إنشاء المستند من منظومة إدارة المبيعات والتنسيق</div>`;
+}
+
+// تصدير "رصيد مخزن المندوب" الحالي (رقم واحد لكل صنف، مش سجل حركات) — توليد PDF ومشاركته
+// مباشرة (واتساب/تطبيقات) من غير فتح نافذة جديدة
+async function rbShareRepBalance(rep){
+  if(!rep){ return; }
+  if(typeof html2canvas==='undefined' || !window.jspdf){ showToast?.('مكتبة PDF لسه بتتحمّل، حاول تاني بعد لحظة') || alert('مكتبة PDF لسه بتتحمّل، حاول تاني بعد لحظة'); return; }
+
+  showToast?.('⏳ جاري تجهيز رصيد المخزن...');
+  const holder = document.createElement('div');
+  holder.style.cssText = 'position:fixed;top:0;left:-99999px;width:780px;background:#fff;z-index:-1;direction:rtl;font-family:Cairo,Arial,sans-serif';
+  holder.innerHTML = rbBuildCurrentBalanceHTML(rep);
+  document.body.appendChild(holder);
+
+  try{
+    if(document.fonts && document.fonts.ready) await document.fonts.ready;
+    const canvas = await html2canvas(holder, {scale:2, useCORS:true, backgroundColor:'#ffffff'});
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({unit:'mm', format:'a4'});
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const imgW = pageW;
+    const imgH = canvas.height * imgW / canvas.width;
+    const imgData = canvas.toDataURL('image/jpeg', 0.95);
+    let heightLeft = imgH, position = 0;
+    pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH);
+    heightLeft -= pageH;
+    while(heightLeft > 0){
+      position = heightLeft - imgH;
+      pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH);
+      heightLeft -= pageH;
+    }
+    const blob = pdf.output('blob');
+    const safeName = rep.replace(/[\\/:*?"<>|]/g,'_');
+    const fileName = `رصيد_مخزن_${safeName}.pdf`;
+    const file = new File([blob], fileName, {type:'application/pdf'});
+
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file], title:'رصيد مخزن المندوب', text:`رصيد مخزن المندوب الفعلي الحالي — ${rep}`});
+      showToast?.('✅ تم فتح خيارات الإرسال');
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = fileName;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 4000);
+      showToast?.('✅ اتحمّل ملف PDF — تقدر ترسله من الواتس يدويًا');
+    }
+  }catch(e){
+    if(e && e.name === 'AbortError'){ /* المستخدم لغى المشاركة بنفسه */ }
+    else{ console.warn('rbShareRepBalance failed', e); showToast?.('حصل خطأ أثناء تجهيز الملف'); }
+  } finally {
+    holder.remove();
+  }
 }
 
 // تصدير سجل الجرد الفعلي (كل عمليات الجرد) — توليد PDF ومشاركته مباشرة (واتساب/تطبيقات) من غير فتح نافذة جديدة
