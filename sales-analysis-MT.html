@@ -1106,6 +1106,8 @@ table.datatable details summary:hover { text-decoration: underline; }
     customerSearchFilter: '',  // مربع بحث بالاسم في جدول "كل العملاء" (تاب العملاء) - بيضيّق الجدول لعميل/عملاء معينين
     coordBranches: null,  // مصفوفة {branchName, route} من جدول "branches" الحي (تاب "الفروع والعملاء" في لوحة التحكم) - بتتحمل مرة واحدة بس وتتستخدم لاقتراح خط سير تلقائي لعملاء "ربط خطوط السير" الناقصين
     coordBranchesLoading: false,
+    coordVisits: null,  // مصفوفة {name, route, date} من جدول "visits" (زيارات منسقي التنسيق) - بتتحمل مرة واحدة بس وتتستخدم لتحديد اسم المنسق المسؤول عن كل خط سير في جدول "دليل الفروع وخطوط السير" (خطوط سير مناديب)، حسب فلتر السنة/الشهر المختار
+    coordVisitsLoading: false,
     itemQtyFilters: { code: '', name: '', cat: '', ppc: '' }  // فلاتر جدول "كل الأصناف - بالكمية" (كود/اسم/تصنيف/عدد بالكرتونة) - محفوظة هنا عشان متترجعش فاضية بعد أي حفظ بيعمل renderAll()
   };
 
@@ -1195,6 +1197,80 @@ table.datatable details summary:hover { text-decoration: underline; }
       state.coordBranchesLoading = false;
     }
     if (typeof renderLinkRoutes === 'function' && document.getElementById('panel-linkroutes')) renderLinkRoutes();
+  }
+
+  // يجيب زيارات منسقي التنسيق (اسم + خط سير + تاريخ) من جدول "visits" في السحابة - مرة واحدة بس
+  // وتتخزن في state.coordVisits - مستخدمة في تاب "خطوط سير مناديب" لتحديد اسم المنسق المسؤول عن كل
+  // خط سير في جدول "دليل الفروع وخطوط السير"، مع احترام فلتر السنة/الشهر المختار فوق الصفحة (آخر
+  // منسق ظهر على الخط ده في نفس الفترة، مش بالضرورة المنسق الحالي لو كان في تبديل خط سير).
+  async function loadCoordVisitsForRouteOwner() {
+    if (!sb || state.coordVisits || state.coordVisitsLoading) return;
+    state.coordVisitsLoading = true;
+    try {
+      let allRows = [], from = 0; const pageSize = 1000;
+      while (true) {
+        const { data, error } = await sb.from('visits').select('name,route,date').not('route', 'is', null).not('name', 'is', null).range(from, from + pageSize - 1);
+        if (error) throw error;
+        if (!data || !data.length) break;
+        allRows = allRows.concat(data);
+        if (data.length < pageSize) break;
+        from += pageSize;
+      }
+      state.coordVisits = allRows;
+      logStatus(`تم تحميل ${fmt(state.coordVisits.length)} زيارة تنسيق لتحديد المنسق المسؤول عن كل خط سير ✓`, 'ok');
+    } catch (e) {
+      state.coordVisits = [];
+      logStatus('تعذر تحميل زيارات التنسيق لتحديد المنسق المسؤول عن خطوط السير: ' + (e.message || e), 'err');
+    } finally {
+      state.coordVisitsLoading = false;
+    }
+    if (typeof renderRepRoutes === 'function' && document.getElementById('panel-reproutes')) renderRepRoutes();
+  }
+
+  // يبني Map: اسم خط السير -> اسم المنسق المسؤول عنه، من بيانات state.coordVisits (زيارات التنسيق).
+  // لو فلتر السنة/الشهر فوق الصفحة مفعّل: بياخد بس الزيارات اللي وقعت في نفس الفترة، ولكل خط سير
+  // بيختار المنسق الأكتر تكرارًا في زياراته (وعند التعادل، الأحدث تاريخًا) - ده أدق تمثيل لـ"مين كان
+  // شغال فعليًا على الخط ده في الفترة دي" حتى لو حصل تبديل منسق جوه نفس الفترة. لو مفيش ولا زيارة
+  // واحدة مسجّلة في الفترة المختارة لأي خط سير، بيرجع لآخر زيارة معروفة بغض النظر عن الفترة (أفضل تقريب متاح).
+  function buildRouteCoordinatorMap() {
+    const visits = state.coordVisits || [];
+    const result = new Map();
+    if (!visits.length) return result;
+
+    const selYears = state.filters.year || [];
+    const selMonths = state.filters.month || [];
+    const hasPeriod = selYears.length > 0 || selMonths.length > 0;
+    function inPeriod(dateStr) {
+      if (!dateStr || dateStr.length < 7) return false;
+      const y = dateStr.slice(0, 4);
+      const m = String(Number(dateStr.slice(5, 7)));
+      if (selYears.length && !selYears.includes(y)) return false;
+      if (selMonths.length && !selMonths.includes(m)) return false;
+      return true;
+    }
+
+    let relevant = hasPeriod ? visits.filter(v => inPeriod(v.date)) : visits;
+    // مفيش زيارات في الفترة المختارة خالص - ارجع لكل الزيارات المعروفة (أفضل من عمود فاضي)
+    if (hasPeriod && !relevant.length) relevant = visits;
+
+    const byRoute = new Map(); // route -> Map(name -> {count, lastDate})
+    relevant.forEach(v => {
+      if (!v.route || !v.name) return;
+      if (!byRoute.has(v.route)) byRoute.set(v.route, new Map());
+      const m = byRoute.get(v.route);
+      const cur = m.get(v.name) || { count: 0, lastDate: '' };
+      cur.count++;
+      if ((v.date || '') > cur.lastDate) cur.lastDate = v.date || '';
+      m.set(v.name, cur);
+    });
+    byRoute.forEach((nameMap, route) => {
+      let best = null;
+      nameMap.forEach((stat, name) => {
+        if (!best || stat.count > best.stat.count || (stat.count === best.stat.count && stat.lastDate > best.stat.lastDate)) best = { name, stat };
+      });
+      if (best) result.set(route, best.name);
+    });
+    return result;
   }
 
   // يقترح خط سير لموقع/عميل ناقص، بالمطابقة مع دليل فروع التنسيق الحي (state.coordBranches):
@@ -7969,6 +8045,10 @@ function renderRepRoutes() {
 
   const years = activeYears(inv, i => i.__year);
 
+  // تحميل زيارات التنسيق (مرة واحدة بس) عشان نعرف اسم المنسق المسؤول عن كل خط سير في "دليل الفروع وخطوط السير" تحت
+  if (!state.coordVisits && !state.coordVisitsLoading) loadCoordVisitsForRouteOwner();
+  const routeCoordinatorMap = buildRouteCoordinatorMap();
+
   // ربط كل فاتورة بدليل خطوط سير المناديب: مطابقة مباشرة، وإلا ربط يدوي محفوظ، وإلا مطابقة مرنة تلقائية
   const resolveSite = buildRepRouteResolver();
   const withRR = inv.map(i => ({ inv: i, rr: resolveSite(i['فرع_العميل']) }));
@@ -8078,6 +8158,7 @@ function renderRepRoutes() {
     dirEntries = dirEntries.slice().sort((a, b) => String(a.branchName).localeCompare(String(b.branchName), 'ar'));
     const dirRows = dirEntries.map(r => [
       escapeHtml(r.branchName), escapeHtml(r.route), escapeHtml(r.group || '-'),
+      escapeHtml(routeCoordinatorMap.get(r.route) || '—'),
       netByBranch.has(r.branchName) ? fmtMoney(netByBranch.get(r.branchName)) : '-'
     ]);
     return { routesForGroup, dirEntries, dirRows };
@@ -8199,7 +8280,7 @@ function renderRepRoutes() {
         <input type="text" id="rrSearchInput" placeholder="اكتب اسم الفرع..." value="${escapeHtml(f.search || '')}" style="width:220px; font-family:inherit; padding:7px 9px; border-radius:8px; border:1.5px solid var(--sand-dark);">
       </div>
     </div>
-    <div class="table-wrap" id="rrDirTableWrap">${tableHTML(['اسم الفرع', 'خط السير', 'المجموعة', 'صافي المبيعات (الفترة الحالية)'], initialDir.dirRows, null)}</div>
+    <div class="table-wrap" id="rrDirTableWrap">${tableHTML(['اسم الفرع', 'خط السير', 'المجموعة', 'المنسق', 'صافي المبيعات (الفترة الحالية)'], initialDir.dirRows, null)}</div>
 
     ${addBranchBoxHtml}
     ${unmatchedLinkSectionHtml}
@@ -8302,7 +8383,7 @@ function renderRepRoutes() {
   function refreshDirTable() {
     const built = computeDir();
     const wrap = document.getElementById('rrDirTableWrap');
-    if (wrap) wrap.innerHTML = tableHTML(['اسم الفرع', 'خط السير', 'المجموعة', 'صافي المبيعات (الفترة الحالية)'], built.dirRows, null);
+    if (wrap) wrap.innerHTML = tableHTML(['اسم الفرع', 'خط السير', 'المجموعة', 'المنسق', 'صافي المبيعات (الفترة الحالية)'], built.dirRows, null);
     const countEl = document.getElementById('rrDirCount');
     if (countEl) countEl.textContent = `${fmt(built.dirEntries.length)} من ${fmt(state.repRoutes.size)}`;
   }
