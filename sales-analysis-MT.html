@@ -1110,6 +1110,8 @@ table.datatable details summary:hover { text-decoration: underline; }
     coordVisitsLoading: false,
     routeCoordLinks: null,  // Map: اسم خط سير مناديب MT -> اسم خط سير التنسيق المقابل له (من جدول tamr_sales_route_coord_links) - ربط يدوي لخطوط السير اللي اسمها مختلف بين النظامين ومش بيتطابقوا تلقائيًا
     routeCoordLinksLoading: false,
+    coordBranchAssignments: null,  // Map: اسم الفرع -> اسم المنسق الثابت المسؤول عنه (من جدول coord_route_assignments) - مستخدم في نافذة "تفصيل الفروع" لخطوط السير الثابتة (هايبر ماركت/ثابت كبار عملاء) حيث كل فرع له منسق مستقل، بعكس الخط المتحرك اللي ليه منسق واحد لكل الخط
+    coordBranchAssignmentsLoading: false,
     itemQtyFilters: { code: '', name: '', cat: '', ppc: '' }  // فلاتر جدول "كل الأصناف - بالكمية" (كود/اسم/تصنيف/عدد بالكرتونة) - محفوظة هنا عشان متترجعش فاضية بعد أي حفظ بيعمل renderAll()
   };
 
@@ -1290,6 +1292,33 @@ table.datatable details summary:hover { text-decoration: underline; }
       logStatus('تعذر تحميل روابط خطوط سير MT/التنسيق: ' + (e.message || e), 'err');
     } finally {
       state.routeCoordLinksLoading = false;
+    }
+    if (typeof renderRepRoutes === 'function' && document.getElementById('panel-reproutes')) renderRepRoutes();
+  }
+
+  // يجيب توزيع المنسقين الثابتين على الفروع (جدول coord_route_assignments) - مرة واحدة بس وتتخزن
+  // في state.coordBranchAssignments كـ Map: اسم الفرع -> اسم المنسق الثابت المسؤول عنه. ده مختلف عن
+  // routeCoordinatorMap اللي بيحدد منسق واحد لكل "خط سير متحرك" - هنا كل فرع في خط سير ثابت (هايبر
+  // ماركت/ثابت كبار عملاء) ممكن يكون ليه منسق مستقل تمامًا عن باقي فروع نفس الخط.
+  async function loadCoordBranchAssignments() {
+    if (!sb || state.coordBranchAssignments || state.coordBranchAssignmentsLoading) return;
+    state.coordBranchAssignmentsLoading = true;
+    try {
+      let allRows = [], from = 0; const pageSize = 1000;
+      while (true) {
+        const { data, error } = await sb.from('coord_route_assignments').select('branch_name,rep_name').not('branch_name', 'is', null).not('rep_name', 'is', null).range(from, from + pageSize - 1);
+        if (error) throw error;
+        if (!data || !data.length) break;
+        allRows = allRows.concat(data);
+        if (data.length < pageSize) break;
+        from += pageSize;
+      }
+      state.coordBranchAssignments = new Map(allRows.map(r => [r.branch_name, r.rep_name]));
+    } catch (e) {
+      state.coordBranchAssignments = new Map();
+      logStatus('تعذر تحميل توزيع المنسقين الثابتين على الفروع: ' + (e.message || e), 'err');
+    } finally {
+      state.coordBranchAssignmentsLoading = false;
     }
     if (typeof renderRepRoutes === 'function' && document.getElementById('panel-reproutes')) renderRepRoutes();
   }
@@ -6204,9 +6233,14 @@ function rrShowBranchDetail(idx) {
   const overlay = rrEnsureBranchDetailModal();
   document.getElementById('rr-branch-modal-title').textContent = `${entry.title} (${entry.rows.length} فرع)`;
   const total = entry.rows.reduce((s, r) => s + r[1], 0);
-  const headers = ['#', 'اسم الفرع', 'صافي المبيعات'];
-  const rows = entry.rows.map((r, i) => [i + 1, escapeHtml(r[0]), fmtMoney(r[1])]);
-  const footer = ['', 'الإجمالي', fmtMoney(total)];
+  // عمود "المنسق" يظهر بس لو في فرع واحد على الأقل اتربط باسم منسق ثابت (coord_route_assignments) -
+  // بيبان غالبًا في خطوط السير الثابتة (هايبر ماركت/ثابت كبار عملاء) اللي كل فرع فيها له منسق مستقل
+  const hasCoord = entry.rows.some(r => r[2]);
+  const headers = hasCoord ? ['#', 'اسم الفرع', 'المنسق', 'صافي المبيعات'] : ['#', 'اسم الفرع', 'صافي المبيعات'];
+  const rows = entry.rows.map((r, i) => hasCoord
+    ? [i + 1, escapeHtml(r[0]), escapeHtml(r[2] || '—'), fmtMoney(r[1])]
+    : [i + 1, escapeHtml(r[0]), fmtMoney(r[1])]);
+  const footer = hasCoord ? ['', 'الإجمالي', '', fmtMoney(total)] : ['', 'الإجمالي', fmtMoney(total)];
   document.getElementById('rr-branch-modal-body').innerHTML = tableHTML(headers, rows, footer);
   overlay.style.display = 'flex';
 }
@@ -8079,6 +8113,7 @@ function renderRepRoutes() {
   // تحميل زيارات التنسيق + روابط خطوط السير اليدوية (مرة واحدة بس) عشان نعرف اسم المنسق المسؤول عن كل خط سير في "أداء المبيعات حسب خط السير" تحت
   if (!state.coordVisits && !state.coordVisitsLoading) loadCoordVisitsForRouteOwner();
   if (!state.routeCoordLinks && !state.routeCoordLinksLoading) loadRouteCoordLinks();
+  if (!state.coordBranchAssignments && !state.coordBranchAssignmentsLoading) loadCoordBranchAssignments();
   const routeCoordinatorMap = buildRouteCoordinatorMap();
 
   // ربط كل فاتورة بدليل خطوط سير المناديب: مطابقة مباشرة، وإلا ربط يدوي محفوظ، وإلا مطابقة مرنة تلقائية
@@ -8095,7 +8130,12 @@ function renderRepRoutes() {
     if (!sitesCount) return fmt(sitesCount);
     const branchNets = new Map();
     rowsOfKey.forEach(m => { branchNets.set(m.rr.branchName, (branchNets.get(m.rr.branchName) || 0) + m.inv.__net); });
-    const detailRows = Array.from(branchNets.entries()).sort((a, b) => b[1] - a[1]);
+    // اسم المنسق الثابت المسؤول عن كل فرع (لو موجود في coord_route_assignments) - مهم بالذات لخطوط
+    // السير الثابتة (هايبر ماركت/ثابت كبار عملاء) اللي كل فرع فيها له منسق مستقل عن باقي الفروع
+    const branchAssignMap = state.coordBranchAssignments || new Map();
+    const detailRows = Array.from(branchNets.entries())
+      .map(([branchName, net]) => [branchName, net, branchAssignMap.get(branchName) || ''])
+      .sort((a, b) => b[1] - a[1]);
     const idx = _rrBranchDetailStore.length;
     _rrBranchDetailStore.push({ title, rows: detailRows });
     return `<a href="javascript:void(0)" onclick="rrShowBranchDetail(${idx})" style="color:#8a5a1e;font-weight:700;text-decoration:underline;cursor:pointer">${fmt(sitesCount)}</a>`;
