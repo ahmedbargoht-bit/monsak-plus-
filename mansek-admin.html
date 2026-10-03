@@ -37354,6 +37354,12 @@ function repbalCalcBreakdown(raw, from, to, has){
   [valid, retValid, retDamaged].forEach(map=>{ Object.keys(map).forEach(rep=>{ Object.keys(map[rep]).forEach(item=>{ if(map[rep][item]<0) map[rep][item]=0; }); }); });
   return {valid, retValid, retDamaged};
 }
+// الرصيد الفعلي الحالي الحقيقي لمندوب معين — بيتجاهل فلتر الفترة (من/إلى) المختار فوق في
+// الصفحة تمامًا، عشان أي شاشة بتعرض "الرصيد الفعلي الحالي" (مودال المندوب، تصدير PDF/Excel،
+// المشاركة على واتساب) تورّي رقم واحد ثابت وصح دايمًا، من غير ما يحتاج المستخدم يمسح الفلتر
+// أو يختار حاجة الأول. فلتر الفترة لسه بيتحكم بس في باقي الشاشات (الفروق/سجل الطلبات).
+function repbalCurrentBalances(){ return repbalCalcBalances(_repbalRawBalanceData, '', '', false); }
+function repbalCurrentBreakdown(){ return repbalCalcBreakdown(_repbalRawBalanceData, '', '', false); }
 function repbalApplyPeriod(){
   const {from, to, has} = repbalGetPeriod();
   const note = document.getElementById('repbal-period-note');
@@ -38106,16 +38112,21 @@ async function repbalOpenExportModal(rep, mode){
   if(balSec) balSec.style.display = mode==='balance' ? '' : 'none';
   if(invSec) invSec.style.display = mode==='inventory' ? '' : 'none';
   await ensureSplPrices(); // كتالوج الأسعار العام (_splPrices) — لازم يكون متحمّل عشان نقيّم قيمة رصيد كل صنف
-  const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
-  const {from, to, has} = repbalGetPeriod();
-  const periodTxt = repbalPeriodTxt(rep, from, to, has);
+  // الرصيد اللي بيتعرض هنا (جوه مودال المندوب) لازم يكون "الرصيد الفعلي الموجود في العربية دلوقتي"
+  // دايمًا، بغض النظر عن فلتر الفترة (من/إلى) المختار فوق في الصفحة — عشان المستخدم يفتح على
+  // أي مندوب ويلاقي رصيده الحقيقي على طول من غير ما يحتاج يمسح الفلتر أو يختار حاجة. فلتر الفترة
+  // فوق لسه بيتحكم في باقي المودال (سجل الجرد/الفروق) لو المستخدم محتاج يراجع فترة معينة.
+  const curBalances  = repbalCurrentBalances();
+  const curBreakdown = repbalCurrentBreakdown();
+  const items = Object.entries(curBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const periodTxt = repbalPeriodTxt(rep, '', '', false);
   const title = document.getElementById('repbal-export-title');
   const meta  = document.getElementById('repbal-export-meta');
   const list  = document.getElementById('repbal-export-list');
   if(title) title.textContent = rep;
   if(meta){ meta.textContent = `${periodTxt} — ${items.length} صنف برصيد`; meta.style.display = 'block'; }
   let totalValue = 0, pricedCount = 0;
-  const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
+  const bd = curBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
   const pendingNote = document.getElementById('repbal-export-pending-note');
   if(pendingNote){
     const retValidQty = Object.values(bd.retValid[rep]||{}).reduce((s,q)=>s+(+q||0),0);
@@ -38305,8 +38316,8 @@ async function repbalResetRep(){
 function repbalExportRepPDF(){
   const rep = _repbalExportRep;
   if(!rep){ showToast('اختر مندوب أولاً','err'); return; }
-  const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
-  const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
+  const items = Object.entries(repbalCurrentBalances()[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const bd = repbalCurrentBreakdown();
   const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
 
   let validValueSum = 0, damagedValueSum = 0;
@@ -38391,8 +38402,8 @@ function repbalExportRepExcel(){
   const rep = _repbalExportRep;
   if(!rep){ showToast('اختر مندوب أولاً','err'); return; }
   if(typeof XLSX==='undefined'){ showToast('جاري تحميل مكتبة Excel...'); return; }
-  const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
-  const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
+  const items = Object.entries(repbalCurrentBalances()[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const bd = repbalCurrentBreakdown();
   const now = new Date().toLocaleDateString('en-US');
 
   const C = {dark:'2C1F0A', caramel:'4B3C1A', gold:'C8A96E', cream:'EDE5D8', light:'F5F0E8', white:'FFFFFF', line:'E0D8CC', green:'1E4620', red:'5A1414'};
@@ -38486,8 +38497,8 @@ function repbalExportRepExcel(){
 // دلوقتي بعد خصم أي مرتجع نزل منها، مش سجل الحركات التاريخية) بألوان وهوية الطحان
 function repbalBuildInventoryLogHTML(rep){
   const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
-  const bd = _repbalBreakdown || {valid:{}, retValid:{}, retDamaged:{}};
-  const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const bd = repbalCurrentBreakdown();
+  const items = Object.entries(repbalCurrentBalances()[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
   let validValueSum = 0, damagedValueSum = 0;
   const rowsHtml = items.length
     ? items.map(([name,qty],i)=>{
