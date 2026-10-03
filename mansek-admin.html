@@ -39134,14 +39134,15 @@ async function wrLoad(){
   document.getElementById('wr-summary').innerHTML = '';
   document.getElementById('wr-detail-card').style.display = 'none';
 
-  // جلب المناديب من users
-  const repsQ = `${SUPABASE_URL}/rest/v1/users?role=eq.sales&select=id,name,grp&status=eq.active&order=name.asc`;
+  // جلب المناديب من users — level=eq.rep إجباري عشان نستبعد مشرفي المبيعات (level=supervisor)
+  // اللي كانوا بيظهروا غلط في القايمة قبل كده لأن الفلتر كان بس role=eq.sales
+  const repsQ = `${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&select=id,name,grp&status=eq.active&order=name.asc`;
   const reps = await fetch(repsQ,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}).then(r=>r.json()).catch(()=>[]);
   // فلتر بالمجموعة لو محددة
   const filteredReps = grp==='all' ? reps : reps.filter(r=>r.grp===grp);
 
   if(!Array.isArray(filteredReps)||!filteredReps.length){
-    tbody.innerHTML='<tr><td colspan="10" style="text-align:center;padding:30px;color:#888">لا يوجد مناديب</td></tr>';
+    tbody.innerHTML='<tr><td colspan="11" style="text-align:center;padding:30px;color:#888">لا يوجد مناديب</td></tr>';
     return;
   }
 
@@ -39152,16 +39153,30 @@ async function wrLoad(){
   const delDateFilter = `&delivery_date=gte.${from}&delivery_date=lte.${to}`;
   const retDateFilter = `&return_date=gte.${from}&return_date=lte.${to}`;
 
+  // أشهر rep_targets اللي بتتقاطع مع الفترة المختارة (ممكن تمتد لأكتر من شهر)
+  const wrMonths = [];
+  { let cur = new Date(from+'T00:00:00'); const end = new Date(to+'T00:00:00');
+    while(cur <= end){ const ym = cur.toISOString().slice(0,7); if(!wrMonths.includes(ym)) wrMonths.push(ym); cur.setMonth(cur.getMonth()+1); cur.setDate(1); }
+  }
+  const monthsInClause = wrMonths.map(m=>`"${m}"`).join(',');
+
   const _wrH = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-  const [deliveries_, returns_, attendance_] = await Promise.all([
+  const [deliveries_, returns_, targets_] = await Promise.all([
     fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=id,rep_name,grp,branch_name,total_net,delivery_date&deleted_at=is.null${grpFilter}${delDateFilter}`, _wrH).catch(()=>[]),
     fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=id,rep_name,grp,branch_name,total_net,return_date,items&deleted_at=is.null${grpFilter}${retDateFilter}`, _wrH).catch(()=>[]),
-    fetchAllRows(`${SUPABASE_URL}/rest/v1/attendance?select=id,name,grp,check_in,check_out,created_at${grpFilter}&created_at=gte.${from}T00:00:00&created_at=lte.${to}T23:59:59`, _wrH).catch(()=>[]),
+    monthsInClause ? fetchAllRows(`${SUPABASE_URL}/rest/v1/rep_targets?select=rep_name,month,target_amount&deleted_at=is.null&month=in.(${monthsInClause})`, _wrH).catch(()=>[]) : Promise.resolve([]),
   ]);
 
   const DL = Array.isArray(deliveries_)?deliveries_:[];
   const RT = Array.isArray(returns_)?returns_:[];
-  const A  = Array.isArray(attendance_)?attendance_:[];
+  const TG = Array.isArray(targets_)?targets_:[];
+
+  // عدد أيام العمل في الفترة (بدون يوم الجمعة) — مقام "نسبة أيام الحضور"
+  let wrWorkDays = 0;
+  { let cur = new Date(from+'T00:00:00'); const end = new Date(to+'T00:00:00');
+    while(cur <= end){ if(cur.getDay()!==5) wrWorkDays++; cur.setDate(cur.getDate()+1); }
+  }
+  wrWorkDays = Math.max(1, wrWorkDays);
 
   // بناء بيانات كل مندوب
   _wrData = filteredReps.map(rep => {
@@ -39179,11 +39194,28 @@ async function wrLoad(){
         if(dq>0){ damagedQty += dq; damagedValue += dq * (+it.price||0); }
       });
     });
-    // أيام حضور = أيام فريدة في attendance
-    const days = new Set(A.filter(x=>x.name===rn).map(x=>(x.check_in||x.created_at||'').slice(0,10))).size;
-    // تقييم
-    const score = wrScore(rd.length, netSales, rr.length, netReturns, days);
-    return {rep, deliveries:rd, returns:rr, netSales, netReturns, branches, days, score, damagedQty, damagedValue};
+    // أيام حضور = أيام فريدة سلّم فيها المندوب فاتورة فعلية (مش جدول attendance منفصل، لأن مناديب
+    // البيع مبيسجلوش حضور/انصراف بشكل منفصل — الفاتورة نفسها هي دليل الحضور)
+    const days = new Set(rd.map(x=>x.delivery_date).filter(Boolean)).size;
+    // الهدف: مجموع هدف الشهر/الأشهر المتقاطعة مع الفترة، بالتناسب مع عدد أيام الفترة داخل كل شهر
+    let target = 0;
+    wrMonths.forEach(ym=>{
+      const t = TG.find(x=>x.rep_name===rn && x.month===ym);
+      if(!t) return;
+      const [yy,mm] = ym.split('-').map(Number);
+      const monthStart = new Date(yy, mm-1, 1);
+      const monthEnd = new Date(yy, mm, 0);
+      const periodStart = new Date(Math.max(monthStart, new Date(from+'T00:00:00')));
+      const periodEnd = new Date(Math.min(monthEnd, new Date(to+'T00:00:00')));
+      const overlapDays = Math.max(0, Math.round((periodEnd - periodStart)/86400000)+1);
+      const daysInMonth = monthEnd.getDate();
+      target += (+t.target_amount||0) * (overlapDays/daysInMonth);
+    });
+    const achievedNet = netSales - netReturns;
+    const damagedRatio = netSales>0 ? (damagedValue/netSales*100) : 0;
+    // تقييم = 80% تحقيق الهدف + 10% سلامة المرتجع (التالف ≤2%) + 10% أيام الحضور
+    const score = wrScore({achievedNet, target, days, workDays: wrWorkDays, damagedRatio});
+    return {rep, deliveries:rd, returns:rr, netSales, netReturns, branches, days, score, damagedQty, damagedValue, target, achievedNet, damagedRatio};
   });
 
   // ملخص
@@ -39230,8 +39262,8 @@ async function wrLoad(){
       <td style="padding:9px 8px;text-align:center;color:#EA580C;font-weight:700">${fmt(netReturns)}</td>
       <td style="padding:9px 8px;text-align:center;color:#B91C1C;font-weight:700">${fmt(damagedValue||0)}${damagedQty?` <span style="font-size:9px;color:#999">(${fmt(damagedQty)})</span>`:''}</td>
       <td style="padding:9px 8px;text-align:center;color:#003049;font-weight:700">${branches}</td>
-      <td style="padding:9px 8px;text-align:center">
-        <span style="background:${scoreInfo.bg};color:${scoreInfo.color};border-radius:6px;padding:3px 10px;font-size:11px;font-weight:700">${scoreInfo.label}</span>
+      <td style="padding:9px 8px;text-align:center" title="${d.target>0?`تحقيق الهدف: ${Math.round((d.achievedNet/d.target)*100)}% (${fmt(d.achievedNet)}/${fmt(d.target)} ج)`:'بدون هدف مسجل للفترة'}">
+        <span style="background:${scoreInfo.bg};color:${scoreInfo.color};border-radius:6px;padding:3px 10px;font-size:11px;font-weight:700">${scoreInfo.label} ${score}%</span>
       </td>
       <td style="padding:9px 8px;text-align:center">
         <button class="btn btn-ghost btn-xs" onclick="event.stopPropagation();wrExportOne(${i})" title="تصدير Excel">
@@ -39242,16 +39274,32 @@ async function wrLoad(){
   }).join('') || '<tr><td colspan="11" style="text-align:center;padding:20px;color:#888">لا بيانات</td></tr>';
 }
 
-function wrScore(delCount, netSales, retCount, netReturns, days){
-  // نقاط: فواتير تسليم*2 + (صافي المبيعات/1000) - (صافي المرتجعات/1000)*0.5 + حضور*3
-  return Math.max(0, delCount*2 + (netSales/1000) - (netReturns/1000)*0.5 + days*3);
+function wrScore({achievedNet, target, days, workDays, damagedRatio}){
+  // 1) نسبة تحقيق الهدف (80%) — صافي المحقق ÷ الهدف المستحق عن نفس الفترة (مجزّأ بالتناسب لو الفترة
+  //    بتقطع أكتر من شهر). لو مفيش هدف مسجل لهذا المندوب في الفترة، المعيار ده ميتحسبش (null) والوزن
+  //    بيتوزع على الباقي بدل ما يفضّل مين معندوش هدف أو يظلم مين عنده.
+  const achievementPct = target>0 ? Math.min(100, (achievedNet/target)*100) : null;
+
+  // 2) نسبة أيام الحضور (10%) — أيام فيها فاتورة تسليم فعلية ÷ أيام العمل في الفترة (من غير جمعة)
+  const attendancePct = Math.min(100, (days/workDays)*100);
+
+  // 3) سلامة المرتجع التالف (10%) — المفروض ميتعديش 2% من صافي المبيعات. لو اتعدى، خصم تدريجي:
+  //    كل 1% زيادة فوق الـ2% بيخصم 25 نقطة من الـ100 بتاعة المعيار ده (يعني عند 6% تالف = صفر)
+  const damagedPct = damagedRatio<=2 ? 100 : Math.max(0, 100 - (damagedRatio-2)*25);
+
+  if(achievementPct===null){
+    // بدون هدف: وزّع الـ80% على أيام الحضور والمرتجع التالف بالتساوي (50/50) بدل ما نسيب المعيار فاضي
+    return Math.round(attendancePct*0.5 + damagedPct*0.5);
+  }
+  return Math.round(achievementPct*0.8 + attendancePct*0.1 + damagedPct*0.1);
 }
 
 function wrScoreInfo(score){
-  if(score >= 80) return {label:'ممتاز ⭐',     bg:'#F0FDF4', color:'#15803D'};
-  if(score >= 50) return {label:'جيد جداً ✅',  bg:'#EFF6FF', color:'#1D4ED8'};
-  if(score >= 25) return {label:'جيد 👍',       bg:'#FFF7ED', color:'#C2410C'};
-  if(score >= 10) return {label:'مقبول ⚠️',     bg:'#FFFBEB', color:'#D97706'};
+  // score دلوقتي نسبة مئوية (0-100) ناتجة من: 80% تحقيق الهدف + 10% أيام الحضور + 10% سلامة المرتجع التالف
+  if(score >= 85) return {label:'ممتاز ⭐',     bg:'#F0FDF4', color:'#15803D'};
+  if(score >= 70) return {label:'جيد جداً ✅',  bg:'#EFF6FF', color:'#1D4ED8'};
+  if(score >= 50) return {label:'جيد 👍',       bg:'#FFF7ED', color:'#C2410C'};
+  if(score >= 30) return {label:'مقبول ⚠️',     bg:'#FFFBEB', color:'#D97706'};
   return              {label:'يحتاج متابعة 🔴', bg:'#FEF2F2', color:'#B91C1C'};
 }
 
@@ -39295,7 +39343,11 @@ function wrShowDetail(idx){
         ${branchHtml}
       </div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px">
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:12px">
+      <div style="background:#FEFCE8;border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:16px;font-weight:900;color:#A16207">${d.target>0?Math.round((d.achievedNet/d.target)*100)+'%':'—'}</div>
+        <div style="font-size:11px;color:#888">${d.target>0?`تحقيق الهدف (${fmt(d.target)} ج)`:'بدون هدف مسجل'}</div>
+      </div>
       <div style="background:#F0FDF4;border-radius:8px;padding:10px;text-align:center">
         <div style="font-size:18px;font-weight:900;color:#15803D">${fmt(d.netSales)} ج</div>
         <div style="font-size:11px;color:#888">صافي المبيعات</div>
