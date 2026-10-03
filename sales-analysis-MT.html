@@ -1106,8 +1106,10 @@ table.datatable details summary:hover { text-decoration: underline; }
     customerSearchFilter: '',  // مربع بحث بالاسم في جدول "كل العملاء" (تاب العملاء) - بيضيّق الجدول لعميل/عملاء معينين
     coordBranches: null,  // مصفوفة {branchName, route} من جدول "branches" الحي (تاب "الفروع والعملاء" في لوحة التحكم) - بتتحمل مرة واحدة بس وتتستخدم لاقتراح خط سير تلقائي لعملاء "ربط خطوط السير" الناقصين
     coordBranchesLoading: false,
-    coordVisits: null,  // مصفوفة {name, route, date} من جدول "visits" (زيارات منسقي التنسيق) - بتتحمل مرة واحدة بس وتتستخدم لتحديد اسم المنسق المسؤول عن كل خط سير في جدول "دليل الفروع وخطوط السير" (خطوط سير مناديب)، حسب فلتر السنة/الشهر المختار
+    coordVisits: null,  // مصفوفة {name, route, date} من جدول "visits" (زيارات منسقي التنسيق) - بتتحمل مرة واحدة بس وتتستخدم لتحديد اسم المنسق المسؤول عن كل خط سير في جدول "أداء المبيعات حسب خط السير" (خطوط سير مناديب)، حسب فلتر السنة/الشهر المختار
     coordVisitsLoading: false,
+    routeCoordLinks: null,  // Map: اسم خط سير مناديب MT -> اسم خط سير التنسيق المقابل له (من جدول tamr_sales_route_coord_links) - ربط يدوي لخطوط السير اللي اسمها مختلف بين النظامين ومش بيتطابقوا تلقائيًا
+    routeCoordLinksLoading: false,
     itemQtyFilters: { code: '', name: '', cat: '', ppc: '' }  // فلاتر جدول "كل الأصناف - بالكمية" (كود/اسم/تصنيف/عدد بالكرتونة) - محفوظة هنا عشان متترجعش فاضية بعد أي حفظ بيعمل renderAll()
   };
 
@@ -1271,6 +1273,35 @@ table.datatable details summary:hover { text-decoration: underline; }
       if (best) result.set(route, best.name);
     });
     return result;
+  }
+
+  // يجيب روابط خطوط سير مناديب MT المربوطة يدويًا بخطوط سير التنسيق (جدول tamr_sales_route_coord_links)
+  // - مرة واحدة بس وتتخزن في state.routeCoordLinks كـ Map: خط سير MT -> خط سير التنسيق المقابل.
+  // المصدر الوحيد لهذا الربط اليدوي هو كارت "ربط خطوط سير مناديب MT بخطوط سير التنسيق" تحت.
+  async function loadRouteCoordLinks() {
+    if (!sb || state.routeCoordLinks || state.routeCoordLinksLoading) return;
+    state.routeCoordLinksLoading = true;
+    try {
+      const { data, error } = await sb.from('tamr_sales_route_coord_links').select('mt_route,coord_route');
+      if (error) throw error;
+      state.routeCoordLinks = new Map((data || []).map(r => [r.mt_route, r.coord_route]));
+    } catch (e) {
+      state.routeCoordLinks = new Map();
+      logStatus('تعذر تحميل روابط خطوط سير MT/التنسيق: ' + (e.message || e), 'err');
+    } finally {
+      state.routeCoordLinksLoading = false;
+    }
+    if (typeof renderRepRoutes === 'function' && document.getElementById('panel-reproutes')) renderRepRoutes();
+  }
+
+  // يحدد اسم المنسق المسؤول عن خط سير مناديب MT معين: تطابق حرفي مباشر مع خط سير تنسيق أول (routeCoordinatorMap)،
+  // وإلا عن طريق الربط اليدوي المحفوظ (state.routeCoordLinks) لو خط السير مربوط بخط سير تنسيق باسم مختلف.
+  function resolveRouteCoordinatorName(mtRouteName, routeCoordinatorMap) {
+    const direct = routeCoordinatorMap.get(mtRouteName);
+    if (direct) return direct;
+    const linkedCoordRoute = state.routeCoordLinks ? state.routeCoordLinks.get(mtRouteName) : null;
+    if (linkedCoordRoute) return routeCoordinatorMap.get(linkedCoordRoute) || null;
+    return null;
   }
 
   // يقترح خط سير لموقع/عميل ناقص، بالمطابقة مع دليل فروع التنسيق الحي (state.coordBranches):
@@ -8045,8 +8076,9 @@ function renderRepRoutes() {
 
   const years = activeYears(inv, i => i.__year);
 
-  // تحميل زيارات التنسيق (مرة واحدة بس) عشان نعرف اسم المنسق المسؤول عن كل خط سير في "دليل الفروع وخطوط السير" تحت
+  // تحميل زيارات التنسيق + روابط خطوط السير اليدوية (مرة واحدة بس) عشان نعرف اسم المنسق المسؤول عن كل خط سير في "أداء المبيعات حسب خط السير" تحت
   if (!state.coordVisits && !state.coordVisitsLoading) loadCoordVisitsForRouteOwner();
+  if (!state.routeCoordLinks && !state.routeCoordLinksLoading) loadRouteCoordLinks();
   const routeCoordinatorMap = buildRouteCoordinatorMap();
 
   // ربط كل فاتورة بدليل خطوط سير المناديب: مطابقة مباشرة، وإلا ربط يدوي محفوظ، وإلا مطابقة مرنة تلقائية
@@ -8112,30 +8144,62 @@ function renderRepRoutes() {
   });
   const routeBmap = yearBreakdownMap(matched, x => x.rr.route, x => x.inv.__year, x => x.inv.__net);
   const routeHeaders = years.length >= 2
-    ? ['خط السير', 'المجموعة', 'عدد الفروع', ...yearColumnHeaders(years)]
-    : ['خط السير', 'المجموعة', 'عدد الفروع', 'صافي المبيعات'];
+    ? ['خط السير', 'المجموعة', 'المنسق', 'عدد الفروع', ...yearColumnHeaders(years)]
+    : ['خط السير', 'المجموعة', 'المنسق', 'عدد الفروع', 'صافي المبيعات'];
   const routeRows = byRoute.map(x => {
     const rowsOfRoute = matched.filter(m => m.rr.route === x.key);
     const sites = new Set(rowsOfRoute.map(m => m.rr.branchName)).size;
     const group = rowsOfRoute[0] ? (rowsOfRoute[0].rr.group || '') : '';
+    const coordName = resolveRouteCoordinatorName(x.key, routeCoordinatorMap) || '—';
     const sitesCell = rrBranchDetailCell(`فروع خط سير: ${x.key}`, rowsOfRoute, sites);
     if (years.length >= 2) {
-      return [x.key, group, sitesCell, ...yearColumnCells(routeBmap, x.key, years, fmtMoney)];
+      return [x.key, group, escapeHtml(coordName), sitesCell, ...yearColumnCells(routeBmap, x.key, years, fmtMoney)];
     }
-    return [x.key, group, sitesCell, fmtMoney(x.sum)];
+    return [x.key, group, escapeHtml(coordName), sitesCell, fmtMoney(x.sum)];
   });
   const routeKeys = byRoute.map(x => x.key);
   const totalRouteSites = new Set(matched.map(m => m.rr.branchName)).size;
   const totalRouteNet = byRoute.reduce((s, x) => s + x.sum, 0);
   const routeFooter = years.length >= 2
-    ? ['الإجمالي', '-', fmt(totalRouteSites), ...yearColumnCells(sumYearTotalsBmap(routeBmap, routeKeys, years), '__TOTAL__', years, fmtMoney)]
-    : ['الإجمالي', '-', fmt(totalRouteSites), fmtMoney(totalRouteNet)];
+    ? ['الإجمالي', '-', '-', fmt(totalRouteSites), ...yearColumnCells(sumYearTotalsBmap(routeBmap, routeKeys, years), '__TOTAL__', years, fmtMoney)]
+    : ['الإجمالي', '-', '-', fmt(totalRouteSites), fmtMoney(totalRouteNet)];
 
   const coveragePct = inv.length ? matched.length / inv.length : 0;
   const unmatchedSites = new Set(unmatched.map(x => x.inv['فرع_العميل']).filter(Boolean));
   const warn = unmatched.length > 0
     ? `<div class="pill-note">⚠ ${fmt(unmatched.length)} فاتورة (${fmtPct(1 - coveragePct)}) لـ ${fmt(unmatchedSites.size)} فرع غير موجودين في دليل "خطوط سير المناديب" الحالي. حدّث ملف "الفروع وخطوط السير" لإضافتهم.</div>`
     : `<div class="pill-note" style="background:#E1EFE4;color:#2f6b45;">✓ كل الفواتير تم ربطها بدليل خطوط سير المناديب بنجاح.</div>`;
+
+  /* ----- ربط خطوط سير مناديب MT بخطوط سير التنسيق (لما اسم خط السير يكون مختلف بين النظامين) ----- */
+  const allCoordRouteNames = Array.from(new Set((state.coordVisits || []).map(v => v.route).filter(Boolean))).sort((a, b) => String(a).localeCompare(String(b), 'ar'));
+  const coordRouteOptionsHtml = allCoordRouteNames.map(r => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join('');
+  const routeLinkCandidates = byRoute.filter(x => !resolveRouteCoordinatorName(x.key, routeCoordinatorMap));
+  const routeLinkedEntries = Array.from((state.routeCoordLinks || new Map()).entries());
+  const routeLinkRowsHtml = routeLinkCandidates.map(x => `
+    <tr data-mtroute="${escapeHtml(x.key)}">
+      <td>${escapeHtml(x.key)}</td>
+      <td>
+        <select class="rclink-select" style="width:240px; font-family:inherit; padding:6px 8px; border-radius:8px; border:1.5px solid var(--sand-dark);">
+          <option value="">-- اختار خط سير التنسيق --</option>
+          ${coordRouteOptionsHtml}
+        </select>
+      </td>
+      <td><button type="button" class="btn rclink-save-btn" style="padding:7px 14px; font-size:12.5px;">ربط</button></td>
+    </tr>
+  `).join('');
+  const routeLinkedRowsHtml = routeLinkedEntries.map(([mtRoute, coordRoute]) => `
+    <tr data-mtroute="${escapeHtml(mtRoute)}">
+      <td>${escapeHtml(mtRoute)}</td>
+      <td>${escapeHtml(coordRoute)}</td>
+      <td><button type="button" class="btn secondary rclink-unlink-btn" style="padding:7px 14px; font-size:12.5px;">إلغاء الربط</button></td>
+    </tr>
+  `).join('');
+  const routeLinkSectionHtml = (routeLinkCandidates.length || routeLinkedEntries.length) ? `
+    <div class="table-title">ربط خطوط سير مناديب MT بخطوط سير التنسيق</div>
+    <div class="hint" style="margin:0 0 10px;">خطوط السير دي اسمها في فواتير المناديب مختلف عن اسم خط سير التنسيق المقابل ليها (أو مفيش ليها منسق بالأساس)، فمش بتتطابق تلقائيًا. اختار خط سير التنسيق الصحيح لكل واحد عشان يظهر اسم المنسق صح في عمود "المنسق" فوق. أي خط سير جديد بعد كده مش متطابق تلقائيًا هيظهر هنا من نفسه.</div>
+    ${routeLinkCandidates.length ? `<div class="table-wrap"><table class="datatable"><thead><tr><th>خط سير مناديب MT</th><th>خط سير التنسيق المقابل</th><th></th></tr></thead><tbody>${routeLinkRowsHtml}</tbody></table></div>` : `<div class="pill-note" style="background:#E1EFE4;color:#2f6b45;">✓ كل خطوط السير متطابقة مع التنسيق حاليًا.</div>`}
+    ${routeLinkedEntries.length ? `<div class="hint" style="margin:14px 0 6px;">روابط محفوظة حاليًا:</div><div class="table-wrap"><table class="datatable"><thead><tr><th>خط سير مناديب MT</th><th>مربوط بخط سير التنسيق</th><th></th></tr></thead><tbody>${routeLinkedRowsHtml}</tbody></table></div>` : ''}
+  ` : '';
 
   /* ----- دليل الفروع (قابل للفلترة بالمجموعة/خط السير/بحث اسم الفرع) ----- */
   const f = state.repRoutesFilter;
@@ -8158,7 +8222,6 @@ function renderRepRoutes() {
     dirEntries = dirEntries.slice().sort((a, b) => String(a.branchName).localeCompare(String(b.branchName), 'ar'));
     const dirRows = dirEntries.map(r => [
       escapeHtml(r.branchName), escapeHtml(r.route), escapeHtml(r.group || '-'),
-      escapeHtml(routeCoordinatorMap.get(r.route) || '—'),
       netByBranch.has(r.branchName) ? fmtMoney(netByBranch.get(r.branchName)) : '-'
     ]);
     return { routesForGroup, dirEntries, dirRows };
@@ -8259,6 +8322,8 @@ function renderRepRoutes() {
     ${warn}
     <div class="table-wrap">${tableHTML(routeHeaders, routeRows, routeFooter)}</div>
 
+    ${routeLinkSectionHtml}
+
     <div class="table-title">دليل الفروع وخطوط السير (<span id="rrDirCount">${fmt(initialDir.dirEntries.length)} من ${fmt(state.repRoutes.size)}</span>)</div>
     <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px;">
       <div>
@@ -8280,7 +8345,7 @@ function renderRepRoutes() {
         <input type="text" id="rrSearchInput" placeholder="اكتب اسم الفرع..." value="${escapeHtml(f.search || '')}" style="width:220px; font-family:inherit; padding:7px 9px; border-radius:8px; border:1.5px solid var(--sand-dark);">
       </div>
     </div>
-    <div class="table-wrap" id="rrDirTableWrap">${tableHTML(['اسم الفرع', 'خط السير', 'المجموعة', 'المنسق', 'صافي المبيعات (الفترة الحالية)'], initialDir.dirRows, null)}</div>
+    <div class="table-wrap" id="rrDirTableWrap">${tableHTML(['اسم الفرع', 'خط السير', 'المجموعة', 'صافي المبيعات (الفترة الحالية)'], initialDir.dirRows, null)}</div>
 
     ${addBranchBoxHtml}
     ${unmatchedLinkSectionHtml}
@@ -8300,6 +8365,43 @@ function renderRepRoutes() {
       if (!validBranch) { alert('لازم تختار اسم فرع موجود بالظبط في قائمة دليل خطوط سير المناديب.'); return; }
       btn.disabled = true; btn.textContent = 'جاري الحفظ...';
       await assignRepRouteSiteLink(site, validBranch);
+    });
+  });
+
+  el.querySelectorAll('.rclink-save-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const tr = btn.closest('tr');
+      const mtRoute = tr.dataset.mtroute;
+      const select = tr.querySelector('.rclink-select');
+      const coordRoute = select.value;
+      if (!coordRoute) { alert('اختار خط سير التنسيق الأول.'); return; }
+      btn.disabled = true; btn.textContent = 'جاري الحفظ...';
+      try {
+        const { error } = await sb.from('tamr_sales_route_coord_links').upsert({ mt_route: mtRoute, coord_route: coordRoute, linked_at: new Date().toISOString() }, { onConflict: 'mt_route' });
+        if (error) throw error;
+        state.routeCoordLinks = null;
+        await loadRouteCoordLinks();
+      } catch (e) {
+        alert('حصل خطأ أثناء الربط: ' + (e.message || e));
+        btn.disabled = false; btn.textContent = 'ربط';
+      }
+    });
+  });
+  el.querySelectorAll('.rclink-unlink-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const tr = btn.closest('tr');
+      const mtRoute = tr.dataset.mtroute;
+      if (!confirm(`إلغاء ربط "${mtRoute}"؟`)) return;
+      btn.disabled = true;
+      try {
+        const { error } = await sb.from('tamr_sales_route_coord_links').delete().eq('mt_route', mtRoute);
+        if (error) throw error;
+        state.routeCoordLinks = null;
+        await loadRouteCoordLinks();
+      } catch (e) {
+        alert('حصل خطأ: ' + (e.message || e));
+        btn.disabled = false;
+      }
     });
   });
 
@@ -8383,7 +8485,7 @@ function renderRepRoutes() {
   function refreshDirTable() {
     const built = computeDir();
     const wrap = document.getElementById('rrDirTableWrap');
-    if (wrap) wrap.innerHTML = tableHTML(['اسم الفرع', 'خط السير', 'المجموعة', 'المنسق', 'صافي المبيعات (الفترة الحالية)'], built.dirRows, null);
+    if (wrap) wrap.innerHTML = tableHTML(['اسم الفرع', 'خط السير', 'المجموعة', 'صافي المبيعات (الفترة الحالية)'], built.dirRows, null);
     const countEl = document.getElementById('rrDirCount');
     if (countEl) countEl.textContent = `${fmt(built.dirEntries.length)} من ${fmt(state.repRoutes.size)}`;
   }
