@@ -1003,9 +1003,6 @@ h2,h3{color:#2C1F0A}
           <div class="nav-item" onclick="showPanel('users')">
             <i class="ti ti-users"></i> المنسقون
           </div>
-          <div class="nav-item" onclick="showPanel('supervisors')">
-            <i class="ti ti-user-star"></i> المشرفون والمديرون
-          </div>
           <div class="nav-item" onclick="showPanel('branches')">
             <i class="ti ti-building-store"></i> الفروع والعملاء
           </div>
@@ -1148,6 +1145,9 @@ h2,h3{color:#2C1F0A}
           </div>
           <div class="nav-item" onclick="showPanel('sector-strength')">
             <i class="ti ti-hierarchy-2" style="color:#005CBF"></i> قوة القطاع
+          </div>
+          <div class="nav-item" onclick="showPanel('supervisors')">
+            <i class="ti ti-user-star"></i> المشرفون والمديرون
           </div>
           <div class="nav-item" onclick="showPanel('letters-archive')">
             <i class="ti ti-archive"></i> أرشيف الخطابات
@@ -11614,13 +11614,21 @@ async function cascadeGroupSupToReps(supName, groups){
   try{
     const H  = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
     const HW = {...H,'Content-Type':'application/json','Prefer':'return=minimal'};
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&status=eq.active&grp=in.(${groups.join(',')})&select=id,supervisors`,{headers:H});
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&level=eq.rep&status=eq.active&grp=in.(${groups.join(',')})&select=id,name,supervisors`,{headers:H});
     const reps = r.ok ? await r.json() : [];
+    const repsToUpdate = (Array.isArray(reps)?reps:[]).filter(rep=>rep.supervisors!==supName);
     await Promise.all(
-      (Array.isArray(reps)?reps:[])
-        .filter(rep=>rep.supervisors!==supName)
-        .map(rep=>fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${rep.id}`,{method:'PATCH',headers:HW,body:JSON.stringify({supervisors:supName})}))
+      repsToUpdate.map(rep=>fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${rep.id}`,{method:'PATCH',headers:HW,body:JSON.stringify({supervisors:supName})}))
     );
+    // مزامنة عمود supervisor_name في جدول rep_targets كمان لنفس المناديب — ده عمود منفصل
+    // (مش مشتق أوتوماتيك من users.supervisors) بيتسجل وقت إضافة/تحويل الهدف، فلو فضل
+    // على اسم المشرف القديم كان بيخلي تاب "هدف" في تطبيق مشرف المبيعات يفضل مش عارض
+    // أهداف المناديب اللي اتنقلوا له حديثًا رغم إنهم ظاهرين صح في كل الشاشات التانية.
+    if(repsToUpdate.length){
+      const encNames = repsToUpdate.map(rep=>encodeURIComponent(rep.name)).join(',');
+      await fetch(`${SUPABASE_URL}/rest/v1/rep_targets?rep_name=in.(${encNames})&deleted_at=is.null`,
+        {method:'PATCH',headers:HW,body:JSON.stringify({supervisor_name:supName})}).catch(()=>{});
+    }
   }catch(e){ console.warn('cascadeGroupSupToReps error:', e); }
 }
 
@@ -24823,7 +24831,6 @@ const NAV_DEFAULT = [
   {id:'orders',         icon:'ti-truck-delivery',     label:'الطلبيات',               visible:true},
   {id:'messages',       icon:'ti-message-circle',     label:'الرسائل',                visible:true},
   {id:'users',          icon:'ti-users',              label:'المنسقون',               visible:true},
-  {id:'supervisors',    icon:'ti-user-star',          label:'المشرفون والمديرون',     visible:true},
   {id:'branches',       icon:'ti-building-store',     label:'الفروع والعملاء',        visible:true},
   {id:'routes',         icon:'ti-route',              label:'خطوط سير المنسقين',     visible:true},
   {id:'holidays',       icon:'ti-calendar',           label:'الإجازات',               visible:true},
