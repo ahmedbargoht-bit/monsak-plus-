@@ -747,6 +747,7 @@ tr:hover td{background:rgba(197,91,72,.04)}
                 <select id="gmv-branch" onchange="gmvBranchChange()" style="flex:1;min-width:0"><option value="">— اختر الفرع —</option></select>
                 <a id="gmv-loc-btn" href="#" target="_blank" rel="noopener" class="btn btn-sm" style="display:none;white-space:nowrap;background:#1A7A4A;color:#fff;text-decoration:none"><i class="ti ti-map-pin"></i> GPS</a>
                 <span id="gmv-loc-none" style="display:none;font-size:11px;color:#B91C1C;white-space:nowrap">لا يوجد لوكيشن</span>
+                <button id="gmv-loc-edit" type="button" onclick="gmvLocEdit()" class="btn btn-sm" style="display:none;white-space:nowrap;background:#C55B48;color:#fff"><i class="ti ti-pencil"></i> تعديل اللوكيشن</button>
               </div>
             </div>
           </div>
@@ -14059,6 +14060,7 @@ function gmvRouteChange(){
   document.getElementById('gmv-report').style.display='none';
   document.getElementById('gmv-loc-btn').style.display='none';
   document.getElementById('gmv-loc-none').style.display='none';
+  const eb0 = document.getElementById('gmv-loc-edit'); if(eb0) eb0.style.display='none';
   bs.innerHTML = '<option value="">— اختر الفرع —</option>';
   if(!route){ wrap.style.display='none'; return; }
   _gmvBranches.filter(b=>_gmvN(b.route)===route)
@@ -14077,6 +14079,7 @@ function gmvBranchChange(){
   const none = document.getElementById('gmv-loc-none');
   const rep = document.getElementById('gmv-report');
   btn.style.display='none'; none.style.display='none';
+  const eb = document.getElementById('gmv-loc-edit'); if(eb) eb.style.display = id ? '' : 'none';
   if(!id){ rep.style.display='none'; return; }
   const b = _gmvBranches.find(x=>String(x.id)===String(id));
   if(!b) return;
@@ -14086,6 +14089,96 @@ function gmvBranchChange(){
     btn.style.display='';
   } else none.style.display='';
   gmvLoadReport(b);
+}
+
+// ── تعديل لوكيشن الفرع (بيتحفظ في جدول branches فيتغير في النظام كله) ──
+let _gmvLocNew = null; // {lat,lng}
+function gmvParseLoc(txt){
+  const t = String(txt||'').trim(); if(!t) return null;
+  const pats = [/@(-?\d+\.\d+),\s*(-?\d+\.\d+)/, /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/, /[?&](?:q|ll|query|destination|center)=(-?\d+\.\d+)(?:,|%2C)\s*(-?\d+\.\d+)/i, /^\(?\s*(-?\d+\.\d+)\s*[,،;\s]\s*(-?\d+\.\d+)\s*\)?$/];
+  for(const p of pats){ const m = t.match(p); if(m) return {lat:+m[1], lng:+m[2]}; }
+  return null;
+}
+function gmvLocValid(p){
+  if(!p) return 'مش قادر أقرا إحداثيات — الصق إحداثيات زي 30.05, 31.23 أو رابط جوجل ماب كامل (مش المختصر)';
+  if(p.lat<21.5||p.lat>32||p.lng<24.5||p.lng>37) return 'الإحداثيات خارج مصر — اتأكد إن الترتيب (خط العرض، خط الطول) صح، مثال: 30.05, 31.23';
+  return '';
+}
+function gmvLocEdit(){
+  const id = document.getElementById('gmv-branch').value;
+  const b = _gmvBranches.find(x=>String(x.id)===String(id));
+  if(!b){ alert('اختار الفرع الأول'); return; }
+  _gmvLocNew = null;
+  let m = document.getElementById('gmv-loc-modal'); if(m) m.remove();
+  m = document.createElement('div'); m.id='gmv-loc-modal';
+  m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:14px';
+  const hasOld = b.lat && b.lng;
+  m.innerHTML = `<div style="background:#fff;border-radius:14px;max-width:420px;width:100%;max-height:90vh;overflow:auto;padding:16px;direction:rtl">
+    <div style="font-size:16px;font-weight:900;color:var(--navy);margin-bottom:4px">📍 تعديل لوكيشن الفرع</div>
+    <div style="font-size:13px;font-weight:700;margin-bottom:10px">${_gmvEsc(b.branch_name)}</div>
+    <div style="font-size:12px;background:#F5F0E8;border-radius:8px;padding:8px;margin-bottom:10px">
+      اللوكيشن الحالي: ${hasOld?`<b dir="ltr">${(+b.lat).toFixed(6)}, ${(+b.lng).toFixed(6)}</b> <a href="https://www.google.com/maps?q=${b.lat},${b.lng}" target="_blank" rel="noopener" style="color:#1D4ED8">عرض</a>`:'<span style="color:#B91C1C">لا يوجد</span>'}
+    </div>
+    <button type="button" onclick="gmvLocUseGps()" class="btn btn-primary" style="width:100%;margin-bottom:8px"><i class="ti ti-current-location"></i> استخدم موقعي الحالي (أنا واقف في الفرع)</button>
+    <div style="text-align:center;font-size:11px;color:var(--text2);margin:4px 0">أو</div>
+    <label class="lbl">الصق إحداثيات أو رابط جوجل ماب</label>
+    <textarea id="gmv-loc-input" rows="2" style="width:100%" placeholder="30.0561, 31.2394" oninput="gmvLocPaste()"></textarea>
+    <div id="gmv-loc-preview" style="font-size:12px;margin:8px 0;min-height:18px"></div>
+    <div style="display:flex;gap:8px">
+      <button type="button" id="gmv-loc-save" onclick="gmvLocSave()" class="btn btn-primary" style="flex:1" disabled><i class="ti ti-device-floppy"></i> حفظ</button>
+      <button type="button" onclick="document.getElementById('gmv-loc-modal').remove()" class="btn" style="flex:1">إلغاء</button>
+    </div>
+    ${hasOld?`<button type="button" onclick="gmvLocDelete()" class="btn btn-sm" style="width:100%;margin-top:10px;color:#B91C1C;border:1px solid #B91C1C;background:#fff"><i class="ti ti-trash"></i> حذف اللوكيشن المسجل</button>`:''}
+  </div>`;
+  document.body.appendChild(m);
+}
+function gmvLocPreview(p, src){
+  const pv = document.getElementById('gmv-loc-preview'), sv = document.getElementById('gmv-loc-save');
+  const err = gmvLocValid(p);
+  if(err){ _gmvLocNew=null; pv.innerHTML = `<span style="color:#B91C1C">${err}</span>`; sv.disabled=true; return; }
+  _gmvLocNew = p; sv.disabled = false;
+  pv.innerHTML = `✅ ${src||''} <b dir="ltr">${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}</b> <a href="https://www.google.com/maps?q=${p.lat},${p.lng}" target="_blank" rel="noopener" style="color:#1D4ED8">راجعه على الخريطة</a>`;
+}
+function gmvLocPaste(){
+  const v = document.getElementById('gmv-loc-input').value.trim();
+  if(!v){ _gmvLocNew=null; document.getElementById('gmv-loc-preview').innerHTML=''; document.getElementById('gmv-loc-save').disabled=true; return; }
+  gmvLocPreview(gmvParseLoc(v), 'الإحداثيات:');
+}
+function gmvLocUseGps(){
+  const pv = document.getElementById('gmv-loc-preview');
+  if(!navigator.geolocation){ pv.innerHTML='<span style="color:#B91C1C">المتصفح مش بيدعم GPS</span>'; return; }
+  pv.textContent = 'جاري تحديد موقعك...';
+  navigator.geolocation.getCurrentPosition(
+    pos => gmvLocPreview({lat:+pos.coords.latitude.toFixed(7), lng:+pos.coords.longitude.toFixed(7)}, `موقعك (دقة ~${Math.round(pos.coords.accuracy)}م):`),
+    err => { pv.innerHTML = `<span style="color:#B91C1C">تعذر تحديد الموقع — فعّل الـ GPS واسمح للمتصفح بالوصول (${_gmvEsc(err.message)})</span>`; },
+    {enableHighAccuracy:true, timeout:20000, maximumAge:0});
+}
+async function gmvLocApply(lat, lng, okMsg){
+  const id = document.getElementById('gmv-branch').value;
+  const b = _gmvBranches.find(x=>String(x.id)===String(id)); if(!b) return;
+  const ok = await sbPatch('branches', {id:b.id}, {lat, lng, location_saved_at: new Date().toISOString()});
+  if(!ok){ alert('تعذر حفظ اللوكيشن — جرّب تاني'); return; }
+  b.lat = lat; b.lng = lng;
+  const m = document.getElementById('gmv-loc-modal'); if(m) m.remove();
+  // تحديث الدروب داون وزرار GPS فورًا
+  const opt = [...document.getElementById('gmv-branch').options].find(o=>String(o.value)===String(b.id));
+  if(opt) opt.textContent = b.branch_name + (lat&&lng ? ' 📍' : '');
+  gmvBranchChange();
+  try{ showToast(okMsg); }catch(e){}
+  alert(okMsg);
+}
+async function gmvLocSave(){
+  if(!_gmvLocNew) return;
+  const id = document.getElementById('gmv-branch').value;
+  const b = _gmvBranches.find(x=>String(x.id)===String(id));
+  if(!confirm(`تغيير لوكيشن فرع "${b.branch_name}"؟`)) return;
+  await gmvLocApply(_gmvLocNew.lat, _gmvLocNew.lng, '✓ تم حفظ اللوكيشن الجديد');
+}
+async function gmvLocDelete(){
+  const id = document.getElementById('gmv-branch').value;
+  const b = _gmvBranches.find(x=>String(x.id)===String(id));
+  if(!confirm(`حذف لوكيشن فرع "${b.branch_name}"؟`)) return;
+  await gmvLocApply(null, null, '✓ تم حذف اللوكيشن');
 }
 
 async function gmvLoadReport(b){
@@ -14233,7 +14326,7 @@ async function gmvLoadReport(b){
     ${supBlock('ss','زيارة مشرف البيع','#1D4ED8',_gmvSups.sales)}
     <div class="card" style="margin-top:12px">
       <div class="fld"><label class="lbl">ملاحظات عامة على الزيارة</label><textarea id="gmv-notes" rows="3" style="width:100%" placeholder="أي ملاحظة على الزيارة..."></textarea></div>
-      <button class="btn btn-primary" onclick="gmvSave()" style="width:100%"><i class="ti ti-device-floppy"></i> حفظ التقييم</button>
+      <button id="gmv-save-btn" class="btn btn-primary" onclick="gmvSave()" style="width:100%"><i class="ti ti-device-floppy"></i> حفظ التقييم</button>
     </div>
     ${prevHtml}`;
 }
@@ -14287,14 +14380,33 @@ async function gmvSave(){
     notes: (document.getElementById('gmv-notes').value||'').trim() || null,
     rated_by: (typeof CU!=='undefined' && CU.name) || 'GM',
   };
+  if(window._gmvSaving) return;
+  window._gmvSaving = true;
+  const saveBtn = document.getElementById('gmv-save-btn');
+  if(saveBtn){ saveBtn.disabled = true; saveBtn.innerHTML = '<i class="ti ti-loader"></i> جاري الحفظ...'; }
   let ok = false, errMsg = '';
   try{
     const r = await fetch(`${SUPABASE_URL}/rest/v1/gm_field_visits`, {method:'POST', headers:{...H(),'Content-Type':'application/json','Prefer':'return=minimal'}, body:JSON.stringify(row)});
     ok = r.ok;
     if(!ok){ const t = await r.text().catch(()=>''); errMsg = t.slice(0,150); console.error('gmvSave failed', r.status, t); }
   }catch(e){ errMsg = e.message; console.error('gmvSave error', e); }
-  if(ok){ showToast('✓ تم حفظ تقييم الزيارة'); gmvLoadReport(c.branch); }
-  else { showToast('تعذر الحفظ: '+(errMsg||'خطأ غير معروف')); alert('تعذر حفظ التقييم\n'+errMsg); }
+  window._gmvSaving = false;
+  if(ok){
+    // رسالة نجاح واضحة داخل الصفحة (التوست تحت الشاشة وممكن ما يبانش على الموبايل)
+    const box = document.getElementById('gmv-report');
+    box.innerHTML = `<div class="card" style="text-align:center;padding:28px;border:2px solid #1A7A4A;background:#F0FDF4">
+      <div style="font-size:42px">✅</div>
+      <div style="font-size:17px;font-weight:900;color:#1A7A4A;margin:8px 0">تم حفظ تقييم الزيارة</div>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:14px">${_gmvEsc(c.branch.branch_name)}</div>
+      <button class="btn btn-primary" onclick="gmvLoadReport(_gmvCtx.branch)" style="width:100%;margin-bottom:8px">فتح تقرير الفرع</button>
+      <button class="btn" onclick="document.getElementById('gmv-route').value='';gmvRouteChange();window.scrollTo(0,0)" style="width:100%">تقييم فرع آخر</button>
+    </div>`;
+    box.scrollIntoView({behavior:'smooth', block:'start'});
+    try{ showToast('✓ تم حفظ تقييم الزيارة'); }catch(e){}
+  } else {
+    if(saveBtn){ saveBtn.disabled = false; saveBtn.innerHTML = '<i class="ti ti-device-floppy"></i> حفظ التقييم'; }
+    alert('تعذر حفظ التقييم\n'+(errMsg||'خطأ غير معروف'));
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
