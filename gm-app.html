@@ -305,6 +305,9 @@ tr:hover td{background:rgba(197,91,72,.04)}
     <button class="tab-btn" id="coord-tab-btn-competitors" onclick="showCoordTab('competitors')">
       🏬 المنافسون
     </button>
+    <button class="tab-btn" id="coord-tab-btn-gm-visit" onclick="showCoordTab('gm-visit')">
+      🕵️ زيارة ميدانية
+    </button>
     <!-- تابات تنسيق تانية هتتضاف هنا تباعًا -->
   </div>
 
@@ -717,6 +720,39 @@ tr:hover td{background:rgba(197,91,72,.04)}
             </table>
           </div>
         </div>
+      </div>
+
+      <!-- ══ زيارة ميدانية — المدير العام بينزل السوق ويقيّم الفرع بنفسه (مراجعة تشغيل) ══ -->
+      <div id="panel-gm-visit" class="panel">
+        <div class="page-header">
+          <div>
+            <h2><i class="ti ti-binoculars"></i> زيارة ميدانية</h2>
+            <p>اختار اليوم وخط السير والفرع — التقرير بيجمع بيانات النظام وبعدها تسجّل تقييمك للتشغيل</p>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:12px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;align-items:end">
+            <div class="fld" style="margin:0">
+              <label class="lbl">اليوم</label>
+              <input type="date" id="gmv-date" style="width:100%">
+            </div>
+            <div class="fld" style="margin:0">
+              <label class="lbl">خط السير</label>
+              <select id="gmv-route" onchange="gmvRouteChange()" style="width:100%"><option value="">— اختر خط السير —</option></select>
+            </div>
+            <div class="fld" style="margin:0;display:none" id="gmv-branch-wrap">
+              <label class="lbl">الفرع</label>
+              <div style="display:flex;gap:6px;align-items:center">
+                <select id="gmv-branch" onchange="gmvBranchChange()" style="flex:1;min-width:0"><option value="">— اختر الفرع —</option></select>
+                <a id="gmv-loc-btn" href="#" target="_blank" rel="noopener" class="btn btn-sm" style="display:none;white-space:nowrap;background:#1A7A4A;color:#fff;text-decoration:none"><i class="ti ti-map-pin"></i> GPS</a>
+                <span id="gmv-loc-none" style="display:none;font-size:11px;color:#B91C1C;white-space:nowrap">لا يوجد لوكيشن</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="gmv-report" style="display:none"></div>
       </div>
     </div>
 
@@ -13972,6 +14008,204 @@ function showCoordTab(tab){
   else if(tab==='supervisors')  loadSupervisors();
   else if(tab==='team-plans')   teamPlansLoad();
   else if(tab==='competitors')  loadCompetitors();
+  else if(tab==='gm-visit')     gmvInit();
+}
+
+// ══════════════════════════════════════════════════════════════
+// زيارة ميدانية — المدير العام بينزل السوق ويقيّم الفرع بنفسه (جدول gm_field_visits)
+// بيانات النظام (أصناف متسلّمة / منسق + تقييمه / مندوب / آخر زيارة) بتتعرض تلقائي، والدرجات من تقييمك إنت
+// ══════════════════════════════════════════════════════════════
+const GMV_CRITERIA = [
+  ['attendance','حضور المنسق بالفرع'],
+  ['relation','علاقة المنسق بالفرع'],
+  ['display','طريقة العرض'],
+  ['fifo','FIFO'],
+  ['cleanliness','نظافة الاستاند / البوديوم'],
+  ['report_accuracy','دقة التقرير (من آخر زيارة)'],
+];
+let _gmvBranches = null;
+let _gmvScores = {};
+let _gmvCtx = null; // سياق التقرير الحالي (فرع/منسق/مندوب/آخر زيارة/عدد أصناف)
+const _gmvN = s => String(s||'').replace(/ /g,' ').replace(/\s+/g,' ').trim();
+const _gmvEsc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const _gmvToday = () => new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);
+
+async function gmvInit(){
+  const d = document.getElementById('gmv-date');
+  if(d && !d.value) d.value = _gmvToday();
+  if(_gmvBranches===null){
+    const rows = await sbGet('branches',{},{allPages:true});
+    _gmvBranches = (Array.isArray(rows)?rows:[]).filter(b=>b.branch_name && b.route && b.status!=='inactive');
+  }
+  const sel = document.getElementById('gmv-route');
+  if(sel && sel.options.length<=1){
+    const routes = [...new Set(_gmvBranches.map(b=>_gmvN(b.route)))].sort((a,b)=>a.localeCompare(b,'ar'));
+    routes.forEach(r=>{ const o=document.createElement('option'); o.value=r; o.textContent=r; sel.appendChild(o); });
+  }
+}
+
+function gmvRouteChange(){
+  const route = document.getElementById('gmv-route').value;
+  const wrap = document.getElementById('gmv-branch-wrap');
+  const bs = document.getElementById('gmv-branch');
+  document.getElementById('gmv-report').style.display='none';
+  document.getElementById('gmv-loc-btn').style.display='none';
+  document.getElementById('gmv-loc-none').style.display='none';
+  bs.innerHTML = '<option value="">— اختر الفرع —</option>';
+  if(!route){ wrap.style.display='none'; return; }
+  _gmvBranches.filter(b=>_gmvN(b.route)===route)
+    .sort((a,b)=>String(a.branch_name).localeCompare(String(b.branch_name),'ar'))
+    .forEach(b=>{
+      const o=document.createElement('option'); o.value=b.id;
+      o.textContent = b.branch_name + (b.lat&&b.lng ? ' 📍' : '');
+      bs.appendChild(o);
+    });
+  wrap.style.display='';
+}
+
+function gmvBranchChange(){
+  const id = document.getElementById('gmv-branch').value;
+  const btn = document.getElementById('gmv-loc-btn');
+  const none = document.getElementById('gmv-loc-none');
+  const rep = document.getElementById('gmv-report');
+  btn.style.display='none'; none.style.display='none';
+  if(!id){ rep.style.display='none'; return; }
+  const b = _gmvBranches.find(x=>String(x.id)===String(id));
+  if(!b) return;
+  if(b.lat && b.lng){
+    // رابط ملاحة جوجل — بيفتح تطبيق الخرائط/GPS على لوكيشن الفرع المتخزن في النظام
+    btn.href = `https://www.google.com/maps/dir/?api=1&destination=${b.lat},${b.lng}&travelmode=driving`;
+    btn.style.display='';
+  } else none.style.display='';
+  gmvLoadReport(b);
+}
+
+async function gmvLoadReport(b){
+  const box = document.getElementById('gmv-report');
+  box.style.display='';
+  box.innerHTML = '<div class="card" style="text-align:center;padding:30px;color:var(--text2)">جاري تحميل تقرير الفرع...</div>';
+  const bn = b.branch_name;
+  const d30 = new Date(Date.now()-30*86400000-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);
+  const enc = encodeURIComponent;
+  const coordNames = [b.rep_name,b.rep_name2,b.rep_name3].map(_gmvN).filter(Boolean);
+  const get = async url => { try{ const r=await fetch(url,{headers:H()}); return r.ok?await r.json():[]; }catch(e){ return []; } };
+
+  let [dels, visits, ratings, prev] = await Promise.all([
+    get(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,delivery_date,items&deleted_at=is.null&branch_name=eq.${enc(bn)}&delivery_date=gte.${d30}&order=delivery_date.desc&limit=500`),
+    get(`${SUPABASE_URL}/rest/v1/visits?select=name,date&branch=eq.${enc(bn)}&order=date.desc&limit=1`),
+    coordNames.length ? get(`${SUPABASE_URL}/rest/v1/coordinator_weekly_ratings?select=coordinator_name,rating,reason,week_start&coordinator_name=in.(${coordNames.map(n=>'"'+n.replace(/"/g,'')+'"').join(',')})&order=week_start.desc&limit=20`) : Promise.resolve([]),
+    get(`${SUPABASE_URL}/rest/v1/gm_field_visits?select=*&branch_name=eq.${enc(bn)}&order=visit_date.desc,created_at.desc&limit=5`),
+  ]);
+  // لو اسم الفرع في الفواتير مكتوب بمسافات مختلفة، جرّب مطابقة مرنة
+  if(!dels.length){
+    const pat = _gmvN(bn).split(' ').join('*');
+    dels = await get(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,delivery_date,items&deleted_at=is.null&branch_name=ilike.*${enc(pat)}*&delivery_date=gte.${d30}&order=delivery_date.desc&limit=500`);
+  }
+
+  // الأصناف المتسلّمة آخر 30 يوم (مجمّعة بالاسم)
+  const itemMap = {};
+  dels.forEach(x=>(Array.isArray(x.items)?x.items:[]).forEach(it=>{
+    const n = _gmvN(it.name); if(!n) return;
+    itemMap[n] = (itemMap[n]||0) + (+it.qty||0);
+  }));
+  const items = Object.entries(itemMap).sort((a,c)=>c[1]-a[1]);
+  const repName = dels[0]?.rep_name || '';
+  const lv = visits[0] || null;
+  const lvDays = lv ? Math.max(0, Math.round((new Date(_gmvToday())-new Date(lv.date))/86400000)) : null;
+
+  _gmvCtx = { branch:b, coordinator: coordNames.join(' / '), rep: repName, lastVisit: lv?.date||null, itemsCount: items.length };
+  _gmvScores = {};
+
+  const stars = n => '⭐'.repeat(Math.max(0,Math.min(5,+n||0)));
+  const ratingHtml = coordNames.length ? coordNames.map(cn=>{
+    const r = ratings.find(x=>_gmvN(x.coordinator_name)===cn);
+    return `<div style="margin-top:4px;font-size:12px"><b>${_gmvEsc(cn)}</b> — ${r?`${stars(r.rating)} ${r.rating}/5 <span style="color:var(--text2);font-size:10px">(أسبوع ${r.week_start})</span>${r.reason?`<div style="font-size:10px;color:var(--text2)">${_gmvEsc(r.reason)}</div>`:''}`:'<span style="color:var(--text2)">لا يوجد تقييم</span>'}</div>`;
+  }).join('') : '<div style="font-size:12px;color:var(--text2);margin-top:4px">لا يوجد منسق مسجل للفرع</div>';
+
+  const infoCard = (title,body,color) => `<div class="card" style="padding:12px;border-top:3px solid ${color}"><div style="font-size:11px;color:var(--text2);font-weight:700">${title}</div>${body}</div>`;
+
+  const itemsRows = items.length ? items.map(([n,q])=>`<tr><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;font-size:12px">${_gmvEsc(n)}</td><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-weight:700;font-size:12px">${q}</td></tr>`).join('')
+    : '<tr><td colspan="2" style="padding:12px;text-align:center;color:var(--text2);font-size:12px">لا توجد فواتير تسليم للفرع آخر 30 يوم</td></tr>';
+
+  const critHtml = GMV_CRITERIA.map(([k,label])=>`
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid #f3ede5;flex-wrap:wrap">
+      <span style="font-size:13px;font-weight:700;color:var(--navy)">${label}</span>
+      <div style="display:flex;gap:5px" id="gmv-sc-${k}">
+        ${[1,2,3,4,5].map(n=>`<button type="button" onclick="gmvSetScore('${k}',${n})" data-n="${n}" style="width:36px;height:36px;border-radius:8px;border:1.5px solid #D9CDB8;background:#fff;font-weight:800;font-size:14px;cursor:pointer;font-family:inherit">${n}</button>`).join('')}
+      </div>
+    </div>`).join('');
+
+  const prevHtml = prev.length ? `
+    <div class="card" style="margin-top:12px">
+      <div class="card-title"><i class="ti ti-history"></i> زياراتك السابقة للفرع</div>
+      ${prev.map(p=>{
+        const sc=[p.score_attendance,p.score_relation,p.score_display,p.score_fifo,p.score_cleanliness,p.score_report_accuracy].filter(x=>x!=null);
+        const avg=sc.length?(sc.reduce((s,x)=>s+x,0)/sc.length).toFixed(1):'—';
+        return `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f3ede5;font-size:12px"><span>${p.visit_date}${p.notes?` — <span style="color:var(--text2)">${_gmvEsc(p.notes)}</span>`:''}</span><b>${avg}/5</b></div>`;
+      }).join('')}
+    </div>` : '';
+
+  box.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:12px">
+      ${infoCard('📦 أصناف متسلّمة للفرع (آخر 30 يوم)', `<div style="font-size:26px;font-weight:900;color:#1A7A4A;margin-top:4px">${items.length}<span style="font-size:12px;color:var(--text2);font-weight:600"> صنف</span></div>`, '#1A7A4A')}
+      ${infoCard('🧑‍💼 منسق المنطقة وتقييمه', ratingHtml, '#C55B48')}
+      ${infoCard('🚚 المندوب', `<div style="font-size:15px;font-weight:800;margin-top:6px">${_gmvEsc(repName)||'—'}</div>`, '#1D4ED8')}
+      ${infoCard('🕒 آخر زيارة للفرع (من النظام)', lv?`<div style="font-size:15px;font-weight:800;margin-top:6px">${lv.date}</div><div style="font-size:11px;color:var(--text2)">${lvDays===0?'النهارده':`من ${lvDays} يوم`}${lv.name?` — ${_gmvEsc(lv.name)}`:''}</div>`:'<div style="font-size:13px;color:#B91C1C;margin-top:6px">لا توجد زيارة مسجلة</div>', '#B45309')}
+    </div>
+
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title"><i class="ti ti-package"></i> الأصناف المتسلّمة للفرع</div>
+      <div style="max-height:260px;overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr style="background:#003049;color:#fff"><th style="padding:7px 8px;text-align:right;font-size:12px">الصنف</th><th style="padding:7px 8px;font-size:12px">الكمية</th></tr></thead><tbody>${itemsRows}</tbody></table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><i class="ti ti-clipboard-check"></i> تقييمك للتشغيل — ${_gmvEsc(bn)} <span id="gmv-avg" style="margin-right:auto;font-size:12px;color:var(--text2)"></span></div>
+      ${critHtml}
+      <div class="fld" style="margin-top:12px"><label class="lbl">ملاحظات</label><textarea id="gmv-notes" rows="3" style="width:100%" placeholder="أي ملاحظة على الزيارة..."></textarea></div>
+      <button class="btn btn-primary" onclick="gmvSave()" style="width:100%"><i class="ti ti-device-floppy"></i> حفظ التقييم</button>
+    </div>
+    ${prevHtml}`;
+}
+
+function gmvSetScore(k,n){
+  _gmvScores[k] = n;
+  document.querySelectorAll(`#gmv-sc-${k} button`).forEach(btn=>{
+    const on = +btn.dataset.n===n;
+    btn.style.background = on ? '#731E2E' : '#fff';
+    btn.style.color = on ? '#fff' : '';
+    btn.style.borderColor = on ? '#731E2E' : '#D9CDB8';
+  });
+  const v = Object.values(_gmvScores);
+  const el = document.getElementById('gmv-avg');
+  if(el) el.textContent = v.length ? `المتوسط: ${(v.reduce((s,x)=>s+x,0)/v.length).toFixed(1)}/5` : '';
+}
+
+async function gmvSave(){
+  if(!_gmvCtx){ showToast('اختار الفرع أولاً'); return; }
+  const missing = GMV_CRITERIA.filter(([k])=>!_gmvScores[k]);
+  if(missing.length){ showToast('كمّل تقييم: '+missing.map(m=>m[1]).join('، ')); return; }
+  const c = _gmvCtx;
+  const row = {
+    visit_date: document.getElementById('gmv-date').value || _gmvToday(),
+    route: _gmvN(c.branch.route),
+    branch_name: c.branch.branch_name,
+    grp: c.branch.grp || null,
+    coordinator_name: c.coordinator || null,
+    rep_name: c.rep || null,
+    last_visit_date: c.lastVisit,
+    items_count: c.itemsCount,
+    score_attendance: _gmvScores.attendance,
+    score_relation: _gmvScores.relation,
+    score_display: _gmvScores.display,
+    score_fifo: _gmvScores.fifo,
+    score_cleanliness: _gmvScores.cleanliness,
+    score_report_accuracy: _gmvScores.report_accuracy,
+    notes: (document.getElementById('gmv-notes').value||'').trim() || null,
+    rated_by: (typeof CU!=='undefined' && CU.name) || 'GM',
+  };
+  const ok = await sbInsert('gm_field_visits', row);
+  if(ok){ showToast('✓ تم حفظ تقييم الزيارة'); gmvLoadReport(c.branch); }
+  else showToast('حدث خطأ أثناء الحفظ');
 }
 
 // ══════════════════════════════════════════════════════════════
