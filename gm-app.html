@@ -14110,14 +14110,18 @@ async function gmvLoadReport(b){
     dels = await get(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,delivery_date,items&deleted_at=is.null&branch_name=ilike.*${enc(pat)}*&delivery_date=gte.${d30}&order=delivery_date.desc&limit=500`);
   }
 
-  // ربط الفرع بعميل MT + أسماؤه البديلة (لجلب أصناف الفواتير)
-  const cmap = await get(`${SUPABASE_URL}/rest/v1/branch_client_map?select=client_name&branch_name=eq.${enc(bn)}&limit=3`);
-  const clientName = cmap[0]?.client_name || '';
-  let aliases = [];
-  if(clientName){
-    const sc = await get(`${SUPABASE_URL}/rest/v1/sales_clients?select=mt_customer_names&name=eq.${enc(clientName)}&limit=1`);
-    aliases = Array.isArray(sc[0]?.mt_customer_names) ? sc[0].mt_customer_names : [];
+  // آخر تقرير كميات للمنسق على الفرع (جدول products) — بنفس يوم/منسق/زيارة أحدث صف
+  const prodRows = await get(`${SUPABASE_URL}/rest/v1/products?select=name,fea,cat,snf,shelf_qty,stock_qty,date_shelf,date_stock,visit_id,created_at&branch=eq.${enc(bn)}&order=created_at.desc&limit=600`);
+  const _cairoDay = t => t ? new Date(new Date(t).getTime()+2*3600000).toISOString().slice(0,10) : '';
+  let report = [], reportDate = '', reportCoord = '';
+  if(prodRows.length){
+    const top = prodRows[0];
+    reportDate = _cairoDay(top.created_at); reportCoord = top.name || '';
+    report = prodRows.filter(r => top.visit_id ? r.visit_id===top.visit_id : (_cairoDay(r.created_at)===reportDate && (r.name||'')===(top.name||'')));
   }
+  const repMap = {};
+  report.forEach(r=>{ const k=(r.snf||'').trim(); if(!k) return; if(!repMap[k]) repMap[k]={snf:k,fea:r.fea||'',cat:r.cat||'',shelf:0,stock:0,ds:r.date_shelf||'',dk:r.date_stock||''}; repMap[k].shelf+=+r.shelf_qty||0; repMap[k].stock+=+r.stock_qty||0; });
+  const reportItems = Object.values(repMap).sort((a,c)=>(c.shelf+c.stock)-(a.shelf+a.stock));
   // مشرفو التنسيق/البيع (للاختيار التلقائي حسب مجموعة الفرع)
   if(!_gmvSups){
     const us = await get(`${SUPABASE_URL}/rest/v1/users?select=name,role,level,grp,groups,status&or=(and(role.eq.supervisor,level.eq.sup),and(role.eq.sales,level.eq.sup))&limit=100`);
@@ -14140,9 +14144,8 @@ async function gmvLoadReport(b){
   const lvDays = lv ? Math.max(0, Math.round((new Date(_gmvToday())-new Date(lv.date))/86400000)) : null;
 
   _gmvCtx = { branch:b, coordinator: coordNames.join(' / '), rep: repName, lastVisit: lv?.date||null, itemsCount: items.length,
-              client: clientName, aliases, delivered: new Set(items.map(([n])=>_gmvNormItem(n))), mtCount: 0 };
+              reportDate, reportCoord, reportCount: reportItems.length };
   _gmvScores = {};
-  _gmvMtItems = [];
 
   // اقتراح المشرفين حسب مجموعة الفرع
   const supBlock = (pfx, title, color, list) => {
@@ -14166,16 +14169,16 @@ async function gmvLoadReport(b){
   };
   const mtCard = `
     <div class="card" style="margin-bottom:12px">
-      <div class="card-title"><i class="ti ti-receipt-2"></i> أصناف فواتير MT للعميل${clientName?` — ${_gmvEsc(clientName)}`:''}</div>
-      ${clientName ? `
-        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px;font-size:12px">
-          من <input type="date" id="gmv-mt-from" value="2026-01-01" style="padding:4px">
-          إلى <input type="date" id="gmv-mt-to" value="2026-06-30" style="padding:4px">
-          <button class="btn btn-sm" onclick="gmvReloadMt()" type="button"><i class="ti ti-refresh"></i> عرض</button>
-          <span id="gmv-mt-sum" style="color:var(--text2)"></span>
+      <div class="card-title"><i class="ti ti-clipboard-list"></i> آخر تقرير كميات للمنسق على الفرع</div>
+      ${reportItems.length ? `
+        <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin-bottom:8px">
+          <span>📅 تاريخ التقرير: <b>${_gmvEsc(reportDate)}</b></span>
+          <span>🧑‍💼 المنسق: <b>${_gmvEsc(reportCoord||'—')}</b></span>
+          <span>🕒 آخر زيارة للفرع: <b>${lv?_gmvEsc(lv.date):'—'}</b></span>
+          <span>📦 ${reportItems.length} صنف</span>
         </div>
-        <div style="max-height:320px;overflow:auto" id="gmv-mt-body"><div style="padding:12px;text-align:center;color:var(--text2);font-size:12px">جاري التحميل...</div></div>`
-      : '<div style="padding:12px;text-align:center;color:#B91C1C;font-size:12px">الفرع غير مربوط بعميل MT — اربطه من لوحة التحكم (ربط فروع بعميل)</div>'}
+        <div style="max-height:320px;overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr style="background:#003049;color:#fff"><th style="padding:7px 8px;text-align:right;font-size:12px">الصنف</th><th style="padding:7px 8px;font-size:12px">كمية الرف</th><th style="padding:7px 8px;font-size:12px">كمية المخزن</th><th style="padding:7px 8px;font-size:12px">صلاحية الرف</th><th style="padding:7px 8px;font-size:12px">صلاحية المخزن</th></tr></thead><tbody>${reportItems.map(x=>`<tr><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;font-size:12px">${_gmvEsc(x.snf)}</td><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-weight:700;font-size:12px">${x.shelf}</td><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-weight:700;font-size:12px">${x.stock}</td><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:12px">${_gmvEsc(x.ds||'—')}</td><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:12px">${_gmvEsc(x.dk||'—')}</td></tr>`).join('')}</tbody></table></div>`
+      : `<div style="padding:12px;text-align:center;color:#B91C1C;font-size:12px">لا يوجد تقرير كميات مسجل للفرع من المنسق${lv?` — آخر زيارة: ${_gmvEsc(lv.date)}`:''}</div>`}
     </div>`;
 
   const stars = n => '⭐'.repeat(Math.max(0,Math.min(5,+n||0)));
@@ -14233,39 +14236,9 @@ async function gmvLoadReport(b){
       <button class="btn btn-primary" onclick="gmvSave()" style="width:100%"><i class="ti ti-device-floppy"></i> حفظ التقييم</button>
     </div>
     ${prevHtml}`;
-  if(clientName) gmvReloadMt();
 }
 
 const _gmvNormItem = s => String(s||'').trim().replace(/ـ/g,'').replace(/\s+/g,' ').replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي');
-
-// أصناف فواتير MT للعميل في فترة محددة (الافتراضي: من بداية السنة لحد قبل شهر 7)
-async function gmvReloadMt(){
-  const c = _gmvCtx; if(!c || !c.client) return;
-  const body = document.getElementById('gmv-mt-body'); if(!body) return;
-  const from = document.getElementById('gmv-mt-from').value || '2026-01-01';
-  const to = document.getElementById('gmv-mt-to').value || _gmvToday();
-  body.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text2);font-size:12px">جاري التحميل...</div>';
-  const keys = [...new Set([c.client, ...c.aliases].map(_gmvNormItem).filter(Boolean))];
-  let rows = [];
-  try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_mt_items_period`, {method:'POST', headers:{...H(),'Content-Type':'application/json'}, body: JSON.stringify({p_keys:keys, p_from:from, p_to:to})});
-    rows = r.ok ? await r.json() : [];
-  }catch(e){ rows = []; }
-  // دمج الأسماء المتشابهة (ي/ى، ة/ه)
-  const m = {};
-  (Array.isArray(rows)?rows:[]).forEach(x=>{
-    const k=_gmvNormItem(x.item);
-    if(!m[k]) m[k]={name:x.item,cartons:0,pieces:0,last:'',inv:0};
-    m[k].cartons += +x.cartons||0; m[k].pieces += +x.pieces||0; m[k].inv += +x.invoices||0;
-    if((x.last_date||'')>m[k].last) m[k].last=x.last_date;
-  });
-  const list = Object.entries(m).map(([k,v])=>({k,...v})).sort((a,b)=>b.cartons-a.cartons);
-  c.mtCount = list.length; _gmvMtItems = list;
-  const sum = document.getElementById('gmv-mt-sum');
-  if(sum) sum.textContent = `${list.length} صنف — منهم ${list.filter(x=>c.delivered.has(x.k)).length} اتسلّم للفرع آخر 30 يوم`;
-  body.innerHTML = list.length ? `<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#003049;color:#fff"><th style="padding:7px 8px;text-align:right;font-size:12px">الصنف</th><th style="padding:7px 8px;font-size:12px">كراتين</th><th style="padding:7px 8px;font-size:12px">فواتير</th><th style="padding:7px 8px;font-size:12px">آخر فاتورة</th><th style="padding:7px 8px;font-size:12px">اتسلّم للفرع (30 يوم)</th></tr></thead><tbody>${list.map(x=>`<tr><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;font-size:12px">${_gmvEsc(x.name)}</td><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-weight:700;font-size:12px">${Math.round(x.cartons*100)/100}</td><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:12px">${x.inv}</td><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:12px">${x.last||'—'}</td><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:12px">${c.delivered.has(x.k)?'<span style="color:#1A7A4A;font-weight:800">✓</span>':'<span style="color:#B91C1C">—</span>'}</td></tr>`).join('')}</tbody></table>`
-    : '<div style="padding:12px;text-align:center;color:var(--text2);font-size:12px">لا توجد فواتير MT للعميل في الفترة دي</div>';
-}
 
 function gmvSetScore(k,n){
   _gmvScores[k] = n;
@@ -14296,7 +14269,7 @@ async function gmvSave(){
   const row = {
     coord_sup_name: supName('cs'), cs_presence: supVal('cs','presence'), cs_followup: supVal('cs','followup'), cs_knowledge: supVal('cs','knowledge'), cs_notes: supNote('cs'),
     sales_sup_name: supName('ss'), ss_presence: supVal('ss','presence'), ss_followup: supVal('ss','followup'), ss_knowledge: supVal('ss','knowledge'), ss_notes: supNote('ss'),
-    mt_items_count: c.mtCount || null, mt_client: c.client || null,
+    report_date: c.reportDate || null, report_coordinator: c.reportCoord || null, report_items_count: c.reportCount || null,
     visit_date: document.getElementById('gmv-date').value || _gmvToday(),
     route: _gmvN(c.branch.route),
     branch_name: c.branch.branch_name,
