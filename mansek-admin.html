@@ -3754,10 +3754,7 @@ h2,h3{color:#2C1F0A}
             <input type="text" id="gmva-q" class="form-control" style="max-width:200px" placeholder="بحث فرع / منسق / مندوب" oninput="gmvaRender()">
           </div>
           <div class="stats-grid" id="gmva-stats" style="margin-bottom:14px"></div>
-          <div style="overflow-x:auto"><table class="data-table" style="width:100%">
-            <thead><tr><th>التاريخ</th><th>خط السير</th><th>الفرع</th><th>المنسق</th><th>المندوب</th><th>أصناف</th><th>آخر زيارة</th><th>حضور</th><th>علاقة</th><th>عرض</th><th>FIFO</th><th>نظافة</th><th>دقة التقرير</th><th>المتوسط</th><th>ملاحظات</th><th>مشرف التنسيق</th><th>تقييمه</th><th>ملاحظاته</th><th>مشرف البيع</th><th>تقييمه</th><th>ملاحظاته</th><th>تقرير الكميات</th><th>آخر زيارات (مشرف تنسيق / مدير تنسيق / مشرف بيع)</th><th></th></tr></thead>
-            <tbody id="gmva-body"><tr><td colspan="24" style="text-align:center;padding:20px">...</td></tr></tbody>
-          </table></div>
+          <div id="gmva-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px"></div>
         </div>
 
         <!-- ══ PANEL: قوة القطاع (الهيكل التنظيمي الفعلي — مدير/مشرف/مندوب ومدير/مشرف/منسق) ══════ -->
@@ -23562,47 +23559,146 @@ async function ssGenerateExportPDF(){
 }
 
 // ═══ زيارة gm — عرض تقييمات الزيارات الميدانية ═══
-let GMVA_ROWS = [], GMVA_VIEW = [];
+let GMVA_ROWS = [], GMVA_VIEW = [], GMVA_DM = [], GMVA_ROUTE_OPEN = '';
 const GMVA_KEYS = ['score_attendance','score_relation','score_display','score_fifo','score_cleanliness','score_report_accuracy'];
 const GMVA_LBL = ['حضور','علاقة','عرض','FIFO','نظافة','دقة التقرير'];
 function _gmvaEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function _gmvaSupAvg(r,p){ const v=['presence','followup','knowledge'].map(k=>+r[p+'_'+k]).filter(x=>x>0); return v.length? v.reduce((a,b)=>a+b,0)/v.length : 0; }
 function _gmvaAvg(r){ const v=GMVA_KEYS.map(k=>+r[k]).filter(x=>x>0); return v.length? v.reduce((a,b)=>a+b,0)/v.length : 0; }
+function _gmvaCol(v){ return v>=4?'#1A7A4A':v>=3?'#B8860B':'#C0392B'; }
+function _gmvaDmFor(grp){
+  return GMVA_DM.filter(u=>{ const g=u.groups; if(!g) return false; const arr=Array.isArray(g)?g:String(g).split(/[,،]/).map(x=>x.trim()); return arr.includes(grp); });
+}
 async function gmvaLoad(force){
-  const body=document.getElementById('gmva-body');
-  if(body) body.innerHTML='<tr><td colspan="24" style="text-align:center;padding:20px">جاري التحميل...</td></tr>';
+  const box=document.getElementById('gmva-cards');
+  if(box) box.innerHTML='<div style="text-align:center;padding:30px;color:#999">جاري التحميل...</div>';
   try{
-    GMVA_ROWS = await fetchAllRows(`${SUPABASE_URL}/rest/v1/gm_field_visits?select=*&order=visit_date.desc,id.desc`, {apikey:SUPABASE_KEY, Authorization:'Bearer '+SUPABASE_KEY});
+    const hd={apikey:SUPABASE_KEY, Authorization:'Bearer '+SUPABASE_KEY};
+    GMVA_ROWS = await fetchAllRows(`${SUPABASE_URL}/rest/v1/gm_field_visits?select=*&order=visit_date.desc,id.desc`, hd);
+    try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/users?select=name,groups&level=eq.dm`,{headers:hd}); GMVA_DM = r.ok? await r.json():[]; }catch(e){ GMVA_DM=[]; }
     const sel=document.getElementById('gmva-route'), cur=sel.value;
     const routes=[...new Set(GMVA_ROWS.map(r=>r.route).filter(Boolean))].sort();
     sel.innerHTML='<option value="">كل الخطوط</option>'+routes.map(r=>`<option value="${_gmvaEsc(r)}">${_gmvaEsc(r)}</option>`).join('');
     sel.value=cur;
     gmvaRender();
-  }catch(e){ if(body) body.innerHTML='<tr><td colspan="24" style="text-align:center;color:#C0392B;padding:20px">تعذر التحميل: '+_gmvaEsc(e.message)+'</td></tr>'; }
+  }catch(e){ if(box) box.innerHTML='<div style="text-align:center;color:#C0392B;padding:20px">تعذر التحميل: '+_gmvaEsc(e.message)+'</div>'; }
+}
+function _gmvaGroups(rows){
+  const m={};
+  rows.forEach(r=>{ const k=r.route||'— بدون خط —'; (m[k]=m[k]||[]).push(r); });
+  return Object.entries(m).map(([route,rs])=>{
+    const byB={}; rs.forEach(r=>{ (byB[r.branch_name]=byB[r.branch_name]||[]).push(r); });
+    const branches=Object.values(byB).map(list=>{ list.sort((a,b)=>(b.visit_date||'').localeCompare(a.visit_date||'')||b.id-a.id); return {latest:list[0],prev:list.slice(1)}; });
+    const avg=rs.length? rs.reduce((a,r)=>a+_gmvaAvg(r),0)/rs.length : 0;
+    const last=rs.reduce((m,r)=>r.visit_date>m?r.visit_date:m,'');
+    const lastRow=rs.find(r=>r.visit_date===last)||rs[0];
+    return {route,rows:rs,branches,avg,last,coord:lastRow.coordinator_name||'',grp:lastRow.grp||''};
+  }).sort((a,b)=>b.last.localeCompare(a.last));
+}
+function _gmvaDmInfo(g){
+  const dms=_gmvaDmFor(g.grp);
+  if(!dms.length) return null;
+  const lastDm=g.rows.reduce((m,r)=>r.last_dm_visit&&r.last_dm_visit>m?r.last_dm_visit:m,'');
+  return {name:dms.map(d=>d.name).join(' / '), date:lastDm};
 }
 function gmvaRender(){
   const f=document.getElementById('gmva-from').value, t=document.getElementById('gmva-to').value;
   const rt=document.getElementById('gmva-route').value, q=document.getElementById('gmva-q').value.trim();
   GMVA_VIEW = GMVA_ROWS.filter(r=>(!f||r.visit_date>=f)&&(!t||r.visit_date<=t)&&(!rt||r.route===rt)&&
-    (!q||[r.branch_name,r.coordinator_name,r.rep_name].some(x=>(x||'').includes(q))));
+    (!q||[r.branch_name,r.coordinator_name,r.rep_name,r.route].some(x=>(x||'').includes(q))));
   const avgAll = GMVA_VIEW.length? GMVA_VIEW.reduce((a,r)=>a+_gmvaAvg(r),0)/GMVA_VIEW.length : 0;
+  const groups=_gmvaGroups(GMVA_VIEW);
   const card=(l,v,c)=>`<div class="stat-card"><div class="stat-label">${l}</div><div class="stat-value" style="color:${c}">${v}</div></div>`;
   document.getElementById('gmva-stats').innerHTML =
-    card('عدد الزيارات',GMVA_VIEW.length,'#731E2E')+
-    card('عدد الفروع',new Set(GMVA_VIEW.map(r=>r.branch_name)).size,'#4E5A2B')+
+    card('خطوط السير المزارة',groups.length,'#731E2E')+
+    card('عدد الزيارات',GMVA_VIEW.length,'#4E5A2B')+
+    card('عدد الفروع',new Set(GMVA_VIEW.map(r=>r.branch_name)).size,'#005CBF')+
     card('متوسط التقييم (من 5)',avgAll.toFixed(2),'#1A7A4A');
-  const col=v=>v>=4?'#1A7A4A':v>=3?'#B8860B':'#C0392B';
-  document.getElementById('gmva-body').innerHTML = GMVA_VIEW.length ? GMVA_VIEW.map(r=>{
-    const a=_gmvaAvg(r);
-    return `<tr><td>${_gmvaEsc(r.visit_date)}</td><td>${_gmvaEsc(r.route||'—')}</td><td>${_gmvaEsc(r.branch_name)}</td><td>${_gmvaEsc(r.coordinator_name||'—')}</td><td>${_gmvaEsc(r.rep_name||'—')}</td><td>${r.items_count==null?'—':r.items_count}</td><td>${_gmvaEsc(r.last_visit_date||'—')}</td>`+
-      GMVA_KEYS.map(k=>`<td style="font-weight:700;color:${col(+r[k])}">${r[k]||'—'}</td>`).join('')+
-      `<td style="font-weight:800;color:${col(a)}">${a.toFixed(1)}</td><td style="max-width:200px">${_gmvaEsc(r.notes||'')}</td>`+
-      `<td>${_gmvaEsc(r.coord_sup_name||'—')}</td><td style="font-weight:700;color:${col(_gmvaSupAvg(r,'cs'))}">${_gmvaSupAvg(r,'cs')?_gmvaSupAvg(r,'cs').toFixed(1):'—'}</td><td style="max-width:160px">${_gmvaEsc(r.cs_notes||'')}</td>`+
-      `<td>${_gmvaEsc(r.sales_sup_name||'—')}</td><td style="font-weight:700;color:${col(_gmvaSupAvg(r,'ss'))}">${_gmvaSupAvg(r,'ss')?_gmvaSupAvg(r,'ss').toFixed(1):'—'}</td><td style="max-width:160px">${_gmvaEsc(r.ss_notes||'')}</td>`+
-      `<td>${r.report_date?_gmvaEsc(r.report_date)+' — '+(r.report_items_count||0)+' صنف':'—'}</td>`+
-      `<td style="font-size:11px">${_gmvaEsc(r.last_cs_visit||'—')} / ${_gmvaEsc(r.last_dm_visit||'—')} / ${_gmvaEsc(r.last_ss_visit||'—')}</td>`+
-      `<td><button class="btn btn-ghost btn-sm" onclick="gmvaDelete(${r.id})" title="حذف"><i class="ti ti-trash" style="color:#C0392B"></i></button></td></tr>`;
-  }).join('') : '<tr><td colspan="24" style="text-align:center;padding:20px;color:#999">لا توجد زيارات</td></tr>';
+  document.getElementById('gmva-cards').innerHTML = groups.length ? groups.map((g,i)=>{
+    const dm=_gmvaDmInfo(g);
+    const dmLine = dm ? `<div style="font-size:12px;margin-top:6px">مدير التنسيق: <b>${_gmvaEsc(dm.name)}</b> — ${dm.date?`<span style="color:#1A7A4A;font-weight:700">زار الفرع ${_gmvaEsc(dm.date)}</span>`:'<span style="color:#B91C1C;font-weight:700">لم يزر الفرع</span>'}</div>` : '';
+    return `<div onclick="gmvaOpenRoute(${i})" style="cursor:pointer;background:#fff;border:1px solid #E0D8CC;border-top:4px solid ${_gmvaCol(g.avg)};border-radius:12px;padding:14px;box-shadow:0 2px 8px rgba(0,0,0,.06)">
+      <div style="font-weight:800;color:#731E2E;font-size:15px;margin-bottom:6px"><i class="ti ti-route"></i> ${_gmvaEsc(g.route)}</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:#555">
+        <span>الزيارات: <b>${g.rows.length}</b></span><span>الفروع: <b>${g.branches.length}</b></span>
+        <span>التقييم: <b style="color:${_gmvaCol(g.avg)};font-size:14px">${g.avg.toFixed(1)}</b>/5</span></div>
+      <div style="font-size:12px;margin-top:6px;color:#555">آخر زيارة: <b>${_gmvaEsc(g.last)}</b></div>
+      <div style="font-size:12px;color:#555">المنسق: <b>${_gmvaEsc(g.coord||'—')}</b></div>${dmLine}
+    </div>`; }).join('') : '<div style="text-align:center;padding:20px;color:#999;grid-column:1/-1">لا توجد زيارات</div>';
+  window._gmvaGroups = groups;
+  if(document.getElementById('gmva-modal')?.style.display==='flex' && GMVA_ROUTE_OPEN){
+    const i=groups.findIndex(g=>g.route===GMVA_ROUTE_OPEN); if(i>=0) gmvaOpenRoute(i);
+  }
+}
+function _gmvaVisitRow(l,d,n){
+  return `<div style="font-size:12px;padding:3px 0">${l}: ${d?`<b style="color:#1A7A4A">زار الفرع ${_gmvaEsc(d)}</b>${n?' ('+_gmvaEsc(n)+')':''}`:'<span style="color:#B91C1C;font-weight:700">لم يزر الفرع</span>'}</div>`;
+}
+function _gmvaSnap(r){ let s=r.snapshot; if(typeof s==='string'){ try{s=JSON.parse(s);}catch(e){s=null;} } return s||null; }
+function _gmvaBranchDetail(r,withPrev,prev){
+  const col=_gmvaCol, snap=_gmvaSnap(r);
+  const scores=GMVA_KEYS.map((k,i)=>`<span style="display:inline-block;background:#F5F0E8;border-radius:6px;padding:3px 8px;margin:2px;font-size:12px">${GMVA_LBL[i]}: <b style="color:${col(+r[k])}">${r[k]||'—'}</b></span>`).join('');
+  const sup=(p,lbl,nm,notes)=>{ const a=_gmvaSupAvg(r,p); return `<div style="background:#FAF7F2;border-radius:8px;padding:8px;margin-top:6px;font-size:12px"><b>${lbl}:</b> ${_gmvaEsc(nm||'—')} ${a?`— <b style="color:${col(a)}">${a.toFixed(1)}/5</b> (حضور ${r[p+'_presence']||'—'} · متابعة ${r[p+'_followup']||'—'} · معرفة ${r[p+'_knowledge']||'—'})`:'— لم يُقيَّم'}${notes?`<div style="color:#555;margin-top:3px">ملاحظات: ${_gmvaEsc(notes)}</div>`:''}</div>`; };
+  const tbl=(head,rows)=>rows.length?`<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:4px"><tr>${head.map(h=>`<th style="background:#731E2E;color:#fff;padding:3px;border:1px solid #ddd">${h}</th>`).join('')}</tr>${rows.map(x=>`<tr>${x.map(c=>`<td style="padding:3px;border:1px solid #ddd;text-align:center">${_gmvaEsc(c)}</td>`).join('')}</tr>`).join('')}</table>`:'';
+  let rep='', qty='', rate='';
+  if(snap){
+    rate=(snap.ratings||[]).filter(x=>x.rating!=null).map(x=>`${_gmvaEsc(x.name)}: <b>${x.rating}</b>${x.week?' ('+_gmvaEsc(x.week)+')':''}`).join(' · ');
+    const ri=(snap.rep&&snap.rep.items)||[];
+    rep=`<div style="margin-top:8px;font-size:12px"><b>المندوب:</b> ${_gmvaEsc(r.rep_name||'—')} — آخر تسليم: ${_gmvaEsc((snap.rep&&snap.rep.date)||'—')}${tbl(['الصنف','الكمية'],ri.map(x=>[x[0],x[1]]))}</div>`;
+    const rp=snap.report||{};
+    qty=`<div style="margin-top:8px;font-size:12px"><b>آخر تقرير كميات للمنسق:</b> ${rp.date?_gmvaEsc(rp.date)+' — '+_gmvaEsc(rp.coord||''):'لا يوجد'}${tbl(['الصنف','رف','مخزن','صلاحية رف','صلاحية مخزن'],(rp.items||[]).map(x=>[x.snf,x.shelf,x.stock,x.ds||'',x.dk||'']))}</div>`;
+  } else {
+    rep=`<div style="margin-top:8px;font-size:12px"><b>المندوب:</b> ${_gmvaEsc(r.rep_name||'—')} <span style="color:#999">(تفاصيل الأصناف غير محفوظة لهذه الزيارة القديمة)</span></div>`;
+    qty=r.report_date?`<div style="margin-top:6px;font-size:12px"><b>تقرير الكميات:</b> ${_gmvaEsc(r.report_date)} — ${r.report_items_count||0} صنف</div>`:'';
+  }
+  const prevHtml = withPrev && prev.length ? `<div style="margin-top:8px;font-size:12px"><b>زيارات سابقة:</b> ${prev.map(p=>`${_gmvaEsc(p.visit_date)} (<b style="color:${col(_gmvaAvg(p))}">${_gmvaAvg(p).toFixed(1)}</b>)`).join(' · ')}</div>`:'';
+  return `<div style="padding:10px 12px;border-top:1px dashed #E0D8CC">
+    <div><b>تقييم GM:</b> ${scores} <span style="font-weight:800;color:${col(_gmvaAvg(r))}">المتوسط ${_gmvaAvg(r).toFixed(1)}</span></div>
+    ${sup('cs','مشرف التنسيق',r.coord_sup_name,r.cs_notes)}${sup('ss','مشرف البيع',r.sales_sup_name,r.ss_notes)}
+    <div style="margin-top:8px"><b>آخر زيارات الفرع:</b>
+      ${_gmvaVisitRow('المنسق',r.last_visit_date,r.coordinator_name)}${_gmvaVisitRow('مشرف التنسيق',r.last_cs_visit,r.last_cs_name)}${_gmvaVisitRow('مدير التنسيق',r.last_dm_visit,r.last_dm_name)}${_gmvaVisitRow('مشرف البيع',r.last_ss_visit,r.last_ss_name)}</div>
+    <div style="margin-top:6px;font-size:12px"><b>المنسق:</b> ${_gmvaEsc(r.coordinator_name||'—')}${rate?' — تقييمه الأسبوعي: '+rate:''}</div>
+    ${rep}${qty}
+    ${r.notes?`<div style="margin-top:8px;font-size:12px;background:#FFF8E6;border-radius:8px;padding:8px"><b>ملاحظات GM:</b> ${_gmvaEsc(r.notes)}</div>`:''}
+    ${prevHtml}
+    <div style="margin-top:8px;display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="gmvaPDF([${r.id}])"><i class="ti ti-file-type-pdf" style="color:#731E2E"></i> PDF الفرع</button>
+    <button class="btn btn-ghost btn-sm" onclick="gmvaDelete(${r.id})"><i class="ti ti-trash" style="color:#C0392B"></i> حذف</button></div></div>`;
+}
+function gmvaOpenRoute(i){
+  const g=(window._gmvaGroups||[])[i]; if(!g) return;
+  GMVA_ROUTE_OPEN=g.route;
+  let m=document.getElementById('gmva-modal');
+  if(!m){ m=document.createElement('div'); m.id='gmva-modal'; m.style.cssText='display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center;padding:12px';
+    m.onclick=e=>{ if(e.target===m){ m.style.display='none'; GMVA_ROUTE_OPEN=''; } }; document.body.appendChild(m); }
+  const dm=_gmvaDmInfo(g);
+  const dmLine= dm ? `<div style="font-size:13px;margin-top:4px">مدير التنسيق: <b>${_gmvaEsc(dm.name)}</b> — ${dm.date?`<span style="color:#1A7A4A;font-weight:700">زار الفرع ${_gmvaEsc(dm.date)}</span>`:'<span style="color:#B91C1C;font-weight:700">لم يزر الفرع</span>'}</div>`:'';
+  const ratings=[...new Set(g.rows.map(r=>r.coordinator_name).filter(Boolean))];
+  const brs=g.branches.map((b,j)=>{ const r=b.latest;
+    return `<div style="border:1px solid #E0D8CC;border-radius:10px;margin-bottom:8px;background:#fff;overflow:hidden">
+      <div onclick="const d=document.getElementById('gmva-bd-${j}');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;padding:10px 12px;gap:8px">
+        <div style="font-weight:700">${_gmvaEsc(r.branch_name)} <span style="font-size:11px;color:#777;font-weight:400">${_gmvaEsc(r.visit_date)}${b.prev.length?' · '+(b.prev.length+1)+' زيارات':''}</span></div>
+        <div style="font-weight:800;color:${_gmvaCol(_gmvaAvg(r))}">${_gmvaAvg(r).toFixed(1)} <i class="ti ti-chevron-down"></i></div></div>
+      <div id="gmva-bd-${j}" style="display:none">${_gmvaBranchDetail(r,true,b.prev)}</div></div>`; }).join('');
+  m.innerHTML=`<div style="background:#F5F0E8;border-radius:14px;width:min(900px,100%);max-height:92vh;display:flex;flex-direction:column;overflow:hidden">
+    <div style="background:#731E2E;color:#fff;padding:14px 16px;display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+      <div><div style="font-size:17px;font-weight:800"><i class="ti ti-route"></i> ${_gmvaEsc(g.route)}</div>
+      <div style="font-size:12px;margin-top:4px">${g.rows.length} زيارة · ${g.branches.length} فرع · متوسط ${g.avg.toFixed(1)}/5 · آخر زيارة ${_gmvaEsc(g.last)}</div>
+      <div style="font-size:12px;margin-top:4px">المنسق: ${_gmvaEsc(ratings.join(' / ')||'—')}</div>
+      ${dm?`<div style="font-size:12px;margin-top:4px">مدير التنسيق: <b>${_gmvaEsc(dm.name)}</b> — ${dm.date?'زار الفرع '+_gmvaEsc(dm.date):'لم يزر الفرع'}</div>`:''}</div>
+      <div style="display:flex;gap:6px"><button class="btn btn-sm" style="background:#fff;color:#731E2E" onclick="gmvaPDF(null,${i})"><i class="ti ti-file-type-pdf"></i> PDF الخط</button>
+      <button class="btn btn-sm" style="background:#4E5A2B;color:#fff" onclick="document.getElementById('gmva-modal').style.display='none';GMVA_ROUTE_OPEN=''">✕</button></div></div>
+    <div style="overflow-y:auto;padding:12px">${brs}</div></div>`;
+  m.style.display='flex';
+}
+function gmvaPDF(ids,gi){
+  let rows;
+  if(ids) rows=GMVA_ROWS.filter(r=>ids.includes(r.id));
+  else { const g=(window._gmvaGroups||[])[gi]; if(!g) return; rows=g.branches.map(b=>b.latest); }
+  if(!rows.length){ alert('لا توجد بيانات'); return; }
+  const w=window.open('','_blank'); if(!w){ alert('اسمح بالنوافذ المنبثقة'); return; }
+  const pages=rows.map(r=>`<div class="pg"><div class="hd"><div>الطحان جولدن داتس — تقرير زيارة GM</div><div>${_gmvaEsc(r.visit_date)}</div></div>
+    <h2>${_gmvaEsc(r.branch_name)} <small>— ${_gmvaEsc(r.route||'')}</small></h2>${_gmvaBranchDetail(r,false,[]).replace(/<button[\s\S]*?<\/button>/g,'')}</div>`).join('');
+  w.document.write(`<html dir="rtl"><head><meta charset="utf-8"><title>تقرير زيارة GM</title><style>body{font-family:Cairo,Arial,sans-serif;margin:0;color:#222}.pg{page-break-after:always;padding:18px}.hd{background:#731E2E;color:#fff;padding:10px 14px;border-radius:8px;display:flex;justify-content:space-between;font-weight:700}h2{color:#731E2E;border-bottom:3px solid #4E5A2B;padding-bottom:6px}h2 small{color:#4E5A2B;font-size:13px}@page{size:A4;margin:8mm}</style></head><body>${pages}</body></html>`);
+  w.document.close(); setTimeout(()=>w.print(),500);
 }
 async function gmvaDelete(id){
   if(!confirm('حذف هذه الزيارة نهائيًا؟')) return;
@@ -23618,7 +23714,7 @@ function gmvaToggleDD(e){
 function _gmvaTableData(){
   const head=['التاريخ','خط السير','الفرع','المنسق','المندوب','عدد الأصناف','آخر زيارة',...GMVA_LBL,'المتوسط','ملاحظات','مشرف التنسيق','تقييم مشرف التنسيق','ملاحظات مشرف التنسيق','مشرف البيع','تقييم مشرف البيع','ملاحظات مشرف البيع','تقرير الكميات (تاريخ)','تقرير الكميات (أصناف)','آخر زيارة مشرف تنسيق','آخر زيارة مدير تنسيق','آخر زيارة مشرف بيع'];
   const rows=GMVA_VIEW.map(r=>[r.visit_date,r.route||'',r.branch_name,r.coordinator_name||'',r.rep_name||'',r.items_count==null?'':r.items_count,r.last_visit_date||'',...GMVA_KEYS.map(k=>r[k]||''),+_gmvaAvg(r).toFixed(2),r.notes||'',
-    r.coord_sup_name||'',_gmvaSupAvg(r,'cs')?+_gmvaSupAvg(r,'cs').toFixed(2):'',r.cs_notes||'',r.sales_sup_name||'',_gmvaSupAvg(r,'ss')?+_gmvaSupAvg(r,'ss').toFixed(2):'',r.ss_notes||'',r.report_date||'',r.report_items_count==null?'':r.report_items_count,r.last_cs_visit||'',r.last_dm_visit||'',r.last_ss_visit||'']);
+    r.coord_sup_name||'',_gmvaSupAvg(r,'cs')?+_gmvaSupAvg(r,'cs').toFixed(2):'',r.cs_notes||'',r.sales_sup_name||'',_gmvaSupAvg(r,'ss')?+_gmvaSupAvg(r,'ss').toFixed(2):'',r.ss_notes||'',r.report_date||'',r.report_items_count==null?'':r.report_items_count,r.last_cs_visit||'لم يزر',r.last_dm_visit||'لم يزر',r.last_ss_visit||'لم يزر']);
   return {head,rows};
 }
 function gmvaExportExcel(){
