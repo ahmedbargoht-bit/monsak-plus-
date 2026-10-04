@@ -14241,12 +14241,15 @@ async function gmvLoadReport(b){
     const hit = spi.find(x=>pm[x.plan_id] && pm[x.plan_id].role==='sales_sup');
     if(hit) lastSs = {date:hit.visit_date, name:pm[hit.plan_id].staff_name};
   }
-  // اسم المندوب: لو مفيش تسليم آخر 30 يوم، هات آخر فاتورة تسليم للفرع
-  let lastRep = '';
-  if(!dels.length){
-    const ld = await get(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,delivery_date&deleted_at=is.null&branch_name=eq.${enc(bn)}&order=delivery_date.desc&limit=1`);
-    lastRep = ld[0]?.rep_name || '';
-  }
+  // آخر زيارة مندوب = آخر فاتورة/فواتير تسليم للفرع (بدون حد 30 يوم) + الأصناف اللي اتوردت فيها
+  let ld = await get(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,delivery_date,items&deleted_at=is.null&branch_name=eq.${enc(bn)}&order=delivery_date.desc&limit=15`);
+  if(!ld.length) ld = await get(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,delivery_date,items&deleted_at=is.null&branch_name=ilike.*${enc(_gmvN(bn).split(' ').join('*'))}*&order=delivery_date.desc&limit=15`);
+  const lastRepDate = ld[0]?.delivery_date || '';
+  const lastRepDocs = ld.filter(x=>x.delivery_date===lastRepDate);
+  const lastRep = lastRepDocs[0]?.rep_name || '';
+  const lastRepItemsMap = {};
+  lastRepDocs.forEach(x=>(Array.isArray(x.items)?x.items:[]).forEach(it=>{ const n=_gmvN(it.name); if(n) lastRepItemsMap[n]=(lastRepItemsMap[n]||0)+(+it.qty||0); }));
+  const lastRepItems = Object.entries(lastRepItemsMap).sort((a,c)=>c[1]-a[1]);
 
   // الأصناف المتسلّمة آخر 30 يوم (مجمّعة بالاسم)
   const itemMap = {};
@@ -14255,7 +14258,7 @@ async function gmvLoadReport(b){
     itemMap[n] = (itemMap[n]||0) + (+it.qty||0);
   }));
   const items = Object.entries(itemMap).sort((a,c)=>c[1]-a[1]);
-  const repName = dels[0]?.rep_name || lastRep || '';
+  const repName = lastRep || dels[0]?.rep_name || '';
   const lv = visits[0] || null;
   const lvDays = lv ? Math.max(0, Math.round((new Date(_gmvToday())-new Date(lv.date))/86400000)) : null;
 
@@ -14331,7 +14334,7 @@ async function gmvLoadReport(b){
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:12px">
       ${infoCard('📦 أصناف متسلّمة للفرع (آخر 30 يوم)', `<div style="font-size:26px;font-weight:900;color:#1A7A4A;margin-top:4px">${items.length}<span style="font-size:12px;color:var(--text2);font-weight:600"> صنف</span></div>`, '#1A7A4A')}
       ${infoCard('🧑‍💼 منسق المنطقة وتقييمه', ratingHtml, '#C55B48')}
-      ${infoCard('🚚 المندوب', `<div style="font-size:15px;font-weight:800;margin-top:6px">${_gmvEsc(repName)||'—'}</div>`, '#1D4ED8')}
+      ${infoCard('🚚 المندوب — آخر زيارة (تسليم)', `<div style="font-size:15px;font-weight:800;margin-top:6px">${_gmvEsc(repName)||'—'}</div>${lastRepDate?`<div style="font-size:12px;margin-top:2px"><b>${_gmvEsc(lastRepDate)}</b> <span style="color:var(--text2)">(${(()=>{const d=Math.max(0,Math.round((new Date(_gmvToday())-new Date(lastRepDate))/86400000));return d===0?'النهارده':`من ${d} يوم`;})()})</span></div>`:'<div style="font-size:12px;color:#B91C1C;margin-top:2px">لا توجد فواتير تسليم للفرع</div>'}`, '#1D4ED8')}
       ${infoCard('🕒 آخر زيارات الفرع (من النظام)', [
         ['🧑‍💼 منسق', lv?{date:lv.date,name:lv.name}:null],
         ['👨‍💼 مشرف تنسيق', lastCs?{date:lastCs.visit_date,name:lastCs.supervisor_name}:null],
@@ -14346,6 +14349,11 @@ async function gmvLoadReport(b){
     <div class="card" style="margin-bottom:12px">
       <div class="card-title"><i class="ti ti-package"></i> الأصناف المتسلّمة للفرع</div>
       <div style="max-height:260px;overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr style="background:#003049;color:#fff"><th style="padding:7px 8px;text-align:right;font-size:12px">الصنف</th><th style="padding:7px 8px;font-size:12px">الكمية</th></tr></thead><tbody>${itemsRows}</tbody></table></div>
+    </div>
+
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title"><i class="ti ti-truck-delivery"></i> الأصناف اللي اتوردت في آخر زيارة للمندوب${lastRepDate?` — ${_gmvEsc(lastRepDate)}`:''}${lastRep?` (${_gmvEsc(lastRep)})`:''}</div>
+      <div style="max-height:260px;overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr style="background:#003049;color:#fff"><th style="padding:7px 8px;text-align:right;font-size:12px">الصنف</th><th style="padding:7px 8px;font-size:12px">الكمية</th></tr></thead><tbody>${lastRepItems.length?lastRepItems.map(([n,q])=>`<tr><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;font-size:12px">${_gmvEsc(n)}</td><td style="padding:5px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-weight:700;font-size:12px">${q}</td></tr>`).join(''):'<tr><td colspan="2" style="padding:12px;text-align:center;color:var(--text2);font-size:12px">لا توجد فواتير تسليم للفرع</td></tr>'}</tbody></table></div>
     </div>
 
     ${mtCard}
