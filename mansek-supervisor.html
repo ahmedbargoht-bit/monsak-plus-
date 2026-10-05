@@ -646,6 +646,9 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     <div class="tab" onclick="showTab('team-plans')" id="tab-team-plans" style="display:none">
       <i class="ti ti-users-group"></i>خطط الفريق
     </div>
+    <div class="tab" onclick="showTab('sup-visits')" id="tab-sup-visits" style="display:none">
+      <i class="ti ti-map-pin-check"></i>متابعة زيارات المشرفين
+    </div>
     <div class="tab" onclick="showTab('daily')" id="tab-daily">
       <i class="ti ti-clipboard-check"></i>زيارات السوق
     </div>
@@ -1785,6 +1788,14 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
     </div>
     <!-- ══ END: شاشة المنافس ══ -->
 
+    <!-- ══ متابعة زيارات المشرفين (للمدير/GM) ══ -->
+    <div class="screen" id="screen-sup-visits">
+      <div class="card">
+        <div class="card-title"><i class="ti ti-map-pin-check" style="color:#2E7D32"></i> متابعة زيارات المشرفين</div>
+        <div id="svm-root"></div>
+      </div>
+    </div>
+
     <!-- ══ خطط الفريق (للمدير/GM) ══════════════════════════════ -->
     <div class="screen" id="screen-team-plans">
       <div class="card">
@@ -2805,6 +2816,7 @@ const NAV_DEFAULT = [
   {id:'logs',            icon:'ti-history',             label:'السجل',           visible:true},
   {id:'plan',            icon:'ti-calendar-week',       label:'الخطة',           visible:true},
   {id:'team-plans',      icon:'ti-users-group',         label:'خطط الفريق',      visible:true},
+  {id:'sup-visits',      icon:'ti-map-pin-check',       label:'متابعة زيارات المشرفين', visible:true},
   {id:'daily',           icon:'ti-clipboard-check',     label:'زيارات السوق',          visible:true},
   {id:'results',         icon:'ti-star',                label:'النتائج',         visible:true},
   {id:'field-support',   icon:'ti-shield-check',        label:'دعم الميدان',     visible:true},
@@ -3004,7 +3016,7 @@ function navApplyToDOM(){
     // نطبّق الإخفاء بس لو المستخدم أخفاه من الترتيب، ونسيب الإظهار لمنطق الدور يشتغل بعدها
     if(!item.visible){
       el.style.display = 'none';
-    } else if(item.id !== 'team-plans'){
+    } else if(item.id !== 'team-plans' && item.id !== 'sup-visits'){
       el.style.display = '';
     }
     tabsBar.appendChild(el); // يعيد الترتيب
@@ -3399,6 +3411,7 @@ function showTab(tab){
   if(tab==='visits') runMissingStepsCheck(); // (v1.5) فحص فوري عند فتح التاب
   if(tab==='plan') { hierLoadPlan(); }
   if(tab==='team-plans') { teamPlansLoadSup(); }
+  if(tab==='sup-visits') { svmInit(); }
   if(tab==='route-branches') { loadRouteBranches(); }
   if(tab==='tamr-benefits') { tbLoad(); }
   if(tab==='spt'){
@@ -10604,6 +10617,8 @@ function setupTabsByRole(){
   if(teamTab){
     teamTab.style.display = (level === 'dm' || level === 'gm') ? 'flex' : 'none';
   }
+  const svmTab = document.getElementById('tab-sup-visits');
+  if(svmTab){ svmTab.style.display = (level === 'dm' || level === 'gm') ? 'flex' : 'none'; }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -12143,5 +12158,248 @@ async function supCompLoadToday(){
   </div>
 </div>
 
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// متابعة زيارات المشرفين (svm) — زيارات مشرفي التنسيق من الخطة: الفروع + الموقع + التقييم
+// ══════════════════════════════════════════════════════════════
+const SVM_GEO_START = '2026-10-05';
+const SVM_GRP = {giza:'الجيزة', cairo:'القاهرة', south:'جنوب وشرق القاهرة', private_cairo:'أسواق خاصة القاهرة', private_chains_cairo:'أسواق خاصة القاهرة', private_chains_giza:'أسواق خاصة القاهرة'};
+const SVM_RATE = {excellent:'ممتاز', good:'جيد', needs:'يحتاج تحسين'};
+const SVM_RATE_CLR = {excellent:['#E8F5E9','#2E7D32'], good:['#E3F2FD','#1565C0'], needs:['#FFEBEE','#C62828']};
+let SVM_ROWS = [], SVM_VIEW = [], SVM_LIMIT = 300, SVM_BRANCH_CACHE = null, SVM_BUSY = false;
+
+function svmEsc(t){ return String(t==null?'':t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function svmIso(d){ const z=new Date(d.getTime()-d.getTimezoneOffset()*60000); return z.toISOString().slice(0,10); }
+function svmHdr(){ return {apikey:SUPABASE_KEY, Authorization:'Bearer '+SUPABASE_KEY}; }
+async function svmGetAll(url){
+  const out=[]; const step=1000;
+  for(let off=0; off<20000; off+=step){
+    const r = await fetch(url+(url.includes('?')?'&':'?')+'limit='+step+'&offset='+off,{headers:svmHdr()});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const j = await r.json();
+    out.push(...j);
+    if(j.length<step) break;
+  }
+  return out;
+}
+
+function svmInit(){
+  const root = document.getElementById('svm-root');
+  if(!root) return;
+  if(!root.dataset.built){
+    const today = new Date(), from = new Date(today.getTime()-6*86400000);
+    const inp = 'border:1.5px solid #D4C4A8;border-radius:8px;padding:7px 10px;font-family:inherit;font-size:13px;background:#fff;color:#2C1F0A';
+    const btn = 'border:1.5px solid #D4C4A8;border-radius:8px;padding:7px 12px;font-family:inherit;font-size:12.5px;background:#fff;color:#4B3C1A;cursor:pointer;font-weight:700';
+    root.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px">
+      <label style="font-size:12px;color:#7A6A4A">من <input type="date" id="svm-from" value="${svmIso(from)}" style="${inp}"></label>
+      <label style="font-size:12px;color:#7A6A4A">إلى <input type="date" id="svm-to" value="${svmIso(today)}" style="${inp}"></label>
+      <select id="svm-grp" onchange="svmRender()" style="${inp}"><option value="">كل المجموعات</option></select>
+      <select id="svm-sup" onchange="svmRender()" style="${inp}"><option value="">كل المشرفين</option></select>
+      <select id="svm-status" onchange="svmRender()" style="${inp}">
+        <option value="">كل الحالات</option><option value="done">منجزة</option><option value="pending">مجدولة</option><option value="missed">فائتة</option>
+        <option value="verified">منجزة وموثّقة ومكتملة</option><option value="unverified">منجزة وغير موثّقة</option><option value="needs">فيها بند يحتاج تحسين</option>
+      </select>
+      <input type="text" id="svm-q" oninput="svmRender()" placeholder="بحث بالفرع أو خط السير..." style="${inp};min-width:170px">
+      <button onclick="svmLoad()" style="${btn}">🔄 تحديث</button>
+      <button onclick="svmExportCSV()" style="${btn}">📊 تصدير Excel</button>
+      <button onclick="svmExportPDF()" style="${btn}">📄 تصدير PDF</button>
+    </div>
+    <div id="svm-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px"></div>
+    <div id="svm-body"><div style="text-align:center;padding:30px;color:#999">جاري التحميل...</div></div>`;
+    root.dataset.built='1';
+    document.getElementById('svm-from').addEventListener('change',svmLoad);
+    document.getElementById('svm-to').addEventListener('change',svmLoad);
+  }
+  svmLoad();
+}
+
+async function svmLoad(){
+  if(SVM_BUSY) return;
+  SVM_BUSY = true;
+  const body = document.getElementById('svm-body');
+  if(body) body.innerHTML = '<div style="text-align:center;padding:30px;color:#999">جاري التحميل...</div>';
+  try{
+    const from = document.getElementById('svm-from').value, to = document.getElementById('svm-to').value;
+    if(!SVM_BRANCH_CACHE){
+      const bs = await svmGetAll(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,grp,lat,lng&order=branch_name.asc`);
+      SVM_BRANCH_CACHE = {}; bs.forEach(b=>{ SVM_BRANCH_CACHE[b.branch_name]=b; });
+    }
+    let q = `${SUPABASE_URL}/rest/v1/plan_branches?select=*&order=visit_date.desc,id.desc`;
+    if(from) q += `&visit_date=gte.${from}`;
+    if(to) q += `&visit_date=lte.${to}`;
+    const pbs = await svmGetAll(q);
+    const pids = [...new Set(pbs.map(x=>x.plan_id).filter(Boolean))];
+    const plans = {};
+    for(let i=0;i<pids.length;i+=100){
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/plans?select=id,supervisor_name,plan_type,status,week_start&id=in.(${pids.slice(i,i+100).join(',')})`,{headers:svmHdr()});
+      if(r.ok) (await r.json()).forEach(p=>{ plans[p.id]=p; });
+    }
+    SVM_ROWS = pbs.map(x=>{
+      const p = plans[x.plan_id]||{}, b = SVM_BRANCH_CACHE[x.branch_name]||{};
+      const done = x.visit_status==='done';
+      const geoOK = !!x.check_in_at && x.geo_status==='inside';
+      const reviewed = !!x.reviewed_at && !!x.review_coord_report && !!x.review_display && !!x.review_clean;
+      const isNew = (x.visit_date||'') >= SVM_GEO_START;
+      let geoLbl = '—', geoClr = '#888';
+      if(done){
+        if(geoOK){ geoLbl='موثّقة بالموقع'; geoClr='#1A7A4A'; }
+        else if(x.check_in_at && x.geo_status==='no_branch_loc'){ geoLbl='لوكيشن الفرع غير مسجّل'; geoClr='#B8860B'; }
+        else { geoLbl = isNew ? 'غير موثّقة' : 'غير موثّقة (قديمة)'; geoClr='#B71C1C'; }
+      }
+      const needs = reviewed && (x.review_coord_report==='needs'||x.review_display==='needs'||x.review_clean==='needs');
+      return {
+        id:x.id, date:x.visit_date||'', sup:p.supervisor_name||'—', planType:p.plan_type||'', branch:x.branch_name||'', route:b.route||'—',
+        grp:b.grp||'', status:x.visit_status||'pending', done, geoOK, geoLbl, geoClr, dist:x.geo_distance_m,
+        checkIn:x.check_in_at||'', vlat:x.visit_lat, vlng:x.visit_lng, blat:b.lat, blng:b.lng,
+        reviewed, isNew, rc:x.review_coord_report||'', rd:x.review_display||'', rl:x.review_clean||'', notes:x.review_notes||x.notes||'',
+        verified: done && geoOK && reviewed, needs, coord:x.rep_name||''
+      };
+    });
+    // قوائم الفلاتر
+    const gs = [...new Set(SVM_ROWS.map(r=>r.grp).filter(Boolean))].sort();
+    const ss = [...new Set(SVM_ROWS.map(r=>r.sup).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+    const gSel = document.getElementById('svm-grp'), sSel = document.getElementById('svm-sup');
+    const gCur = gSel.value, sCur = sSel.value;
+    gSel.innerHTML = '<option value="">كل المجموعات</option>'+gs.map(g=>`<option value="${svmEsc(g)}">${svmEsc(SVM_GRP[g]||g)}</option>`).join('');
+    sSel.innerHTML = '<option value="">كل المشرفين</option>'+ss.map(s=>`<option value="${svmEsc(s)}">${svmEsc(s)}</option>`).join('');
+    gSel.value = gs.includes(gCur)?gCur:''; sSel.value = ss.includes(sCur)?sCur:'';
+    SVM_BUSY = false;
+    svmRender();
+  }catch(e){
+    SVM_BUSY = false;
+    if(body) body.innerHTML = `<div style="text-align:center;color:#C0392B;padding:24px">تعذّر التحميل: ${svmEsc(e.message)}</div>`;
+  }
+}
+
+function svmFiltered(){
+  const g=document.getElementById('svm-grp').value, s=document.getElementById('svm-sup').value;
+  const st=document.getElementById('svm-status').value, q=document.getElementById('svm-q').value.trim();
+  return SVM_ROWS.filter(r=>{
+    if(g && r.grp!==g) return false;
+    if(s && r.sup!==s) return false;
+    if(q && !(r.branch.includes(q)||r.route.includes(q))) return false;
+    if(st==='done') return r.done;
+    if(st==='pending') return r.status==='pending';
+    if(st==='missed') return r.status==='missed'||r.status==='skipped';
+    if(st==='verified') return r.verified;
+    if(st==='unverified') return r.done && !r.verified;
+    if(st==='needs') return r.needs;
+    return true;
+  });
+}
+
+function svmRender(reset){
+  if(reset!==false) SVM_LIMIT = 300;
+  SVM_VIEW = svmFiltered();
+  const v = SVM_VIEW;
+  const done = v.filter(r=>r.done).length;
+  const ver = v.filter(r=>r.verified).length;
+  const geo = v.filter(r=>r.done&&r.geoOK).length;
+  const missed = v.filter(r=>r.status==='missed'||r.status==='skipped').length;
+  const needs = v.filter(r=>r.needs).length;
+  const pct = done ? Math.round(ver/done*100) : 0;
+  const card=(l,val,c)=>`<div style="background:#FAF6EE;border:1px solid #E8DCC4;border-radius:10px;padding:10px 12px"><div style="font-size:11px;color:#7A6A4A">${l}</div><div style="font-size:21px;font-weight:800;color:${c}">${val}</div></div>`;
+  document.getElementById('svm-stats').innerHTML =
+    card('الزيارات المخططة',v.length,'#4B3C1A')+card('المنجزة',done,'#1A7A4A')+card('موثّقة بالموقع',geo,'#1565C0')+
+    card('موثّقة ومكتملة التقييم',ver,'#2E7D32')+card('نسبة الالتزام',pct+'%',pct>=80?'#2E7D32':pct>=50?'#B8860B':'#B71C1C')+
+    card('فائتة',missed,'#B71C1C')+card('بند يحتاج تحسين',needs,'#C62828');
+  const body = document.getElementById('svm-body');
+  if(!v.length){ body.innerHTML = '<div style="text-align:center;padding:30px;color:#999">مفيش زيارات في الفترة والفلاتر دي</div>'; return; }
+  const stLbl = {done:['منجزة','#E8F5E9','#2E7D32'], pending:['مجدولة','#F1F1F1','#666'], missed:['فائتة','#FFEBEE','#C62828'], skipped:['فائتة','#FFEBEE','#C62828']};
+  const rate = val => val ? `<span style="display:inline-block;padding:2px 7px;border-radius:99px;font-size:10.5px;font-weight:700;background:${SVM_RATE_CLR[val][0]};color:${SVM_RATE_CLR[val][1]}">${SVM_RATE[val]}</span>` : '<span style="color:#bbb">—</span>';
+  const shown = v.slice(0,SVM_LIMIT);
+  body.innerHTML = `<div style="overflow-x:auto;border:1px solid #E8DCC4;border-radius:10px"><table style="width:100%;border-collapse:collapse;font-size:12px;min-width:860px">
+    <thead><tr style="background:#4B3C1A;color:#EDE5D8">
+      ${['التاريخ','المشرف','خط السير','الفرع','الحالة','الموقع','تقرير المنسق','العرض','النظافة',''].map(h=>`<th style="padding:8px;text-align:right;white-space:nowrap">${h}</th>`).join('')}
+    </tr></thead><tbody>
+    ${shown.map((r,i)=>{
+      const s = stLbl[r.status]||stLbl.pending;
+      return `<tr style="background:${i%2?'#FBF8F1':'#fff'};border-top:1px solid #F0E8D6">
+        <td style="padding:7px 8px;white-space:nowrap">${svmEsc(r.date)}</td>
+        <td style="padding:7px 8px;font-weight:700">${svmEsc(r.sup)}</td>
+        <td style="padding:7px 8px">${svmEsc(r.route)}</td>
+        <td style="padding:7px 8px">${svmEsc(r.branch)}</td>
+        <td style="padding:7px 8px"><span style="padding:2px 8px;border-radius:99px;font-size:10.5px;font-weight:700;background:${s[1]};color:${s[2]}">${s[0]}</span></td>
+        <td style="padding:7px 8px;color:${r.geoClr};font-weight:700;white-space:nowrap">${svmEsc(r.geoLbl)}${r.done&&r.geoOK&&r.dist!=null?' · '+r.dist+' م':''}</td>
+        <td style="padding:7px 8px">${rate(r.rc)}</td><td style="padding:7px 8px">${rate(r.rd)}</td><td style="padding:7px 8px">${rate(r.rl)}</td>
+        <td style="padding:7px 8px"><button onclick="svmDetail(${r.id})" style="border:1px solid #D4C4A8;background:#fff;border-radius:7px;padding:3px 9px;font-family:inherit;font-size:11px;cursor:pointer;color:#731E2E;font-weight:700">تفاصيل</button></td>
+      </tr>`;
+    }).join('')}
+    </tbody></table></div>
+    <div style="text-align:center;margin-top:10px;font-size:12px;color:#7A6A4A">
+      عرض ${shown.length} من ${v.length}
+      ${v.length>shown.length?`<button onclick="SVM_LIMIT+=300;svmRender(false)" style="margin-right:8px;border:1px solid #D4C4A8;background:#fff;border-radius:7px;padding:4px 12px;font-family:inherit;font-size:12px;cursor:pointer;font-weight:700">عرض المزيد</button>`:''}
+    </div>`;
+}
+
+function svmMapLink(lat,lng,label){
+  if(lat==null||lng==null||lat===''||lng==='') return '<span style="color:#999">غير متاح</span>';
+  return `<a href="https://www.google.com/maps?q=${lat},${lng}" target="_blank" rel="noopener" style="color:#1565C0;font-weight:700">${label}</a>`;
+}
+function svmDetail(id){
+  const r = SVM_ROWS.find(x=>x.id===id); if(!r) return;
+  const old = document.getElementById('svm-modal'); if(old) old.remove();
+  const rate = val => val ? `<b style="color:${SVM_RATE_CLR[val][1]}">${SVM_RATE[val]}</b>` : '—';
+  const row=(k,v)=>`<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid #F0E8D6;font-size:13px"><span style="color:#7A6A4A">${k}</span><span style="text-align:left">${v}</span></div>`;
+  const t = r.checkIn ? new Date(r.checkIn).toLocaleString('ar-EG',{dateStyle:'short',timeStyle:'short'}) : '—';
+  const m = document.createElement('div');
+  m.id='svm-modal';
+  m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px';
+  m.onclick = e=>{ if(e.target===m) m.remove(); };
+  m.innerHTML = `<div dir="rtl" style="background:#fff;border-radius:14px;max-width:480px;width:100%;max-height:90vh;overflow-y:auto;padding:18px 20px;font-family:inherit">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div style="font-size:16px;font-weight:800;color:#731E2E">${svmEsc(r.branch)}</div>
+      <button onclick="document.getElementById('svm-modal').remove()" style="border:none;background:none;font-size:22px;cursor:pointer;color:#888">×</button>
+    </div>
+    ${row('المشرف',svmEsc(r.sup))}${row('المنسق',svmEsc(r.coord||'—'))}${row('خط السير',svmEsc(r.route))}${row('التاريخ',svmEsc(r.date))}
+    ${row('الحالة',r.done?'منجزة':r.status==='missed'?'فائتة':'مجدولة')}
+    ${row('الموقع',`<span style="color:${r.geoClr};font-weight:700">${svmEsc(r.geoLbl)}</span>`)}
+    ${row('المسافة من الفرع',r.dist!=null?r.dist+' متر':'—')}${row('وقت الدخول',svmEsc(t))}
+    ${row('موقع المشرف',svmMapLink(r.vlat,r.vlng,'عرض على الخريطة'))}${row('موقع الفرع',svmMapLink(r.blat,r.blng,'عرض على الخريطة'))}
+    ${row('تقرير المنسق',rate(r.rc))}${row('العرض والأصناف',rate(r.rd))}${row('نظافة مكان العرض',rate(r.rl))}
+    ${r.done&&r.isNew&&!r.reviewed?'<div style="margin-top:8px;color:#B71C1C;font-size:12px;font-weight:700">نموذج المراجعة غير مكتمل</div>':''}
+    ${r.done&&!r.isNew&&!r.reviewed?'<div style="margin-top:8px;color:#888;font-size:12px">زيارة قديمة (قبل تفعيل التوثيق بالموقع والتقييم)</div>':''}
+    <div style="margin-top:10px;font-size:12.5px"><b>الملاحظات:</b> ${r.notes?svmEsc(r.notes):'<span style="color:#999">لا يوجد</span>'}</div>
+  </div>`;
+  document.body.appendChild(m);
+}
+
+function svmRows(){
+  return SVM_VIEW.map(r=>[r.date,r.sup,r.route,r.branch,
+    r.done?'منجزة':(r.status==='missed'||r.status==='skipped')?'فائتة':'مجدولة',
+    r.geoLbl, r.dist!=null?r.dist:'', SVM_RATE[r.rc]||'', SVM_RATE[r.rd]||'', SVM_RATE[r.rl]||'', r.notes]);
+}
+const SVM_COLS = ['التاريخ','المشرف','خط السير','الفرع','الحالة','الموقع','المسافة (م)','تقرير المنسق','العرض والأصناف','النظافة','الملاحظات'];
+function svmExportCSV(){
+  if(!SVM_VIEW.length){ alert('مفيش بيانات للتصدير'); return; }
+  const esc = v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+  const csv = '﻿'+[SVM_COLS,...svmRows()].map(r=>r.map(esc).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download = `متابعة_زيارات_المشرفين_${svmIso(new Date())}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function svmExportPDF(){
+  if(!SVM_VIEW.length){ alert('مفيش بيانات للتصدير'); return; }
+  const from=document.getElementById('svm-from').value, to=document.getElementById('svm-to').value;
+  const html = `<html dir="rtl"><head><meta charset="utf-8"><title>متابعة زيارات المشرفين</title><style>
+    body{font-family:Cairo,Arial,sans-serif;margin:0;padding:16px;color:#222}
+    .hd{background:#731E2E;color:#fff;padding:10px 14px;border-radius:8px;display:flex;justify-content:space-between;font-weight:700}
+    table{width:100%;border-collapse:collapse;font-size:10.5px;margin-top:10px}
+    th{background:#4E5A2B;color:#fff;padding:6px;text-align:right}td{padding:5px 6px;border-bottom:1px solid #ddd}
+    tr:nth-child(even) td{background:#FBF8F1}</style></head><body>
+    <div class="hd"><div>الطحان جولدن داتس — متابعة زيارات المشرفين</div><div>${svmEsc(from)} ← ${svmEsc(to)}</div></div>
+    <table><thead><tr>${SVM_COLS.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>
+    ${svmRows().map(r=>`<tr>${r.map(c=>`<td>${svmEsc(c)}</td>`).join('')}</tr>`).join('')}
+    </tbody></table>
+    <div style="text-align:center;font-size:10px;color:#aaa;margin-top:12px">Al Tahhan Golden Dates © ${new Date().getFullYear()}</div></body></html>`;
+  const w = window.open('','_blank','width=1000,height=800');
+  if(!w){ alert('السماح بالـ popups مطلوب'); return; }
+  w.document.write(html); w.document.close(); w.onload=()=>{ w.focus(); w.print(); };
+}
+
+</script>
 </body>
 </html>
