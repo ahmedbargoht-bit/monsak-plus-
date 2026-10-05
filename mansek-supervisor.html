@@ -12203,8 +12203,10 @@ function svmInit(){
       </select>
       <input type="text" id="svm-q" oninput="svmRender()" placeholder="بحث بالفرع أو خط السير..." style="${inp};min-width:170px">
       <button onclick="svmLoad()" style="${btn}">🔄 تحديث</button>
-      <button onclick="svmExportCSV()" style="${btn}">📊 تصدير Excel</button>
+      <button onclick="svmExportExcel()" style="${btn}">📊 تصدير Excel</button>
       <button onclick="svmExportPDF()" style="${btn}">📄 تصدير PDF</button>
+      <button onclick="svmSharePDF()" style="${btn};background:#E8F5E9;color:#1A7A4A;border-color:#A5D6A7">📤 إرسال PDF</button>
+      <button onclick="svmShareExcel()" style="${btn};background:#E8F5E9;color:#1A7A4A;border-color:#A5D6A7">📤 إرسال Excel</button>
     </div>
     <div id="svm-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px"></div>
     <div id="svm-body"><div style="text-align:center;padding:30px;color:#999">جاري التحميل...</div></div>`;
@@ -12294,12 +12296,7 @@ function svmRender(reset){
   if(reset!==false) SVM_LIMIT = 300;
   SVM_VIEW = svmFiltered();
   const v = SVM_VIEW;
-  const done = v.filter(r=>r.done).length;
-  const ver = v.filter(r=>r.verified).length;
-  const geo = v.filter(r=>r.done&&r.geoOK).length;
-  const missed = v.filter(r=>r.status==='missed'||r.status==='skipped').length;
-  const needs = v.filter(r=>r.needs).length;
-  const pct = done ? Math.round(ver/done*100) : 0;
+  const st = svmStats(v); const {done,ver,geo,missed,needs,pct} = st;
   const card=(l,val,c)=>`<div style="background:#FAF6EE;border:1px solid #E8DCC4;border-radius:10px;padding:10px 12px"><div style="font-size:11px;color:#7A6A4A">${l}</div><div style="font-size:21px;font-weight:800;color:${c}">${val}</div></div>`;
   document.getElementById('svm-stats').innerHTML =
     card('الزيارات المخططة',v.length,'#4B3C1A')+card('المنجزة',done,'#1A7A4A')+card('موثّقة بالموقع',geo,'#1565C0')+
@@ -12366,38 +12363,205 @@ function svmDetail(id){
   document.body.appendChild(m);
 }
 
-function svmRows(){
-  return SVM_VIEW.map(r=>[r.date,r.sup,r.route,r.branch,
-    r.done?'منجزة':(r.status==='missed'||r.status==='skipped')?'فائتة':'مجدولة',
-    r.geoLbl, r.dist!=null?r.dist:'', SVM_RATE[r.rc]||'', SVM_RATE[r.rd]||'', SVM_RATE[r.rl]||'', r.notes]);
+
+function svmStats(v){
+  const done = v.filter(r=>r.done).length, ver = v.filter(r=>r.verified).length;
+  return { total:v.length, done, ver, geo:v.filter(r=>r.done&&r.geoOK).length,
+    missed:v.filter(r=>r.status==='missed'||r.status==='skipped').length, needs:v.filter(r=>r.needs).length,
+    pct: done ? Math.round(ver/done*100) : 0 };
 }
-const SVM_COLS = ['التاريخ','المشرف','خط السير','الفرع','الحالة','الموقع','المسافة (م)','تقرير المنسق','العرض والأصناف','النظافة','الملاحظات'];
-function svmExportCSV(){
-  if(!SVM_VIEW.length){ alert('مفيش بيانات للتصدير'); return; }
-  const esc = v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
-  const csv = '﻿'+[SVM_COLS,...svmRows()].map(r=>r.map(esc).join(',')).join('\r\n');
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
-  a.download = `متابعة_زيارات_المشرفين_${svmIso(new Date())}.csv`;
-  document.body.appendChild(a); a.click(); a.remove();
+const SVM_C = {maroon:'#731E2E', olive:'#4E5A2B', gold:'#C8A96E', brown:'#4B3C1A', cream:'#FAF6EE'};
+const SVM_ST = {done:['منجزة','#E8F5E9','#2E7D32'], pending:['مجدولة','#F1F1F1','#666666'], missed:['فائتة','#FFEBEE','#C62828'], skipped:['فائتة','#FFEBEE','#C62828']};
+function svmLogo(){
+  try{ if(typeof AT_LOGO_B64!=='undefined') return AT_LOGO_B64; }catch(e){}
+  try{ if(typeof SINV_LOGO!=='undefined') return SINV_LOGO; }catch(e){}
+  try{ if(typeof AT_ROUTE_LOGO_B64!=='undefined') return AT_ROUTE_LOGO_B64; }catch(e){}
+  return '';
+}
+function svmFilterLabel(){
+  const g=document.getElementById('svm-grp'), s=document.getElementById('svm-sup'), st=document.getElementById('svm-status');
+  const parts=[];
+  if(g.value) parts.push('المجموعة: '+(SVM_GRP[g.value]||g.value));
+  if(s.value) parts.push('المشرف: '+s.value);
+  if(st.value) parts.push('الحالة: '+st.options[st.selectedIndex].text);
+  return parts.length ? parts.join(' — ') : 'كل المجموعات والمشرفين';
+}
+function svmFileBase(){
+  const from=document.getElementById('svm-from').value, to=document.getElementById('svm-to').value;
+  return `متابعة_زيارات_المشرفين_${from}_${to}`;
+}
+const SVM_PAGE_W = 1123, SVM_PAGE_H = 794;
+function svmPageChrome(body, pageNo, pages, first, st, from, to){
+  const logo = svmLogo();
+  const card=(l,val,c)=>`<div style="flex:1;background:${SVM_C.cream};border:1px solid #E8DCC4;border-top:3px solid ${c};border-radius:8px;padding:6px 10px"><div style="font-size:10px;color:#7A6A4A">${l}</div><div style="font-size:19px;font-weight:800;color:${c}">${val}</div></div>`;
+  return `<div style="width:${SVM_PAGE_W}px;height:${SVM_PAGE_H}px;background:#fff;direction:rtl;font-family:Cairo,Arial,sans-serif;position:relative;overflow:hidden;box-sizing:border-box">
+    <div style="background:${SVM_C.maroon};color:#fff;height:78px;display:flex;align-items:center;justify-content:space-between;padding:0 24px">
+      <div style="display:flex;align-items:center;gap:14px">
+        ${logo?`<img src="${logo}" style="height:54px;background:#fff;border-radius:8px;padding:3px">`:''}
+        <div><div style="font-size:21px;font-weight:800">متابعة زيارات المشرفين</div>
+        <div style="font-size:11px;color:#EDE5D8">الطحان جولدن داتس — Al Tahhan Golden Dates</div></div>
+      </div>
+      <div style="text-align:left"><div style="font-size:14px;font-weight:700">${svmEsc(from)} ← ${svmEsc(to)}</div>
+      <div style="font-size:10.5px;color:#EDE5D8;max-width:420px">${svmEsc(svmFilterLabel())}</div></div>
+    </div>
+    <div style="height:5px;background:${SVM_C.gold}"></div>
+    <div style="padding:12px 24px 0">
+      ${first?`<div style="display:flex;gap:8px;margin-bottom:10px">
+        ${card('المخططة',st.total,SVM_C.brown)}${card('المنجزة',st.done,'#1A7A4A')}${card('موثّقة بالموقع',st.geo,'#1565C0')}
+        ${card('موثّقة ومكتملة',st.ver,'#2E7D32')}${card('نسبة الالتزام',st.pct+'%',st.pct>=80?'#2E7D32':st.pct>=50?'#B8860B':'#B71C1C')}
+        ${card('فائتة',st.missed,'#B71C1C')}${card('يحتاج تحسين',st.needs,'#C62828')}</div>`:''}
+      ${body}
+    </div>
+    <div style="position:absolute;bottom:0;left:0;right:0;height:30px;background:${SVM_C.cream};border-top:2px solid ${SVM_C.gold};display:flex;align-items:center;justify-content:space-between;padding:0 24px;font-size:10px;color:#7A6A4A">
+      <div>Al Tahhan Golden Dates © ${new Date().getFullYear()}</div><div>صفحة ${pageNo} من ${pages}</div>
+    </div>
+  </div>`;
+}
+function svmPages(){
+  const v = SVM_VIEW, st = svmStats(v);
+  const from=document.getElementById('svm-from').value, to=document.getElementById('svm-to').value;
+  const FIRST=13, REST=19;
+  const chunks=[]; let idx=0;
+  chunks.push(v.slice(0,FIRST)); idx=FIRST;
+  while(idx<v.length){ chunks.push(v.slice(idx,idx+REST)); idx+=REST; }
+  const rate = val => val ? `<span style="display:inline-block;padding:2px 9px;border-radius:99px;font-size:10px;font-weight:700;background:${SVM_RATE_CLR[val][0]};color:${SVM_RATE_CLR[val][1]}">${SVM_RATE[val]}</span>` : '<span style="color:#bbb">—</span>';
+  const cols=[['التاريخ',78],['المشرف',120],['خط السير',170],['الفرع',205],['الحالة',66],['الموقع',150],['تقرير المنسق',82],['العرض',82],['النظافة',82]];
+  const cell='padding:0 8px;height:30px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid #F0E8D6;font-size:10.5px';
+  return chunks.map((rows,pi)=>{
+    const body = `<table style="width:100%;border-collapse:collapse;table-layout:fixed"><colgroup>${cols.map(c=>`<col style="width:${c[1]}px">`).join('')}</colgroup>
+      <thead><tr style="background:${SVM_C.olive};color:#fff">${cols.map(c=>`<th style="padding:0 8px;height:30px;text-align:right;font-size:11px">${c[0]}</th>`).join('')}</tr></thead><tbody>
+      ${rows.map((r,i)=>{ const s=SVM_ST[r.status]||SVM_ST.pending;
+        return `<tr style="background:${i%2?'#FBF8F1':'#fff'}">
+        <td style="${cell}">${svmEsc(r.date)}</td><td style="${cell};font-weight:700">${svmEsc(r.sup)}</td><td style="${cell}">${svmEsc(r.route)}</td><td style="${cell}">${svmEsc(r.branch)}</td>
+        <td style="${cell}"><span style="padding:2px 9px;border-radius:99px;font-size:10px;font-weight:700;background:${s[1]};color:${s[2]}">${s[0]}</span></td>
+        <td style="${cell};color:${r.geoClr};font-weight:700">${svmEsc(r.geoLbl)}${r.done&&r.geoOK&&r.dist!=null?' · '+r.dist+' م':''}</td>
+        <td style="${cell}">${rate(r.rc)}</td><td style="${cell}">${rate(r.rd)}</td><td style="${cell}">${rate(r.rl)}</td></tr>`; }).join('')}
+      </tbody></table>`;
+    return svmPageChrome(body, pi+1, chunks.length, pi===0, st, from, to);
+  });
 }
 function svmExportPDF(){
   if(!SVM_VIEW.length){ alert('مفيش بيانات للتصدير'); return; }
-  const from=document.getElementById('svm-from').value, to=document.getElementById('svm-to').value;
-  const html = `<html dir="rtl"><head><meta charset="utf-8"><title>متابعة زيارات المشرفين</title><style>
-    body{font-family:Cairo,Arial,sans-serif;margin:0;padding:16px;color:#222}
-    .hd{background:#731E2E;color:#fff;padding:10px 14px;border-radius:8px;display:flex;justify-content:space-between;font-weight:700}
-    table{width:100%;border-collapse:collapse;font-size:10.5px;margin-top:10px}
-    th{background:#4E5A2B;color:#fff;padding:6px;text-align:right}td{padding:5px 6px;border-bottom:1px solid #ddd}
-    tr:nth-child(even) td{background:#FBF8F1}</style></head><body>
-    <div class="hd"><div>الطحان جولدن داتس — متابعة زيارات المشرفين</div><div>${svmEsc(from)} ← ${svmEsc(to)}</div></div>
-    <table><thead><tr>${SVM_COLS.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>
-    ${svmRows().map(r=>`<tr>${r.map(c=>`<td>${svmEsc(c)}</td>`).join('')}</tr>`).join('')}
-    </tbody></table>
-    <div style="text-align:center;font-size:10px;color:#aaa;margin-top:12px">Al Tahhan Golden Dates © ${new Date().getFullYear()}</div></body></html>`;
-  const w = window.open('','_blank','width=1000,height=800');
+  const pages = svmPages();
+  const html = `<html dir="rtl"><head><meta charset="utf-8"><title>${svmEsc(svmFileBase())}</title><style>
+    @page{size:297mm 210mm;margin:0}
+    html,body{margin:0;padding:0}
+    body{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .pg{page-break-after:always;width:${SVM_PAGE_W}px;height:${SVM_PAGE_H}px;overflow:hidden;transform-origin:top right}
+    .pg:last-child{page-break-after:auto}</style></head><body>${pages.map(p=>`<div class="pg">${p}</div>`).join('')}</body></html>`;
+  const w = window.open('','_blank','width=1150,height=820');
   if(!w){ alert('السماح بالـ popups مطلوب'); return; }
-  w.document.write(html); w.document.close(); w.onload=()=>{ w.focus(); w.print(); };
+  w.document.write(html); w.document.close(); w.onload=()=>{ setTimeout(()=>{ w.focus(); w.print(); },400); };
+}
+
+function svmLoadScript(src){
+  return new Promise((res,rej)=>{ const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=()=>rej(new Error('load '+src)); document.head.appendChild(s); });
+}
+async function svmBuildPdfBlob(){
+  if(typeof html2canvas==='undefined') await svmLoadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
+  if(!window.jspdf) await svmLoadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+  const pages = svmPages();
+  const { jsPDF } = window.jspdf;
+  const pdf = new jsPDF({orientation:'landscape', unit:'mm', format:'a4'});
+  const holder = document.createElement('div');
+  holder.style.cssText = `position:fixed;top:0;left:-99999px;width:${SVM_PAGE_W}px;height:${SVM_PAGE_H}px;background:#fff;z-index:-1`;
+  document.body.appendChild(holder);
+  try{
+    if(document.fonts && document.fonts.ready) await document.fonts.ready;
+    for(let i=0;i<pages.length;i++){
+      holder.innerHTML = pages[i];
+      await new Promise(r=>setTimeout(r,60));
+      const canvas = await html2canvas(holder, {scale:2, useCORS:true, backgroundColor:'#ffffff', width:SVM_PAGE_W, height:SVM_PAGE_H});
+      if(i>0) pdf.addPage();
+      pdf.addImage(canvas.toDataURL('image/jpeg',0.92),'JPEG',0,0,297,210);
+    }
+  } finally { holder.remove(); }
+  return pdf.output('blob');
+}
+
+function svmBuildWorkbook(){
+  const XL = window.XLSX;
+  const v = SVM_VIEW, st = svmStats(v);
+  const from=document.getElementById('svm-from').value, to=document.getElementById('svm-to').value;
+  const head = ['التاريخ','المشرف','المنسق','خط السير','الفرع','الحالة','الموقع','المسافة (م)','وقت الدخول','تقرير المنسق','العرض والأصناف','النظافة','الملاحظات'];
+  const N = head.length;
+  const aoa = [
+    ['الطحان جولدن داتس — متابعة زيارات المشرفين'],
+    [`الفترة: ${from} ← ${to}  |  ${svmFilterLabel()}`],
+    [`المخططة: ${st.total}  |  المنجزة: ${st.done}  |  موثّقة بالموقع: ${st.geo}  |  موثّقة ومكتملة: ${st.ver}  |  نسبة الالتزام: ${st.pct}%  |  فائتة: ${st.missed}  |  يحتاج تحسين: ${st.needs}`],
+    [], head
+  ];
+  v.forEach(r=>{
+    aoa.push([r.date,r.sup,r.coord||'',r.route,r.branch,
+      r.done?'منجزة':(r.status==='missed'||r.status==='skipped')?'فائتة':'مجدولة', r.geoLbl, r.dist!=null?r.dist:'',
+      r.checkIn?new Date(r.checkIn).toLocaleString('ar-EG',{dateStyle:'short',timeStyle:'short'}):'',
+      SVM_RATE[r.rc]||'', SVM_RATE[r.rd]||'', SVM_RATE[r.rl]||'', r.notes]);
+  });
+  const ws = XL.utils.aoa_to_sheet(aoa);
+  const thin = {style:'thin',color:{rgb:'E8DCC4'}};
+  const border = {top:thin,bottom:thin,left:thin,right:thin};
+  const fill = rgb=>({patternType:'solid',fgColor:{rgb}});
+  const setS=(r,c,s)=>{ const a=XL.utils.encode_cell({r,c}); if(!ws[a]) ws[a]={t:'s',v:''}; ws[a].s=s; };
+  for(let c=0;c<N;c++){
+    setS(0,c,{fill:fill('731E2E'),font:{bold:true,sz:16,color:{rgb:'FFFFFF'},name:'Cairo'},alignment:{horizontal:'center',vertical:'center'}});
+    setS(1,c,{fill:fill('4E5A2B'),font:{bold:true,sz:11,color:{rgb:'FFFFFF'},name:'Cairo'},alignment:{horizontal:'center',vertical:'center'}});
+    setS(2,c,{fill:fill('C8A96E'),font:{bold:true,sz:11,color:{rgb:'2C1F0A'},name:'Cairo'},alignment:{horizontal:'center',vertical:'center'}});
+    setS(4,c,{fill:fill('4E5A2B'),font:{bold:true,sz:11,color:{rgb:'FFFFFF'},name:'Cairo'},alignment:{horizontal:'center',vertical:'center',wrapText:true},border});
+  }
+  const rateS = val=>{ const m={excellent:['E8F5E9','2E7D32'],good:['E3F2FD','1565C0'],needs:['FFEBEE','C62828']}[val]; return m?{fill:fill(m[0]),font:{bold:true,color:{rgb:m[1]},name:'Cairo'}}:null; };
+  v.forEach((r,i)=>{
+    const R=5+i, zebra = i%2 ? 'FBF8F1' : 'FFFFFF';
+    for(let c=0;c<N;c++) setS(R,c,{fill:fill(zebra),font:{name:'Cairo',sz:10,color:{rgb:'2C1F0A'}},alignment:{horizontal:c===12?'right':'center',vertical:'center',wrapText:c===12},border});
+    const stc = r.done?['E8F5E9','2E7D32']:(r.status==='missed'||r.status==='skipped')?['FFEBEE','C62828']:['F1F1F1','666666'];
+    setS(R,5,{fill:fill(stc[0]),font:{bold:true,color:{rgb:stc[1]},name:'Cairo',sz:10},alignment:{horizontal:'center',vertical:'center'},border});
+    setS(R,6,{fill:fill(zebra),font:{bold:true,color:{rgb:r.geoClr.replace('#','')},name:'Cairo',sz:10},alignment:{horizontal:'center',vertical:'center'},border});
+    [[9,r.rc],[10,r.rd],[11,r.rl]].forEach(([c,val])=>{ const m=rateS(val); if(m) setS(R,c,{...m,alignment:{horizontal:'center',vertical:'center'},border}); });
+  });
+  ws['!merges'] = [0,1,2].map(r=>({s:{r,c:0},e:{r,c:N-1}}));
+  ws['!cols'] = [12,18,18,26,28,10,24,11,18,14,16,12,34].map(w=>({wch:w}));
+  ws['!rows'] = [{hpt:30},{hpt:20},{hpt:20},{hpt:6},{hpt:24}];
+  ws['!views'] = [{RTL:true}];
+  ws['!freeze'] = {xSplit:0,ySplit:5};
+  const wb = XL.utils.book_new(); XL.utils.book_append_sheet(wb, ws, 'متابعة زيارات المشرفين');
+  return wb;
+}
+function svmExportExcel(){
+  if(!SVM_VIEW.length){ alert('مفيش بيانات للتصدير'); return; }
+  if(!window.XLSX){ alert('مكتبة Excel لسه بتتحمّل، جرّب بعد لحظة'); return; }
+  XLSX.writeFile(svmBuildWorkbook(), svmFileBase()+'.xlsx');
+}
+
+async function svmShareBlob(blob, fileName, mime, title){
+  const file = new File([blob], fileName, {type:mime});
+  if(navigator.canShare && navigator.canShare({files:[file]})){
+    try{ await navigator.share({files:[file], title, text:title}); }
+    catch(e){ if(e && e.name==='AbortError') return; throw e; }
+  } else {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download=fileName;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),4000);
+    alert('الجهاز ده مبيدعمش المشاركة المباشرة — الملف اتحمّل، تقدر ترسله من الواتساب أو أي تطبيق.');
+  }
+}
+async function svmSharePDF(){
+  if(!SVM_VIEW.length){ alert('مفيش بيانات للإرسال'); return; }
+  const btn = event && event.target; const old = btn ? btn.textContent : '';
+  if(btn){ btn.disabled=true; btn.textContent='⏳ جاري التجهيز...'; }
+  try{
+    const blob = await svmBuildPdfBlob();
+    await svmShareBlob(blob, svmFileBase()+'.pdf', 'application/pdf', 'متابعة زيارات المشرفين');
+  }catch(e){ console.warn(e); alert('حصل خطأ أثناء تجهيز الملف — جرّب تاني.'); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent=old; } }
+}
+async function svmShareExcel(){
+  if(!SVM_VIEW.length){ alert('مفيش بيانات للإرسال'); return; }
+  if(!window.XLSX){ alert('مكتبة Excel لسه بتتحمّل، جرّب بعد لحظة'); return; }
+  try{
+    const out = XLSX.write(svmBuildWorkbook(), {bookType:'xlsx', type:'array'});
+    const blob = new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    await svmShareBlob(blob, svmFileBase()+'.xlsx', blob.type, 'متابعة زيارات المشرفين');
+  }catch(e){ console.warn(e); alert('حصل خطأ أثناء تجهيز الملف — جرّب تاني.'); }
 }
 
 </script>
