@@ -1179,6 +1179,11 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
           سجّل ما نفذته فعلياً اليوم — وأي انحراف عن الخطة يجب توثيقه
         </div>
       </div>
+      <div class="card" style="background:#F0FDF4;border:1px solid #A5D6A7;margin-bottom:12px;cursor:pointer" onclick="supShowGeoNotice(true)">
+        <div style="font-size:12px;color:#1A7A4A;font-weight:700">
+          📍 زيارات السوق موثّقة بلوكيشن الفرع — لازم تكون داخل نطاق الفرع (200 متر) وقت تسجيل "منجز"
+        </div>
+      </div>
       <!-- أيام الأسبوع -->
       <div id="daily-days"></div>
     </div>
@@ -2620,6 +2625,7 @@ async function doLogin(){
   // إظهار التابات حسب الدور
   setupTabsByRole();
   _startBlockWatch();
+  setTimeout(()=>supShowGeoNotice(false), 1200);
   // تحديث تلقائي دوري — شاشة "لوكيشن المنسقين" واللي زيها لازم تفضل حية بدون ما المشرف يضغط تحديث يدوي كل شوية
   if(_smartRefreshTimer) clearInterval(_smartRefreshTimer);
   _smartRefreshTimer = setInterval(()=>{ if(cu) smartRefresh(); }, 3*60*1000); // كل 3 دقايق
@@ -5578,15 +5584,26 @@ async function markVisitStatus(status){
   if(!itemId) return;
 
   const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
+  let patch = { visit_status:status, notes };
+  if(status==='done'){
+    if(_geoVerifying) return;
+    const it0 = planItems.find(i=>i.id===itemId);
+    _geoVerifying = true;
+    showToast('📍 جاري التحقق من موقعك...');
+    const v = await supVerifyVisitLocation(it0 ? it0.branch_name : '');
+    _geoVerifying = false;
+    if(!v.ok){ alert(v.msg); return; }
+    patch = { ...patch, ...v.fields };
+  }
   const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${itemId}`,{
     method:'PATCH', headers:H,
-    body:JSON.stringify({ visit_status:status, notes })
+    body:JSON.stringify(patch)
   }).catch(()=>null);
   if(!res || !res.ok){ showToast('❌ فشل حفظ حالة الزيارة — حاول تاني'); return; }
 
   // تحديث الـ cache
   const idx = planItems.findIndex(i=>i.id===itemId);
-  if(idx!==-1){ planItems[idx].status=status; planItems[idx].notes=notes; }
+  if(idx!==-1){ planItems[idx].status=status; planItems[idx].notes=notes; if(patch.check_in_at){ planItems[idx].check_in_at=patch.check_in_at; planItems[idx].geo_status=patch.geo_status; planItems[idx].geo_distance_m=patch.geo_distance_m; } }
 
   modal.classList.remove('open');
   showToast(status==='done'?'✅ تم تسجيل الزيارة كمنجزة':'❌ تم تسجيل الزيارة كفائتة');
@@ -6344,7 +6361,8 @@ async function loadDailyExecution(){
       geo_status:b.geo_status||'unknown',
       rep_name: b.rep_name||'—',
       area_supervisor: b.area_supervisor||'',
-      notes: b.notes||''
+      notes: b.notes||'',
+      check_in_at: b.check_in_at||null, geo_distance_m: b.geo_distance_m
     }));
     if(Array.isArray(freshItems) && freshItems.length) planItems = freshItems;
   }catch(e){ console.warn('loadDailyExecution fetch error:', e); }
@@ -6403,6 +6421,7 @@ async function loadDailyExecution(){
             <div style="font-size:12px;font-weight:700">${item.area_supervisor||item.rep_name}</div>
             <div style="font-size:11px;color:var(--text2)">${item.branch_name}</div>
             ${item.rep_name && item.rep_name!=='—'?`<div style="font-size:10px;color:#999">👤 ${item.rep_name}</div>`:''}
+            ${supGeoBadgeHTML(item)}
           </div>
           <span class="badge ${item.status==='done'?'b-green':item.status==='missed'?'b-red':'b-gray'}">
             ${item.status==='done'?'✅ منجز':item.status==='missed'?'❌ فائت':'⏳ اضغط للتحديث'}
@@ -6485,22 +6504,117 @@ async function savePlanNote(itemId, areaSup='', branchName=''){
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+// توثيق زيارة السوق بلوكيشن الفرع — لازم المشرف يكون داخل نطاق الفرع وقت تسجيل "منجز"
+// ══════════════════════════════════════════════════════════════
+const GEO_VISIT_RADIUS_M = 200;       // نطاق الفرع المسموح
+const GEO_ACC_TOLERANCE_M = 100;      // أقصى هامش لدقة الـ GPS (جوه المولات الدقة بتقل)
+let _geoVerifying = false;
+
+async function supGetBranchCoords(bn){
+  try{ await loadBranchCoords(); }catch(e){}
+  if(_branchCoordsMap[bn]) return _branchCoordsMap[bn];
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=lat,lng&branch_name=eq.${encodeURIComponent(bn)}&limit=1`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`},cache:'no-store'});
+    const d = r.ok ? await r.json() : [];
+    if(d[0] && d[0].lat && d[0].lng){
+      _branchCoordsMap[bn] = {lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lng)};
+      return _branchCoordsMap[bn];
+    }
+  }catch(e){}
+  return null;
+}
+function supGetPosition(){
+  return new Promise((resolve,reject)=>{
+    if(!navigator.geolocation) return reject({code:0});
+    navigator.geolocation.getCurrentPosition(resolve, reject, {enableHighAccuracy:true, timeout:20000, maximumAge:0});
+  });
+}
+// بيرجع {ok, fields, msg} — fields بتتحفظ في plan_branches لو ok
+async function supVerifyVisitLocation(branchName){
+  const bc = await supGetBranchCoords(branchName);
+  let pos;
+  try{ pos = await supGetPosition(); }
+  catch(e){
+    const denied = e && e.code===1;
+    return {ok:false, msg: denied
+      ? '📍 لازم تفعّل خدمة الموقع للتطبيق عشان تسجّل الزيارة.\n\nآيفون: الإعدادات ← الخصوصية ← خدمات الموقع ← Safari (أو التطبيق) ← أثناء الاستخدام.'
+      : '📍 مقدرناش نحدد موقعك. تأكد إن الـ GPS شغال وإنك في مكان مفتوح شوية، وجرّب تاني.'};
+  }
+  const lat = pos.coords.latitude, lng = pos.coords.longitude, acc = Math.round(pos.coords.accuracy||0);
+  const base = {visit_lat:lat, visit_lng:lng, check_in_at:new Date().toISOString()};
+  if(!bc){
+    return {ok:true, fields:{...base, geo_status:'no_branch_loc', geo_distance_m:null}};
+  }
+  const dist = Math.round(haversineMeters(lat,lng,bc.lat,bc.lng));
+  const allowed = GEO_VISIT_RADIUS_M + Math.min(acc, GEO_ACC_TOLERANCE_M);
+  if(dist > allowed){
+    return {ok:false, msg:`🚫 مينفعش تسجّل الزيارة — إنت بعيد عن الفرع.\n\nالمسافة بينك وبين "${branchName}": ${dist>=1000?(dist/1000).toFixed(1)+' كم':dist+' متر'}\nالمسموح: ${GEO_VISIT_RADIUS_M} متر.\n\nروح الفرع وسجّل الزيارة من هناك.`};
+  }
+  return {ok:true, fields:{...base, geo_status:'inside', geo_distance_m:dist}};
+}
+function supGeoBadgeHTML(item){
+  if(item.status!=='done') return '';
+  if(item.check_in_at && item.geo_status==='inside'){
+    const t = new Date(item.check_in_at).toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'});
+    return `<div style="font-size:10px;color:#1A7A4A;font-weight:700;margin-top:2px">📍 موثّقة بلوكيشن الفرع${item.geo_distance_m!=null?' · '+item.geo_distance_m+' م':''} · ${t}</div>`;
+  }
+  if(item.check_in_at && item.geo_status==='no_branch_loc'){
+    return `<div style="font-size:10px;color:#B8860B;font-weight:700;margin-top:2px">📍 موثّقة — لوكيشن الفرع غير مسجّل في النظام</div>`;
+  }
+  return `<div style="font-size:10px;color:#888;margin-top:2px">⚪ غير موثّقة (قبل تفعيل التوثيق بالموقع)</div>`;
+}
+function supShowGeoNotice(force){
+  const key = 'geo_notice_v1_'+(cu?.name||'');
+  try{ if(!force && localStorage.getItem(key)) return; }catch(e){}
+  const m = document.createElement('div');
+  m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:center;justify-content:center;padding:18px';
+  m.innerHTML = `<div style="background:#fff;border-radius:16px;max-width:380px;width:100%;padding:20px;font-family:Cairo,sans-serif;text-align:center">
+    <div style="font-size:40px">📍</div>
+    <div style="font-size:16px;font-weight:800;color:#731E2E;margin:6px 0">زيارات السوق بقت موثّقة بلوكيشن الفرع</div>
+    <div style="font-size:13px;color:#444;line-height:1.9;text-align:right">
+      • عشان تسجّل زيارة "منجز" لازم تكون <b>داخل نطاق الفرع (${GEO_VISIT_RADIUS_M} متر)</b>.<br>
+      • فعّل خدمة الموقع للتطبيق قبل ما تبدأ يومك.<br>
+      • لو بعيد عن الفرع مش هتقدر تسجّل الزيارة.<br>
+      • الزيارات الموثّقة بالموقع هي اللي بتتحسب في معيار <b>الحضور الشخصي</b> في تقييمك.
+    </div>
+    <button style="margin-top:14px;width:100%;padding:12px;background:#731E2E;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">تمام، فهمت</button>
+  </div>`;
+  m.querySelector('button').onclick = ()=>{ try{ localStorage.setItem(key,'1'); }catch(e){} m.remove(); };
+  document.body.appendChild(m);
+}
+
 async function toggleVisitStatus(itemId, currentStatus){
   // دورة الحالات: pending → done → missed → pending
   const next = currentStatus==='pending'?'done':currentStatus==='done'?'missed':'pending';
   const icon = next==='done'?'✅ تم التنفيذ':next==='missed'?'❌ فائت':'⏳ مجدول';
 
+  if(_geoVerifying) return;
   try{
+    let patch = {visit_status:next};
+    const idx0 = planItems.findIndex(i=>i.id===itemId);
+    if(next==='done'){
+      // ✅ توثيق بلوكيشن الفرع — بدون تواجد في نطاق الفرع مفيش تسجيل
+      _geoVerifying = true;
+      showToast('📍 جاري التحقق من موقعك...');
+      const v = await supVerifyVisitLocation(idx0!==-1 ? planItems[idx0].branch_name : '');
+      _geoVerifying = false;
+      if(!v.ok){ alert(v.msg); return; }
+      patch = {visit_status:'done', ...v.fields};
+    } else {
+      patch = {visit_status:next, geo_status:null, visit_lat:null, visit_lng:null, check_in_at:null, geo_distance_m:null};
+    }
     const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${itemId}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body: JSON.stringify({visit_status:next})
+      body: JSON.stringify(patch)
     });
 
     if(res.ok){
       // حدّث المحلي
       const idx = planItems.findIndex(i=>i.id===itemId);
-      if(idx!==-1) planItems[idx].status = next;
+      if(idx!==-1){ planItems[idx].status = next; planItems[idx].geo_status = patch.geo_status||null; planItems[idx].check_in_at = patch.check_in_at||null; planItems[idx].geo_distance_m = patch.geo_distance_m!=null?patch.geo_distance_m:null; }
 
       // لو تم التنفيذ — احسب النقاط
       if(next==='done'){
@@ -6522,6 +6636,7 @@ async function toggleVisitStatus(itemId, currentStatus){
       showToast('❌ فشل تحديث الحالة — تحقق من الاتصال');
     }
   }catch(e){
+    _geoVerifying = false;
     showToast('❌ خطأ في الاتصال');
     console.error('toggleVisitStatus error:', e);
   }
@@ -6943,6 +7058,20 @@ async function saveVisitResult(){
     }
     console.log('✓ السجل موجود في plan_branches');
 
+    // ✅ توثيق بلوكيشن الفرع — النتيجة بتعلّم الزيارة "منجز"، فلازم المشرف يكون في نطاق الفرع
+    let geoFields = {};
+    const curItem = planItems.find(i=>i.id===_currentResultItem.planItemId);
+    if(!(curItem && curItem.check_in_at)){
+      showToast('📍 جاري التحقق من موقعك...');
+      const gv = await supVerifyVisitLocation(_currentResultItem.branchName);
+      if(!gv.ok){
+        err.textContent = gv.msg.split('\n')[0]; err.style.display='block';
+        alert(gv.msg);
+        return;
+      }
+      geoFields = gv.fields;
+    }
+
     const existing = cachedResults.find(r=>r.plan_item_id===_currentResultItem.planItemId);
     const payload = {
       shelf_status:      fifoVal||'—',
@@ -7011,7 +7140,7 @@ async function saveVisitResult(){
     const r2 = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${_currentResultItem.planItemId}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-      body: JSON.stringify({visit_status:'done'})
+      body: JSON.stringify({visit_status:'done', ...geoFields})
     });
     if(!r2.ok){
       let errorDetail = `HTTP ${r2.status}`;
