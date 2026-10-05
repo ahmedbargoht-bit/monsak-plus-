@@ -647,7 +647,7 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       <i class="ti ti-users-group"></i>خطط الفريق
     </div>
     <div class="tab" onclick="showTab('daily')" id="tab-daily">
-      <i class="ti ti-clipboard-check"></i>اليومي
+      <i class="ti ti-clipboard-check"></i>زيارات السوق
     </div>
     <div class="tab" onclick="showTab('results')" id="tab-results">
       <i class="ti ti-star"></i>النتائج
@@ -1176,12 +1176,12 @@ body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--text);min-h
       <div class="card" style="background:#E3F2FD;border:1px solid #BBDEFB;margin-bottom:12px">
         <div style="font-size:12px;color:#1565C0;font-weight:600">
           <i class="ti ti-info-circle"></i>
-          سجّل ما نفذته فعلياً اليوم — وأي انحراف عن الخطة يجب توثيقه
+          زيارات السوق: اضغط على الفرع، وبعد التحقق من موقعك هيفتح نموذج المراجعة (تقرير المنسق، العرض والأصناف، النظافة)
         </div>
       </div>
       <div class="card" style="background:#F0FDF4;border:1px solid #A5D6A7;margin-bottom:12px;cursor:pointer" onclick="supShowGeoNotice(true)">
         <div style="font-size:12px;color:#1A7A4A;font-weight:700">
-          📍 زيارات السوق موثّقة بلوكيشن الفرع — لازم تكون داخل نطاق الفرع (200 متر) وقت تسجيل "منجز"
+          📍 زيارات السوق موثّقة بلوكيشن الفرع — لازم تكون داخل نطاق الفرع (200 متر) وتكمّل نموذج المراجعة عشان الزيارة تتحسب
         </div>
       </div>
       <!-- أيام الأسبوع -->
@@ -2805,7 +2805,7 @@ const NAV_DEFAULT = [
   {id:'logs',            icon:'ti-history',             label:'السجل',           visible:true},
   {id:'plan',            icon:'ti-calendar-week',       label:'الخطة',           visible:true},
   {id:'team-plans',      icon:'ti-users-group',         label:'خطط الفريق',      visible:true},
-  {id:'daily',           icon:'ti-clipboard-check',     label:'اليومي',          visible:true},
+  {id:'daily',           icon:'ti-clipboard-check',     label:'زيارات السوق',          visible:true},
   {id:'results',         icon:'ti-star',                label:'النتائج',         visible:true},
   {id:'field-support',   icon:'ti-shield-check',        label:'دعم الميدان',     visible:true},
   {id:'settings',        icon:'ti-settings',            label:'الإعدادات',       visible:true},
@@ -5586,14 +5586,9 @@ async function markVisitStatus(status){
   const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
   let patch = { visit_status:status, notes };
   if(status==='done'){
-    if(_geoVerifying) return;
-    const it0 = planItems.find(i=>i.id===itemId);
-    _geoVerifying = true;
-    showToast('📍 جاري التحقق من موقعك...');
-    const v = await supVerifyVisitLocation(it0 ? it0.branch_name : '');
-    _geoVerifying = false;
-    if(!v.ok){ alert(v.msg); return; }
-    patch = { ...patch, ...v.fields };
+    modal.classList.remove('open');
+    openVisitReview(itemId, notes);
+    return;
   }
   const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${itemId}`,{
     method:'PATCH', headers:H,
@@ -6280,11 +6275,7 @@ async function calcExecutionPoints(){
       if(match.missing)   missingPts  += 5;
       if(match.att_out)   checkoutPts += 5;
 
-      // حدّث حالة البند
-      if(item.status!=='done'){
-        await sbPatch('plan_branches',`id=eq.${item.id}`,{visit_status:'done'});
-        item.status = 'done';
-      }
+      // (اتشال التعليم التلقائي "منجز" — الزيارة بتتسجل بس من تاب زيارات السوق بالموقع + نموذج المراجعة)
     }
   }
 
@@ -6362,10 +6353,13 @@ async function loadDailyExecution(){
       rep_name: b.rep_name||'—',
       area_supervisor: b.area_supervisor||'',
       notes: b.notes||'',
-      check_in_at: b.check_in_at||null, geo_distance_m: b.geo_distance_m
+      check_in_at: b.check_in_at||null, geo_distance_m: b.geo_distance_m,
+      review_coord_report: b.review_coord_report||'', review_display: b.review_display||'',
+      review_clean: b.review_clean||'', review_notes: b.review_notes||'', reviewed_at: b.reviewed_at||null
     }));
     if(Array.isArray(freshItems) && freshItems.length) planItems = freshItems;
   }catch(e){ console.warn('loadDailyExecution fetch error:', e); }
+  try{ await vrLoadRouteMap(planItems.map(i=>i.branch_name)); }catch(e){}
 
   const devs = await sbGet('plan_deviations',{supervisor_name:cu.name});
   cachedDeviations = Array.isArray(devs)?devs:[];
@@ -6408,11 +6402,13 @@ async function loadDailyExecution(){
           </div>
         </div>`:''}
 
-      ${dayItems.length ? dayItems.map(item=>`
+      ${dayItems.length ? vrGroupByRoute(dayItems).map(g=>`
+        <div style="font-size:12px;font-weight:700;color:#731E2E;margin:8px 2px 6px"><i class="ti ti-route" style="font-size:14px"></i> ${vrEsc(g.route)} <span style="font-weight:500;color:var(--text2)">(${g.items.length} فرع)</span></div>
+        ${g.items.map(item=>`
         <div style="display:flex;align-items:center;gap:8px;padding:10px;
           background:${item.status==='done'?'#E8F5E9':item.status==='missed'?'#FFEBEE':'#f8f9fd'};
           border-radius:8px;margin-bottom:4px;cursor:pointer"
-          onclick="toggleVisitStatus(${item.id},'${item.status}')">
+          onclick="visitItemClick(${item.id},'${item.status}')">
           <div style="width:32px;height:32px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
             background:${item.status==='done'?'var(--green)':item.status==='missed'?'var(--red)':'#ddd'};color:#fff;font-size:14px">
             ${item.status==='done'?'✓':item.status==='missed'?'✗':'⏳'}
@@ -6424,7 +6420,7 @@ async function loadDailyExecution(){
             ${supGeoBadgeHTML(item)}
           </div>
           <span class="badge ${item.status==='done'?'b-green':item.status==='missed'?'b-red':'b-gray'}">
-            ${item.status==='done'?'✅ منجز':item.status==='missed'?'❌ فائت':'⏳ اضغط للتحديث'}
+            ${item.status==='done'?'✅ منجز':item.status==='missed'?'❌ فائت':'📍 ابدأ الزيارة'}
           </span>
         </div>
         <!-- ملاحظة الزيارة -->
@@ -6437,7 +6433,7 @@ async function loadDailyExecution(){
             style="padding:6px 12px;background:#C55B48;color:#fff;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif;white-space:nowrap">
             💾 حفظ
           </button>
-        </div>`).join('')
+        </div>`).join('')}`).join('')
       : `<div style="font-size:11px;color:var(--text2);text-align:center;padding:8px">لا توجد زيارات مجدولة</div>`}
 
       ${(isToday || isPast) && !deviation && currentPlan?.status==='approved'?`
@@ -6507,6 +6503,7 @@ async function savePlanNote(itemId, areaSup='', branchName=''){
 // ══════════════════════════════════════════════════════════════
 // توثيق زيارة السوق بلوكيشن الفرع — لازم المشرف يكون داخل نطاق الفرع وقت تسجيل "منجز"
 // ══════════════════════════════════════════════════════════════
+const GEO_BLOCK_NO_BRANCH_LOC = false; // true = منع تسجيل زيارة فرع ملوش لوكيشن | false = يتسجّل لكن "غير موثّقة" ومش بتتحسب في التقييم
 const GEO_VISIT_RADIUS_M = 200;       // نطاق الفرع المسموح
 const GEO_ACC_TOLERANCE_M = 100;      // أقصى هامش لدقة الـ GPS (جوه المولات الدقة بتقل)
 let _geoVerifying = false;
@@ -6545,6 +6542,7 @@ async function supVerifyVisitLocation(branchName){
   const lat = pos.coords.latitude, lng = pos.coords.longitude, acc = Math.round(pos.coords.accuracy||0);
   const base = {visit_lat:lat, visit_lng:lng, check_in_at:new Date().toISOString()};
   if(!bc){
+    if(GEO_BLOCK_NO_BRANCH_LOC) return {ok:false, msg:`📍 لوكيشن فرع "${branchName}" مش مسجّل في النظام فمقدرناش نوثّق الزيارة.\n\nبلّغ الإدارة تسجّل لوكيشن الفرع.`};
     return {ok:true, fields:{...base, geo_status:'no_branch_loc', geo_distance_m:null}};
   }
   const dist = Math.round(haversineMeters(lat,lng,bc.lat,bc.lng));
@@ -6556,14 +6554,21 @@ async function supVerifyVisitLocation(branchName){
 }
 function supGeoBadgeHTML(item){
   if(item.status!=='done') return '';
+  let h='';
   if(item.check_in_at && item.geo_status==='inside'){
     const t = new Date(item.check_in_at).toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'});
-    return `<div style="font-size:10px;color:#1A7A4A;font-weight:700;margin-top:2px">📍 موثّقة بلوكيشن الفرع${item.geo_distance_m!=null?' · '+item.geo_distance_m+' م':''} · ${t}</div>`;
+    h = `<div style="font-size:10px;color:#1A7A4A;font-weight:700;margin-top:2px">📍 موثّقة بلوكيشن الفرع${item.geo_distance_m!=null?' · '+item.geo_distance_m+' م':''} · ${t}</div>`;
+  } else if(item.check_in_at && item.geo_status==='no_branch_loc'){
+    h = `<div style="font-size:10px;color:#B8860B;font-weight:700;margin-top:2px">⚠️ غير موثّقة بالموقع — لوكيشن الفرع غير مسجّل (بلّغ الإدارة)</div>`;
+  } else {
+    h = `<div style="font-size:10px;color:#888;margin-top:2px">⚪ غير موثّقة (قبل تفعيل التوثيق بالموقع)</div>`;
   }
-  if(item.check_in_at && item.geo_status==='no_branch_loc'){
-    return `<div style="font-size:10px;color:#B8860B;font-weight:700;margin-top:2px">📍 موثّقة — لوكيشن الفرع غير مسجّل في النظام</div>`;
+  if(item.reviewed_at){
+    h += `<div style="font-size:10px;color:#4B3C1A;margin-top:2px">📝 تقرير المنسق: ${vrLbl(item.review_coord_report)} · العرض: ${vrLbl(item.review_display)} · النظافة: ${vrLbl(item.review_clean)}</div>`;
+  } else {
+    h += `<div style="font-size:10px;color:#B71C1C;margin-top:2px">📝 نموذج المراجعة غير مكتمل</div>`;
   }
-  return `<div style="font-size:10px;color:#888;margin-top:2px">⚪ غير موثّقة (قبل تفعيل التوثيق بالموقع)</div>`;
+  return h;
 }
 function supShowGeoNotice(force){
   const key = 'geo_notice_v1_'+(cu?.name||'');
@@ -6585,12 +6590,232 @@ function supShowGeoNotice(force){
   document.body.appendChild(m);
 }
 
+
+// ══════════════════════════════════════════════════════════════
+// زيارات السوق — نموذج الزيارة (الموقع + مراجعة تقرير المنسق + العرض + النظافة)
+// ══════════════════════════════════════════════════════════════
+const VR_LABELS = {excellent:'ممتاز', good:'جيد', needs:'يحتاج تحسين'};
+function vrLbl(v){ return VR_LABELS[v] || '—'; }
+function vrEsc(t){ return String(t==null?'':t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+let _vrRouteMap = {};
+let _vrCtx = null;
+
+async function vrLoadRouteMap(names){
+  const need = [...new Set((names||[]).filter(n=>n && !(n in _vrRouteMap)))];
+  if(!need.length) return;
+  const list = need.map(n=>'"'+String(n).replace(/"/g,'')+'"').join(',');
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route&branch_name=in.(${encodeURIComponent(list)})&limit=1000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+  const rows = r.ok ? await r.json() : [];
+  need.forEach(n=>{ _vrRouteMap[n] = ''; });
+  rows.forEach(b=>{ _vrRouteMap[b.branch_name] = b.route || ''; });
+}
+function vrGroupByRoute(items){
+  const m = new Map();
+  items.forEach(i=>{ const r = _vrRouteMap[i.branch_name] || 'خط سير غير محدد'; if(!m.has(r)) m.set(r,[]); m.get(r).push(i); });
+  return [...m.entries()].map(([route,items])=>({route,items}));
+}
+function visitItemClick(itemId, status){
+  if(status==='pending') return openVisitReview(itemId);
+  if(status==='done') return openVisitSummary(itemId);
+  return toggleVisitStatus(itemId, status); // فائتة → ترجع مجدولة
+}
+function vrCloseModal(){ const m=document.getElementById('modal-visit-review'); if(m) m.classList.remove('open'); }
+function vrEnsureModal(){
+  let m = document.getElementById('modal-visit-review');
+  if(!m){ m = document.createElement('div'); m.id='modal-visit-review'; m.className='modal-overlay'; document.body.appendChild(m); }
+  return m;
+}
+
+async function openVisitReview(itemId, prefillNotes){
+  if(_geoVerifying) return;
+  const item = planItems.find(i=>i.id===itemId);
+  if(!item) return;
+  _geoVerifying = true;
+  showToast('📍 جاري التحقق من موقعك...');
+  let v;
+  try{ v = await supVerifyVisitLocation(item.branch_name); } finally { _geoVerifying = false; }
+  if(!v.ok){ alert(v.msg); return; }
+  _vrCtx = {itemId, fields:v.fields, branch:item.branch_name, r:{coord:'',display:'',clean:''}};
+  const noLoc = v.fields.geo_status==='no_branch_loc';
+  const m = vrEnsureModal();
+  const rateRow = (key,title,hint)=>`
+    <div style="margin-top:12px">
+      <div style="font-size:12.5px;font-weight:700;color:#4B3C1A">${title}</div>
+      <div style="font-size:11px;color:var(--text2);margin:2px 0 6px">${hint}</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px" id="vr-r-${key}">
+        ${['excellent','good','needs'].map(val=>`<button type="button" onclick="vrSetRating('${key}','${val}')" data-v="${val}"
+          style="padding:9px 4px;border:1.5px solid #D4C4A8;border-radius:9px;background:#fff;font-family:Cairo,sans-serif;font-size:12px;font-weight:700;color:#4B3C1A;cursor:pointer">${VR_LABELS[val]}</button>`).join('')}
+      </div>
+    </div>`;
+  m.innerHTML = `<div class="modal-sheet" style="max-width:430px;max-height:92vh;overflow-y:auto">
+    <div class="modal-title">📍 زيارة سوق — ${vrEsc(item.branch_name)}</div>
+    <div style="font-size:11px;color:var(--text2);text-align:center;margin-bottom:8px">${vrEsc(_vrRouteMap[item.branch_name]||'')}</div>
+    ${noLoc
+      ? `<div style="background:#FFF8E1;color:#B8860B;border-radius:8px;padding:8px 10px;font-size:11.5px;font-weight:700">⚠️ لوكيشن الفرع مش مسجّل — الزيارة هتتسجل "غير موثّقة بالموقع" ومش هتتحسب في معيار الحضور الشخصي.</div>`
+      : `<div style="background:#E8F5E9;color:#1A7A4A;border-radius:8px;padding:8px 10px;font-size:11.5px;font-weight:700">✅ تم التحقق من موقعك — إنت داخل نطاق الفرع (${v.fields.geo_distance_m} م)</div>`}
+    <div id="vr-coord-box" style="margin-top:10px;background:#FBF0F0;border-radius:10px;padding:10px 12px;font-size:12px">⏳ جاري تحميل آخر تقرير للمنسق...</div>
+    ${rateRow('coord','1) مراجعة تقرير المنسق من آخر زيارة','راجع التقرير اللي فوق وقيّم التزام المنسق واكتماله')}
+    ${rateRow('display','2) مراجعة طريقة العرض والأصناف','شكل العرض وتوافر الأصناف وترتيبها على الرف')}
+    ${rateRow('clean','3) مراجعة نظافة مكان العرض','نظافة الرف والمكان حوله')}
+    <div style="margin-top:12px">
+      <div style="font-size:12.5px;font-weight:700;color:#4B3C1A">ملاحظات أخرى (اختياري)</div>
+      <textarea id="vr-notes" rows="3" placeholder="اكتب أي ملاحظات عن الفرع..." style="width:100%;margin-top:6px;border:1.5px solid #D4C4A8;border-radius:9px;padding:8px 10px;font-family:Cairo,sans-serif;font-size:12px;background:#FFFDF8;color:#4B3C1A;box-sizing:border-box">${vrEsc(prefillNotes||item.notes||'')}</textarea>
+    </div>
+    <div id="vr-err" style="display:none;color:#B71C1C;font-size:12px;font-weight:700;margin-top:8px"></div>
+    <div class="modal-btns" style="margin-top:12px">
+      <button class="btn-modal" onclick="vrCloseModal()" style="background:#eee;color:#555">إلغاء</button>
+      <button class="btn-modal" onclick="vrMarkMissed()" style="background:#FFEBEE;color:#B71C1C">فائتة</button>
+      <button class="btn-modal btn-confirm" id="vr-save-btn" onclick="vrSave()">تسجيل الزيارة</button>
+    </div>
+  </div>`;
+  m.classList.add('open');
+  vrLoadCoordReport(item.branch_name);
+}
+
+function vrSetRating(key,val){
+  if(!_vrCtx) return;
+  _vrCtx.r[key] = val;
+  const colors = {excellent:['#E8F5E9','#2E7D32'], good:['#E3F2FD','#1565C0'], needs:['#FFEBEE','#C62828']};
+  document.querySelectorAll('#vr-r-'+key+' button').forEach(b=>{
+    const on = b.dataset.v===val;
+    b.style.background = on ? colors[val][0] : '#fff';
+    b.style.borderColor = on ? colors[val][1] : '#D4C4A8';
+    b.style.color = on ? colors[val][1] : '#4B3C1A';
+  });
+  const e=document.getElementById('vr-err'); if(e) e.style.display='none';
+}
+
+async function vrLoadCoordReport(bn){
+  const box = document.getElementById('vr-coord-box');
+  if(!box) return;
+  try{
+    const H = {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}};
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/products?select=name,snf,shelf_qty,stock_qty,visit_id,created_at&branch=eq.${encodeURIComponent(bn)}&order=created_at.desc&limit=600`,H);
+    const prod = res.ok ? await res.json() : [];
+    if(!prod.length){ box.innerHTML = '⚠️ مفيش تقرير منسق سابق للفرع ده — قيّم البند 1 بناءً على ده.'; return; }
+    const cd = t=>t?new Date(new Date(t).getTime()+2*3600000).toISOString().slice(0,10):'';
+    const top = prod[0], date = cd(top.created_at);
+    const rows = prod.filter(r=>top.visit_id ? r.visit_id===top.visit_id : (cd(r.created_at)===date && (r.name||'')===(top.name||'')));
+    const m = {};
+    rows.forEach(r=>{ const k=(r.snf||'').trim(); if(!k) return; if(!m[k]) m[k]={snf:k,shelf:0,stock:0}; m[k].shelf+=+r.shelf_qty||0; m[k].stock+=+r.stock_qty||0; });
+    const items = Object.values(m).sort((a,b)=>a.snf.localeCompare(b.snf,'ar'));
+    const low = items.filter(x=>x.shelf<3).length;
+    box.innerHTML = `<div style="font-weight:700;margin-bottom:4px">📋 آخر تقرير للمنسق</div>
+      <div>👤 <b>${vrEsc(top.name||'—')}</b> · 📅 <b>${vrEsc(date)}</b> · ${items.length} صنف${low?` · <span style="color:#C0392B;font-weight:700">${low} صنف رف أقل من 3</span>`:''}</div>
+      <details style="margin-top:6px"><summary style="cursor:pointer;color:#731E2E;font-weight:700">عرض الأصناف (رف / مخزن)</summary>
+        <div style="max-height:180px;overflow-y:auto;margin-top:6px">
+        <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+          ${items.map((x,i)=>`<tr style="background:${i%2?'#FBF0F0':'#fff'}"><td style="padding:4px 6px;font-weight:600">${vrEsc(x.snf)}</td><td style="padding:4px 6px;text-align:center;${x.shelf<3?'color:#C0392B;font-weight:700':''}">${x.shelf}</td><td style="padding:4px 6px;text-align:center;color:#555">${x.stock>0?x.stock:'—'}</td></tr>`).join('')}
+        </table></div></details>`;
+  }catch(e){ box.innerHTML = '⚠️ تعذّر تحميل التقرير.'; }
+}
+
+async function vrSave(){
+  if(!_vrCtx) return;
+  const err = document.getElementById('vr-err');
+  const r = _vrCtx.r;
+  if(!r.coord || !r.display || !r.clean){
+    err.textContent = 'لازم تقيّم البنود التلاتة قبل ما تسجّل الزيارة.';
+    err.style.display = 'block';
+    return;
+  }
+  const btn = document.getElementById('vr-save-btn');
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ جاري الحفظ...'; }
+  const notes = (document.getElementById('vr-notes')?.value||'').trim();
+  const patch = {
+    visit_status:'done', ..._vrCtx.fields,
+    review_coord_report:r.coord, review_display:r.display, review_clean:r.clean,
+    review_notes:notes||null, reviewed_at:new Date().toISOString()
+  };
+  if(notes) patch.notes = notes;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${_vrCtx.itemId}`,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+      body:JSON.stringify(patch)
+    });
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const idx = planItems.findIndex(i=>i.id===_vrCtx.itemId);
+    if(idx!==-1){
+      Object.assign(planItems[idx],{status:'done', geo_status:patch.geo_status, check_in_at:patch.check_in_at, geo_distance_m:patch.geo_distance_m,
+        review_coord_report:r.coord, review_display:r.display, review_clean:r.clean, review_notes:notes, reviewed_at:patch.reviewed_at});
+      if(notes) planItems[idx].notes = notes;
+    }
+    vrCloseModal();
+    showToast('✅ تم تسجيل الزيارة');
+    try{ await calcExecutionPoints(); }catch(e){}
+    loadDailyExecution();
+    if(document.getElementById('screen-plan')?.classList.contains('active')) renderPlan();
+  }catch(e){
+    err.textContent = 'فشل الحفظ — تأكد من الاتصال وجرّب تاني.';
+    err.style.display = 'block';
+    if(btn){ btn.disabled = false; btn.textContent = 'تسجيل الزيارة'; }
+  }
+}
+
+async function vrMarkMissed(){
+  if(!_vrCtx) return;
+  const id = _vrCtx.itemId;
+  vrCloseModal();
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${id}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({visit_status:'missed'})
+  }).catch(()=>null);
+  if(!res || !res.ok){ showToast('❌ فشل التحديث'); return; }
+  const idx = planItems.findIndex(i=>i.id===id); if(idx!==-1) planItems[idx].status='missed';
+  showToast('❌ تم تسجيل الزيارة كفائتة');
+  loadDailyExecution();
+}
+
+async function openVisitSummary(itemId){
+  let b = null;
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${itemId}&select=*`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const d = r.ok ? await r.json() : [];
+    b = d[0] || null;
+  }catch(e){}
+  if(!b){ showToast('❌ تعذّر تحميل بيانات الزيارة'); return; }
+  const m = vrEnsureModal();
+  const item = {status:'done', check_in_at:b.check_in_at, geo_status:b.geo_status, geo_distance_m:b.geo_distance_m,
+    review_coord_report:b.review_coord_report, review_display:b.review_display, review_clean:b.review_clean, reviewed_at:b.reviewed_at};
+  m.innerHTML = `<div class="modal-sheet" style="max-width:420px">
+    <div class="modal-title">✅ ${vrEsc(b.branch_name)}</div>
+    <div style="font-size:11px;color:var(--text2);text-align:center;margin-bottom:8px">${vrEsc(b.visit_date||'')}</div>
+    <div style="background:#F8F9FD;border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.9">
+      ${supGeoBadgeHTML(item)}
+      ${b.review_notes?`<div style="margin-top:6px"><b>الملاحظات:</b> ${vrEsc(b.review_notes)}</div>`:''}
+    </div>
+    <div class="modal-btns" style="margin-top:12px">
+      <button class="btn-modal" onclick="vrCloseModal()" style="background:#eee;color:#555">إغلاق</button>
+      <button class="btn-modal" onclick="vrReopen(${itemId})" style="background:#FFF3E0;color:#E65100">${b.reviewed_at?'إلغاء التسجيل':'إعادة التسجيل بالموقع'}</button>
+    </div>
+  </div>`;
+  m.classList.add('open');
+}
+
+async function vrReopen(itemId){
+  if(!confirm('هيتم إلغاء تسجيل الزيارة دي وترجع "مجدولة"، وهتحتاج تسجّلها تاني من الفرع. تكمّل؟')) return;
+  vrCloseModal();
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${itemId}`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+    body:JSON.stringify({visit_status:'pending', geo_status:null, visit_lat:null, visit_lng:null, check_in_at:null, geo_distance_m:null, review_coord_report:null, review_display:null, review_clean:null, review_notes:null, reviewed_at:null})
+  }).catch(()=>null);
+  if(!res || !res.ok){ showToast('❌ فشل التحديث'); return; }
+  const idx = planItems.findIndex(i=>i.id===itemId);
+  if(idx!==-1) Object.assign(planItems[idx],{status:'pending', geo_status:null, check_in_at:null, geo_distance_m:null, review_coord_report:'', review_display:'', review_clean:'', review_notes:'', reviewed_at:null});
+  showToast('⏳ رجعت الزيارة مجدولة');
+  loadDailyExecution();
+}
+
 async function toggleVisitStatus(itemId, currentStatus){
   // دورة الحالات: pending → done → missed → pending
   const next = currentStatus==='pending'?'done':currentStatus==='done'?'missed':'pending';
   const icon = next==='done'?'✅ تم التنفيذ':next==='missed'?'❌ فائت':'⏳ مجدول';
 
   if(_geoVerifying) return;
+  if(next==='done'){ openVisitReview(itemId); return; }
   try{
     let patch = {visit_status:next};
     const idx0 = planItems.findIndex(i=>i.id===itemId);
@@ -6603,7 +6828,7 @@ async function toggleVisitStatus(itemId, currentStatus){
       if(!v.ok){ alert(v.msg); return; }
       patch = {visit_status:'done', ...v.fields};
     } else {
-      patch = {visit_status:next, geo_status:null, visit_lat:null, visit_lng:null, check_in_at:null, geo_distance_m:null};
+      patch = {visit_status:next, geo_status:null, visit_lat:null, visit_lng:null, check_in_at:null, geo_distance_m:null, review_coord_report:null, review_display:null, review_clean:null, review_notes:null, reviewed_at:null};
     }
     const res = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${itemId}`,{
       method:'PATCH',
@@ -6833,7 +7058,7 @@ async function renderVisitResults(){
 
   if(!donePlanItems.length){
     document.getElementById('results-list').innerHTML=
-      '<div class="empty">لا توجد زيارات منفذة — نفّذ زيارات من تاب اليومي أولاً</div>';
+      '<div class="empty">لا توجد زيارات منفذة — نفّذ زيارات من تاب زيارات السوق أولاً</div>';
     return;
   }
 
@@ -7060,16 +7285,15 @@ async function saveVisitResult(){
 
     // ✅ توثيق بلوكيشن الفرع — النتيجة بتعلّم الزيارة "منجز"، فلازم المشرف يكون في نطاق الفرع
     let geoFields = {};
-    const curItem = planItems.find(i=>i.id===_currentResultItem.planItemId);
-    if(!(curItem && curItem.check_in_at)){
-      showToast('📍 جاري التحقق من موقعك...');
-      const gv = await supVerifyVisitLocation(_currentResultItem.branchName);
-      if(!gv.ok){
-        err.textContent = gv.msg.split('\n')[0]; err.style.display='block';
-        alert(gv.msg);
+    {
+      let chk = [];
+      try{ const cr = await fetch(`${SUPABASE_URL}/rest/v1/plan_branches?id=eq.${_currentResultItem.planItemId}&select=visit_status,reviewed_at`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}); chk = cr.ok ? await cr.json() : []; }catch(e){}
+      if(!(chk[0] && chk[0].visit_status==='done' && chk[0].reviewed_at)){
+        const m = 'سجّل الزيارة الأول من تاب "زيارات السوق" (التحقق من الموقع + نموذج المراجعة)، وبعدها أكمل نتيجة الزيارة هنا.';
+        err.textContent = m; err.style.display='block';
+        alert(m);
         return;
       }
-      geoFields = gv.fields;
     }
 
     const existing = cachedResults.find(r=>r.plan_item_id===_currentResultItem.planItemId);

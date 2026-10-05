@@ -45392,8 +45392,8 @@ const SEV_CRIT_INFO = [
     what:'متوسط "نقاط" زيارات فريقك (مقياس جاهز بيجمع حضور/رفوف/نواقص/انصراف من تطبيق المنسق) مقارنة بمتوسط كل زيارات الشركة في نفس الفترة.',
     how:'خلّي متوسط نقاط زيارات فريقك يساوي أو يعدّي متوسط الشركة، وقلّل عدد الزيارات اللي نقاطها منخفضة جدًا (أقل من 60% من متوسط الشركة).' },
   { icon:'📝', title:'الحضور الشخصي (توثيق زيارة السوق)', mgrOnly:false,
-    what:'من الزيارات المخططة اللي خلّصتها (منجزة)، كام منها اتسجلت وإنت <b>داخل نطاق الفرع (200 متر)</b> بلوكيشن الموبايل — دليل إنك نزلت الفرع بنفسك مش بس ضغطت "منجز". (الزيارات قبل 5 أكتوبر 2026 بتتحسب بالملاحظة.)',
-    how:'سجّل كل زيارة من تطبيقك وإنت جوه الفرع وخدمة الموقع شغّالة، ووصل لتوثيق <b>80% أو أكتر</b> من زياراتك المنجزة.' },
+    what:'من الزيارات المخططة اللي خلّصتها (منجزة)، كام منها اتسجلت وإنت <b>داخل نطاق الفرع (200 متر)</b> بلوكيشن الموبايل <b>واتملّى فيها نموذج المراجعة</b> (تقرير المنسق، العرض والأصناف، نظافة مكان العرض) — دليل إنك نزلت الفرع وراجعته بنفسك. (الزيارات قبل 5 أكتوبر 2026 بتتحسب بالملاحظة.)',
+    how:'من تاب "زيارات السوق" في تطبيقك: ابدأ الزيارة وإنت جوه الفرع وخدمة الموقع شغّالة، وقيّم البنود التلاتة، ووصل لتوثيق <b>80% أو أكتر</b> من زياراتك المنجزة.' },
   { icon:'⏰', title:'تسجيل الانصراف اليومي', mgrOnly:false,
     what:'نسبة أيام حضور منسقيك اللي فيها تسجيل دخول بس من غير تسجيل انصراف في نفس اليوم.',
     how:'تابع مع منسقينك إنهم يسجّلوا انصراف في كل يوم حضروا فيه، وخلّي نسبة الأيام الناقصة انصراف <b>5% أو أقل</b>.' },
@@ -45785,21 +45785,30 @@ function sevComputeCriteria(groups, ctx){
   // ✅ من 5 أكتوبر 2026: الزيارة بتتحسب "موثّقة" بس لو اتسجلت بلوكيشن الفرع (check_in_at + geo_status).
   // الزيارات القبلها (غير موثّقة بالموقع) بتفضل بمعيار الملاحظة القديم عشان تقييم الفترات السابقة ما يتصفّرش.
   const GEO_START = '2026-10-05';
-  const _geoOK = b => !!b.check_in_at && (b.geo_status==='inside' || b.geo_status==='no_branch_loc');
+  const _geoOK = b => !!b.check_in_at && b.geo_status==='inside';
+  const _revOK = b => !!b.reviewed_at && !!b.review_coord_report && !!b.review_display && !!b.review_clean;
+  const _okVisit = b => ((b.visit_date||'') < GEO_START) ? !!(b.notes||'').trim() : (_geoOK(b) && _revOK(b));
   const doneBranches = myBranches.filter(b=>b.visit_status==='done');
-  const notedBranches = doneBranches.filter(b => ((b.visit_date||'') < GEO_START) ? !!(b.notes||'').trim() : _geoOK(b));
+  const notedBranches = doneBranches.filter(_okVisit);
   const notePct = doneBranches.length ? Math.round(notedBranches.length/doneBranches.length*100) : 0;
   let noteLevel;
   if(!doneBranches.length) noteLevel = 'needsWork';
   else if(notePct>=80) noteLevel = 'excellent';
   else if(notePct>=50) noteLevel = 'good';
   else noteLevel = 'needsWork';
+  const _needsCnt = notedBranches.filter(b=>b.reviewed_at && (b.review_coord_report==='needs'||b.review_display==='needs'||b.review_clean==='needs')).length;
   const noteCrit = {
     level: noteLevel,
-    text: doneBranches.length ? `${notedBranches.length}/${doneBranches.length} زيارة منجزة موثّقة بلوكيشن الفرع (${notePct}%)` : `مفيش زيارات منجزة ${periodLabel}`,
+    text: doneBranches.length ? `${notedBranches.length}/${doneBranches.length} زيارة منجزة موثّقة بالموقع ونموذج المراجعة مكتمل (${notePct}%)${_needsCnt?` — منهم ${_needsCnt} زيارة فيها بند "يحتاج تحسين"`:''}` : `مفيش زيارات منجزة ${periodLabel}`,
   };
-  const noteDetails = doneBranches.filter(b => !(((b.visit_date||'') < GEO_START) ? !!(b.notes||'').trim() : _geoOK(b)))
-    .map(b=>`📝 ${b.rep_name||'—'} — ${b.branch_name||'—'} — ${b.visit_date||'—'} — ${((b.visit_date||'') < GEO_START) ? 'غير موثّقة (قبل تفعيل التوثيق بالموقع)' : 'غير موثّقة بلوكيشن الفرع'}`);
+  const noteDetails = doneBranches.filter(b=>!_okVisit(b))
+    .map(b=>{
+      let why;
+      if((b.visit_date||'') < GEO_START) why = 'غير موثّقة (قبل تفعيل التوثيق بالموقع)';
+      else if(!_geoOK(b)) why = b.geo_status==='no_branch_loc' ? 'لوكيشن الفرع غير مسجّل — غير موثّقة بالموقع' : 'غير موثّقة بلوكيشن الفرع';
+      else why = 'نموذج المراجعة غير مكتمل';
+      return `📝 ${b.rep_name||'—'} — ${b.branch_name||'—'} — ${b.visit_date||'—'} — ${why}`;
+    });
 
   // 8) تسجيل الانصراف اليومي — منسقين سجّلوا حضور (وقت دخول) في يوم معين بس من غير ما يسجّلوا انصراف
   // (وقت خروج) في نفس اليوم، من جدول الحضور اليومي (attendance) - مؤشر انضباط أساسي مكمّل لمعيار
