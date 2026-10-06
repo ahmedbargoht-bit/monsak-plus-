@@ -74,6 +74,8 @@ html,body{position:fixed;inset:0;width:100%;height:100%;overflow:hidden;font-fam
 .sec-title{font-size:12px;font-weight:800;color:var(--t1);margin-bottom:8px}
 .branch-card{background:var(--w);border-radius:13px;padding:11px 13px;margin-bottom:7px;display:flex;align-items:center;gap:10px;cursor:pointer}
 .branch-card:active{transform:scale(.98)}
+.loc-add-btn{margin-top:5px;background:#FFF3E0;color:#B45309;border:1.5px solid #F5B461;border-radius:9px;padding:4px 10px;font-family:'Cairo',sans-serif;font-size:11px;font-weight:800;cursor:pointer}.loc-add-btn:active{transform:scale(.96)}.loc-add-btn[disabled]{opacity:.6}
+
 .branch-icon{width:36px;height:36px;background:var(--bg);border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0}
 .branch-info{flex:1;min-width:0}
 .branch-name{font-size:12px;font-weight:700;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1113,6 +1115,69 @@ async function sbFetch(table, params=''){
   return res.json();
 }
 
+
+// ══ إضافة لوكيشن للفرع اللي ملوش لوكيشن (لكل المناديب) ══
+let _blMap=null, _blLoading=null;
+function loadBranchLocMap(force){
+  if(_blMap && !force) return Promise.resolve(_blMap);
+  if(_blLoading && !force) return _blLoading;
+  _blLoading=sbFetchAll('branches','?select=branch_name,lat,lng&order=id.asc').then(rows=>{
+    const m={}; rows.forEach(r=>{ if(r.branch_name) m[r.branch_name]=!!(r.lat!=null&&r.lng!=null&&+r.lat&&+r.lng); });
+    _blMap=m; _blLoading=null; return m;
+  }).catch(()=>{ _blLoading=null; return _blMap||{}; });
+  return _blLoading;
+}
+// true لو الفرع معروف إنه من غير لوكيشن (لو الخريطة لسه ما اتحملتش مش بنعرض الزرار)
+function branchNeedsLoc(name){ return !!(_blMap && _blMap[name]===false); }
+function branchLocBtn(name){
+  if(!branchNeedsLoc(name)) return '';
+  return `<button class="loc-add-btn" data-bn="${encodeURIComponent(name)}" onclick="event.stopPropagation();addBranchLocation(this)">📍 إضافة لوكيشن</button>`;
+}
+function _blGetPos(highAcc){
+  return new Promise((res,rej)=>{
+    if(!navigator.geolocation) return rej({code:0,message:'no geo'});
+    navigator.geolocation.getCurrentPosition(res,rej,{enableHighAccuracy:highAcc,timeout:highAcc?15000:20000,maximumAge:0});
+  });
+}
+async function addBranchLocation(btn){
+  const name=decodeURIComponent(btn.dataset.bn||'');
+  if(!name) return;
+  const old=btn.textContent; btn.disabled=true; btn.textContent='⏳ جاري تحديد موقعك...';
+  try{
+    let pos=null, tries=0;
+    while(tries<3){
+      tries++;
+      try{ pos=await _blGetPos(true); }
+      catch(e){ if(e&&e.code===1) throw e; pos=await _blGetPos(false); }
+      if(pos.coords.accuracy<=50) break;
+      if(tries>=3 || !confirm('دقة الموقع ضعيفة (حوالي '+Math.round(pos.coords.accuracy)+' متر). لازم تكون واقف جوه الفرع. تعيد المحاولة؟')){
+        if(pos.coords.accuracy>50){ showToast('⚠️ الدقة ضعيفة — اقف قدام الفرع وجرب تاني'); return; }
+      }
+    }
+    if(!pos || pos.coords.accuracy>50){ showToast('⚠️ الدقة ضعيفة — اقف قدام الفرع وجرب تاني'); return; }
+    const lat=pos.coords.latitude, lng=pos.coords.longitude, acc=Math.round(pos.coords.accuracy);
+    if(!confirm('تسجيل موقعك الحالي كلوكيشن لفرع:\n'+name+'\n\n(دقة الموقع حوالي '+acc+' متر)\nتأكد إنك واقف في الفرع. تأكيد؟')) return;
+    // الشرط lat=is.null يمنع تغيير لوكيشن اتسجل قبل كده
+    const res=await fetch(SUPABASE_URL+'/rest/v1/branches?branch_name=eq.'+encodeURIComponent(name)+'&lat=is.null',{
+      method:'PATCH', headers:{...SB_HEADERS,'Prefer':'return=representation'},
+      body:JSON.stringify({lat,lng,location_saved_at:new Date().toISOString(),location_saved_by:(currentRep&&currentRep.name)||null,location_accuracy_m:acc})
+    });
+    if(!res.ok) throw new Error(await res.text());
+    const rows=await res.json().catch(()=>[]);
+    if(!rows.length){ showToast('ℹ️ الفرع ده اتسجل له لوكيشن قبل كده'); }
+    else showToast('✅ تم تسجيل لوكيشن الفرع');
+    if(_blMap) _blMap[name]=true;
+    document.querySelectorAll('.loc-add-btn').forEach(b=>{ if(decodeURIComponent(b.dataset.bn||'')===name) b.remove(); });
+  }catch(e){
+    if(e&&e.code===1) alert('⚠️ مفيش إذن للموقع. فعّل إذن الموقع للمتصفح/التطبيق من إعدادات الموبايل وجرب تاني.');
+    else if(e&&e.code===2||e&&e.code===3) alert('⚠️ تعذّر تحديد موقعك. اتأكد إن الـ GPS شغّال وجرب تاني.');
+    else showToast('⚠️ تعذّر حفظ اللوكيشن');
+    console.warn('addBranchLocation',e);
+  }finally{
+    if(btn.isConnected){ btn.disabled=false; btn.textContent=old; }
+  }
+}
+
 // Supabase/PostgREST بيرجع بحد أقصى 1000 صف في أي طلب واحد حتى لو الـ limit في الـ params
 // المرسلة أكبر — أي زيادة عن كده بتتقطع بصمت. النسخة دي بتجيب كل الصفحات مع بعض.
 // ملحوظة: لازم الـ params متبدأش بـ limit=/offset= لأننا بنضيفهم إحنا هنا.
@@ -1299,6 +1364,7 @@ async function loadHomeScreen(){
 
     // Get client map
     await loadAllClientData();
+    await loadBranchLocMap(true);
     const grouped={};
     rows.forEach(r=>{
       const k=r.route||'غير محدد';
@@ -1323,6 +1389,7 @@ async function loadHomeScreen(){
           <div class="branch-info">
             <div class="branch-name">${b.branch_name}</div>
             <div class="branch-client">${client||'—'}</div>
+            ${branchLocBtn(b.branch_name)}
           </div>
           <div class="branch-arr">◄</div>
         </div>`;
@@ -2778,11 +2845,13 @@ function doRenderBranches(rows, containerId, mode){
         <div class="branch-name">${b.branch_name}</div>
         <div class="branch-client">${client||'—'}</div>
         ${badges?`<div class="bdg">${badges}</div>`:''}
+        ${branchLocBtn(b.branch_name)}
       </div>
       <div class="branch-arr">◄</div>
     </div>`;
   });
   $(containerId).innerHTML=html;
+  if(!_blMap) loadBranchLocMap().then(()=>doRenderBranches(rows,containerId,mode));
 }
 
 function onDelRouteChange(){
