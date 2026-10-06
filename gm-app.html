@@ -15469,7 +15469,7 @@ async function svmLoad(){
       const needs = reviewed && (x.review_coord_report==='needs'||x.review_display==='needs'||x.review_clean==='needs');
       return {
         id:x.id, date:x.visit_date||'', sup:p.supervisor_name||'—', planType:p.plan_type||'', branch:x.branch_name||'', route:b.route||'—',
-        grp:b.grp||'', status:x.visit_status||'pending', done, geoOK, geoLbl, geoClr, dist:x.geo_distance_m,
+        grp:b.grp||'', status:x.visit_status||'pending', done, geoOK, geoSt:x.geo_status||'', geoLbl, geoClr, dist:x.geo_distance_m,
         checkIn:x.check_in_at||'', vlat:x.visit_lat, vlng:x.visit_lng, blat:b.lat, blng:b.lng,
         reviewed, isNew, rc:x.review_coord_report||'', rd:x.review_display||'', rl:x.review_clean||'', notes:x.review_notes||x.notes||'',
         verified: done && geoOK && reviewed, needs, coord:x.rep_name||''
@@ -15516,7 +15516,7 @@ function svmRender(reset){
   const card=(l,val,c)=>`<div style="background:#FAF6EE;border:1px solid #E8DCC4;border-radius:10px;padding:10px 12px"><div style="font-size:11px;color:#7A6A4A">${l}</div><div style="font-size:21px;font-weight:800;color:${c}">${val}</div></div>`;
   document.getElementById('svm-stats').innerHTML =
     card('الزيارات المخططة',v.length,'#4B3C1A')+card('المنجزة',done,'#1A7A4A')+card('موثّقة بالموقع',geo,'#1565C0')+
-    card('موثّقة ومكتملة التقييم',ver,'#2E7D32')+card('نسبة الالتزام',pct+'%',pct>=80?'#2E7D32':pct>=50?'#B8860B':'#B71C1C')+
+    card('موثّقة ومكتملة التقييم',ver,'#2E7D32')+card('نسبة المتابعة (المعيار)',pct+'%',pct>=80?'#2E7D32':pct>=50?'#B8860B':'#B71C1C')+
     card('فائتة',missed,'#B71C1C')+card('بند يحتاج تحسين',needs,'#C62828');
   const body = document.getElementById('svm-body');
   if(!v.length){ body.innerHTML = '<div style="text-align:center;padding:30px;color:#999">مفيش زيارات في الفترة والفلاتر دي</div>'; return; }
@@ -15580,11 +15580,45 @@ function svmDetail(id){
 }
 
 
+// ── معيار "متابعة زيارات المشرفين" — دالة واحدة مشتركة بين التاب وتقييم مشرفي/مديري التنسيق ──
+// items: [{date,status,checkIn,geoStatus,reviewedAll,hasNeeds,notes}]
+// المخطط المستحق = المنجزة + الفائتة + المجدولة اللي ميعادها عدّى (المجدولة المستقبلية مش بتتحسب)
+function svmFollowStats(items, today){
+  today = today || svmIso(new Date());
+  const GS = SVM_GEO_START;
+  const isDue = b => b.status==='done' || b.status==='missed' || b.status==='skipped' || (b.date||'')<=today;
+  const qualifies = b => b.status==='done' && (((b.date||'')<GS) ? !!(b.notes||'').trim() : (!!b.checkIn && b.geoStatus==='inside' && !!b.reviewedAll));
+  const reason = b => {
+    if(b.status==='done'){
+      if((b.date||'')<GS) return (b.notes||'').trim() ? '' : 'غير موثّقة (قبل تفعيل التوثيق بالموقع)';
+      if(!(b.checkIn && b.geoStatus==='inside')) return b.geoStatus==='no_branch_loc' ? 'لوكيشن الفرع غير مسجّل — غير موثّقة بالموقع' : 'غير موثّقة بلوكيشن الفرع';
+      if(!b.reviewedAll) return 'نموذج المراجعة غير مكتمل';
+      return '';
+    }
+    if(b.status==='missed'||b.status==='skipped') return 'فائتة';
+    return 'لم تُنفَّذ (ميعادها عدّى)';
+  };
+  const due = items.filter(isDue);
+  const q = due.filter(qualifies);
+  const done = due.filter(b=>b.status==='done').length;
+  const missed = due.filter(b=>b.status==='missed'||b.status==='skipped').length;
+  const notDone = due.length - done - missed;
+  const incomplete = due.filter(b=>b.status==='done' && reason(b)==='نموذج المراجعة غير مكتمل').length;
+  const unverified = due.filter(b=>b.status==='done' && !qualifies(b)).length - incomplete;
+  const needsCnt = q.filter(b=>b.hasNeeds).length;
+  const pct = due.length ? Math.round(q.length/due.length*100) : 0;
+  return {planned:due.length, done, missed, notDone, qualified:q.length, unverified, incomplete, needsCnt, pct,
+    failures: due.filter(b=>!qualifies(b)).map(b=>({item:b, reason:reason(b)})), needsItems: q.filter(b=>b.hasNeeds)};
+}
+function svmRowToItem(r){
+  return {date:r.date, status:r.status, checkIn:r.checkIn, geoStatus:r.geoSt, reviewedAll:r.reviewed, hasNeeds:r.needs, notes:r.notes};
+}
 function svmStats(v){
   const done = v.filter(r=>r.done).length, ver = v.filter(r=>r.verified).length;
+  const f = svmFollowStats(v.map(svmRowToItem));
   return { total:v.length, done, ver, geo:v.filter(r=>r.done&&r.geoOK).length,
     missed:v.filter(r=>r.status==='missed'||r.status==='skipped').length, needs:v.filter(r=>r.needs).length,
-    pct: done ? Math.round(ver/done*100) : 0 };
+    pct: f.pct, follow:f };
 }
 const SVM_C = {maroon:'#731E2E', olive:'#4E5A2B', gold:'#C8A96E', brown:'#4B3C1A', cream:'#FAF6EE'};
 const SVM_ST = {done:['منجزة','#E8F5E9','#2E7D32'], pending:['مجدولة','#F1F1F1','#666666'], missed:['فائتة','#FFEBEE','#C62828'], skipped:['فائتة','#FFEBEE','#C62828']};
@@ -15624,7 +15658,7 @@ function svmPageChrome(body, pageNo, pages, first, st, from, to){
     <div style="padding:12px 24px 0">
       ${first?`<div style="display:flex;gap:8px;margin-bottom:10px">
         ${card('المخططة',st.total,SVM_C.brown)}${card('المنجزة',st.done,'#1A7A4A')}${card('موثّقة بالموقع',st.geo,'#1565C0')}
-        ${card('موثّقة ومكتملة',st.ver,'#2E7D32')}${card('نسبة الالتزام',st.pct+'%',st.pct>=80?'#2E7D32':st.pct>=50?'#B8860B':'#B71C1C')}
+        ${card('موثّقة ومكتملة',st.ver,'#2E7D32')}${card('نسبة المتابعة',st.pct+'%',st.pct>=80?'#2E7D32':st.pct>=50?'#B8860B':'#B71C1C')}
         ${card('فائتة',st.missed,'#B71C1C')}${card('يحتاج تحسين',st.needs,'#C62828')}</div>`:''}
       ${body}
     </div>
@@ -15779,7 +15813,6 @@ async function svmShareExcel(){
     await svmShareBlob(blob, svmFileBase()+'.xlsx', blob.type, 'متابعة زيارات المشرفين');
   }catch(e){ console.warn(e); alert('حصل خطأ أثناء تجهيز الملف — جرّب تاني.'); }
 }
-
 </script>
 </body>
 </html>

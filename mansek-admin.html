@@ -45403,9 +45403,9 @@ const SEV_CRIT_INFO = [
   { icon:'⏱️', title:'جودة الزيارات', mgrOnly:false,
     what:'متوسط "نقاط" زيارات فريقك (مقياس جاهز بيجمع حضور/رفوف/نواقص/انصراف من تطبيق المنسق) مقارنة بمتوسط كل زيارات الشركة في نفس الفترة.',
     how:'خلّي متوسط نقاط زيارات فريقك يساوي أو يعدّي متوسط الشركة، وقلّل عدد الزيارات اللي نقاطها منخفضة جدًا (أقل من 60% من متوسط الشركة).' },
-  { icon:'📝', title:'الحضور الشخصي (توثيق زيارة السوق)', mgrOnly:false,
-    what:'من الزيارات المخططة اللي خلّصتها (منجزة)، كام منها اتسجلت وإنت <b>داخل نطاق الفرع (200 متر)</b> بلوكيشن الموبايل <b>واتملّى فيها نموذج المراجعة</b> (تقرير المنسق، العرض والأصناف، نظافة مكان العرض) — دليل إنك نزلت الفرع وراجعته بنفسك. (الزيارات قبل 5 أكتوبر 2026 بتتحسب بالملاحظة.)',
-    how:'من تاب "زيارات السوق" في تطبيقك: ابدأ الزيارة وإنت جوه الفرع وخدمة الموقع شغّالة، وقيّم البنود التلاتة، ووصل لتوثيق <b>80% أو أكتر</b> من زياراتك المنجزة.' },
+  { icon:'📍', title:'متابعة زيارات المشرفين', mgrOnly:false,
+    what:'من الزيارات المخططة (لحد النهارده)، كام زيارة اتنفّذت <b>وإنت داخل نطاق الفرع (200 متر)</b> واتملّى فيها <b>نموذج المراجعة</b> (تقرير المنسق، العرض والأصناف، نظافة مكان العرض). الفائتة والمجدولة اللي عدّى ميعادها بتخفض النسبة. للمدير: بتتحسب من زيارات مشرفينه كلهم + زياراته هو من خطته. (الزيارات قبل 5 أكتوبر 2026 بتتحسب بالملاحظة.)',
+    how:'نفّذ الزيارات المخططة من تاب "زيارات السوق" وإنت جوه الفرع وخدمة الموقع شغّالة، وقيّم البنود التلاتة، ووصل لـ <b>80% أو أكتر</b> من الزيارات المخططة. المدير: تابع إن مشرفينك يلتزموا بخططهم وبالتوثيق.' },
   { icon:'⏰', title:'تسجيل الانصراف اليومي', mgrOnly:false,
     what:'نسبة أيام حضور منسقيك اللي فيها تسجيل دخول بس من غير تسجيل انصراف في نفس اليوم.',
     how:'تابع مع منسقينك إنهم يسجّلوا انصراف في كل يوم حضروا فيه، وخلّي نسبة الأيام الناقصة انصراف <b>5% أو أقل</b>.' },
@@ -45585,7 +45585,7 @@ async function sevLoadContext(){
 }
 
 // ══ حساب المعايير الـ5 الأساسية لأي مجموعة "groups" (مشرف أو مدير) ══
-function sevComputeCriteria(groups, ctx){
+function sevComputeCriteria(groups, ctx, ownName, isMgr){
   const { supGroups, plans, planBranches, attEdits, locs, orders, visits, attendance, branches, inRange, now, start, end, ssoOrders, missingRows, returnsRows } = ctx;
   const periodLabel = ctx.periodLabel || 'الأسبوع ده';
   const holidayRows = ctx.holidayRows || [];
@@ -45601,6 +45601,10 @@ function sevComputeCriteria(groups, ctx){
   // محتاجهم كمان حتى لو مفيش خطط قدمها المشرف أصلاً.
   const planIds = new Set(supPlans.map(p=>p.id));
   const myBranches = planBranches.filter(b=>planIds.has(b.plan_id));
+  // زيارات "متابعة زيارات المشرفين": زيارات الفريق + زيارات صاحب التقييم نفسه من خطته (للمدير)
+  const ownPlanIds = new Set(plans.filter(p=>ownName && p.supervisor_name===ownName).map(p=>p.id));
+  const visitBranches = planBranches.filter(b=>planIds.has(b.plan_id) || ownPlanIds.has(b.plan_id));
+  const planSupById = {}; plans.forEach(p=>{ planSupById[p.id]=p.supervisor_name; });
   let planCrit, planDetails=[];
   if(!supPlans.length){
     planCrit = {level:'needsWork', text:`لسه محدش قدم خطة ${periodLabel}`};
@@ -45792,35 +45796,36 @@ function sevComputeCriteria(groups, ctx){
     return `${flag} ${r.name} — ${avg} نقطة (${rv.length} زيارة)`;
   });
 
-  // 7) الحضور الشخصي للمشرف (توثيق زيارة السوق) — نسبة الزيارات المخططة "المنجزة" اللي المشرف كتب
-  // عليها ملاحظة فعلية من تاب "اليومي" في تطبيقه، كدليل إنه فعلاً نزل السوق شافه بعينه مش بس ضغط "منجز".
-  // ✅ من 5 أكتوبر 2026: الزيارة بتتحسب "موثّقة" بس لو اتسجلت بلوكيشن الفرع (check_in_at + geo_status).
-  // الزيارات القبلها (غير موثّقة بالموقع) بتفضل بمعيار الملاحظة القديم عشان تقييم الفترات السابقة ما يتصفّرش.
-  const GEO_START = '2026-10-05';
-  const _geoOK = b => !!b.check_in_at && b.geo_status==='inside';
-  const _revOK = b => !!b.reviewed_at && !!b.review_coord_report && !!b.review_display && !!b.review_clean;
-  const _okVisit = b => ((b.visit_date||'') < GEO_START) ? !!(b.notes||'').trim() : (_geoOK(b) && _revOK(b));
-  const doneBranches = myBranches.filter(b=>b.visit_status==='done');
-  const notedBranches = doneBranches.filter(_okVisit);
-  const notePct = doneBranches.length ? Math.round(notedBranches.length/doneBranches.length*100) : 0;
+  // 7) متابعة زيارات المشرفين — نفس دالة التاب الجديد (svmFollowStats) عشان الأرقام تتطابق.
+  // المشرف: زياراته هو من خطته. المدير: زيارات كل مشرفينه + زياراته هو من خطته في رقم واحد.
+  // الزيارات قبل 5 أكتوبر 2026 بتفضل بمعيار الملاحظة القديم عشان تقييم الفترات السابقة ما يتغيرش.
+  const _toItem = b => ({
+    date:b.visit_date, status:b.visit_status||'pending', checkIn:b.check_in_at, geoStatus:b.geo_status,
+    reviewedAll: !!(b.reviewed_at && b.review_coord_report && b.review_display && b.review_clean),
+    hasNeeds: b.review_coord_report==='needs' || b.review_display==='needs' || b.review_clean==='needs',
+    notes:b.notes, _b:b
+  });
+  const _visitItems = visitBranches.map(_toItem);
+  const _fs = svmFollowStats(_visitItems);
   let noteLevel;
-  if(!doneBranches.length) noteLevel = 'needsWork';
-  else if(notePct>=80) noteLevel = 'excellent';
-  else if(notePct>=50) noteLevel = 'good';
+  if(!_fs.planned) noteLevel = 'needsWork';
+  else if(_fs.pct>=80) noteLevel = 'excellent';
+  else if(_fs.pct>=50) noteLevel = 'good';
   else noteLevel = 'needsWork';
-  const _needsCnt = notedBranches.filter(b=>b.reviewed_at && (b.review_coord_report==='needs'||b.review_display==='needs'||b.review_clean==='needs')).length;
+  const _ownN = ownName ? _visitItems.filter(i=>planSupById[i._b.plan_id]===ownName && (i.status==='done'||i.status==='missed'||i.status==='skipped'||(i.date||'')<=svmIso(new Date()))).length : 0;
+  const _extra = [
+    _fs.missed ? `${_fs.missed} فائتة` : '', _fs.notDone ? `${_fs.notDone} لم تُنفَّذ` : '',
+    _fs.unverified>0 ? `${_fs.unverified} غير موثّقة` : '', _fs.incomplete ? `${_fs.incomplete} نموذج ناقص` : '',
+    _fs.needsCnt ? `${_fs.needsCnt} فيها بند يحتاج تحسين` : ''
+  ].filter(Boolean).join(' · ');
   const noteCrit = {
     level: noteLevel,
-    text: doneBranches.length ? `${notedBranches.length}/${doneBranches.length} زيارة منجزة موثّقة بالموقع ونموذج المراجعة مكتمل (${notePct}%)${_needsCnt?` — منهم ${_needsCnt} زيارة فيها بند "يحتاج تحسين"`:''}` : `مفيش زيارات منجزة ${periodLabel}`,
+    text: _fs.planned
+      ? `${_fs.qualified}/${_fs.planned} زيارة مخططة موثّقة ومكتملة (${_fs.pct}%)${isMgr?` — الفريق ${_fs.planned-_ownN} + شخصية ${_ownN}`:''}${_extra?' · '+_extra:''}`
+      : `مفيش زيارات مخططة ${periodLabel}`,
   };
-  const noteDetails = doneBranches.filter(b=>!_okVisit(b))
-    .map(b=>{
-      let why;
-      if((b.visit_date||'') < GEO_START) why = 'غير موثّقة (قبل تفعيل التوثيق بالموقع)';
-      else if(!_geoOK(b)) why = b.geo_status==='no_branch_loc' ? 'لوكيشن الفرع غير مسجّل — غير موثّقة بالموقع' : 'غير موثّقة بلوكيشن الفرع';
-      else why = 'نموذج المراجعة غير مكتمل';
-      return `📝 ${b.rep_name||'—'} — ${b.branch_name||'—'} — ${b.visit_date||'—'} — ${why}`;
-    });
+  const noteDetails = _fs.failures.map(f=>`📍 ${planSupById[f.item._b.plan_id]||'—'} — ${f.item._b.branch_name||'—'} — ${f.item._b.visit_date||'—'} — ${f.reason}`)
+    .concat(_fs.needsItems.map(i=>`⚠️ ${planSupById[i._b.plan_id]||'—'} — ${i._b.branch_name||'—'} — ${i._b.visit_date||'—'} — فيها بند "يحتاج تحسين"`));
 
   // 8) تسجيل الانصراف اليومي — منسقين سجّلوا حضور (وقت دخول) في يوم معين بس من غير ما يسجّلوا انصراف
   // (وقت خروج) في نفس اليوم، من جدول الحضور اليومي (attendance) - مؤشر انضباط أساسي مكمّل لمعيار
@@ -45889,7 +45894,7 @@ function sevComputeCriteria(groups, ctx){
       {icon:'📍', title:'استخدام اللوكيشن اللايف',        ...locCrit,  details:locDetails},
       {icon:'📦', title:'تحويل الأوردرات للمنسقين',       ...ordCrit,  details:ordDetails},
       {icon:'⏱️', title:'جودة الزيارات',                  ...qualCrit, details:qualDetails},
-      {icon:'📝', title:'الحضور الشخصي (توثيق زيارة السوق)', ...noteCrit, details:noteDetails},
+      {icon:'📍', title:'متابعة زيارات المشرفين', ...noteCrit, details:noteDetails},
       {icon:'⏰', title:'تسجيل الانصراف اليومي',           ...outCrit,  details:outDetails},
       {icon:'🛰️', title:'تسجيل الحضور/الانصراف بدون لوكيشن', ...gpsCrit, details:gpsDetails},
       {icon:'📮', title:'تحويل النواقص لمشرف البيع',        ...missRespCrit, details:missRespDetails},
@@ -45978,7 +45983,7 @@ async function renderSupervisorEval(){
 
   _sevResults = supNames.map(sup=>{
     const groups = ctx.supGroups[sup]||[];
-    const { crits } = sevComputeCriteria(groups, ctx);
+    const { crits } = sevComputeCriteria(groups, ctx, sup, false);
     const overall = sevOverallFromCrits(crits);
     const pct = sevPctFromCrits(crits);
     return {
@@ -46023,7 +46028,7 @@ async function renderManagerEval(){
 
   _sevResults = filtered.map(mgr=>{
     const groups = mgr.groups||[];
-    const { crits, supPlans } = sevComputeCriteria(groups, ctx);
+    const { crits, supPlans } = sevComputeCriteria(groups, ctx, mgr.name, true);
 
     // 6) سرعة اعتماد خطط المشرفين
     const approvedPlans = supPlans.filter(p=>p.merch_approved || p.status==='approved');
@@ -54733,7 +54738,7 @@ async function svmLoad(){
       const needs = reviewed && (x.review_coord_report==='needs'||x.review_display==='needs'||x.review_clean==='needs');
       return {
         id:x.id, date:x.visit_date||'', sup:p.supervisor_name||'—', planType:p.plan_type||'', branch:x.branch_name||'', route:b.route||'—',
-        grp:b.grp||'', status:x.visit_status||'pending', done, geoOK, geoLbl, geoClr, dist:x.geo_distance_m,
+        grp:b.grp||'', status:x.visit_status||'pending', done, geoOK, geoSt:x.geo_status||'', geoLbl, geoClr, dist:x.geo_distance_m,
         checkIn:x.check_in_at||'', vlat:x.visit_lat, vlng:x.visit_lng, blat:b.lat, blng:b.lng,
         reviewed, isNew, rc:x.review_coord_report||'', rd:x.review_display||'', rl:x.review_clean||'', notes:x.review_notes||x.notes||'',
         verified: done && geoOK && reviewed, needs, coord:x.rep_name||''
@@ -54780,7 +54785,7 @@ function svmRender(reset){
   const card=(l,val,c)=>`<div style="background:#FAF6EE;border:1px solid #E8DCC4;border-radius:10px;padding:10px 12px"><div style="font-size:11px;color:#7A6A4A">${l}</div><div style="font-size:21px;font-weight:800;color:${c}">${val}</div></div>`;
   document.getElementById('svm-stats').innerHTML =
     card('الزيارات المخططة',v.length,'#4B3C1A')+card('المنجزة',done,'#1A7A4A')+card('موثّقة بالموقع',geo,'#1565C0')+
-    card('موثّقة ومكتملة التقييم',ver,'#2E7D32')+card('نسبة الالتزام',pct+'%',pct>=80?'#2E7D32':pct>=50?'#B8860B':'#B71C1C')+
+    card('موثّقة ومكتملة التقييم',ver,'#2E7D32')+card('نسبة المتابعة (المعيار)',pct+'%',pct>=80?'#2E7D32':pct>=50?'#B8860B':'#B71C1C')+
     card('فائتة',missed,'#B71C1C')+card('بند يحتاج تحسين',needs,'#C62828');
   const body = document.getElementById('svm-body');
   if(!v.length){ body.innerHTML = '<div style="text-align:center;padding:30px;color:#999">مفيش زيارات في الفترة والفلاتر دي</div>'; return; }
@@ -54844,11 +54849,45 @@ function svmDetail(id){
 }
 
 
+// ── معيار "متابعة زيارات المشرفين" — دالة واحدة مشتركة بين التاب وتقييم مشرفي/مديري التنسيق ──
+// items: [{date,status,checkIn,geoStatus,reviewedAll,hasNeeds,notes}]
+// المخطط المستحق = المنجزة + الفائتة + المجدولة اللي ميعادها عدّى (المجدولة المستقبلية مش بتتحسب)
+function svmFollowStats(items, today){
+  today = today || svmIso(new Date());
+  const GS = SVM_GEO_START;
+  const isDue = b => b.status==='done' || b.status==='missed' || b.status==='skipped' || (b.date||'')<=today;
+  const qualifies = b => b.status==='done' && (((b.date||'')<GS) ? !!(b.notes||'').trim() : (!!b.checkIn && b.geoStatus==='inside' && !!b.reviewedAll));
+  const reason = b => {
+    if(b.status==='done'){
+      if((b.date||'')<GS) return (b.notes||'').trim() ? '' : 'غير موثّقة (قبل تفعيل التوثيق بالموقع)';
+      if(!(b.checkIn && b.geoStatus==='inside')) return b.geoStatus==='no_branch_loc' ? 'لوكيشن الفرع غير مسجّل — غير موثّقة بالموقع' : 'غير موثّقة بلوكيشن الفرع';
+      if(!b.reviewedAll) return 'نموذج المراجعة غير مكتمل';
+      return '';
+    }
+    if(b.status==='missed'||b.status==='skipped') return 'فائتة';
+    return 'لم تُنفَّذ (ميعادها عدّى)';
+  };
+  const due = items.filter(isDue);
+  const q = due.filter(qualifies);
+  const done = due.filter(b=>b.status==='done').length;
+  const missed = due.filter(b=>b.status==='missed'||b.status==='skipped').length;
+  const notDone = due.length - done - missed;
+  const incomplete = due.filter(b=>b.status==='done' && reason(b)==='نموذج المراجعة غير مكتمل').length;
+  const unverified = due.filter(b=>b.status==='done' && !qualifies(b)).length - incomplete;
+  const needsCnt = q.filter(b=>b.hasNeeds).length;
+  const pct = due.length ? Math.round(q.length/due.length*100) : 0;
+  return {planned:due.length, done, missed, notDone, qualified:q.length, unverified, incomplete, needsCnt, pct,
+    failures: due.filter(b=>!qualifies(b)).map(b=>({item:b, reason:reason(b)})), needsItems: q.filter(b=>b.hasNeeds)};
+}
+function svmRowToItem(r){
+  return {date:r.date, status:r.status, checkIn:r.checkIn, geoStatus:r.geoSt, reviewedAll:r.reviewed, hasNeeds:r.needs, notes:r.notes};
+}
 function svmStats(v){
   const done = v.filter(r=>r.done).length, ver = v.filter(r=>r.verified).length;
+  const f = svmFollowStats(v.map(svmRowToItem));
   return { total:v.length, done, ver, geo:v.filter(r=>r.done&&r.geoOK).length,
     missed:v.filter(r=>r.status==='missed'||r.status==='skipped').length, needs:v.filter(r=>r.needs).length,
-    pct: done ? Math.round(ver/done*100) : 0 };
+    pct: f.pct, follow:f };
 }
 const SVM_C = {maroon:'#731E2E', olive:'#4E5A2B', gold:'#C8A96E', brown:'#4B3C1A', cream:'#FAF6EE'};
 const SVM_ST = {done:['منجزة','#E8F5E9','#2E7D32'], pending:['مجدولة','#F1F1F1','#666666'], missed:['فائتة','#FFEBEE','#C62828'], skipped:['فائتة','#FFEBEE','#C62828']};
@@ -54888,7 +54927,7 @@ function svmPageChrome(body, pageNo, pages, first, st, from, to){
     <div style="padding:12px 24px 0">
       ${first?`<div style="display:flex;gap:8px;margin-bottom:10px">
         ${card('المخططة',st.total,SVM_C.brown)}${card('المنجزة',st.done,'#1A7A4A')}${card('موثّقة بالموقع',st.geo,'#1565C0')}
-        ${card('موثّقة ومكتملة',st.ver,'#2E7D32')}${card('نسبة الالتزام',st.pct+'%',st.pct>=80?'#2E7D32':st.pct>=50?'#B8860B':'#B71C1C')}
+        ${card('موثّقة ومكتملة',st.ver,'#2E7D32')}${card('نسبة المتابعة',st.pct+'%',st.pct>=80?'#2E7D32':st.pct>=50?'#B8860B':'#B71C1C')}
         ${card('فائتة',st.missed,'#B71C1C')}${card('يحتاج تحسين',st.needs,'#C62828')}</div>`:''}
       ${body}
     </div>
@@ -55043,7 +55082,6 @@ async function svmShareExcel(){
     await svmShareBlob(blob, svmFileBase()+'.xlsx', blob.type, 'متابعة زيارات المشرفين');
   }catch(e){ console.warn(e); alert('حصل خطأ أثناء تجهيز الملف — جرّب تاني.'); }
 }
-
 </script>
 </body>
 </html>
