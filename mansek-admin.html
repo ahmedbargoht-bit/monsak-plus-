@@ -2758,6 +2758,18 @@ h2,h3{color:#2C1F0A}
               </div>
             </div>
 
+            <!-- فلتر الفروع الناقصة -->
+            <div style="margin-bottom:10px">
+              <div style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:6px">اكتمال البيانات:</div>
+              <select id="br-missing" onchange="loadBranches()" style="min-width:260px">
+                <option value="all">كل الفروع</option>
+                <option value="either">⚠️ ناقصة (بدون مجموعة أو بدون خط سير)</option>
+                <option value="nogrp">بدون مجموعة فقط</option>
+                <option value="noroute">بدون خط سير فقط</option>
+                <option value="both">بدون مجموعة وبدون خط سير معًا</option>
+              </select>
+            </div>
+
             <!-- بحث -->
             <input type="text" id="br-search" placeholder="🔍 ابحث عن فرع أو خط سير..." oninput="loadBranches()" style="width:100%;margin-bottom:10px"/>
 
@@ -11714,7 +11726,32 @@ async function syncGroupsFromDB(){
         color: g.color || '#888'
       };
     });
+    // المجموعات الثابتة القديمة اللي مش موجودة في جدول groups (ومفيش عليها فروع) تتشال من كل القوائم
+    const dbKeys = new Set((Array.isArray(rows)?rows:[]).map(g=>g.key_name));
+    if(dbKeys.size){
+      const STALE = ['markets','fuel_cairo','fuel_alex','private_cairo'].filter(k=>!dbKeys.has(k));
+      STALE.forEach(k=>{ delete GROUPS[k]; });
+      removeStaleGroupUI(STALE);
+    }
   }catch(e){ console.warn('syncGroupsFromDB error:', e); }
+}
+
+function removeStaleGroupUI(stale){
+  if(!stale || !stale.length) return;
+  const skip = el => el.closest && (el.closest('[id^="pb-"]') || el.classList.contains('sgr-cb') || (el.id||'').startsWith('pb-'));
+  document.querySelectorAll('select').forEach(sel=>{
+    if((sel.id||'').startsWith('pb-')) return;
+    [...sel.options].forEach(o=>{ if(stale.includes(o.value)) o.remove(); });
+  });
+  document.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+    if(!stale.includes(cb.value) || skip(cb)) return;
+    const holder = cb.closest('label') || cb.parentElement;
+    if(holder) holder.remove();
+  });
+  document.querySelectorAll('[data-grp]').forEach(el=>{
+    if(!stale.includes(el.getAttribute('data-grp'))) return;
+    if(el.classList.contains('asr-grp-chip') || el.classList.contains('rep-cb-label')) el.remove();
+  });
 }
 
 // ── تحديث كل قوائم فلتر المجموعات الثابتة في الصفحة (select) بعد مزامنة GROUPS ──────
@@ -24124,6 +24161,25 @@ async function loadBranches(){
   if(selGrps.length)   data=data.filter(b=>selGrps.includes(b.grp));
   if(selStatus.length) data=data.filter(b=>selStatus.includes(b.status));
   if(search)           data=data.filter(b=>(b.branch_name||'').toLowerCase().includes(search)||(b.route||'').toLowerCase().includes(search));
+
+  // فلتر الفروع الناقصة: بدون مجموعة (فاضية/مش موجودة في جدول المجموعات) أو بدون خط سير (فاضي/مش موجود في جدول خطوط السير)
+  const missingMode = document.getElementById('br-missing')?.value || 'all';
+  if(missingMode!=='all'){
+    try{
+      if(!window._brRouteNames){
+        const rr = await fetch(`${SUPABASE_URL}/rest/v1/routes?select=name&limit=2000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+        window._brRouteNames = new Set((rr.ok?await rr.json():[]).map(r=>(r.name||'').replace(/ /g,' ').trim()));
+      }
+    }catch(e){ window._brRouteNames = new Set(); }
+    const noGrp   = b => !b.grp || !GROUPS[b.grp];
+    const noRoute = b => !(b.route||'').trim() || !window._brRouteNames.has((b.route||'').replace(/ /g,' ').trim());
+    data = data.filter(b=>{
+      if(missingMode==='nogrp')   return noGrp(b);
+      if(missingMode==='noroute') return noRoute(b);
+      if(missingMode==='both')    return noGrp(b) && noRoute(b);
+      return noGrp(b) || noRoute(b);
+    });
+  }
 
   // نسخة من البيانات المفلترة الحالية — يستخدمها تصدير Excel/PDF عشان يطابقوا اللي ظاهر على الشاشة بالظبط
   _brLastData = data;
