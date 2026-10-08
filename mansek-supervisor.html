@@ -4344,6 +4344,77 @@ let _lbMissingAll = null;
 let _lbReturnsAll = null;
 let _lbRatingsAll = null;
 let _lbBranchesAll= null;  // [{branch_name,route,lat,lng}]
+let _lbProductsAll= null;  // products آخر 90 يوم (لجودة التنفيذ)
+let _lbDeliveriesAll= null; // sales_deliveries آخر 90 يوم (الأصناف اللي اتورّدت للفرع)
+
+// ── جودة التنفيذ (محسوبة تلقائيًا من بيانات النظام — بدون قايمة تعليم أو صور) ──
+// (1) توفر الأصناف: الأصناف الموجودة فعليًا على الرف ÷ الأصناف اللي اتورّدت للفرع (من فواتير التسليم، آخر 90 يوم)
+// (2) FIFO والصلاحيات: نسبة الأصناف على الرف اللي لسه صلاحيتها كويسة (تاريخ الإنتاج + مدة الصلاحية، أكتر من شهرين
+//     متبقيين)؛ الصنف قريب الانتهاء بيتحسب سليم لو اتسجّل له مرتجع/سحب لنفس الفرع خلال 7 أيام من الزيارة
+// (3) اكتمال تسجيل الزيارة (للثابت فقط): زيارة اتقفلت بوقت انصراف + اتسجل فيها رف
+// الأوزان: ثابت/كبار عملاء = توفر 40 / FIFO 35 / اكتمال 25 — متحرك = توفر 55 / FIFO 45. معيار مش مقاس = null فيتشال من المتوسط.
+function lbQualityCriterion(repName, type, myVisits, products, deliveries, returns){
+  const norm = s=>String(s||'').trim().replace(/ـ/g,'').replace(/\s+/g,' ').replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي');
+  const expected = {}; // branch -> Set(items)
+  (deliveries||[]).forEach(d=>{
+    if(!d.branch_name || !Array.isArray(d.items)) return;
+    const set = (expected[d.branch_name] = expected[d.branch_name] || new Set());
+    d.items.forEach(it=>{ const k=norm(it.name); if(k) set.add(k); });
+  });
+  const byVisitId = {}, byKey = {};
+  (products||[]).forEach(p=>{
+    if(p.name!==repName) return;
+    if(p.visit_id!=null) (byVisitId[p.visit_id] = byVisitId[p.visit_id] || []).push(p);
+    const key = [p.name, p.branch, (p.created_at||'').slice(0,10)].join('|');
+    (byKey[key] = byKey[key] || []).push(p);
+  });
+  const retIdx = {}; // branch|item -> [dates]
+  (returns||[]).forEach(r=>{
+    if(!r.branch || !r.snf) return;
+    (retIdx[r.branch+'|'+norm(r.snf)] = retIdx[r.branch+'|'+norm(r.snf)] || []).push((r.created_at||'').slice(0,10));
+  });
+  const availS=[], fifoS=[], compS=[];
+  const winFrom = new Date(Date.now() - 88*864e5).toISOString().slice(0,10);
+  (myVisits||[]).forEach(v=>{
+    const vdate = (v.date || v.created_at || '').slice(0,10);
+    if(!vdate || vdate < winFrom) return; // بيانات الأصناف متحمّلة لآخر 90 يوم بس — زيارة أقدم مش مقاسة
+    const rows = byVisitId[v.id] || byKey[[v.name, v.branch, vdate].join('|')] || [];
+    const closed = !!(v.time_out && v.time_out!=='--');
+    compS.push(closed && rows.length ? 100 : 0);
+    if(!rows.length) return;
+    // توفر
+    const exp = expected[v.branch];
+    if(exp && exp.size>=3){
+      const present = new Set();
+      rows.forEach(r=>{ if((+r.shelf_qty||0)>0){ const k=norm(r.snf); if(exp.has(k)) present.add(k); } });
+      availS.push(Math.min(100, present.size/exp.size*100));
+    }
+    // FIFO / صلاحيات
+    const vy = +vdate.slice(0,4), vm = +vdate.slice(5,7);
+    let tot=0, ok=0;
+    rows.forEach(r=>{
+      if(!((+r.shelf_qty||0)>0)) return;
+      const m = /^(\d{4})-(\d{2})$/.exec(r.date_shelf||'');
+      const life = +r.months_shelf;
+      if(!m || !life || !vy) return;
+      tot++;
+      const remaining = (+m[1])*12 + (+m[2]) + life - (vy*12+vm);
+      if(remaining>2){ ok++; return; }
+      const dts = retIdx[v.branch+'|'+norm(r.snf)] || [];
+      const t0 = new Date(vdate).getTime();
+      if(dts.some(d=>{ const t=new Date(d).getTime(); return t>=t0-864e5 && t<=t0+7*864e5; })) ok++;
+    });
+    if(tot) fifoS.push(ok/tot*100);
+  });
+  const avg = a=>a.length ? a.reduce((x,y)=>x+y,0)/a.length : null;
+  const parts = type==='متحرك'
+    ? [[avg(availS),55],[avg(fifoS),45]]
+    : [[avg(availS),40],[avg(fifoS),35],[avg(compS),25]];
+  let sum=0, w=0;
+  parts.forEach(([val,wt])=>{ if(val!==null){ sum+=val*wt; w+=wt; } });
+  return w ? Math.round(sum/w) : null;
+}
+
 
 const LB_WEIGHTS = {
   'متحرك':            {quality:.20, attendance:.15, shiftClose:.08, speed:.12, toOrder:.10, completeness:.10, coverage:.10, gps:.08, rating:.07},
@@ -4382,11 +4453,18 @@ async function lbFetchAll(forceRefresh){
   const returnsPromises= grps.map(grp => sbGet('returns',{grp},{limit:5000}));
   const branchesPromises= grps.map(grp => sbGet('branches',{grp},{limit:5000}));
 
-  const [repsArrs, visitsArrs, attArrs, missingArrs, returnsArrs, branchesArrs, ratings] = await Promise.all([
+  const from90 = new Date(Date.now()-90*864e5).toISOString().slice(0,10);
+  const productsPromises = grps.map(grp => sbFetchAll(`${SUPABASE_URL}/rest/v1/products?select=name,branch,snf,shelf_qty,date_shelf,months_shelf,created_at,visit_id&grp=eq.${encodeURIComponent(grp)}&created_at=gte.${from90}`).catch(()=>[]));
+  const deliveriesPromise = sbFetchAll(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=branch_name,items,delivery_date&delivery_date=gte.${from90}&deleted_at=is.null`).catch(()=>[]);
+
+  const [repsArrs, visitsArrs, attArrs, missingArrs, returnsArrs, branchesArrs, ratings, productsArrs, deliveries] = await Promise.all([
     Promise.all(repsPromises), Promise.all(visitsPromises), Promise.all(attPromises),
     Promise.all(missingPromises), Promise.all(returnsPromises), Promise.all(branchesPromises),
     sbGet('coordinator_weekly_ratings',{},{limit:5000}),
+    Promise.all(productsPromises), deliveriesPromise,
   ]);
+  _lbProductsAll = [].concat(...productsArrs);
+  _lbDeliveriesAll = Array.isArray(deliveries) ? deliveries : [];
 
   _lbRepsTyped  = [].concat(...repsArrs).map(u=>({name:u.name, route:u.route||'', grp:u.grp||'', type:u.user_type||'متحرك'}));
   _lbVisitsAll  = [].concat(...visitsArrs);
@@ -4425,16 +4503,8 @@ async function renderLB(forceRefresh){
 
     const crit = {};
 
-    if(_lbActiveType==='متحرك'){
-      // لو المنسق معندوش ولا زيارة فيها صنف مسجّل (avgSku=0 عبر كل زياراته) — تاب الأصناف مش
-      // مستخدم خالص في زياراته، فمعندناش قياس حقيقي للجودة (null = غير مقاس)، مش صفر فعلي —
-      // نفس منطق لوحة التحكم بالحرف
-      const avgSku = myVisits.length ? myVisits.reduce((s,v)=>s+(+v.sku_on||0),0)/myVisits.length : 0;
-      crit.quality = (myVisits.length && avgSku>0) ? Math.min(100, Math.round(avgSku/25*100)) : null;
-    } else {
-      const avgKpi = myVisits.length ? myVisits.reduce((s,v)=>s+(+v.kpi_pts||0),0)/myVisits.length : 0;
-      crit.quality = Math.min(100, Math.round(avgKpi/70*100));
-    }
+    // جودة التنفيذ: محسوبة تلقائيًا (توفر الأصناف + FIFO/الصلاحيات + اكتمال التسجيل) — نفس لوحة التحكم بالحرف
+    crit.quality = lbQualityCriterion(name, _lbActiveType, myVisits, _lbProductsAll, _lbDeliveriesAll, _lbReturnsAll);
 
     crit.attendance  = myAtt.length ? Math.round(myAtt.filter(a=>a.time_in).length/myAtt.length*100) : 0;
     crit.shiftClose  = myAtt.length ? Math.round(myAtt.filter(a=>a.time_out).length/myAtt.length*100) : 0;
@@ -4484,7 +4554,11 @@ async function renderLB(forceRefresh){
       crit.variety = Math.min(100, types.size*34);
     }
 
-    crit.rating = myRatings.length ? Math.round(myRatings.reduce((s,r)=>s+(+r.rating||0),0)/myRatings.length/5*100) : 0;
+    crit.rating = myRatings.length ? Math.round(myRatings.reduce((s,r)=>{
+      const stars = (+r.rating||0)/5;
+      const looks = [r.look_shirt,r.look_hair,r.look_hands].filter(x=>x===0||x===1);
+      return s + (looks.length ? stars*0.6 + (looks.reduce((a,b)=>a+b,0)/looks.length)*0.4 : stars);
+    },0)/myRatings.length*100) : 0;
 
     // معيار قيمته null = غير مقاس (زي جودة التنفيذ لمنسق مفيش عنده بيانات أصناف خالص) — بيُستبعد
     // من المجموع ووزنه يتوزع على باقي المعايير المقاسة، بدل صفر قاسي مضلل — نفس منطق لوحة التحكم
@@ -4587,14 +4661,45 @@ function lbRenderRatingList(reps){
     const stars = [1,2,3,4,5].map(n=>
       `<span onclick="lbSetStar('${rep.name.replace(/'/g,"\\'")}',${n})" style="cursor:pointer;font-size:18px;color:${n<=curRating?'#F5A623':'#ddd'}" data-star="${n}">★</span>`
     ).join('');
-    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #f2f2f2" data-rep-row="${rep.name.replace(/"/g,'&quot;')}">
-      <div style="flex:1;min-width:0;font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rep.name}</div>
+    const lookChips = [['shirt','👕 التيشيرت',existing?.look_shirt],['hair','💇 الشعر',existing?.look_hair],['hands','🤲 نظافة الإيد',existing?.look_hands]].map(([k,lbl,v])=>{
+      const st = (v===1||v===0) ? v : -1; // -1 = لسه ما اتقيّمش
+      return `<span class="lb-look-chip" data-look="${k}" data-val="${st}" onclick="lbToggleLook(this)" style="${lbLookChipStyle(st)}">${lbl}${st===1?' ✓':st===0?' ✗':''}</span>`;
+    }).join('');
+    return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid #f2f2f2" data-rep-row="${rep.name.replace(/"/g,'&quot;')}">
+      <div style="flex:1;min-width:120px;font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rep.name}</div>
       <div class="lb-stars" data-rep="${rep.name.replace(/"/g,'&quot;')}">${stars}</div>
+      <div class="lb-looks" data-rep-looks="${rep.name.replace(/"/g,'&quot;')}" style="display:flex;gap:4px;flex-wrap:wrap">${lookChips}</div>
       <input type="text" placeholder="سبب (اختياري)" value="${(existing?.reason||'').replace(/"/g,'&quot;')}" id="lb-rating-reason-${rep.name.replace(/[^a-zA-Z0-9؀-ۿ]/g,'_')}"
         style="width:120px;font-size:10px;padding:4px 6px;border:1px solid #ddd;border-radius:6px;font-family:Cairo,sans-serif"/>
       <button onclick="lbSaveRating('${rep.name.replace(/'/g,"\\'")}')" style="font-size:10px;padding:5px 10px;border:none;border-radius:6px;background:#C55B48;color:#fff;cursor:pointer">حفظ</button>
     </div>`;
   }).join('') || '<div class="empty">لا يوجد منسقين</div>';
+}
+
+// المظهر العام (تيشيرت/شعر/نظافة الإيد) — المشرف بيقيّمها: ضغطة = تمام ✓، ضغطة تانية = مش تمام ✗، تالتة = إلغاء
+function lbLookChipStyle(v){
+  const base='cursor:pointer;font-size:10px;padding:3px 8px;border-radius:999px;border:1px solid;font-family:Cairo,sans-serif;white-space:nowrap;';
+  if(v===1) return base+'background:#E8F5E9;color:#2E7D32;border-color:#81C784;';
+  if(v===0) return base+'background:#FDECEA;color:#C62828;border-color:#E57373;';
+  return base+'background:#f7f7f7;color:#888;border-color:#ddd;';
+}
+function lbToggleLook(el){
+  const cur = +el.dataset.val;
+  const nxt = cur===-1 ? 1 : cur===1 ? 0 : -1;
+  el.dataset.val = nxt;
+  const base = el.textContent.replace(/ [✓✗]$/,'');
+  el.textContent = base + (nxt===1?' ✓':nxt===0?' ✗':'');
+  el.style.cssText = lbLookChipStyle(nxt);
+}
+function lbReadLooks(name){
+  const box = document.querySelector(`.lb-looks[data-rep-looks="${CSS.escape(name)}"]`);
+  const out = {};
+  ['shirt','hair','hands'].forEach(k=>{
+    const el = box?.querySelector(`[data-look="${k}"]`);
+    const v = el ? +el.dataset.val : -1;
+    out['look_'+k] = (v===1||v===0) ? v : null;
+  });
+  return out;
 }
 
 function lbSetStar(name, n){
@@ -4615,14 +4720,15 @@ async function lbSaveRating(name){
   const reasonEl = document.getElementById('lb-rating-reason-'+name.replace(/[^a-zA-Z0-9؀-ۿ]/g,'_'));
   const reason = reasonEl?.value || '';
 
+  const looks = lbReadLooks(name);
   let ok;
   if(existing){
-    ok = await sbPatch('coordinator_weekly_ratings', `id=eq.${existing.id}`, {rating, reason, rated_by:cu.name, updated_at:new Date().toISOString()});
-    if(ok){ existing.rating=rating; existing.reason=reason; }
+    ok = await sbPatch('coordinator_weekly_ratings', `id=eq.${existing.id}`, {rating, reason, ...looks, rated_by:cu.name, updated_at:new Date().toISOString()});
+    if(ok){ existing.rating=rating; existing.reason=reason; Object.assign(existing, looks); }
   } else {
     ok = await sbPost('coordinator_weekly_ratings', {
       coordinator_name:name, coord_type:_lbActiveType, week_start:_lbRatingWeek,
-      rating, reason, rated_by:cu.name
+      rating, reason, ...looks, rated_by:cu.name
     });
     if(ok){
       const fresh = await sbGet('coordinator_weekly_ratings',{coordinator_name:name, week_start:_lbRatingWeek},{limit:1});
