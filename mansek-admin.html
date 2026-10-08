@@ -1001,9 +1001,6 @@ h2,h3{color:#2C1F0A}
           <div class="nav-item" onclick="showPanel('messages')">
             <i class="ti ti-message-circle"></i> الرسائل
           </div>
-          <div class="nav-item" onclick="showPanel('users')">
-            <i class="ti ti-users"></i> المنسقون
-          </div>
           <div class="nav-item" onclick="showPanel('routes')">
             <i class="ti ti-route"></i> خطوط سير المنسقين
           </div>
@@ -1140,6 +1137,9 @@ h2,h3{color:#2C1F0A}
           </div>
           <div class="nav-item" onclick="showPanel('brand-settings')">
             <i class="ti ti-palette" style="color:#8B5A9A"></i> تعديلات جوهرية
+          </div>
+          <div class="nav-item" onclick="showPanel('users')">
+            <i class="ti ti-users"></i> المنسقون
           </div>
           <div class="nav-item" onclick="showPanel('branches')">
             <i class="ti ti-building-store"></i> الفروع والعملاء
@@ -2925,7 +2925,7 @@ h2,h3{color:#2C1F0A}
             <div><h2>خطوط السير</h2><p>إدارة خطوط السير وربطها بالمنسقين والفروع</p></div>
             <div class="page-actions">
               <button class="btn btn-sm" style="background:#B45309;color:#fff" onclick="checkRouteConflicts()"><i class="ti ti-alert-triangle"></i> فحص تعارض الفروع</button>
-              <button class="btn btn-sm" style="background:#1A7A4A;color:#fff" onclick="syncRoutesAndBranchesToSupabase()"><i class="ti ti-cloud-upload"></i> مزامنة مع Supabase</button>
+              <button class="btn btn-sm" style="background:#1A7A4A;color:#fff;display:none" onclick="syncRoutesAndBranchesToSupabase()"><i class="ti ti-cloud-upload"></i> مزامنة مع Supabase</button>
               <button class="btn btn-sm" style="background:#731E2E;color:#fff" onclick="exportRoutesPDF()"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
               <button class="btn btn-primary btn-sm" onclick="openModal('modal-add-route')"><i class="ti ti-plus"></i> خط سير جديد</button>
             </div>
@@ -22873,16 +22873,26 @@ async function addUser(){
     const grpLabel = document.getElementById('nu-group')?.selectedOptions[0]?.text||grp;
     route = await resolveFixedRouteLabel(grp, type, grpLabel);
   }
+  if(!grp){alert('اختر المجموعة');return;}
   try{
-    // upsert — لو موجود يحدّثه، لو جديد يضيفه
+    // جدول users مفيهوش UNIQUE على الاسم (on_conflict=name كان بيفشل دايماً) — فبنفحص التكرار يدوياً
+    // وبنرفض الاسم لو موجود بأي دور (منسق/مشرف/مندوب) عشان منكتبش فوق حد موجود.
+    const dupRes = await fetch(`${SUPABASE_URL}/rest/v1/users?select=id,role&name=eq.${encodeURIComponent(name)}&limit=1`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const dup = dupRes.ok ? await dupRes.json().catch(()=>[]) : [];
+    if(Array.isArray(dup) && dup.length){
+      alert(`الاسم "${name}" موجود بالفعل في النظام (${dup[0].role}). لو هو نفس المنسق عدّله من زرار التعديل، ولو شخص تاني غيّر الاسم (مثلاً أضف اسم الأب).`);
+      return;
+    }
     // fixed_branch القديم بيتسجل بأول فرع مختار (fallback فقط — المصدر الحقيقي بقى coord_route_assignments)
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/users?on_conflict=name`,{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/users`,{
       method:'POST',
       headers:{
         'Content-Type':'application/json',
         'apikey':SUPABASE_KEY,
         'Authorization':`Bearer ${SUPABASE_KEY}`,
-        'Prefer':'resolution=merge-duplicates,return=minimal'
+        'Prefer':'return=minimal'
       },
       body: JSON.stringify({name, pass_hash:pass, role:'rep', route, grp, groups:grp, user_type:type, level:'rep', status:'active', goal:1, day_off:dayOff, fixed_branch:selectedBranches[0]||null})
     });
@@ -22903,11 +22913,13 @@ async function addUser(){
       showOk('nu-ok','✓ تم إضافة '+name+' بنجاح');
       renderAdminEditReps();
     } else {
-      showOk('nu-ok','⚠️ تم الحفظ محلياً');
+      const errTxt = await res.text().catch(()=>'');
+      alert('⚠️ فشل حفظ المنسق في قاعدة البيانات — لم يتم الإضافة.\n'+errTxt.slice(0,200));
+      return; // نسيب المودال مفتوح والبيانات زي ما هي عشان يعيد المحاولة
     }
   }catch(e){
-    REPS.push({name,pass,route,group:grp,type,goal:1,status:'active'});
-    showOk('nu-ok','✓ تم الحفظ محلياً');
+    alert('⚠️ تعذر الاتصال بقاعدة البيانات — لم يتم إضافة المنسق. تأكد من النت وحاول تاني.');
+    return;
   }
   document.getElementById('nu-name').value='';
   document.getElementById('nu-pass').value='';
@@ -22965,11 +22977,31 @@ async function editUser(){
 
   // 2. تحديث في Supabase لو الجدول موجود
   const updatePayload={name,pass_hash:pass,route,grp:group,user_type:type,goal,status,day_off:dayOff,emp_code:empCode||null,fixed_branch:fixedBranch||null};
+  // الاسم مفتاح بيربط المنسق بكل سجلاته (زيارات/تخصيص فروع/فواتير) — تغييره من هنا كان بيسيب
+  // فروعه وتاريخه على الاسم القديم، فبنمنعه. لو غلط في الاسم اعمل منسق جديد.
+  if(oldName && name!==oldName){
+    alert('لا يمكن تغيير اسم المنسق من هنا لأن الاسم هو اللي بيربط فروعه وزياراته وفواتيره. لو الاسم غلط أضف منسق جديد بالاسم الصحيح وانقل له الخط.');
+    document.getElementById('eu-name').value = oldName;
+    return;
+  }
+  let saveOk = false;
   try{
     const r=REPS.find(x=>x.name===oldName);
-    if(r&&r.id) await sbUpdate('users',{id:r.id},updatePayload);
-    else         await sbUpdateByName('users',oldName,updatePayload);
-  }catch(e){console.warn('Supabase update failed, saved locally');}
+    if(r&&r.id) saveOk = await sbUpdate('users',{id:r.id},updatePayload);
+    else {
+      // role=rep ضروري: فيه أسماء مكررة بين المنسقين وجهات تانية ومنقدرش نعدّل صف مش بتاعه
+      const rr = await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(oldName)}&role=eq.rep`,{
+        method:'PATCH',
+        headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+        body:JSON.stringify(updatePayload)
+      });
+      saveOk = rr.ok;
+    }
+  }catch(e){ saveOk = false; }
+  if(!saveOk){
+    alert('⚠️ فشل حفظ التعديل في قاعدة البيانات — لم يتم التعديل. حاول تاني.');
+    return;
+  }
 
   // 2.5 تحديث تلقائي لخط سير/مجموعة الفروع المرتبطة بهذا المنسق (rep_name/rep_name2/rep_name3)
   // عشان لو الأدمن غيّر خط سير المنسق من هنا، الفروع اللي شغالة معاه تتحدث معاه فوراً
@@ -27785,6 +27817,10 @@ function exportRouteDetailPDF(){
 }
 
 async function syncRoutesAndBranchesToSupabase(){
+  // موقوفة: كانت بترفع قائمة BRANCHES_MAP القديمة المكتوبة داخل الملف فوق قاعدة البيانات (ممكن تضيف فروع/خطوط مكررة
+  // أو قديمة). المصدر الوحيد دلوقتي هو الداتا بيز نفسها — الإضافة والتعديل من الشاشات نفسها مباشرة.
+  alert('الزرار ده موقوف: قاعدة البيانات هي المصدر الوحيد دلوقتي، وأي إضافة أو تعديل بيتم من الشاشات مباشرة.');
+  return;
   const btn = document.querySelector('[onclick="syncRoutesAndBranchesToSupabase()"]');
   if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader"></i> جاري المزامنة...'; }
 
