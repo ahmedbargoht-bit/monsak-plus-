@@ -63,6 +63,12 @@ td{padding:.38rem .5rem;border-bottom:1px solid #2d171e;font-size:.9rem;vertical
 .dot{display:inline-block;width:.7rem;height:.7rem;border-radius:50%;background:#555}
 .dot.on{background:#4ADE80;box-shadow:0 0 .5rem #4ADE80}
 .hint{font-size:.7rem;color:#8d7d70;text-align:center;padding-top:.3rem}
+.locwrap{display:grid;grid-template-columns:1.7fr 1fr;gap:.7rem;height:calc(100% - 7.2rem)}
+#loc-map{height:calc(100% - 1.7rem);border-radius:.6rem;overflow:hidden;background:#1d0e13}
+.leg{font-size:.7rem;color:#bfae98;font-weight:400;margin-right:.6rem}
+.leg i{display:inline-block;width:.6rem;height:.6rem;border-radius:50%;margin:0 .15rem 0 .1rem;vertical-align:middle}
+.leaflet-tooltip.tvtip{background:#1d0e13;color:#fff;border:1px solid #F0C880;font:700 12px Cairo,Tahoma,Arial,sans-serif;padding:1px 6px;box-shadow:none}
+.leaflet-tooltip-top.tvtip:before{border-top-color:#F0C880}
 </style>
 </head>
 <body>
@@ -94,7 +100,7 @@ var REFRESH_MS=5*60*1000;
 var WORK_DAYS=26;
 var AR_DAYS=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
 var DAY_KEYS={sunday:0,monday:1,tuesday:2,wednesday:3,thursday:4,friday:5,saturday:6,'الأحد':0,'الاثنين':1,'الثلاثاء':2,'الأربعاء':3,'الخميس':4,'الجمعة':5,'السبت':6};
-var TABS=[{id:'dash',label:'الداشبورد'},{id:'lb',label:'لوحة شرف المنسقين'},{id:'loc',label:'الموقع الحالي'},{id:'sales',label:'المبيعات'}];
+var TABS=[{id:'lb',label:'لوحة شرف المنسقين'},{id:'dash',label:'الداشبورد'},{id:'loc',label:'الموقع الحالي'},{id:'sales',label:'المبيعات'}];
 var GROUPS={giza:'الجيزة',cairo:'وسط القاهرة',south:'جنوب وشرق القاهرة',tajmuat:'التجمعات',hyper:'الهايبر ماركت',alex:'الإسكندرية',delta:'الدلتا'};
 var S={tab:0,data:{},errs:{},page:0,nextAt:0,loading:false,lastOk:0};
 
@@ -155,7 +161,7 @@ function loadToday(){
     getAll('visits?select=id,name,grp,branch,points,date&date='+dq+'&order=id.asc'),
     getAll('attendance?select=id,name,grp,date,time_in,time_out&date='+dq+'&order=id.asc'),
     getAll('missing?select=id,name,branch,snf,reason,grp,created_at&created_at=gte.'+startUtc+'&order=id.asc'),
-    get('location?select=name,grp,updated_at,branch&limit=1000'),
+    get('location?select=name,grp,updated_at,branch,lat,lng&limit=1000'),
     get('users?select=name,grp,user_type,route,day_off&role=eq.rep&status=eq.active&limit=1000'),
     get('groups?select=key_name,name,emoji&limit=200').catch(function(){return []})
   ]).then(function(r){
@@ -287,31 +293,84 @@ function locRows(){
   rows.sort(function(a,b){return (b.present-a.present)||(b.online-a.online)||String(a.name).localeCompare(String(b.name),'ar')});
   return rows;
 }
+var MAP={m:null,layer:null,sig:'',state:0,q:[],css:false,el:null};
+var TILE='https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=9mZx9M7L3irFfrjxHVj2';
+function loadLeaflet(cb){
+  if(window.L){cb(true);return}
+  if(MAP.state===1){MAP.q.push(cb);return}
+  MAP.state=1;MAP.q=[cb];
+  function done(ok){MAP.state=ok?2:3;var q=MAP.q;MAP.q=[];q.forEach(function(f){f(ok)})}
+  if(!MAP.css){MAP.css=true;var l=document.createElement('link');l.rel='stylesheet';l.href='https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css';document.head.appendChild(l)}
+  var sc=document.createElement('script');sc.src='https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js';
+  sc.onload=function(){done(!!window.L)};sc.onerror=function(){done(false)};document.head.appendChild(sc);
+}
+function mapPoints(){
+  var d=S.data.today,out=[];if(!d)return out;
+  var ok={};d.users.forEach(function(u){ok[u.name]=1});
+  d.location.forEach(function(l){
+    var lat=parseFloat(l.lat),lng=parseFloat(l.lng),t=parseTs(l.updated_at).getTime();
+    if(isNaN(lat)||isNaN(lng)||!t||!ok[l.name])return;
+    var min=Math.floor((Date.now()-t)/60000);if(min>1440)return;
+    var col=min<10?'#22C55E':min<60?'#F59E0B':'#9CA3AF';
+    out.push({name:l.name,lat:lat,lng:lng,col:col,min:min});
+  });
+  return out;
+}
+function updateMap(){
+  var box=$('loc-map');if(!box)return;
+  var pts=mapPoints();
+  loadLeaflet(function(ok){
+    if(!ok){box.innerHTML='<div class="empty">تعذّر تحميل الخريطة — تأكد أن التلفزيون متصل بالإنترنت</div>';MAP.m=null;return}
+    if(!MAP.m||MAP.el!==box){
+      box.innerHTML='';MAP.el=box;
+      MAP.m=L.map(box,{zoomControl:false,attributionControl:false,keyboard:false}).setView([30.0444,31.2357],9);
+      L.tileLayer(TILE,{maxZoom:18}).addTo(MAP.m);
+      MAP.layer=L.layerGroup().addTo(MAP.m);MAP.sig='';
+    }
+    MAP.m.invalidateSize();
+    var sig=pts.map(function(p){return p.name+p.lat+p.lng+p.col}).join('|');
+    if(sig===MAP.sig)return;
+    MAP.sig=sig;MAP.layer.clearLayers();
+    var bounds=[];
+    pts.forEach(function(p){
+      L.circleMarker([p.lat,p.lng],{radius:9,color:'#fff',weight:2,fillColor:p.col,fillOpacity:1}).addTo(MAP.layer)
+        .bindTooltip(p.name,{permanent:true,direction:'top',offset:[0,-8],className:'tvtip'});
+      bounds.push([p.lat,p.lng]);
+    });
+    if(bounds.length)MAP.m.fitBounds(bounds,{padding:[40,40],maxZoom:13});
+  });
+}
 function renderLoc(){
   var el=$('v-loc'),d=S.data.today;
   if(!d){el.innerHTML='<div class="empty">جاري التحميل...</div>';return}
+  if(!$('loc-map')){
+    el.innerHTML='<div class="grid kpis4" id="loc-kpi" style="margin-bottom:.7rem"></div>'+
+     '<div class="locwrap">'+
+       '<div class="card" style="overflow:hidden"><h3>🗺️ الخريطة الحية<span class="leg"><i style="background:#22C55E"></i>متصل الآن<i style="background:#F59E0B"></i>أقل من ساعة<i style="background:#9CA3AF"></i>أقدم</span></h3><div id="loc-map"></div></div>'+
+       '<div class="card" style="overflow:hidden" id="loc-list"></div>'+
+     '</div><div class="hint" id="loc-hint"></div>';
+    MAP.m=null;
+  }
   var rows=locRows(),total=rows.length,pres=rows.filter(function(r){return r.present}).length;
   var pages=Math.max(1,Math.ceil(total/LOC_PAGE));if(S.page>=pages)S.page=0;
   var slice=rows.slice(S.page*LOC_PAGE,S.page*LOC_PAGE+LOC_PAGE);
   var pct=total?Math.round(pres/total*100):0;
-  el.innerHTML=
-   '<div class="grid kpis4" style="margin-bottom:.7rem">'+
+  var npts=mapPoints().length;
+  $('loc-kpi').innerHTML=
      '<div class="card kcard s" style="border-top-color:#C4B5FD"><div class="lbl">إجمالي المنسقين</div><div class="num p">'+total+'</div></div>'+
      '<div class="card kcard s" style="border-top-color:#4ADE80"><div class="lbl">حضروا</div><div class="num g">'+pres+'</div></div>'+
      '<div class="card kcard s" style="border-top-color:#F87171"><div class="lbl">غائبون</div><div class="num r">'+(total-pres)+'</div></div>'+
-     '<div class="card kcard s" style="border-top-color:#FBBF24"><div class="lbl">نسبة الحضور</div><div class="num a">'+pct+'%</div></div>'+
-   '</div>'+
-   '<div class="card" style="height:calc(100% - 6.4rem);overflow:hidden"><table><thead><tr><th>المنسق</th><th>المجموعة</th><th>الفرع الحالي</th><th class="tc">الحضور</th><th class="tc">الانصراف</th><th class="tc">زيارات</th><th class="tc">نواقص</th><th class="tc">متصل</th></tr></thead><tbody>'+
+     '<div class="card kcard s" style="border-top-color:#FBBF24"><div class="lbl">نسبة الحضور</div><div class="num a">'+pct+'%</div></div>';
+  $('loc-list').innerHTML='<table><thead><tr><th>المنسق</th><th>الفرع الحالي</th><th class="tc">الحضور</th><th class="tc">متصل</th></tr></thead><tbody>'+
    (slice.length?slice.map(function(r){
-     return '<tr><td><b>'+esc(r.name)+'</b></td><td style="color:#bfae98">'+esc(GROUPS[r.grp]||r.grp||'')+'</td>'+
-       '<td>'+(r.branch?esc(r.branch):'<span class="r" style="font-size:.8rem">لم يسجل فرع</span>')+'</td>'+
+     return '<tr><td><b>'+esc(r.name)+'</b></td>'+
+       '<td style="font-size:.8rem">'+(r.branch?esc(r.branch):'<span class="r" style="font-size:.75rem">لم يسجل فرع</span>')+'</td>'+
        '<td class="tc">'+(r.present?'<span class="pill g">'+esc(r.tin)+'</span>':'<span class="pill r">غائب</span>')+'</td>'+
-       '<td class="tc">'+(r.tout?esc(r.tout):'—')+'</td>'+
-       '<td class="tc">'+r.visits+'</td><td class="tc">'+(r.miss?'<span class="pill a">'+r.miss+'</span>':'0')+'</td>'+
        '<td class="tc"><span class="dot'+(r.online?' on':'')+'"></span></td></tr>';
-   }).join(''):'<tr><td colspan="8" class="empty">لا توجد بيانات</td></tr>')+
-   '</tbody></table></div>'+
-   '<div class="hint">صفحة '+(S.page+1)+' من '+pages+(pages>1?' • بتتغيّر تلقائيًا (أو بأزرار ↑ ↓)':'')+'</div>';
+   }).join(''):'<tr><td colspan="4" class="empty">لا توجد بيانات</td></tr>')+
+   '</tbody></table>';
+  $('loc-hint').textContent='على الخريطة '+npts+' منسق • قائمة صفحة '+(S.page+1)+' من '+pages+(pages>1?' (بتتغيّر تلقائيًا أو بأزرار ↑ ↓)':'');
+  updateMap();
 }
 
 /* ───────── المبيعات (Sales Dashboard + مبيعات اليوم) ───────── */
@@ -483,7 +542,7 @@ function demoGet(path){
   if(path.indexOf('visits?')===0)return names.map(function(n,i){return {id:i,name:n,grp:grps[i%5],branch:branches[i%6],points:5,date:iso}});
   if(path.indexOf('attendance?')===0)return names.slice(0,9).map(function(n,i){return {id:i,name:n,grp:grps[i%5],date:iso,time_in:pad(8+i%3)+':'+pad(i*5%60),time_out:i%3===0?'15:30':null}});
   if(path.indexOf('missing?')===0){var o=[];for(var i=0;i<26;i++)o.push({id:i,name:names[i%12],branch:branches[i%6],snf:snfs[i%5],reason:['لا يوجد','نفد','متأخر'][i%3],grp:grps[i%5],created_at:new Date().toISOString()});return o}
-  if(path.indexOf('location?')===0)return names.slice(0,5).map(function(n,i){return {name:n,grp:grps[i%5],updated_at:new Date(Date.now()-i*180000).toISOString(),branch:branches[i%6]}});
+  if(path.indexOf('location?')===0)return names.slice(0,5).map(function(n,i){return {name:n,grp:grps[i%5],updated_at:new Date(Date.now()-i*i*600000).toISOString(),branch:branches[i%6],lat:30.04+i*0.03,lng:31.23+i*0.04}});
   if(path.indexOf('users?')===0)return names.map(function(n,i){return {name:n,grp:grps[i%5],user_type:'متحرك',route:'خط '+(i+1),day_off:'none'}});
   if(path.indexOf('groups?')===0)return [];
   if(path.indexOf('tv_snapshots?')===0){
