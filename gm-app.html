@@ -5244,15 +5244,25 @@ async function addUser(){
   // في _nuFixedSelectedSet لحد ما المنسق يتحفظ فعلياً هنا وبعدين نكتب كل فرع في coord_route_assignments
   const selectedBranches = isFixed ? [..._nuFixedSelectedSet] : [];
   if(!name||!pass){alert('أدخل الاسم والباسورد');return;}
+  if(!grp){alert('اختر المجموعة');return;}
   try{
+    // جدول users مفيهوش UNIQUE على الاسم (on_conflict=name كان بيفشل دايماً) — فبنفحص التكرار يدوياً
+    const dupRes = await fetch(`${SUPABASE_URL}/rest/v1/users?select=id,role&name=eq.${encodeURIComponent(name)}&limit=1`,{
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
+    });
+    const dup = dupRes.ok ? await dupRes.json().catch(()=>[]) : [];
+    if(Array.isArray(dup) && dup.length){
+      alert(`الاسم "${name}" موجود بالفعل في النظام (${dup[0].role}). لو هو نفس المنسق عدّله من زرار التعديل، ولو شخص تاني غيّر الاسم (مثلاً أضف اسم الأب).`);
+      return;
+    }
     // fixed_branch القديم بيتسجل بأول فرع مختار (fallback فقط — المصدر الحقيقي بقى coord_route_assignments)
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/users?on_conflict=name`,{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/users`,{
       method:'POST',
       headers:{
         'Content-Type':'application/json',
         'apikey':SUPABASE_KEY,
         'Authorization':`Bearer ${SUPABASE_KEY}`,
-        'Prefer':'resolution=merge-duplicates,return=minimal'
+        'Prefer':'return=minimal'
       },
       body: JSON.stringify({name, pass_hash:pass, role:'rep', route, grp, groups:grp, user_type:type, level:'rep', status:'active', goal:1, day_off:dayOff, fixed_branch:selectedBranches[0]||null})
     });
@@ -5271,11 +5281,13 @@ async function addUser(){
       await loadCoordUsers();
       showOk('nu-ok','✓ تم إضافة '+name+' بنجاح');
     } else {
-      showOk('nu-ok','⚠️ تم الحفظ محلياً');
+      const errTxt = await res.text().catch(()=>'');
+      alert('⚠️ فشل حفظ المنسق في قاعدة البيانات — لم يتم الإضافة.\n'+errTxt.slice(0,200));
+      return;
     }
   }catch(e){
-    REPS.push({name,pass,route,group:grp,type,goal:1,status:'active'});
-    showOk('nu-ok','✓ تم الحفظ محلياً');
+    alert('⚠️ تعذر الاتصال بقاعدة البيانات — لم يتم إضافة المنسق. تأكد من النت وحاول تاني.');
+    return;
   }
   document.getElementById('nu-name').value='';
   document.getElementById('nu-pass').value='';
@@ -5319,11 +5331,30 @@ async function editUser(){
   if(!name)return;
 
   const updatePayload={name,pass_hash:pass,route,grp:group,user_type:type,day_off:dayOff,emp_code:empCode||null,fixed_branch:fixedBranch||null};
+  // الاسم مفتاح بيربط المنسق بكل سجلاته — تغييره من هنا كان بيسيب فروعه وتاريخه على الاسم القديم
+  if(oldName && name!==oldName){
+    alert('لا يمكن تغيير اسم المنسق من هنا لأن الاسم هو اللي بيربط فروعه وزياراته وفواتيره. لو الاسم غلط أضف منسق جديد بالاسم الصحيح وانقل له الخط.');
+    document.getElementById('eu-name').value = oldName;
+    return;
+  }
+  let saveOk = false;
   try{
     const r=REPS.find(x=>x.name===oldName);
-    if(r&&r.id) await sbUpdate('users',{id:r.id},updatePayload);
-    else         await sbUpdateByName('users',oldName,updatePayload);
-  }catch(e){console.warn('Supabase update failed, saved locally');}
+    if(r&&r.id) saveOk = await sbUpdate('users',{id:r.id},updatePayload);
+    else {
+      // role=rep ضروري: فيه أسماء مكررة بين المنسقين وجهات تانية
+      const rr = await fetch(`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(oldName)}&role=eq.rep`,{
+        method:'PATCH',
+        headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
+        body:JSON.stringify(updatePayload)
+      });
+      saveOk = rr.ok;
+    }
+  }catch(e){ saveOk = false; }
+  if(!saveOk){
+    alert('⚠️ فشل حفظ التعديل في قاعدة البيانات — لم يتم التعديل. حاول تاني.');
+    return;
+  }
 
   // تحديث تلقائي لخط سير/مجموعة الفروع المرتبطة بهذا المنسق (rep_name/rep_name2/rep_name3)
   // + تنظيف تخصيصات coord_route_assignments القديمة المرتبطة بخط سير سابق مختلف عن الجديد
