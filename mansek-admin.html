@@ -17625,44 +17625,65 @@ function convexHull(points){
 // ══ بوب-أب فرع بيانات "آخر زيارة" + "لوكيشن الدخول" — بيتجاب أول ما يتفتح البوب-أب (on-demand) بدل
 // ما نجيب زيارات كل فروع الخط مرة واحدة، عشان الخريطة تفضل خفيفة وسريعة.
 const _locBranchVisitCache = {};
-async function locBuildBranchPopup(marker, branchName, extraLine){
-  const safeName = (branchName||'—').replace(/</g,'&lt;');
-  const loadingHtml = `<div style="font-family:Cairo,sans-serif;text-align:right;min-width:170px">
-    <div style="font-weight:700;font-size:13px;margin-bottom:4px">${safeName}</div>
-    ${extraLine||''}
-    <div style="font-size:11px;color:#888;margin-top:4px">⏳ جاري تحميل آخر زيارة...</div>
-  </div>`;
-  marker.bindPopup(loadingHtml);
+const _locBranchInvCache = {};
+// أيقونة دبوس لوكيشن (SVG) بلون الفرع/خط السير
+function locPinIcon(color){
+  return L.divIcon({
+    className:'',
+    html:`<svg width="30" height="40" viewBox="0 0 30 40" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 2px 3px rgba(0,0,0,.4))"><path d="M15 1C7.3 1 1 7.2 1 14.9 1 25 15 39 15 39s14-14 14-24.1C29 7.2 22.7 1 15 1z" fill="${color}" stroke="#fff" stroke-width="2"/><circle cx="15" cy="15" r="5.5" fill="#fff"/></svg>`,
+    iconSize:[30,40], iconAnchor:[15,39], popupAnchor:[0,-34]
+  });
+}
+// كرت الفرع (بيظهر لما تقف على الدبوس): المجموعة + خط السير فوق، وبعدين اسم الفرع، آخر زيارة للمنسق،
+// آخر فاتورة توريد + اسم المندوب، وفتح اللوكيشن — كله بيتجاب أول مرة بس (on-demand) والخريطة تفضل خفيفة.
+async function locBuildBranchPopup(marker, branchName, extraLine, opts){
+  opts = opts || {};
+  const esc = t=>String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  const safeName = esc(branchName||'—');
+  const head = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #eee">
+      <span style="background:#EDE7F6;color:#5B3FA0;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700">👥 ${esc(opts.grpLabel||'—')}</span>
+      <span style="background:#EEF6FF;color:#1D4ED8;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700">🧭 ${esc(opts.route||'—')}</span></div>`;
+  const wrap = inner => `<div style="font-family:Cairo,sans-serif;text-align:right;min-width:230px;max-width:290px">${head}
+      <div style="font-weight:800;font-size:14px;margin-bottom:6px">${safeName}</div>${inner}</div>`;
+  marker.bindPopup(wrap(`<div style="font-size:11px;color:#888">⏳ جاري تحميل البيانات...</div>`), {closeButton:false, autoPan:false, offset:[0,-4]});
+
+  // فتح عند الوقوف (hover) وقفل بتأخير بسيط عشان تقدر توصل لزرار "فتح في لوكيشن"
+  let closeT=null;
+  const cancel=()=>{ if(closeT){ clearTimeout(closeT); closeT=null; } };
+  const schedule=()=>{ cancel(); closeT=setTimeout(()=>marker.closePopup(),350); };
+  marker.on('mouseover', ()=>{ cancel(); marker.openPopup(); });
+  marker.on('mouseout', schedule);
   marker.on('popupopen', async ()=>{
-    let info = _locBranchVisitCache[branchName];
-    if(info===undefined){
-      try{
-        const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-        const r = await fetch(`${SUPABASE_URL}/rest/v1/visits?select=created_at,lat,lng,rep_name,name&branch=eq.${encodeURIComponent(branchName)}&order=created_at.desc&limit=1`, {headers:H});
-        const d = r.ok ? await r.json() : [];
-        info = d[0] || null;
-      }catch(e){ info = null; }
-      _locBranchVisitCache[branchName] = info;
+    const pe = marker.getPopup() && marker.getPopup().getElement();
+    if(pe){ pe.onmouseenter=cancel; pe.onmouseleave=schedule; }
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const enc = encodeURIComponent(branchName);
+    let visit = _locBranchVisitCache[branchName];
+    let inv   = _locBranchInvCache[branchName];
+    if(visit===undefined || inv===undefined){
+      const [vr, ir] = await Promise.all([
+        visit===undefined ? fetch(`${SUPABASE_URL}/rest/v1/visits?select=created_at,date,lat,lng,rep_name,name&branch=eq.${enc}&order=created_at.desc&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]) : Promise.resolve(null),
+        inv===undefined   ? fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=delivery_date,rep_name,invoice_number&branch_name=eq.${enc}&deleted_at=is.null&order=delivery_date.desc,id.desc&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]) : Promise.resolve(null)
+      ]);
+      if(vr){ visit = vr[0]||null; _locBranchVisitCache[branchName]=visit; }
+      if(ir){ inv   = ir[0]||null; _locBranchInvCache[branchName]=inv; }
     }
-    let html = `<div style="font-family:Cairo,sans-serif;text-align:right;min-width:170px">
-      <div style="font-weight:700;font-size:13px;margin-bottom:4px">${safeName}</div>
-      ${extraLine||''}`;
-    if(info){
-      const repN = info.rep_name || info.name || '—';
-      const dt = info.created_at ? new Date(info.created_at).toLocaleString('ar-EG',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
-      html += `<div style="font-size:11px;color:#555;margin-bottom:2px">🕐 آخر زيارة: ${dt}</div>
-        <div style="font-size:11px;color:#555;margin-bottom:2px">👤 ${repN}</div>`;
-      if(info.lat && info.lng){
-        html += `<div style="font-size:11px;color:#555;margin-bottom:4px">📍 لوكيشن الدخول وقت الزيارة</div>
-          <a href="https://www.google.com/maps?q=${info.lat},${info.lng}" target="_blank" style="font-size:11px;color:#1D4ED8">فتح في Google Maps</a>`;
-      } else {
-        html += `<div style="font-size:11px;color:#aaa;margin-bottom:2px">لا توجد إحداثيات لهذه الزيارة</div>`;
-      }
-    } else {
-      html += `<div style="font-size:11px;color:#aaa;margin-top:4px">لا توجد زيارات مسجلة لهذا الفرع</div>`;
+    const fmtD = v=>{ if(!v) return '—'; const d=new Date(v); return isNaN(d)?String(v):d.toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'numeric'}); };
+    const row = (ico,label,val,sub)=>`<div style="margin-bottom:7px"><div style="font-size:10px;color:#888">${ico} ${label}</div>
+        <div style="font-size:12px;font-weight:700;color:#2C1F0A">${val}</div>${sub?`<div style="font-size:11px;color:#555">${sub}</div>`:''}</div>`;
+    let html='';
+    if(visit){
+      const dt = visit.created_at ? new Date(visit.created_at).toLocaleString('ar-EG',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : fmtD(visit.date);
+      html += row('🕐','آخر زيارة للمنسق', esc(dt), '👤 '+esc(visit.rep_name||visit.name||'—'));
+    } else html += row('🕐','آخر زيارة للمنسق','لا توجد زيارات مسجلة','');
+    if(inv){
+      html += row('🧾','آخر فاتورة توريد', esc(fmtD(inv.delivery_date)), '🚚 المندوب: '+esc(inv.rep_name||'—'));
+    } else html += row('🧾','آخر فاتورة توريد','لا توجد فواتير مسجلة','');
+    const lat = opts.lat!=null?opts.lat:(visit&&visit.lat), lng = opts.lng!=null?opts.lng:(visit&&visit.lng);
+    if(lat && lng){
+      html += `<a href="https://www.google.com/maps?q=${lat},${lng}" target="_blank" style="display:block;text-align:center;background:#1A7A4A;color:#fff;border-radius:8px;padding:6px;font-size:12px;font-weight:700;text-decoration:none">📍 فتح في لوكيشن</a>`;
     }
-    html += `</div>`;
-    marker.setPopupContent(html);
+    marker.setPopupContent(wrap(html));
   });
 }
 
@@ -17823,9 +17844,8 @@ async function renderLocationMap(){
     // الفروع اللي لسه مسجلتش موقعها (شايلينها تحت الخريطة كقائمة برتقالي منفصلة، مش على الخريطة خالص)
     withGeo.forEach(b=>{
       const lat = Number(b.lat), lng = Number(b.lng);
-      const marker = L.circleMarker([lat,lng], {radius:8, color:'#fff', weight:2, fillColor:'#1A7A4A', fillOpacity:1}).addTo(_locBranchLayer);
-      marker.bindTooltip((b.branch_name||'—'), {permanent:true, direction:'top', offset:[0,-6], className:'branch-name-label'});
-      locBuildBranchPopup(marker, b.branch_name, `<div style="font-size:11px;color:#1A7A4A;margin-top:2px">✓ الموقع مسجل</div>`);
+      const marker = L.marker([lat,lng], {icon:locPinIcon('#1A7A4A')}).addTo(_locBranchLayer);
+      locBuildBranchPopup(marker, b.branch_name, '', {grpLabel:gLabel, route:route, lat, lng});
       bounds.push([lat,lng]);
     });
 
@@ -17888,8 +17908,8 @@ async function renderLocationMap(){
 
       withGeo.forEach(b=>{
         const lat=Number(b.lat), lng=Number(b.lng);
-        const marker = L.circleMarker([lat,lng], {radius:6, color:'#fff', weight:1.5, fillColor:c, fillOpacity:1}).addTo(_locBranchLayer);
-        locBuildBranchPopup(marker, b.branch_name, `<div style="font-size:11px;color:#555;margin-top:2px">🧭 ${routeName}</div>`);
+        const marker = L.marker([lat,lng], {icon:locPinIcon(c)}).addTo(_locBranchLayer);
+        locBuildBranchPopup(marker, b.branch_name, '', {grpLabel:gLabel, route:routeName, lat, lng});
         bounds.push([lat,lng]);
       });
 
