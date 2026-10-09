@@ -2708,6 +2708,40 @@ table.datatable details summary:hover { text-decoration: underline; }
     }
   }
 
+  // بعد أي رفع ناجح للسحابة: لازم الشهور اللي اترفعت تتضاف لـ"الصفوف الخام المتجمّعة" (cloudRawAccum) والكاش
+  // المحلي. من غير كده، أي إعادة بناء للبيانات من cloudRawAccum (تحديث خلفي، تغيير فلتر سنة/شهر، فتح الأداة
+  // من الكاش القديم) كانت بترجّع النسخة القديمة اللي مفيهاش الشهر الجديد - فالفواتير تظهر بعد الرفع وبعدين تختفي.
+  async function syncUploadedPeriodsIntoState(invRows, itemRowsDb) {
+    if (!sb) return;
+    const client = sb;
+    const keys = new Map();
+    (invRows || []).concat(itemRowsDb || []).forEach(r => {
+      if (r && r.year != null && r.month != null) keys.set(r.year + '-' + r.month, { year: Number(r.year), month: Number(r.month) });
+    });
+    if (!keys.size) return;
+    const periods = Array.from(keys.values());
+    const { invRows: freshInv, itemRows: freshItems } = await fetchAllPeriodsInvoiceItemRows(client, periods);
+    if (sb !== client) return;
+    const isUploaded = r => keys.has(r.year + '-' + r.month);
+    if (!cloudRawAccum) {
+      const [cat, other] = await Promise.all([fetchItemCatalogAndMerges(client).catch(() => ({ itemCatalogRows: [], itemMergeRows: [] })), fetchOtherTablesRows(client)]);
+      cloudRawAccum = { invRows: [], itemRows: [], ...emptyOtherTablesShape(), ...cat, ...other };
+    } else {
+      // المرتجعات/الخصم غير المباشر/فواتير جريد اللي اترفعت دلوقتي كمان لازم تتحدّث (applyCloudRowsToState بتبنيها من هنا)
+      try { Object.assign(cloudRawAccum, await fetchOtherTablesRows(client)); } catch (e) { /* مش مانع */ }
+    }
+    cloudRawAccum.invRows = (cloudRawAccum.invRows || []).filter(r => !isUploaded(r)).concat(freshInv);
+    cloudRawAccum.itemRows = (cloudRawAccum.itemRows || []).filter(r => !isUploaded(r)).concat(freshItems);
+    keys.forEach((p, k) => {
+      loadedPeriodKeys.add(k);
+      if (!allKnownPeriods.some(x => x.year === p.year && x.month === p.month)) allKnownPeriods.push(p);
+    });
+    allKnownPeriods.sort((a, b) => (a.year - b.year) || (a.month - b.month));
+    applyCloudRowsToState(cloudRawAccum);
+    finishCloudRender(true);
+    saveCloudCache(cloudRawAccum);
+  }
+
   async function syncToCloud(newInvoices, newItemRows, newReturns, newIndirectDiscounts, newChecks, newLedger, newCustomerInvoicesRaw) {
     if (!sb || (!newInvoices.length && !newItemRows.length && !(newReturns && newReturns.length) && !(newIndirectDiscounts && newIndirectDiscounts.length) && !(newChecks && newChecks.length) && !(newLedger && newLedger.length) && !(newCustomerInvoicesRaw && newCustomerInvoicesRaw.length))) return;
     try {
@@ -2748,6 +2782,8 @@ table.datatable details summary:hover { text-decoration: underline; }
       const indMsg      = indRows.length      ? ` و${indRows.length} قيد خصم غير مباشر` : '';
       const custInvMsg = custInvRows.length ? ` و${custInvRows.length} فاتورة جريد` : '';
       logStatus(`تم حفظ ${invRows.length} فاتورة و${itemRowsDb.length} سطر صنف${retMsg}${indMsg}${custInvMsg} في السحابة بنجاح ✓ (لن تُفقد حتى لو رجعت للأداة تاني)`, 'ok');
+      try { await syncUploadedPeriodsIntoState(invRows, itemRowsDb); }
+      catch (e2) { logStatus('تم الحفظ، لكن تعذر تحديث العرض من السحابة الآن (' + (e2.message || e2) + ') - حدّث الصفحة (F5).', 'err'); }
     } catch (e) {
       logStatus('تعذر الحفظ في السحابة - البيانات معروضة الآن لكنها لن تُحفظ للمرة القادمة (' + (e.message || e) + ')', 'err');
     }
