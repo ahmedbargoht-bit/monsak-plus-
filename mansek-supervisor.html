@@ -6479,6 +6479,7 @@ async function loadDailyExecution(){
     if(Array.isArray(freshItems) && freshItems.length) planItems = freshItems;
   }catch(e){ console.warn('loadDailyExecution fetch error:', e); }
   try{ await vrLoadRouteMap(planItems.map(i=>i.branch_name)); }catch(e){}
+  if(cu?.level==='dm'){ try{ await vrLoadLastVisits(planItems.map(i=>i.branch_name)); }catch(e){} }
 
   const devs = await sbGet('plan_deviations',{supervisor_name:cu.name});
   cachedDeviations = Array.isArray(devs)?devs:[];
@@ -6537,6 +6538,7 @@ async function loadDailyExecution(){
             <div style="font-size:11px;color:var(--text2)">${item.branch_name}</div>
             ${item.rep_name && item.rep_name!=='—'?`<div style="font-size:10px;color:#999">👤 ${item.rep_name}</div>`:''}
             ${supGeoBadgeHTML(item)}
+            ${vrLastVisitLine(item.branch_name)}
           </div>
           <span class="badge ${item.status==='done'?'b-green':item.status==='missed'?'b-red':'b-gray'}">
             ${item.status==='done'?'✅ منجز':item.status==='missed'?'❌ فائت':'📍 ابدأ الزيارة'}
@@ -6763,6 +6765,58 @@ function vrEnsureModal(){
   return m;
 }
 
+// ── آخر زيارة سابقة للفرع (من أي مشرف) — بتظهر لمدير التنسيق فقط ──
+let _lastVisitMap = {};   // branch_name → {date, sup, rc, rd, rl, notes} أو null (لم يُزَر)
+async function vrLoadLastVisits(names){
+  const need = [...new Set((names||[]).filter(n=>n && !(n in _lastVisitMap)))];
+  if(!need.length) return;
+  const H = {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}};
+  need.forEach(n=>{ _lastVisitMap[n] = null; });
+  try{
+    for(let i=0;i<need.length;i+=60){
+      const part = need.slice(i,i+60);
+      const list = part.map(n=>'"'+String(n).replace(/"/g,'')+'"').join(',');
+      let url = `${SUPABASE_URL}/rest/v1/plan_branches?select=id,plan_id,branch_name,visit_date,review_coord_report,review_display,review_clean,review_notes,notes&visit_status=eq.done&visit_date=not.is.null&branch_name=in.(${encodeURIComponent(list)})&order=visit_date.desc,id.desc&limit=1000`;
+      const r = await fetch(url,H);
+      const rows = r.ok ? await r.json() : [];
+      const curPlan = currentPlan ? currentPlan.id : null;
+      const first = {};
+      rows.forEach(x=>{ if(curPlan && x.plan_id===curPlan) return; if(!first[x.branch_name]) first[x.branch_name]=x; });
+      const pids = [...new Set(Object.values(first).map(x=>x.plan_id).filter(Boolean))];
+      const plans = {};
+      if(pids.length){
+        const pr = await fetch(`${SUPABASE_URL}/rest/v1/plans?select=id,supervisor_name&id=in.(${pids.join(',')})`,H);
+        if(pr.ok) (await pr.json()).forEach(p=>{ plans[p.id]=p.supervisor_name; });
+      }
+      Object.values(first).forEach(x=>{
+        _lastVisitMap[x.branch_name] = {date:x.visit_date, sup:plans[x.plan_id]||'—', rc:x.review_coord_report||'', rd:x.review_display||'', rl:x.review_clean||'', notes:x.review_notes||x.notes||''};
+      });
+    }
+  }catch(e){ console.warn('vrLoadLastVisits', e); }
+}
+function vrDaysAgo(d){
+  if(!d) return '';
+  const n = Math.round((new Date(localISO()+'T00:00:00') - new Date(d+'T00:00:00'))/86400000);
+  return n<=0 ? 'النهارده' : n===1 ? 'من يوم' : n===2 ? 'من يومين' : n<=10 ? `من ${n} أيام` : `من ${n} يوم`;
+}
+function vrLastVisitLine(bn){
+  if(cu?.level!=='dm') return '';
+  const lv = _lastVisitMap[bn];
+  if(lv===undefined) return '';
+  if(!lv) return `<div style="font-size:10px;color:#888;margin-top:2px">🕘 آخر زيارة للفرع: لم يُزَر من قبل</div>`;
+  return `<div style="font-size:10px;color:#4B3C1A;margin-top:2px">🕘 آخر زيارة للفرع: ${vrEsc(lv.date)} (${vrDaysAgo(lv.date)}) — ${vrEsc(lv.sup)}</div>`;
+}
+function vrLastVisitCardHTML(bn){
+  const lv = _lastVisitMap[bn];
+  if(lv===undefined) return '⏳ جاري تحميل آخر زيارة للفرع...';
+  if(!lv) return '🕘 <b>آخر زيارة للفرع:</b> لم يُزَر من قبل';
+  const rt = v=> v==='excellent'?'<b style="color:#2E7D32">ممتاز</b>':v==='good'?'<b style="color:#1565C0">جيد</b>':v==='needs'?'<b style="color:#C62828">يحتاج تحسين</b>':'—';
+  return `<div style="font-weight:700;margin-bottom:4px">🕘 آخر زيارة للفرع</div>
+    <div>👤 <b>${vrEsc(lv.sup)}</b> · 📅 <b>${vrEsc(lv.date)}</b> <span style="color:#7A6A4A">(${vrDaysAgo(lv.date)})</span></div>
+    <div style="margin-top:3px">تقرير المنسق: ${rt(lv.rc)} · العرض: ${rt(lv.rd)} · النظافة: ${rt(lv.rl)}</div>
+    ${lv.notes?`<div style="margin-top:3px"><b>ملاحظات:</b> ${vrEsc(lv.notes)}</div>`:''}`;
+}
+
 async function openVisitReview(itemId, prefillNotes){
   if(_geoVerifying) return;
   const item = planItems.find(i=>i.id===itemId);
@@ -6806,6 +6860,7 @@ async function openVisitReview(itemId, prefillNotes){
       : noLoc
       ? `<div style="background:#FFF8E1;color:#B8860B;border-radius:8px;padding:8px 10px;font-size:11.5px;font-weight:700">⚠️ لوكيشن الفرع مش مسجّل — الزيارة هتتسجل "غير موثّقة بالموقع" ومش هتتحسب في معيار الحضور الشخصي.</div>`
       : `<div style="background:#E8F5E9;color:#1A7A4A;border-radius:8px;padding:8px 10px;font-size:11.5px;font-weight:700">✅ تم التحقق من موقعك — إنت داخل نطاق الفرع (${v.fields.geo_distance_m} م)</div>`}
+    ${cu?.level==='dm'?`<div id="vr-last-visit" style="margin-top:10px;background:#F1F5FB;border-radius:10px;padding:10px 12px;font-size:12px">${vrLastVisitCardHTML(item.branch_name)}</div>`:''}
     <div id="vr-coord-box" style="margin-top:10px;background:#FBF0F0;border-radius:10px;padding:10px 12px;font-size:12px">⏳ جاري تحميل آخر تقرير للمنسق...</div>
     ${rateRow('coord','1) مراجعة تقرير المنسق من آخر زيارة','راجع التقرير اللي فوق وقيّم التزام المنسق واكتماله')}
     ${rateRow('display','2) مراجعة طريقة العرض والأصناف','شكل العرض وتوافر الأصناف وترتيبها على الرف')}
@@ -6823,6 +6878,9 @@ async function openVisitReview(itemId, prefillNotes){
   </div>`;
   m.classList.add('open');
   vrLoadCoordReport(item.branch_name);
+  if(cu?.level==='dm' && !(item.branch_name in _lastVisitMap)){
+    vrLoadLastVisits([item.branch_name]).then(()=>{ const el=document.getElementById('vr-last-visit'); if(el) el.innerHTML = vrLastVisitCardHTML(item.branch_name); });
+  }
 }
 
 function vrSetRating(key,val){
