@@ -2415,6 +2415,103 @@ table.datatable details summary:hover { text-decoration: underline; }
     });
   };
 
+  // تصحيح المنطقة/القطاع لخط سير كامل مرة واحدة: بيحفظ لكل مواقع الخط (من كل الفواتير المحمّلة، مش بس
+  // المفلترة) عن طريق نفس الربط اليدوي المحفوظ في السحابة، فبيتطبق على كل الفواتير والتقارير والتصديرات.
+  window.rrOpenRouteEditor = function (btn) {
+    const route = btn.getAttribute('data-route') || '';
+    const curRegion = btn.getAttribute('data-region') || '';
+    const curSector = btn.getAttribute('data-sector') || '';
+    if (!route) return;
+    const clean = v => { const s = (v == null ? '' : String(v)).trim(); return (!s || s.toLowerCase() === 'null' || s.toLowerCase() === 'undefined') ? '' : s; };
+    const regions = new Set(), sectors = new Set();
+    const addKnown = (rg, sc) => { if (clean(rg)) regions.add(clean(rg)); if (clean(sc)) sectors.add(clean(sc)); };
+    state.invoices.forEach(i => { if (i.__route) addKnown(i.__route.المنطقة, i.__route.القطاع); });
+    state.manualRoutes.forEach(m => addKnown(m.region, m.sector));
+    state.routeCatalog.forEach(c => addKnown(c.region, c.sector));
+    const opts = set => Array.from(set).sort((a, b) => a.localeCompare(b, 'ar')).map(v => `<option value="${escapeHtml(v)}"></option>`).join('');
+    const sites = new Set();
+    state.invoices.forEach(i => { if (i.__route && i.__route.خط_سير === route) { const s = (i['فرع_العميل'] || '').toString().trim(); if (s) sites.add(s); } });
+
+    // اقتراح تلقائي: لكل موقع في الخط ده بندوّر على منطقة/قطاع معروفين لنفس الموقع (من أي فاتورة أو ربط يدوي)،
+    // ولو مفيش بنرجع لباقي مواقع نفس العميل، وبعدين بناخد القيمة الأكثر تكرارًا. المستخدم بيراجعها قبل الحفظ.
+    let sugRegion = '', sugSector = '', sugNote = '';
+    if (!clean(curRegion) || !clean(curSector)) {
+      const bySite = new Map(), byCust = new Map();
+      const bump = (m, k, rg, sc) => { if (!k) return; const e = m.get(k) || {}; const key = rg + '||' + sc; e[key] = (e[key] || 0) + 1; m.set(k, e); };
+      const siteCust = new Map();
+      state.invoices.forEach(i => {
+        const site = (i['فرع_العميل'] || '').toString().trim();
+        const cust = (i['العميل'] || '').toString().trim();
+        if (site && cust && sites.has(site)) siteCust.set(site, cust);
+      });
+      const custSet = new Set(siteCust.values());
+      state.invoices.forEach(i => {
+        if (!i.__route) return;
+        const rg = clean(i.__route.المنطقة), sc = clean(i.__route.القطاع);
+        if (!rg || !sc) return;
+        const site = (i['فرع_العميل'] || '').toString().trim();
+        const cust = (i['العميل'] || '').toString().trim();
+        if (site && sites.has(site)) bump(bySite, 'all', rg, sc);
+        else if (cust && custSet.has(cust)) bump(byCust, 'all', rg, sc);
+      });
+      state.manualRoutes.forEach((m, site) => { if (sites.has(site) && clean(m.region) && clean(m.sector)) bump(bySite, 'all', clean(m.region), clean(m.sector)); });
+      const pick = (m) => { const e = m.get('all'); if (!e) return null; const top = Object.entries(e).sort((a, b) => b[1] - a[1])[0]; const [rg, sc] = top[0].split('||'); return { rg, sc, n: top[1], total: Object.values(e).reduce((s, v) => s + v, 0) }; };
+      const p = pick(bySite) || pick(byCust);
+      if (p) { sugRegion = p.rg; sugSector = p.sc; sugNote = `اقتراح تلقائي (${fmt(p.n)} من ${fmt(p.total)} فاتورة مشابهة) — راجعه قبل الحفظ`; }
+      else sugNote = 'مفيش بيانات كافية للاقتراح التلقائي — اكتب القيم يدويًا';
+    }
+    const initRegion = clean(curRegion) || sugRegion;
+    const initSector = clean(curSector) || sugSector;
+
+    document.getElementById('rrRouteEditOverlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'rrRouteEditOverlay';
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:9999; display:flex; align-items:center; justify-content:center; padding:16px;';
+    overlay.innerHTML = `
+      <div style="background:#fff; border-radius:12px; padding:20px 22px; width:360px; max-width:100%; box-shadow:0 8px 30px rgba(0,0,0,.28);">
+        <div style="font-weight:700; font-size:14px; margin-bottom:4px;"><i class="ti ti-edit"></i> تصحيح المنطقة والقطاع</div>
+        <div style="font-size:12.5px; color:var(--ink-soft); margin-bottom:10px;">${escapeHtml(route)} — ${fmt(sites.size)} موقع</div>
+        <div class="hint" style="margin:0 0 10px; background:#FBF7EC; padding:6px 8px; border-radius:6px;">هيتطبق على كل مواقع الخط ده، وعلى كل الفواتير والتقارير.</div>
+        ${sugNote ? `<div class="hint" style="margin:0 0 10px; background:#E1EFE4; color:#2f6b45; padding:6px 8px; border-radius:6px;">${escapeHtml(sugNote)}</div>` : ''}
+        <div style="display:flex; gap:10px; margin-bottom:16px;">
+          <div style="flex:1;"><div class="hint" style="margin:0 0 4px;">المنطقة</div>
+            <input type="text" id="rrRtRegion" list="rrRtRegionDl" value="${escapeHtml(initRegion)}" style="width:100%; box-sizing:border-box; font-family:inherit; padding:8px; border-radius:8px; border:1.5px solid var(--sand-dark);">
+            <datalist id="rrRtRegionDl">${opts(regions)}</datalist></div>
+          <div style="flex:1;"><div class="hint" style="margin:0 0 4px;">القطاع</div>
+            <input type="text" id="rrRtSector" list="rrRtSectorDl" value="${escapeHtml(initSector)}" style="width:100%; box-sizing:border-box; font-family:inherit; padding:8px; border-radius:8px; border:1.5px solid var(--sand-dark);">
+            <datalist id="rrRtSectorDl">${opts(sectors)}</datalist></div>
+        </div>
+        <div style="display:flex; gap:10px; justify-content:flex-end;">
+          <button type="button" id="rrRtCancel" class="btn secondary" style="padding:8px 16px;">إلغاء</button>
+          <button type="button" id="rrRtSave" class="btn" style="padding:8px 16px;">حفظ</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    document.getElementById('rrRtCancel').addEventListener('click', close);
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    document.getElementById('rrRtSave').addEventListener('click', async () => {
+      const region = document.getElementById('rrRtRegion').value.trim();
+      const sector = document.getElementById('rrRtSector').value.trim();
+      if (!region || !sector) { alert('اكتب المنطقة والقطاع الاتنين'); return; }
+      if (!sites.size) { alert('مفيش مواقع مربوطة بالخط ده عشان يتحفظ عليها'); return; }
+      const saveBtn = document.getElementById('rrRtSave');
+      saveBtn.disabled = true; saveBtn.textContent = 'جاري الحفظ...';
+      const ok = await assignManualRoutesBulk(Array.from(sites).map(site => ({ site, route, region, sector })));
+      if (ok) {
+        // لو الخط موجود في كتالوج الخطوط، نحدّث منطقته وقطاعه كمان
+        try {
+          if (sb && state.routeCatalog.has(route)) {
+            const prev = state.routeCatalog.get(route) || {};
+            const { error } = await sb.from('tamr_sales_route_catalog').upsert([{ route, branch: prev.branch || null, type: prev.type || null, region, sector, updated_at: new Date().toISOString() }], { onConflict: 'route' });
+            if (!error) state.routeCatalog.set(route, { ...prev, region, sector });
+          }
+        } catch (e) {}
+        close();
+      } else { saveBtn.disabled = false; saveBtn.textContent = 'حفظ'; }
+    });
+  };
+
   // إنشاء خط سير جديد مستقل (بناءً على الفرع) - مش لازم يكون مربوط بعميل معين وقت الإنشاء،
   // بيدخل في قائمة "خطوط السير المتاحة" عشان تقدر تربط بيه أي عميل بعدين
   async function saveRouteToCatalog(route, branch, type, region, sector) {
@@ -8050,8 +8147,14 @@ function renderReps() {
       siteAggR.get(site).net += i.__net;
     });
     const sitesList = Array.from(siteAggR.keys()).sort((a, b) => String(a).localeCompare(String(b), 'ar'));
-    const regionForEdit = invs[0] ? invs[0].__route.المنطقة : '';
-    const sectorForEdit = invs[0] ? invs[0].__route.القطاع : '';
+    const rrClean = v => { const s = (v == null ? '' : String(v)).trim(); return (!s || s.toLowerCase() === 'null' || s.toLowerCase() === 'undefined') ? '' : s; };
+    // أول قيمة حقيقية (مش فاضية/null) لخط السير ده من أي فاتورة، مش بس أول فاتورة
+    const regionForEdit = rrClean((invs.find(i => rrClean(i.__route.المنطقة)) || {__route:{}}).__route.المنطقة);
+    const sectorForEdit = rrClean((invs.find(i => rrClean(i.__route.القطاع)) || {__route:{}}).__route.القطاع);
+    const rrBtn = (label) => `<button type="button" class="btn no-print" style="padding:2px 8px; font-size:10.5px; margin-inline-start:6px;"
+      data-route="${escapeHtml(x.key)}" data-region="${escapeHtml(regionForEdit)}" data-sector="${escapeHtml(sectorForEdit)}"
+      onclick="rrOpenRouteEditor(this)"><i class="ti ti-edit"></i> ${label}</button>`;
+    const missingTag = '<span style="color:#B91C1C; font-weight:700;">غير محدد</span>';
     // خانة "عدد المواقع" قابلة للفتح (details/summary) - بتفضل ظاهرة كاملة عند الطباعة بفضل قاعدة
     // الطباعة الموجودة أصلًا في الـ CSS (table.datatable details:not([open]) { display:block !important })
     let sitesCell = fmt(sitesList.length);
@@ -8072,8 +8175,8 @@ function renderReps() {
         </div>
       </details>`;
     }
-    const region = regionForEdit;
-    const sector = sectorForEdit;
+    const region = regionForEdit ? escapeHtml(regionForEdit) : missingTag + rrBtn('تصحيح');
+    const sector = sectorForEdit ? escapeHtml(sectorForEdit) : missingTag + (regionForEdit ? rrBtn('تصحيح') : '');
     if (years.length >= 2) {
       return [x.key, region, sector, sitesCell, ...yearColumnCells(routeBmap, x.key, years, fmtMoney)];
     }
