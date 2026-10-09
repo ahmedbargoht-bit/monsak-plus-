@@ -172,6 +172,10 @@ function loadToday(){
     return {visits:r[0]||[],attendance:r[1]||[],missing:r[2]||[],location:r[3]||[],users:r[4]||[],c:c,iso:iso};
   });
 }
+function loadSup(){
+  var c=cairo(),mIso=cairoMidnightUtcIso({y:c.y,m:c.m,d:1,h:c.h,mi:c.mi,s:c.s}),tIso=cairoMidnightUtcIso(c);
+  return getAll('field_support_logs?select=supervisor_name,rep_name,branch_name,grp,created_at&created_at=gte.'+mIso+'&order=id.asc').then(function(r){return {logs:r||[],todayIso:tIso}}).catch(function(){return {logs:[],todayIso:tIso}});
+}
 function loadLb(){
   return get('tv_snapshots?select=key,payload,updated_at&key=like.'+encodeURIComponent('leaderboard:*')).then(function(rows){
     var o={};(rows||[]).forEach(function(r){o[r.key.replace('leaderboard:','')]=r});return o;
@@ -210,7 +214,7 @@ function loadSales(){
 }
 function refresh(){
   if(S.loading)return;S.loading=true;
-  var jobs=[['today',loadToday],['lb',loadLb],['sales',loadSales]];
+  var jobs=[['today',loadToday],['lb',loadLb],['sup',loadSup],['sales',loadSales]];
   Promise.all(jobs.map(function(j){
     return j[1]().then(function(d){S.data[j[0]]=d;delete S.errs[j[0]]}).catch(function(e){S.errs[j[0]]=e&&e.message||'خطأ'});
   })).then(function(){
@@ -407,18 +411,80 @@ function renderHm(){
 }
 
 /* ───────── لوحة الشرف ───────── */
+var LB_PAGES=1;
+function lbLayout(){
+  var el=$('v-lb');
+  var fs=parseFloat(window.getComputedStyle(document.documentElement).fontSize)||18;
+  var h=el.clientHeight||650;
+  return Math.max(3,Math.floor((h-fs*13)/(fs*3.4)));
+}
+function lbFmtTs(ts){
+  try{return new Date(ts).toLocaleString('ar-EG',{timeZone:'Africa/Cairo',day:'numeric',month:'numeric',hour:'numeric',minute:'2-digit'})}catch(e){return ''}
+}
+function lbSupHtml(g){
+  var d=S.data.sup;if(!d||!d.logs)return '';
+  var by={},order=[];
+  d.logs.forEach(function(l){
+    if((l.grp==='private_cairo'?'private_chains_cairo':l.grp)!==g||!l.supervisor_name)return;
+    var o=by[l.supervisor_name];
+    if(!o){o=by[l.supervisor_name]={name:l.supervisor_name,m:0,t:0,last:'',br:''};order.push(o)}
+    o.m++;
+    if(l.created_at>=d.todayIso)o.t++;
+    if(l.created_at>o.last){o.last=l.created_at;o.br=l.branch_name||l.rep_name||''}
+  });
+  if(!order.length)return '<div class="card" style="padding:.3rem .6rem;margin-bottom:.5rem;color:#bfae98;font-size:.75rem">👔 زيارات المشرف: لا توجد زيارات هذا الشهر</div>';
+  order.sort(function(a,b){return b.m-a.m});
+  var h='<div style="display:flex;gap:.5rem;margin-bottom:.5rem;flex-wrap:wrap">';
+  order.forEach(function(o){
+    h+='<div class="card" style="flex:1;min-width:14rem;padding:.3rem .6rem;display:flex;align-items:center;gap:.6rem">'+
+      '<div style="font-size:1.1rem">👔</div>'+
+      '<div style="flex:1;min-width:0"><b style="display:block;font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(o.name)+'</b>'+
+      '<span style="font-size:.62rem;color:#bfae98">آخر زيارة: '+esc(lbFmtTs(o.last))+(o.br?' • '+esc(o.br):'')+'</span></div>'+
+      '<div style="text-align:center"><div style="font-size:1.3rem;font-weight:800;color:#F0C880;line-height:1">'+o.m+'</div><div style="font-size:.55rem;color:#bfae98">هذا الشهر</div></div>'+
+      '<div style="text-align:center"><div style="font-size:1.3rem;font-weight:800;color:#4ADE80;line-height:1">'+o.t+'</div><div style="font-size:.55rem;color:#bfae98">اليوم</div></div></div>';
+  });
+  return h+'</div>';
+}
 function renderLb(){
   var el=$('v-lb'),d=S.data.lb;
   if(!d){el.innerHTML='<div class="empty">جاري التحميل...</div>';return}
   var types=[['متحرك','🚗 منسق متحرك'],['ثابت','🏪 منسق ثابت (هايبر)'],['ثابت كبار عملاء','⭐ ثابت كبار عملاء']];
   var medals=['🥇','🥈','🥉'];
-  var newest=0,html='<div class="three" style="height:calc(100% - 1.6rem)">';
+  var newest=0,gcount={},rowsBy={};
   types.forEach(function(t){
-    var s=d[t[0]];
-    html+='<div class="card" style="overflow:hidden"><h3>'+t[1]+'</h3>';
-    if(!s||!s.payload||!s.payload.rows||!s.payload.rows.length){html+='<div class="empty">لم يتم نشر الترتيب بعد</div></div>';return}
+    var s=d[t[0]];rowsBy[t[0]]=[];
+    if(!s||!s.payload||!s.payload.rows)return;
     var ts=parseTs(s.updated_at).getTime();if(ts>newest)newest=ts;
-    s.payload.rows.slice(0,8).forEach(function(r,i){
+    s.payload.rows.forEach(function(r,i){
+      var g=r.group||'other';
+      rowsBy[t[0]].push({r:r,rank:i,g:g});
+      gcount[g]=(gcount[g]||0)+1;
+    });
+  });
+  var gs=Object.keys(gcount).sort(function(a,b){return gcount[b]-gcount[a]});
+  if(!gs.length){el.innerHTML='<div class="card"><div class="empty">لم يتم نشر الترتيب بعد</div></div>';LB_PAGES=1;return}
+  var per=lbLayout(),pages=[];
+  gs.forEach(function(g){
+    var mx=1;
+    types.forEach(function(t){
+      var n=rowsBy[t[0]].filter(function(x){return x.g===g}).length;
+      mx=Math.max(mx,Math.ceil(n/per));
+    });
+    for(var i=0;i<mx;i++)pages.push({g:g,i:i,of:mx});
+  });
+  LB_PAGES=pages.length;if(S.page>=LB_PAGES)S.page=0;
+  var pg=pages[S.page],col0=HM_GRP_COLORS[pg.g]||'#bfae98';
+  var html='<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem"><span style="width:.8rem;height:.8rem;border-radius:2px;background:'+col0+'"></span>'+
+    '<b style="font-size:1.05rem;color:'+col0+'">'+esc(hmGrpLabel(pg.g))+(pg.of>1?' (جزء '+(pg.i+1)+' من '+pg.of+')':'')+'</b></div>'+
+    lbSupHtml(pg.g)+
+    '<div class="three" style="height:calc(100% - '+(lbSupHtml(pg.g)?'7.2':'3.6')+'rem)">';
+  types.forEach(function(t){
+    var all=rowsBy[t[0]].filter(function(x){return x.g===pg.g});
+    html+='<div class="card" style="overflow:hidden"><h3>'+t[1]+' <span class="leg" style="font-weight:400">'+all.length+'</span></h3>';
+    var sl=all.slice(pg.i*per,pg.i*per+per);
+    if(!sl.length){html+='<div class="empty">لا يوجد منسقين</div></div>';return}
+    sl.forEach(function(x){
+      var r=x.r,i=x.rank;
       var col=r.score>=80?'#4ADE80':r.score>=60?'#FBBF24':'#F87171';
       html+='<div class="rank"><div class="no">'+(medals[i]||(i+1))+'</div><div class="nm"><b>'+esc(r.name)+'</b><span>'+esc(r.route||GROUPS[r.group]||'')+'</span>'+
         '<div class="bar" style="margin-top:.25rem;height:.4rem"><i style="width:'+Math.min(r.score,100)+'%;background:'+col+'"></i></div></div>'+
@@ -430,7 +496,7 @@ function renderLb(){
   var age=newest?Math.round((Date.now()-newest)/36e5):null;
   var note=newest?'آخر نشر للترتيب: '+(age<1?'من أقل من ساعة':age<24?'من '+age+' ساعة':'من '+Math.round(age/24)+' يوم'):'';
   var warn=(age!=null&&age>48)?' — الترتيب قديم، اضغط "نشر للتلفزيون" من لوحة التحكم':'';
-  el.innerHTML=html+'<div class="hint" style="'+(warn?'color:#FBBF24':'')+'">'+note+warn+' • الترتيب تراكمي منذ بداية التسجيل ويتحدّث من لوحة التحكم</div>';
+  el.innerHTML=html+'<div class="hint" style="'+(warn?'color:#FBBF24':'')+'">'+note+warn+' • صفحة '+(S.page+1)+' من '+LB_PAGES+(LB_PAGES>1?' (بتتغيّر تلقائيًا أو بأزرار ↑ ↓)':'')+' • الترتيب تراكمي ويتحدّث من لوحة التحكم</div>';
 }
 
 /* ───────── الموقع الحالي ───────── */
@@ -670,8 +736,8 @@ document.addEventListener('keydown',function(e){
   // التابات مرتبة من اليمين للشمال: السهم الشمال = التالي
   if(k==='ArrowLeft'||c===37){go(S.tab+1);e.preventDefault()}
   else if(k==='ArrowRight'||c===39){go(S.tab-1);e.preventDefault()}
-  else if(k==='ArrowDown'||c===40){var tid=TABS[S.tab].id;if(tid==='loc'){S.page++;renderLoc();e.preventDefault()}else if(tid==='hm'){S.page=(S.page+1)%Math.max(1,HM_PAGES);renderHm();e.preventDefault()}}
-  else if(k==='ArrowUp'||c===38){var tid2=TABS[S.tab].id;if(tid2==='loc'){S.page=Math.max(0,S.page-1);renderLoc();e.preventDefault()}else if(tid2==='hm'){S.page=(S.page-1+Math.max(1,HM_PAGES))%Math.max(1,HM_PAGES);renderHm();e.preventDefault()}}
+  else if(k==='ArrowDown'||c===40){var tid=TABS[S.tab].id;if(tid==='loc'){S.page++;renderLoc();e.preventDefault()}else if(tid==='hm'){S.page=(S.page+1)%Math.max(1,HM_PAGES);renderHm();e.preventDefault()}else if(tid==='lb'){S.page=(S.page+1)%Math.max(1,LB_PAGES);renderLb();e.preventDefault()}}
+  else if(k==='ArrowUp'||c===38){var tid2=TABS[S.tab].id;if(tid2==='loc'){S.page=Math.max(0,S.page-1);renderLoc();e.preventDefault()}else if(tid2==='hm'){S.page=(S.page-1+Math.max(1,HM_PAGES))%Math.max(1,HM_PAGES);renderHm();e.preventDefault()}else if(tid2==='lb'){S.page=(S.page-1+Math.max(1,LB_PAGES))%Math.max(1,LB_PAGES);renderLb();e.preventDefault()}}
   else if(k>='1'&&k<='4'){go(+k-1)}
   else if(k==='r'||k==='R'){refresh()}
   else if(k==='f'||k==='F'){toggleFs()}
@@ -695,7 +761,11 @@ setInterval(function(){
   if(TABS[S.tab].id!=='hm'||!S.data.sales)return;
   if(HM_PAGES>1){S.page=(S.page+1)%HM_PAGES;renderHm()}
 },15000);
-window.addEventListener('resize',function(){var t=TABS[S.tab].id;if(t==='sales')renderSales();else if(t==='hm')renderHm()});
+setInterval(function(){
+  if(TABS[S.tab].id!=='lb'||!S.data.lb)return;
+  if(LB_PAGES>1){S.page=(S.page+1)%LB_PAGES;renderLb()}
+},15000);
+window.addEventListener('resize',function(){var t=TABS[S.tab].id;if(t==='sales')renderSales();else if(t==='hm')renderHm();else if(t==='lb')renderLb()});
 
 /* ───────── وضع تجريبي (?demo=1) لمعاينة الشكل بدون اتصال ───────── */
 function demoGet(path){
