@@ -4348,7 +4348,7 @@ let _lbProductsAll= null;  // products آخر 90 يوم (لجودة التنفي
 let _lbDeliveriesAll= null; // sales_deliveries آخر 90 يوم (الأصناف اللي اتورّدت للفرع)
 
 // ── جودة التنفيذ (محسوبة تلقائيًا من بيانات النظام — بدون قايمة تعليم أو صور) ──
-// (1) توفر الأصناف: الأصناف الموجودة فعليًا على الرف ÷ الأصناف اللي اتورّدت للفرع (من فواتير التسليم، آخر 90 يوم)
+// (1) توفر الأصناف: الأصناف الموجودة فعليًا على الرف ÷ الأصناف اللي اتورّدت للفرع (من فواتير التسليم، آخر 90 يوم) — الحساب على آخر 60 يوم (الأقدم متأرشف)
 // (2) FIFO والصلاحيات: نسبة الأصناف على الرف اللي لسه صلاحيتها كويسة (تاريخ الإنتاج + مدة الصلاحية، أكتر من شهرين
 //     متبقيين)؛ الصنف قريب الانتهاء بيتحسب سليم لو اتسجّل له مرتجع/سحب لنفس الفرع خلال 7 أيام من الزيارة
 // (3) اكتمال تسجيل الزيارة (للثابت فقط): زيارة اتقفلت بوقت انصراف + اتسجل فيها رف
@@ -4374,10 +4374,10 @@ function lbQualityCriterion(repName, type, myVisits, products, deliveries, retur
     (retIdx[r.branch+'|'+norm(r.snf)] = retIdx[r.branch+'|'+norm(r.snf)] || []).push((r.created_at||'').slice(0,10));
   });
   const availS=[], fifoS=[], compS=[];
-  const winFrom = new Date(Date.now() - 88*864e5).toISOString().slice(0,10);
+  const winFrom = new Date(Date.now() - 58*864e5).toISOString().slice(0,10); // الأصناف بتتأرشف بعد 60 يوم — زيارة أقدم مش مقاسة
   (myVisits||[]).forEach(v=>{
     const vdate = (v.date || v.created_at || '').slice(0,10);
-    if(!vdate || vdate < winFrom) return; // بيانات الأصناف متحمّلة لآخر 90 يوم بس — زيارة أقدم مش مقاسة
+    if(!vdate || vdate < winFrom) return; // بيانات الأصناف الشغالة آخر 60 يوم بس (الأقدم في الأرشيف) — زيارة أقدم مش مقاسة
     const rows = byVisitId[v.id] || byKey[[v.name, v.branch, vdate].join('|')] || [];
     const closed = !!(v.time_out && v.time_out!=='--');
     compS.push(closed && rows.length ? 100 : 0);
@@ -6681,18 +6681,22 @@ async function supVerifyVisitLocation(branchName){
   const dist = Math.round(haversineMeters(lat,lng,bc.lat,bc.lng));
   const allowed = GEO_VISIT_RADIUS_M + Math.min(acc, GEO_ACC_TOLERANCE_M);
   if(dist > allowed){
-    return {ok:false, msg:`🚫 مينفعش تسجّل الزيارة — إنت بعيد عن الفرع.\n\nالمسافة بينك وبين "${branchName}": ${dist>=1000?(dist/1000).toFixed(1)+' كم':dist+' متر'}\nالمسموح: ${GEO_VISIT_RADIUS_M} متر.\n\nروح الفرع وسجّل الزيارة من هناك.`};
+    return {ok:false, far:true, fields:{...base, geo_status:'outside', geo_distance_m:dist}, msg:`🚫 مينفعش تسجّل الزيارة — إنت بعيد عن الفرع.\n\nالمسافة بينك وبين "${branchName}": ${dist>=1000?(dist/1000).toFixed(1)+' كم':dist+' متر'}\nالمسموح: ${GEO_VISIT_RADIUS_M} متر.\n\nروح الفرع وسجّل الزيارة من هناك.`};
   }
   return {ok:true, fields:{...base, geo_status:'inside', geo_distance_m:dist}};
 }
 function supGeoBadgeHTML(item){
   if(item.status!=='done') return '';
   let h='';
-  if(item.check_in_at && item.geo_status==='inside'){
+  if(cu?.level==='dm'){
+    // مدير التنسيق: الموقع بيتسجّل بصمت — مفيش عرض لحالة الموقع/المسافة
+  } else if(item.check_in_at && item.geo_status==='inside'){
     const t = new Date(item.check_in_at).toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'});
     h = `<div style="font-size:10px;color:#1A7A4A;font-weight:700;margin-top:2px">📍 موثّقة بلوكيشن الفرع${item.geo_distance_m!=null?' · '+item.geo_distance_m+' م':''} · ${t}</div>`;
   } else if(item.check_in_at && item.geo_status==='no_branch_loc'){
     h = `<div style="font-size:10px;color:#B8860B;font-weight:700;margin-top:2px">⚠️ غير موثّقة بالموقع — لوكيشن الفرع غير مسجّل (بلّغ الإدارة)</div>`;
+  } else if(item.geo_status==='not_verified' || item.geo_status==='outside'){
+    h = `<div style="font-size:10px;color:#B8860B;font-weight:700;margin-top:2px">⚠️ غير موثّقة بالموقع${item.geo_distance_m!=null?' · '+item.geo_distance_m+' م عن الفرع':''}</div>`;
   } else {
     h = `<div style="font-size:10px;color:#888;margin-top:2px">⚪ غير موثّقة (قبل تفعيل التوثيق بالموقع)</div>`;
   }
@@ -6766,10 +6770,24 @@ async function openVisitReview(itemId, prefillNotes){
   _geoVerifying = true;
   showToast('📍 جاري التحقق من موقعك...');
   let v;
-  try{ v = await supVerifyVisitLocation(item.branch_name); } finally { _geoVerifying = false; }
-  if(!v.ok){ alert(v.msg); return; }
+  try{
+    if(cu?.level==='dm'){
+      // مدير التنسيق: لو الـ GPS مقفول أو بطيء ما نستناش — النموذج يفتح بعد 5 ثواني بحد أقصى
+      v = await Promise.race([
+        supVerifyVisitLocation(item.branch_name).catch(()=>({ok:false})),
+        new Promise(res=>setTimeout(()=>res({ok:false,timeout:true}),5000))
+      ]);
+    } else { v = await supVerifyVisitLocation(item.branch_name); }
+  } finally { _geoVerifying = false; }
+  if(!v.ok){
+    // مدير التنسيق فقط: الموقع اختياري — يقدر يكمل الزيارة بدون توثيق
+    // الموقع بيتسجّل بصمت (الحالة الحقيقية: inside/outside/...) من غير ما يظهر له أي تنبيه أو مسافة
+    if(cu?.level!=='dm'){ alert(v.msg); return; }
+    v = {ok:true, fields: v.far ? v.fields : {geo_status:'not_verified', geo_distance_m:null, check_in_at:null, visit_lat:null, visit_lng:null}};
+  }
   _vrCtx = {itemId, fields:v.fields, branch:item.branch_name, r:{coord:'',display:'',clean:''}};
   const noLoc = v.fields.geo_status==='no_branch_loc';
+  const notVer = v.fields.geo_status==='not_verified' || v.fields.geo_status==='outside';
   const m = vrEnsureModal();
   const rateRow = (key,title,hint)=>`
     <div style="margin-top:12px">
@@ -6783,7 +6801,9 @@ async function openVisitReview(itemId, prefillNotes){
   m.innerHTML = `<div class="modal-sheet" style="max-width:430px;max-height:92vh;overflow-y:auto">
     <div class="modal-title">📍 زيارة سوق — ${vrEsc(item.branch_name)}</div>
     <div style="font-size:11px;color:var(--text2);text-align:center;margin-bottom:8px">${vrEsc(_vrRouteMap[item.branch_name]||'')}</div>
-    ${noLoc
+    ${cu?.level==='dm'
+      ? ''
+      : noLoc
       ? `<div style="background:#FFF8E1;color:#B8860B;border-radius:8px;padding:8px 10px;font-size:11.5px;font-weight:700">⚠️ لوكيشن الفرع مش مسجّل — الزيارة هتتسجل "غير موثّقة بالموقع" ومش هتتحسب في معيار الحضور الشخصي.</div>`
       : `<div style="background:#E8F5E9;color:#1A7A4A;border-radius:8px;padding:8px 10px;font-size:11.5px;font-weight:700">✅ تم التحقق من موقعك — إنت داخل نطاق الفرع (${v.fields.geo_distance_m} م)</div>`}
     <div id="vr-coord-box" style="margin-top:10px;background:#FBF0F0;border-radius:10px;padding:10px 12px;font-size:12px">⏳ جاري تحميل آخر تقرير للمنسق...</div>
