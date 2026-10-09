@@ -40824,7 +40824,22 @@ async function hmComputeGrpCards(from, to, client){
   });
   Object.values(out).forEach(o=>{ ['total','visited','notVisited'].forEach(k=>o[k].sort((a,b)=>a.localeCompare(b,'ar'))); });
   _hmGrpCards = out;
+  // تارجت المجموعة = مجموع rep_targets لمناديبها (users.grp) عن شهور الفترة
+  _hmGrpTarget = {};
+  try{
+    const months = [];
+    let y = +String(from).slice(0,4), m = +String(from).slice(5,7);
+    const ey = +String(to).slice(0,4), em = +String(to).slice(5,7);
+    while((y<ey || (y===ey && m<=em)) && months.length<24){ months.push(y+'-'+String(m).padStart(2,'0')); m++; if(m>12){m=1;y++;} }
+    const [tg, us] = await Promise.all([
+      hmFetchAllRows(`${SUPABASE_URL}/rest/v1/rep_targets?select=rep_name,target_amount,month&deleted_at=is.null&month=in.(${months.join(',')})&order=id.asc`, H),
+      hmFetchAllRows(`${SUPABASE_URL}/rest/v1/users?select=name,grp&role=eq.sales&level=eq.rep&status=eq.active&order=id.asc`, H)
+    ]);
+    const ug = {}; us.forEach(u=>{ ug[u.name] = u.grp==='private_cairo' ? 'private_chains_cairo' : u.grp; });
+    tg.forEach(t=>{ const g = ug[t.rep_name]; if(g) _hmGrpTarget[g] = (_hmGrpTarget[g]||0) + (Number(t.target_amount)||0); });
+  }catch(e){ console.warn('hm targets', e); }
 }
+let _hmGrpTarget = {};
 
 function hmShowGrpCardList(grp, type){
   const c = _hmGrpCards[grp]; if(!c) return;
@@ -40848,7 +40863,15 @@ function hmGrpCardHTML(grp){
   const cell = (n, lbl, col, type) => `<div onclick="hmShowGrpCardList('${grp}','${type}')" style="flex:1;min-width:90px;cursor:pointer;text-align:center;padding:8px 6px;background:#fff;border:1px solid #E8E8E8;border-radius:8px">
       <div style="font-size:20px;font-weight:900;color:${col};line-height:1.1">${n}</div>
       <div style="font-size:10px;color:#666;margin-top:2px;font-weight:700">${lbl}</div></div>`;
-  return `<div style="display:flex;gap:8px;margin-bottom:8px">${cell(c.total.length,'عدد الفروع','#003049','total')}${cell(c.visited.length,'اتزارت','#15803D','visited')}${cell(c.notVisited.length,'لم تُزَر','#B71C1C','not_visited')}</div>`;
+  const cov = c.total.length ? Math.round(c.visited.length / c.total.length * 100) : 0;
+  let sales = 0;
+  (_hmRawData||[]).forEach(b=>{ const g = b.grp==='private_cairo' ? 'private_chains_cairo' : b.grp; if(g===grp) sales += (b.invoiceValue||0); });
+  const tgt = _hmGrpTarget[grp] || 0;
+  const ach = tgt>0 ? Math.round(sales/tgt*100)+'%' : '—';
+  const info = (n, lbl, col, tip) => `<div title="${tip}" style="flex:1;min-width:90px;text-align:center;padding:8px 6px;background:#fff;border:1px solid #E8E8E8;border-radius:8px">
+      <div style="font-size:20px;font-weight:900;color:${col};line-height:1.1">${n}</div>
+      <div style="font-size:10px;color:#666;margin-top:2px;font-weight:700">${lbl}</div></div>`;
+  return `<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">${cell(c.total.length,'عدد الفروع','#003049','total')}${cell(c.visited.length,'اتزارت','#15803D','visited')}${cell(c.notVisited.length,'لم تُزَر','#B71C1C','not_visited')}${info(cov+'%','نسبة التغطية','#0369A1','اتزارت ÷ عدد الفروع')}${info(ach,'المحقق','#B45309', tgt>0 ? ('المبيعات '+sales.toFixed(0)+' ÷ التارجت '+tgt.toFixed(0)) : 'لا يوجد تارجت للمجموعة')}</div>`;
 }
 
 function hmRender(data, metric){
