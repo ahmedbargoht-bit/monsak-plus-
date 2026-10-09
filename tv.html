@@ -177,6 +177,20 @@ function loadLb(){
     var o={};(rows||[]).forEach(function(r){o[r.key.replace('leaderboard:','')]=r});return o;
   });
 }
+function loadMt(monthStart,today){
+  /* تاريخ القطع = آخر تاريخ فاتورة دخلت MT. لحد التاريخ ده المصدر فواتير MT (بعد خصم المرتجع)، وبعده مبيعات المناديب */
+  return get('tamr_sales_invoices?select=invoice_date&order=invoice_date.desc&limit=1').then(function(r){
+    var cut=(r&&r[0]&&r[0].invoice_date)?String(r[0].invoice_date).slice(0,10):null;
+    if(!cut)return {cut:null,inv:[],ret:[]};
+    var end=today<cut?today:cut;
+    if(monthStart>end)return {cut:cut,inv:[],ret:[]};
+    var rng='&invoice_date=gte.'+monthStart+'&invoice_date=lte.'+end+'&order=id.asc';
+    return Promise.all([
+      getAll('tamr_sales_invoices?select=customer_site,customer,invoice_date,net,gross,discount'+rng),
+      getAll('tamr_sales_returns?select=customer,invoice_date,total'+rng)
+    ]).then(function(x){return {cut:cut,inv:x[0]||[],ret:x[1]||[]}});
+  }).catch(function(){return {cut:null,inv:[],ret:[]}});
+}
 function loadSales(){
   var c=cairo(),month=c.y+'-'+pad(c.m),monthStart=month+'-01';
   var wk=addDays(c.y,c.m,c.d,-6),weekStart=isoOf(wk.y,wk.m,wk.d);
@@ -188,8 +202,9 @@ function loadSales(){
     get('rep_targets?select=rep_name,supervisor_name,target_amount&month=eq.'+month+'&limit=1000'),
     get('rep_achieved_overrides?select=rep_name,amount,range_to&month=eq.'+month).catch(function(){return []}),
     get('users?select=name,supervisors&role=eq.sales&level=eq.rep&limit=1000').catch(function(){return []}),
-    getAll('branches?select=branch_name,grp&status=eq.active&order=id.asc').catch(function(){return []})
-  ]).then(function(r){return {del:r[0]||[],ret:r[1]||[],tgt:r[2]||[],ovr:r[3]||[],usr:r[4]||[],br:r[5]||[],c:c,month:month,monthStart:monthStart,today:today}});
+    getAll('branches?select=branch_name,grp&status=eq.active&order=id.asc').catch(function(){return []}),
+    loadMt(monthStart,today)
+  ]).then(function(r){return {del:r[0]||[],ret:r[1]||[],tgt:r[2]||[],ovr:r[3]||[],usr:r[4]||[],br:r[5]||[],mt:r[6]||{cut:null,inv:[],ret:[]},c:c,month:month,monthStart:monthStart,today:today}});
 }
 function refresh(){
   if(S.loading)return;S.loading=true;
@@ -217,24 +232,74 @@ function repsExpected(d){
 }
 /* ───────── خريطة حرارة الفروع (نفس منطق لوحة التحكم: قيمة فواتير التوريد بدون ضريبة — الشهر الحالي) ───────── */
 var HM_COLORS=['#EFF6FF','#BFDBFE','#60A5FA','#2563EB','#1D4ED8','#1E3A8A'];
-var HM_GRP_COLORS={giza:'#F87171',cairo:'#60A5FA',south:'#4ADE80',tajmuat:'#FB923C',hyper:'#C084FC',alex:'#38BDF8',delta:'#FACC15',private_cairo:'#D97706',private_chains_cairo:'#D97706',private_chains_giza:'#D97706'};
-var HM_GRP_LBL={private_cairo:'الأسواق الخاصة',private_chains_cairo:'سلاسل الأسواق الخاصة القاهرة',private_chains_giza:'سلاسل الأسواق الخاصة الجيزة'};
+var HM_GRP_COLORS={other:'#9CA3AF',giza:'#F87171',cairo:'#60A5FA',south:'#4ADE80',tajmuat:'#FB923C',hyper:'#C084FC',alex:'#38BDF8',delta:'#FACC15',private_cairo:'#D97706',private_chains_cairo:'#D97706',private_chains_giza:'#D97706'};
+var HM_GRP_LBL={other:'غير مصنّف',private_cairo:'الأسواق الخاصة',private_chains_cairo:'سلاسل الأسواق الخاصة القاهرة',private_chains_giza:'سلاسل الأسواق الخاصة الجيزة'};
 function hmGrpLabel(g){return HM_GRP_LBL[g]||GROUPS[g]||g||'أخرى'}
+function hmNorm(x){
+  return String(x==null?'':x).toLowerCase()
+    .replace(/[ً-ْـ]/g,'')
+    .replace(/[أإآٱ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه')
+    .replace(/[^ء-يa-z0-9]/g,'');
+}
+function hmNextDay(iso){var p=iso.split('-');var t=new Date(Date.UTC(+p[0],+p[1]-1,+p[2]+1));return t.getUTCFullYear()+'-'+pad(t.getUTCMonth()+1)+'-'+pad(t.getUTCDate())}
 function hmGroups(){
   var d=S.data.sales;if(!d)return null;
+  /* الخريطة = فواتير MT لحد آخر تاريخ فاتورة دخلت MT (صافي بعد خصم المرتجع) + مبيعات المناديب بعد التاريخ ده */
+  var idx={};
+  (d.br||[]).forEach(function(b){
+    var nm=String(b.branch_name||'').trim(),k=hmNorm(nm);
+    if(!k||!b.grp||idx[k])return;
+    idx[k]={name:nm,grp:b.grp==='private_cairo'?'private_chains_cairo':b.grp};
+  });
+  function resolve(site){
+    var raw=String(site||'').trim();if(!raw)return null;
+    var h=idx[hmNorm(raw)];
+    return h?{name:h.name,grp:h.grp}:{name:raw,grp:'other'};
+  }
   var m={};
-  function ens(n,g){var k=String(n).trim();var o=m[k]||(m[k]={branch:k,grp:'',inv:0,ret:0});if(!o.grp&&g)o.grp=g;return o}
-  d.del.forEach(function(r){if(!r.branch_name||r.delivery_date<d.monthStart)return;ens(r.branch_name,r.grp).inv+=net(r)});
-  d.ret.forEach(function(r){if(!r.branch_name||r.return_date<d.monthStart)return;ens(r.branch_name,r.grp).ret+=net(r)});
+  function ens(n,g){var k=String(n).trim();var o=m[k]||(m[k]={branch:k,grp:'',gross:0,ret:0,inv:0});if(!o.grp&&g)o.grp=g;return o}
+  var mt=d.mt||{cut:null,inv:[],ret:[]},cut=mt.cut;
+  /* مبيعات MT + توزيع المرتجع نسبيًا (مرتجع MT مسجل بالعميل مش بالفرع) */
+  var custSites={};
+  mt.inv.forEach(function(r){
+    var g=Number(r.gross)||0,ds=Number(r.discount)||0;
+    if(g>0&&Math.abs(g-ds)<0.01)return;            /* استبعاد البضاعة المجانية */
+    var s=resolve(r.customer_site);if(!s)return;
+    var net=Number(r.net)||0;
+    ens(s.name,s.grp).gross+=net;
+    var ck=hmNorm(r.customer);
+    if(ck){var cs=custSites[ck]||(custSites[ck]={});cs[s.name]=(cs[s.name]||0)+net}
+  });
+  var custRet={};
+  mt.ret.forEach(function(r){var ck=hmNorm(r.customer);custRet[ck]=(custRet[ck]||0)+(Number(r.total)||0)});
+  Object.keys(custRet).forEach(function(ck){
+    var sites=custSites[ck];if(!sites)return;
+    var names=Object.keys(sites),sum=0;
+    names.forEach(function(n){sum+=Math.max(0,sites[n])});
+    names.forEach(function(n){
+      var sh=sum>0?Math.max(0,sites[n])/sum:1/names.length;
+      m[n].ret+=custRet[ck]*sh;
+    });
+  });
+  /* مبيعات المناديب بعد تاريخ القطع (البيع فقط) */
+  var repsFrom=d.monthStart;
+  if(cut){var nx=hmNextDay(cut);if(nx>repsFrom)repsFrom=nx}
+  d.del.forEach(function(r){
+    if(!r.branch_name||r.delivery_date<repsFrom)return;
+    var h=idx[hmNorm(r.branch_name)];
+    ens(h?h.name:r.branch_name,h?h.grp:r.grp).gross+=net(r);
+  });
   var gm={},max=1,total=0;
   Object.keys(m).forEach(function(k){
-    var b=m[k],g=b.grp||'other';
+    var b=m[k];b.inv=b.gross-b.ret;
+    var g=b.grp||'other';
     var o=gm[g]||(gm[g]={g:g,rows:[],total:0});
     o.rows.push(b);o.total+=b.inv;total+=b.inv;if(b.inv>max)max=b.inv;
   });
   var arr=Object.keys(gm).map(function(k){return gm[k]});
   arr.forEach(function(o){o.rows.sort(function(a,b){return b.inv-a.inv})});
-  /* كارت التغطية: كل الفروع النشطة للمجموعة / اللي اتزارت (عليها فاتورة توريد أو مرتجع هذا الشهر) / لم تُزَر */
+  arr.sort(function(a,b){return b.total-a.total});
+  /* كارت التغطية: كل الفروع النشطة للمجموعة / اللي اتزارت (ليها نشاط بالمصدر ده هذا الشهر) / لم تُزَر */
   var byG={};
   (d.br||[]).forEach(function(b){
     var n=String(b.branch_name||'').trim(),g=b.grp==='private_cairo'?'private_chains_cairo':b.grp;
@@ -246,8 +311,7 @@ function hmGroups(){
     var c=byG[o.g==='private_cairo'?'private_chains_cairo':o.g];
     o.cov=c?{tot:c.tot,vis:c.vis,not:c.tot-c.vis}:null;
   });
-  arr.sort(function(a,b){return b.total-a.total});
-  return {groups:arr,max:max,total:total,from:d.monthStart};
+  return {groups:arr,max:max,total:total,from:d.monthStart,cut:cut};
 }
 function hmColor(v,max){
   if(!v||v<=0)return HM_COLORS[0];
@@ -285,7 +349,7 @@ function renderHm(){
   var c=S.data.sales.c;
   var html='<div class="card" style="height:100%;overflow:hidden">'+
     '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.45rem">'+
-      '<h3 style="margin:0">🗺️ خريطة حرارة الفروع <span class="leg" style="font-weight:400">قيمة الفواتير — من '+esc(data.from)+' إلى اليوم</span></h3>'+
+      '<h3 style="margin:0">🗺️ خريطة حرارة الفروع <span class="leg" style="font-weight:400">قيمة الفواتير — من '+esc(data.from)+' إلى اليوم'+(data.cut?' • فواتير MT حتى '+esc(data.cut)+' + مبيعات المناديب بعدها':' • فواتير المناديب')+'</span></h3>'+
       '<div class="leg" style="margin:0">أعلى قيمة: <b class="y">'+fmt(data.max)+' ج</b> &nbsp;•&nbsp; الإجمالي: <b class="y">'+fmt(data.total)+' ج</b> &nbsp;•&nbsp; كثافة النشاط: منخفض '+
         HM_COLORS.map(function(x){return '<i style="background:'+x+';border-radius:2px;width:.8rem;height:.8rem"></i>'}).join('')+' عالي جدًا</div>'+
     '</div>';
@@ -302,7 +366,7 @@ function renderHm(){
       '<div style="display:grid;grid-template-columns:repeat('+L.cols+',1fr);gap:.4rem">';
     blk.rows.forEach(function(b){
       var bg=hmColor(b.inv,data.max),dark=(b.inv/data.max)>0.3;
-      var rp=b.inv>0?Math.round(b.ret/b.inv*100):0;
+      var rp=b.gross>0?Math.round(b.ret/b.gross*100):0;
       html+='<div style="background:'+bg+';color:'+(dark?'#fff':'#1A1A2E')+';border-radius:.45rem;padding:.25rem .35rem;height:3.3rem;overflow:hidden;text-align:center">'+
         '<div style="font-size:.95rem;font-weight:800;line-height:1.15">'+fmt(b.inv)+(rp>0?' <span style="font-size:.55rem;font-weight:600;opacity:.8">'+rp+'%↩</span>':'')+'</div>'+
         '<div style="font-size:.62rem;line-height:1.2;opacity:.92;max-height:1.5rem;overflow:hidden">'+esc(b.branch)+'</div></div>';

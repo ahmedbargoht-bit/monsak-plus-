@@ -40152,7 +40152,7 @@ function _wrBuildAndDownload(data, from, to, fname){
 })();
 
 const HM_COLORS = ['#EFF6FF','#BFDBFE','#60A5FA','#2563EB','#1D4ED8','#1E3A8A'];
-const HM_GRP_COLORS = {giza:'#D62828',cairo:'#005CBF',south:'#1A7A4A',tajmuat:'#F77F00',hyper:'#6A0DAD',alex:'#003049',private_cairo:'#8B4513'};
+const HM_GRP_COLORS = {giza:'#D62828',cairo:'#005CBF',south:'#1A7A4A',tajmuat:'#F77F00',hyper:'#6A0DAD',alex:'#003049',private_cairo:'#8B4513',other:'#7A7A7A'};
 let _hmRawData = null;
 
 // دروب داون العملاء — نفس مصدر تاب "أسعار الأصناف والخصومات" (sales_clients + branch_client_map)
@@ -40227,7 +40227,7 @@ function hmFilterClientDropdownByGrp(){
 // أسماء مختصرة للمجموعات الأساسية المعروفة (تُستخدم لو مجموعة اتحددت لوحدها وماكانتش موجودة في
 // GROUPS المُزامنة لأي سبب) - أي مجموعة تانية (زي مجموعة جديدة اتعملت من تاب "إنشاء مجموعة") هتاخد
 // اسمها ولونها كاملين من GROUPS تلقائيًا بدل ما تفضل غير ظاهرة في الفلتر خالص.
-const HM_GRP_ALL_LABELS = {giza:'الجيزة',cairo:'وسط القاهرة',south:'جنوب وشرق',tajmuat:'التجمعات',hyper:'الهايبر',alex:'الإسكندرية',private_cairo:'أسواق خاصة القاهرة'};
+const HM_GRP_ALL_LABELS = {giza:'الجيزة',cairo:'وسط القاهرة',south:'جنوب وشرق',tajmuat:'التجمعات',hyper:'الهايبر',alex:'الإسكندرية',private_cairo:'أسواق خاصة القاهرة',other:'غير مصنّف'};
 // بيرجع اسم/لون المجموعة - بيدوّر أول حاجة في GROUPS (المصدر الحي، بيتزامن من قاعدة البيانات وبيشمل
 // أي مجموعة جديدة)، وإلا في الخريطة القديمة المختصرة هنا، وإلا المفتاح نفسه كـ fallback أخير.
 function hmGrpLabel(key){ return (GROUPS[key]&&GROUPS[key].label) || HM_GRP_ALL_LABELS[key] || WR_GRP_LABELS[key] || key || '—'; }
@@ -40371,6 +40371,47 @@ function hmUpdateItemsLabel(){
   if(metricSel && n>0) metricSel.value = 'selItems';
 }
 
+// ══ مصدر بيانات الخريطة: فواتير MT المرفوعة (بعد خصم المرتجع) حتى آخر تاريخ فاتورة دخلت MT + مبيعات المناديب بعد التاريخ ده ══
+let _hmActiveNames = new Set();   // أسماء الفروع اللي ليها نشاط في الفترة بالمصدر الجديد (للكروت والتغطية)
+let _hmSourceNote = '';
+function hmNorm(s){
+  return String(s==null?'':s).toLowerCase()
+    .replace(/[ً-ْـ]/g,'')
+    .replace(/[أإآٱ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه')
+    .replace(/[^ء-يa-z0-9]/g,'');
+}
+function hmAddDayISO(iso, k){
+  const p = String(iso).split('-').map(Number);
+  const t = new Date(Date.UTC(p[0], p[1]-1, p[2]+k));
+  return t.getUTCFullYear()+'-'+String(t.getUTCMonth()+1).padStart(2,'0')+'-'+String(t.getUTCDate()).padStart(2,'0');
+}
+async function hmMtCutoff(H){
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_invoices?select=invoice_date&order=invoice_date.desc&limit=1`,{headers:H});
+    const j = r.ok ? await r.json() : [];
+    return (Array.isArray(j) && j[0] && j[0].invoice_date) ? String(j[0].invoice_date).slice(0,10) : null;
+  }catch(e){ return null; }
+}
+async function hmFetchMt(from, to, H){
+  const q = (t, sel) => `${SUPABASE_URL}/rest/v1/${t}?select=${sel}&invoice_date=gte.${from}&invoice_date=lte.${to}&order=id.asc`;
+  const [inv, items, rets] = await Promise.all([
+    hmFetchAllRows(q('tamr_sales_invoices','customer_site,customer,invoice_date,net,gross,discount,file_name,branch,invoice_no'), H),
+    hmFetchAllRows(q('tamr_sales_items','customer_site,customer,invoice_date,item,total,file_name,branch,invoice_no'), H),
+    hmFetchAllRows(q('tamr_sales_returns','customer,invoice_date,total'), H),
+  ]);
+  return {inv, items, rets};
+}
+async function hmBranchIndex(H){
+  const rows = await hmFetchAllRows(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,grp&status=eq.active&order=id.asc`, H);
+  const idx = new Map();
+  rows.forEach(b=>{
+    const nm = String(b.branch_name||'').trim(); const k = hmNorm(nm);
+    if(!k || !b.grp || idx.has(k)) return;
+    idx.set(k, {name:nm, grp: b.grp==='private_cairo' ? 'private_chains_cairo' : b.grp});
+  });
+  return idx;
+}
+
 async function hmLoad(){
   const from   = document.getElementById('hm-from').value;
   const to     = document.getElementById('hm-to').value;
@@ -40383,85 +40424,137 @@ async function hmLoad(){
   document.getElementById('hm-tbody').innerHTML = '<tr><td colspan="9" style="text-align:center;padding:20px;color:#888">—</td></tr>';
 
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-  // فرع "الأسواق الخاصة" (private_cairo) مسجل في جدول الفروع بالاسم القديم ده لـ255 فرع حقيقي
-  // (بيغطوا القاهرة والجيزة مع بعض — نفس المجموعة اللي بيشرف عليها المشرف أحمد سيد صنع الله)،
-  // لكن فواتير المناديب (sales_deliveries/sales_returns) بتتسجل بمسمى مختلف حسب المنطقة الفعلية:
-  // private_chains_cairo أو private_chains_giza. فلو فلترنا فواتير المبيعات بـ"private_cairo" حرفيًا
-  // هيرجع فاضي دايمًا رغم إن الفرع حقيقي وليه بيانات. الحل: لما "private_cairo" يكون من ضمن
-  // المجموعات المختارة، نوسّع فلتر المبيعات ليشمل المسميين الحقيقيين كمان.
+  // فواتير المناديب بتتسجل private_chains_cairo / private_chains_giza، وفروعها القديمة ممكن تكون private_cairo
   const HM_GRP_SALES_ALIAS = { private_cairo: ['private_cairo','private_chains_cairo','private_chains_giza'] };
   const grpsForSales = grps.flatMap(g => HM_GRP_SALES_ALIAS[g] || [g]);
+  const allowedGrps = new Set(grpsForSales);
   const grpFilter  = grpsForSales.length ? `&grp=in.(${grpsForSales.join(',')})` : '';
 
-  // كل بيانات الخريطة دلوقتي مصدرها المناديب فقط — فواتير التسليم والمرتجع (sales_deliveries / sales_returns)
-  const [deliveries, returns_sales] = await Promise.all([
-    fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=id,grp,branch_name,delivery_date,total_net,total_tax,items${grpFilter}&delivery_date=gte.${from}&delivery_date=lte.${to}&deleted_at=is.null&limit=10000`,{headers:H}).then(r=>r.json()).catch(()=>[]),
-    fetch(`${SUPABASE_URL}/rest/v1/sales_returns?select=id,grp,branch_name,return_date,total_net,total_tax,items${grpFilter}&return_date=gte.${from}&return_date=lte.${to}&deleted_at=is.null&limit=10000`,{headers:H}).then(r=>r.json()).catch(()=>[]),
+  // 1) تاريخ القطع = آخر تاريخ فاتورة دخلت MT. لحد التاريخ ده المصدر فواتير MT، وبعده مبيعات المناديب.
+  const cutoff = await hmMtCutoff(H);
+  const mtEnd  = cutoff ? (to < cutoff ? to : cutoff) : null;
+  const needMt = !!cutoff && from <= mtEnd;
+  let repsStart = from;
+  if(cutoff){ const nx = hmAddDayISO(cutoff, 1); if(nx > repsStart) repsStart = nx; }
+  const needReps = repsStart <= to;
+
+  const [mt, deliveries, bidx] = await Promise.all([
+    needMt ? hmFetchMt(from, mtEnd, H).catch(()=>null) : Promise.resolve(null),
+    needReps ? fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=id,grp,branch_name,delivery_date,total_net,total_tax,items${grpFilter}&delivery_date=gte.${repsStart}&delivery_date=lte.${to}&deleted_at=is.null&limit=10000`,{headers:H}).then(r=>r.json()).catch(()=>[]) : Promise.resolve([]),
+    hmBranchIndex(H).catch(()=>new Map()),
   ]);
 
-  let D  = Array.isArray(deliveries)?deliveries:[];
-  let RS = Array.isArray(returns_sales)?returns_sales:[];
+  const clientSet = (client!=='all' && _hmClientBranches[client]) ? _hmClientBranches[client] : null;
+  const passClient = (name) => !clientSet || clientSet.has(name);
+  const selNorm = new Set(Array.from(_hmSelectedItems).map(hmNorm));
 
-  // فلترة على فروع العميل المختار (نفس ربط فرع↔عميل من تاب أسعار الأصناف والخصومات)
-  if(client!=='all' && _hmClientBranches[client]){
-    const branchSet = _hmClientBranches[client];
-    D  = D.filter(d=>branchSet.has(d.branch_name));
-    RS = RS.filter(r=>branchSet.has(r.branch_name));
-  }
-
-  // بناء map الفروع
   const branchMap = {};
   const ensureBranch = (name, grp) => {
     const k = name.trim();
-    if(!branchMap[k]) branchMap[k] = {branch:k, grp:grp||'', visitDates:new Set(), products:0, returns:0, lastVisit:null, invoiceValue:0, returnValue:0, retValuePct:0, selItems:0};
+    if(!branchMap[k]) branchMap[k] = {branch:k, grp:grp||'', visitDates:new Set(), products:0, returns:0, lastVisit:null, gross:0, invoiceValue:0, returnValue:0, retValuePct:0, selItems:0};
     return branchMap[k];
   };
+  const touch = (b, dt) => { if(dt){ b.visitDates.add(dt); if(!b.lastVisit||dt>b.lastVisit) b.lastVisit = dt; } };
+  const resolveSite = (site) => {
+    const raw = String(site||'').trim(); if(!raw) return null;
+    const hit = bidx.get(hmNorm(raw));
+    return hit ? {name:hit.name, grp:hit.grp, matched:true} : {name:raw, grp:'other', matched:false};
+  };
+  const groupOk = (s) => !grps.length || allowedGrps.has(s.grp);
 
-  // الزيارات = عدد الأيام المميزة اللي نزلتلها فاتورة (يوم واحد فيه 3 فواتير = زيارة واحدة)
-  // قيمة الفواتير + الأصناف — من فواتير المناديب (sales_deliveries)
+  let unmatchedSites = new Set(), unassignedReturns = 0, mtReturnsTotal = 0;
+
+  // 2) فواتير MT (لحد تاريخ القطع)
+  if(mt){
+    const excl = new Set();
+    const keyOf = r => (r.file_name||'')+'||'+(r.branch||'')+'||'+(r.invoice_no||'');
+    const invs = (mt.inv||[]).filter(r=>{
+      const g = Number(r.gross)||0, d = Number(r.discount)||0;
+      if(g>0 && Math.abs(g-d)<0.01){ excl.add(keyOf(r)); return false; } // استبعاد البضاعة المجانية
+      return true;
+    });
+    const siteNet = {};      // اسم الفرع → صافي MT
+    const custSites = {};    // العميل (موحّد) → {اسم الفرع: صافي}
+    invs.forEach(r=>{
+      const s = resolveSite(r.customer_site); if(!s) return;
+      const net = Number(r.net)||0;
+      siteNet[s.name] = (siteNet[s.name]||0) + net;
+      const ck = hmNorm(r.customer);
+      if(ck){ (custSites[ck] = custSites[ck] || {})[s.name] = (custSites[ck][s.name]||0) + net; }
+      if(!s.matched) unmatchedSites.add(s.name);
+      if(!groupOk(s) || !passClient(s.name)) return;
+      const b = ensureBranch(s.name, s.grp);
+      b.gross += net; touch(b, String(r.invoice_date||'').slice(0,10));
+    });
+    // الأصناف
+    (mt.items||[]).forEach(r=>{
+      if(excl.has(keyOf(r))) return;
+      const s = resolveSite(r.customer_site); if(!s || !groupOk(s) || !passClient(s.name)) return;
+      const b = ensureBranch(s.name, s.grp);
+      b.products += 1;
+      if(selNorm.size && selNorm.has(hmNorm(r.item))) b.selItems += Number(r.total)||0;
+    });
+    // مرتجع MT: مسجل بالعميل والحي بس (مفيش اسم فرع) → توزيع نسبي على فروع العميل بحسب صافي مبيعاتها في الفترة
+    const custRet = {};
+    (mt.rets||[]).forEach(r=>{
+      const ck = hmNorm(r.customer); const v = Number(r.total)||0;
+      mtReturnsTotal += v;
+      const o = custRet[ck] || (custRet[ck] = {val:0, lines:0}); o.val += v; o.lines += 1;
+    });
+    Object.keys(custRet).forEach(ck=>{
+      const sites = custSites[ck];
+      const o = custRet[ck];
+      if(!sites){ unassignedReturns += o.val; return; }
+      const names = Object.keys(sites);
+      let sum = 0; names.forEach(n=>{ sum += Math.max(0, sites[n]); });
+      names.forEach(n=>{
+        const share = sum>0 ? Math.max(0, sites[n])/sum : 1/names.length;
+        const bi = bidx.get(hmNorm(n));
+        const s = {name:n, grp: bi ? bi.grp : 'other'};
+        if(!groupOk(s) || !passClient(n)) return;
+        const b = ensureBranch(n, s.grp);
+        b.returnValue += o.val*share; b.returns += Math.round(o.lines*share);
+      });
+    });
+  }
+
+  // 3) مبيعات المناديب بعد تاريخ القطع (البيع فقط — من غير مرتجع المناديب)
+  const D = Array.isArray(deliveries) ? deliveries : [];
   D.forEach(d=>{
     if(!d.branch_name) return;
-    const b = ensureBranch(d.branch_name, d.grp);
-    const dt = d.delivery_date||'';
-    if(dt){
-      b.visitDates.add(dt);
-      if(!b.lastVisit||dt>b.lastVisit) b.lastVisit = dt;
-    }
-    b.invoiceValue += ((d.total_net||0)-(d.total_tax||0)); // الصافي بدون ضريبة — نفس منطق فواتير المناديب
+    const bi = bidx.get(hmNorm(d.branch_name));
+    const name = bi ? bi.name : String(d.branch_name).trim();
+    if(!passClient(name) && !passClient(String(d.branch_name).trim())) return;
+    const b = ensureBranch(name, bi ? bi.grp : d.grp);
+    touch(b, d.delivery_date||'');
+    b.gross += ((d.total_net||0)-(d.total_tax||0));
     b.products += Array.isArray(d.items) ? d.items.length : 0;
-    // قيمة الأصناف المختارة بس (لو المستخدم حدد أصناف من فلتر "الأصناف") - بتتحسب دايمًا (0 لو مفيش اختيار)
-    if(_hmSelectedItems.size && Array.isArray(d.items)){
+    if(selNorm.size && Array.isArray(d.items)){
       d.items.forEach(it=>{
         const nm = (it && it.name ? String(it.name) : '').trim();
-        if(!nm || !_hmSelectedItems.has(nm)) return;
-        const val = (it.total!=null) ? Number(it.total)||0 : (Number(it.qty)||0)*(Number(it.price)||0);
-        b.selItems += val;
+        if(!nm || !selNorm.has(hmNorm(nm))) return;
+        b.selItems += (it.total!=null) ? Number(it.total)||0 : (Number(it.qty)||0)*(Number(it.price)||0);
       });
     }
   });
 
-  // قيمة المرتجع + عدد أصناف المرتجعات — من مرتجعات المناديب (sales_returns)
-  // فاتورة المرتجع كمان بتتحسب زيارة وبتدخل في حساب تاريخ آخر فاتورة (زي فاتورة التوريد بالظبط)
-  RS.forEach(r=>{
-    if(!r.branch_name) return;
-    const b = ensureBranch(r.branch_name, r.grp);
-    const dt = r.return_date||'';
-    if(dt){
-      b.visitDates.add(dt);
-      if(!b.lastVisit||dt>b.lastVisit) b.lastVisit = dt;
-    }
-    b.returnValue += ((r.total_net||0)-(r.total_tax||0));
-    b.returns += Array.isArray(r.items) ? r.items.length : 0;
-  });
-
-  // تحويل مجموعة الأيام لعدد زيارات + نسبة المرتجع من الصافي
   Object.values(branchMap).forEach(b=>{
     b.visits = b.visitDates.size;
     delete b.visitDates;
-    b.retValuePct = b.invoiceValue>0 ? (b.returnValue/b.invoiceValue*100) : 0;
+    b.invoiceValue = b.gross - b.returnValue;                       // الصافي بعد خصم المرتجع
+    b.retValuePct = b.gross>0 ? (b.returnValue/b.gross*100) : 0;
   });
 
-  _hmRawData = Object.values(branchMap);
+  _hmRawData = Object.values(branchMap).filter(b=>b.visits>0 || b.returnValue>0);
+  _hmActiveNames = new Set(_hmRawData.filter(b=>b.visits>0).map(b=>b.branch.trim()));
+
+  const fmtN = v => Math.round(v).toLocaleString('en-US');
+  _hmSourceNote = cutoff
+    ? `المصدر: فواتير MT حتى ${cutoff}${repsStart<=to?` + مبيعات المناديب من ${repsStart}`:''}`
+      + (mt && unmatchedSites.size ? ` — ${unmatchedSites.size} فرع MT غير مطابق لجدول الفروع (تحت "غير مصنّف")` : '')
+      + (unassignedReturns>0 ? ` — مرتجع MT غير موزّع (عميل بدون مبيعات في الفترة): ${fmtN(unassignedReturns)} ج` : '')
+    : 'مفيش فواتير MT — المصدر فواتير المناديب';
+
   try{ await hmComputeGrpCards(from, to, client); }catch(e){ _hmGrpCards = {}; }
   hmRender(_hmRawData, metric);
   hmFillTable(_hmRawData);
@@ -40498,19 +40591,9 @@ async function hmFetchClientVisitedSet(client, from, to){
   if(client==='all' || !_hmClientBranches[client]) return new Set();
   const branchSet = _hmClientBranches[client];
   if(!branchSet.size) return new Set();
-  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-  // مش بنبعت أسماء الفروع كفلتر in.() في الـ URL — بعض أسماء الفروع فيها أقواس "(" ")"
-  // (زي "العثيم - مول بيتا (حدائق اكتوبر)")، والقوس ده بيتعارض مع صيغة in.(...) نفسها
-  // ويبوّظ الفلتر ويخلي نتايج ناقصة جداً. فبنجيب كل فواتير الفترة (الجدول صغير) ونفلتر في الجافاسكريبت.
-  // وبنستخدم hmFetchAllRows عشان لو عدد الفواتير في الفترة أكتر من 1000 (زي دلوقتي)
-  // منفقدش أي صف بسبب سقف الـ Supabase الافتراضي.
-  const [delRes, retRes] = await Promise.all([
-    hmFetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=branch_name,delivery_date&delivery_date=gte.${from}&delivery_date=lte.${to}&deleted_at=is.null&order=id.asc`, H),
-    hmFetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=branch_name,return_date&return_date=gte.${from}&return_date=lte.${to}&deleted_at=is.null&order=id.asc`, H),
-  ]);
+  // "اتزار" = الفرع ليه نشاط في المصدر الجديد (فواتير MT حتى تاريخ القطع + مبيعات المناديب بعده) — اتحسب في hmLoad
   const visited = new Set();
-  delRes.forEach(d=>{ if(d.branch_name && branchSet.has(d.branch_name.trim())) visited.add(d.branch_name.trim()); });
-  retRes.forEach(r=>{ if(r.branch_name && branchSet.has(r.branch_name.trim())) visited.add(r.branch_name.trim()); });
+  branchSet.forEach(n=>{ const t = String(n).trim(); if(_hmActiveNames.has(t)) visited.add(t); });
   return visited;
 }
 
@@ -40581,17 +40664,9 @@ async function hmUpdateGroupCoverage(grps, from, to){
   const branchLists = await Promise.all(grps.map(g=>hmFetchGroupBranchesList(g)));
   const allBranches = [...new Set(branchLists.flat())].sort((a,b)=>a.localeCompare(b,'ar'));
 
-  // فروع اتزارت فعلاً — بنجيب كل فواتير الفترة بدون فلتر grp (نفس منطق تغطية العميل)
-  // عشان مانفتقدش فروع بسبب grp غير دقيق على فاتورة معينة
-  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-  const [delRes, retRes] = await Promise.all([
-    hmFetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=branch_name,delivery_date&delivery_date=gte.${from}&delivery_date=lte.${to}&deleted_at=is.null&order=id.asc`, H),
-    hmFetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=branch_name,return_date&return_date=gte.${from}&return_date=lte.${to}&deleted_at=is.null&order=id.asc`, H),
-  ]);
-  const branchSet = new Set(allBranches);
+  // فروع اتزارت = ليها نشاط في المصدر الجديد (MT حتى تاريخ القطع + المناديب بعده) — اتحسب في hmLoad
   const visitedSet = new Set();
-  delRes.forEach(d=>{ if(d.branch_name && branchSet.has(d.branch_name.trim())) visitedSet.add(d.branch_name.trim()); });
-  retRes.forEach(r=>{ if(r.branch_name && branchSet.has(r.branch_name.trim())) visitedSet.add(r.branch_name.trim()); });
+  allBranches.forEach(n=>{ if(_hmActiveNames.has(String(n).trim())) visitedSet.add(n); });
 
   const visited=[], notVisited=[];
   allBranches.forEach(name=>{ if(visitedSet.has(name)) visited.push(name); else notVisited.push(name); });
@@ -40693,14 +40768,9 @@ function hmCoverageExportPDF(){
 let _hmGrpCards = {}; // grp → {total:[], visited:[], notVisited:[]}
 async function hmComputeGrpCards(from, to, client){
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-  const [brs, delRes, retRes] = await Promise.all([
-    hmFetchAllRows(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,grp&status=eq.active&order=id.asc`, H),
-    hmFetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=branch_name&delivery_date=gte.${from}&delivery_date=lte.${to}&deleted_at=is.null&order=id.asc`, H),
-    hmFetchAllRows(`${SUPABASE_URL}/rest/v1/sales_returns?select=branch_name&return_date=gte.${from}&return_date=lte.${to}&deleted_at=is.null&order=id.asc`, H),
-  ]);
+  const brs = await hmFetchAllRows(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,grp&status=eq.active&order=id.asc`, H);
   const clientSet = (client && client!=='all' && _hmClientBranches[client]) ? _hmClientBranches[client] : null;
-  const seen = new Set();
-  delRes.concat(retRes).forEach(x=>{ if(x.branch_name) seen.add(String(x.branch_name).trim()); });
+  const seen = _hmActiveNames; // الفروع اللي ليها نشاط في المصدر الجديد (اتحسب في hmLoad)
   const out = {};
   brs.forEach(b=>{
     const name = String(b.branch_name||'').trim();
@@ -40787,7 +40857,8 @@ function hmRender(data, metric){
     return pct>0.3 ? '#fff' : '#1A1A2E';
   };
 
-  let html = `<div style="font-size:12px;font-weight:700;color:#003049;margin-bottom:12px">المقياس: ${metricLabels[metric]||metric} — أعلى قيمة: ${fmtVal(maxVal)}</div>`;
+  let html = `<div style="font-size:12px;font-weight:700;color:#003049;margin-bottom:${_hmSourceNote?'4':'12'}px">المقياس: ${metricLabels[metric]||metric} — أعلى قيمة: ${fmtVal(maxVal)}</div>`;
+  if(_hmSourceNote) html += `<div style="font-size:11px;color:#8B6F47;background:#FBF7EC;border-radius:6px;padding:5px 9px;margin-bottom:12px">${_hmSourceNote}</div>`;
 
   Object.entries(groups).forEach(([grp, branches])=>{
     const grpColor = hmGrpColor(grp);
