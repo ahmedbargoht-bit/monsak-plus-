@@ -598,6 +598,7 @@ input[type=number] { -moz-appearance:textfield; }
       <!-- نواقص سابقة بانتظار استلام التوريد — زرار "استلمت التوريد" -->
       <div id="miss-pending-receipt-wrap" style="display:none;margin-bottom:14px">
         <div class="card-title" style="color:#1A7A4A"><i class="ti ti-truck-delivery"></i> نواقص بانتظار استلام التوريد</div>
+        <select id="miss-branch-filter" onchange="_missBrSel=this.value;renderMissingPendingReceipts()" style="width:100%;padding:9px;margin-bottom:8px;border:1.5px solid #C8E6D4;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:#fff"></select>
         <div id="miss-pending-receipt-list"></div>
       </div>
 
@@ -661,6 +662,7 @@ input[type=number] { -moz-appearance:textfield; }
       <!-- مرتجعات المندوب رفعها فعلاً وبانتظار تأكيدك -->
       <div id="ret-pending-ack-wrap" style="display:none;margin-bottom:14px">
         <div class="card-title" style="color:#1A7A4A"><i class="ti ti-checkbox"></i> مرتجعات بانتظار تأكيدك</div>
+        <select id="ret-branch-filter" onchange="_retBrSel=this.value;renderReturnsPendingAck()" style="width:100%;padding:9px;margin-bottom:8px;border:1.5px solid #C8E6D4;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:#fff"></select>
         <div id="ret-pending-ack-list"></div>
       </div>
 
@@ -4950,15 +4952,35 @@ function updateMissBadge(){const b=document.getElementById('miss-badge');if(!b)r
 // ── نواقص سابقة بانتظار استلام التوريد — زرار "استلمت التوريد" ──
 // (المنسق هو اللي المفروض يأكد استلام التوريد بعد ما مشرف البيع/المندوب يورّد الصنف، مش
 // مجرد status="transferred" اللي بيتحط من طرف مشرف التنسيق — ده تأكيد فعلي من المنسق نفسه)
+
+// ── دروب داون الفروع لتابي النواقص والمرتجعات (للتأكيد فرع فرع) ──
+let _missBrSel = '__all', _retBrSel = '__all';
+async function _fillBranchFilter(selId, counts, current){
+  const sel = document.getElementById(selId); if(!sel) return current;
+  let names = [];
+  try{ names = await myAssignedBranchNames(); }catch(e){}
+  const all = [...new Set([...(names||[]), ...Object.keys(counts)])].filter(Boolean).sort((a,b)=>a.localeCompare(b,'ar'));
+  const total = Object.values(counts).reduce((a,b)=>a+b,0);
+  if(current!=='__all' && !all.includes(current)) current='__all';
+  const esc = t=>String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  sel.innerHTML = `<option value="__all">كل الفروع (${total})</option>` +
+    all.map(n=>`<option value="${esc(n)}">${esc(n)} (${counts[n]||0})</option>`).join('');
+  sel.value = current;
+  return current;
+}
 async function renderMissingPendingReceipts(){
   const wrap = document.getElementById('miss-pending-receipt-wrap');
   const list = document.getElementById('miss-pending-receipt-list');
   if(!wrap || !list || !cu?.name) return;
   try{
     const rows = await sbSelect('missing', {name: cu.name});
-    const pending = (Array.isArray(rows)?rows:[]).filter(m=>!m.confirmed);
-    if(!pending.length){ wrap.style.display='none'; return; }
+    const allPending = (Array.isArray(rows)?rows:[]).filter(m=>!m.confirmed);
+    if(!allPending.length){ wrap.style.display='none'; return; }
     wrap.style.display='block';
+    const cnt = {}; allPending.forEach(m=>{ const b=m.branch||'—'; cnt[b]=(cnt[b]||0)+1; });
+    _missBrSel = await _fillBranchFilter('miss-branch-filter', cnt, _missBrSel);
+    const pending = _missBrSel==='__all' ? allPending : allPending.filter(m=>(m.branch||'—')===_missBrSel);
+    if(!pending.length){ list.innerHTML='<div style="text-align:center;color:#999;font-size:12px;padding:14px">لا توجد نواقص بانتظار التأكيد في هذا الفرع</div>'; return; }
     list.innerHTML = pending.map(m=>`
       <div style="background:#F0FBF5;border:1px solid #C8E6D4;border-radius:10px;padding:10px;margin-bottom:8px">
         <div style="font-size:12px;font-weight:700;color:#1A7A4A">${(m.snf||'').toString().replace(/</g,'&lt;')}</div>
@@ -4999,11 +5021,15 @@ async function renderReturnsPendingAck(){
     const rows = await sbSelect('returns', {name: cu.name});
     const list = Array.isArray(rows) ? rows : [];
 
-    const toAck = list.filter(r => r.pulled === true && r.coord_ack !== true);
-    if(!toAck.length){ ackWrap.style.display='none'; }
+    const allToAck = list.filter(r => r.pulled === true && r.coord_ack !== true);
+    if(!allToAck.length){ ackWrap.style.display='none'; }
     else{
       ackWrap.style.display='block';
-      ackList.innerHTML = toAck.map(r=>`
+      const cnt = {}; allToAck.forEach(r=>{ const b=r.branch||'—'; cnt[b]=(cnt[b]||0)+1; });
+      _retBrSel = await _fillBranchFilter('ret-branch-filter', cnt, _retBrSel);
+      const toAck = _retBrSel==='__all' ? allToAck : allToAck.filter(r=>(r.branch||'—')===_retBrSel);
+      if(!toAck.length) ackList.innerHTML='<div style="text-align:center;color:#999;font-size:12px;padding:14px">لا توجد مرتجعات بانتظار التأكيد في هذا الفرع</div>';
+      else ackList.innerHTML = toAck.map(r=>`
         <div style="background:#F0FBF5;border:1px solid #C8E6D4;border-radius:10px;padding:10px;margin-bottom:8px">
           <div style="font-size:12px;font-weight:700;color:#1A7A4A">${(r.snf||'').toString().replace(/</g,'&lt;')}</div>
           <div style="font-size:10px;color:#666;margin-top:2px">${r.branch||''} ${r.qty?'· '+r.qty+' وحدة':''}</div>
@@ -5015,7 +5041,7 @@ async function renderReturnsPendingAck(){
         </div>`).join('');
     }
 
-    const issues = list.filter(r => r.pulled !== true && r.pull_result && r.pull_result !== 'pulled');
+    const issues = list.filter(r => r.pulled !== true && r.pull_result && r.pull_result !== 'pulled' && (_retBrSel==='__all' || (r.branch||'—')===_retBrSel));
     if(!issueWrap || !issueList) return;
     if(!issues.length){ issueWrap.style.display='none'; }
     else{
