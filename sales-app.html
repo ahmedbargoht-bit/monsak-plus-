@@ -2121,6 +2121,20 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
       </div>
     </div>
 
+    <!-- ══ زيارة السوق ══ -->
+    <div class="panel" id="panel-market">
+      <div style="background:linear-gradient(135deg,#4B3C1A,#6B3D15);border-radius:14px;padding:14px 16px;margin-bottom:12px;color:#EDE5D8">
+        <div style="font-size:14px;font-weight:900;margin-bottom:4px">🏪 زيارة السوق</div>
+        <div style="font-size:10px;color:rgba(237,229,216,.65)">آخر زيارة مشرف ومندوب · رصيد الفرع من آخر تقرير منسق · المرتجعات · مؤشرات المندوب</div>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+        <div id="mk-days" style="display:flex;gap:6px;overflow-x:auto;width:100%;padding-bottom:4px"></div>
+        <input id="mk-q" oninput="mkRender()" placeholder="🔍 ابحث باسم الفرع أو المندوب" style="flex:2;min-width:150px;padding:9px;border:1.5px solid #D4C4A8;border-radius:10px;font-family:Cairo,sans-serif;font-size:12px;background:#fff">
+        <button onclick="mkLoad(true)" style="padding:9px 14px;border:none;border-radius:10px;background:var(--navy);color:#fff;font-family:Cairo,sans-serif;font-size:12px;font-weight:700;cursor:pointer">🔄 تحديث</button>
+      </div>
+      <div id="mk-list"></div>
+    </div>
+
     <!-- ══ البيع اليومي ══ -->
     <div class="panel" id="panel-yawm">
 
@@ -2303,20 +2317,6 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--navy)}
       <button class="btn btn-ghost" onclick="closeModal('modal-task')" style="width:auto;padding:10px 16px">إلغاء</button>
     </div>
   </div>
-</div>
-
-<!-- ══ PANEL: زيارة السوق ══════════════════════════════════════ -->
-<div id="panel-market" class="panel">
-  <div style="background:linear-gradient(135deg,#4B3C1A,#6B3D15);border-radius:14px;padding:14px 16px;margin-bottom:12px;color:#EDE5D8">
-    <div style="font-size:14px;font-weight:900;margin-bottom:4px">🏪 زيارة السوق</div>
-    <div style="font-size:10px;color:rgba(237,229,216,.65)">آخر زيارة مشرف ومندوب · رصيد الفرع من آخر تقرير منسق · المرتجعات · مؤشرات المندوب</div>
-  </div>
-  <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
-    <select id="mk-grp" onchange="mkRender()" style="flex:1;min-width:120px;padding:9px;border:1.5px solid #D4C4A8;border-radius:10px;font-family:Cairo,sans-serif;font-size:12px;background:#fff"></select>
-    <input id="mk-q" oninput="mkRender()" placeholder="🔍 ابحث باسم الفرع أو المندوب" style="flex:2;min-width:150px;padding:9px;border:1.5px solid #D4C4A8;border-radius:10px;font-family:Cairo,sans-serif;font-size:12px;background:#fff">
-    <button onclick="mkLoad(true)" style="padding:9px 14px;border:none;border-radius:10px;background:var(--navy);color:#fff;font-family:Cairo,sans-serif;font-size:12px;font-weight:700;cursor:pointer">🔄 تحديث</button>
-  </div>
-  <div id="mk-list"></div>
 </div>
 
 <!-- ══ PANEL: المنجز (قديم — غير معروض، الزرار بيفتح زيارة السوق) ══════ -->
@@ -13152,6 +13152,26 @@ async function mkLoad(force){
     MK.deliv = {}; MK.rep = {};
     dels.forEach(d=>{ (MK.deliv[d.branch_name] = MK.deliv[d.branch_name] || []).push(d); if(!MK.rep[d.branch_name]) MK.rep[d.branch_name] = d; });
     MK.coord = {}; vis.forEach(v=>{ if(v.branch && !MK.coord[v.branch]) MK.coord[v.branch] = v; });
+    // فروع الخطة (خططي بلس) للأسبوع الحالي
+    const _d=new Date(); const _diff=_d.getDay()===6?0:_d.getDay()+1;
+    const _sat=new Date(_d); _sat.setDate(_d.getDate()-_diff); _sat.setHours(0,0,0,0);
+    const ws=localDateStr(_sat);
+    let plans = [];
+    if(cu?.level==='manager' || cu?.level==='gm'){
+      const all = await mkAll(`sales_plans_plus?week_start=eq.${ws}&select=id,staff_name,sector&order=staff_name.asc`);
+      plans = cu.level==='gm' ? all : all.filter(p=>String(p.sector||'').split(',').map(s=>s.trim()).some(s=>groups.includes(s)));
+    } else {
+      plans = await mkAll(`sales_plans_plus?staff_name=eq.${encodeURIComponent(cu?.name||'')}&week_start=eq.${ws}&select=id,staff_name,sector&order=id.asc`);
+    }
+    MK.planItems = [];
+    if(plans.length){
+      const nameOf = {}; plans.forEach(p=>{ nameOf[p.id] = p.staff_name; });
+      const its = await mkAll(`sales_plan_items?plan_id=in.(${plans.map(p=>p.id).join(',')})&select=plan_id,client_name,area,visit_date,visit_status&order=visit_date.asc,id.asc`);
+      MK.planItems = its.filter(i=>i.client_name).map(i=>({...i, staff:nameOf[i.plan_id]||''}));
+    }
+    MK.days = [...new Set(MK.planItems.map(i=>i.visit_date).filter(Boolean))].sort();
+    const today = localDateStr(new Date());
+    if(!MK.day || !(MK.day==='all' || MK.days.includes(MK.day))) MK.day = MK.days.includes(today) ? today : (MK.days.find(d=>d>=today) || 'all');
     MK.loaded = true;
   }catch(e){
     console.warn('mkLoad', e);
@@ -13159,24 +13179,36 @@ async function mkLoad(force){
     MK.loading = false; return;
   }
   MK.loading = false;
-  // دروب داون المجموعات
-  const sel = document.getElementById('mk-grp');
-  if(sel){
-    const gs = [...new Set(MK.branches.map(b=>b.grp).filter(Boolean))];
-    sel.innerHTML = '<option value="">كل المجموعات</option>' + gs.map(g=>`<option value="${mkEsc(g)}">${mkEsc((GROUPS[g]&&GROUPS[g].label)||g)}</option>`).join('');
-  }
   mkRender();
 }
+function mkSetDay(d){ MK.day = d; mkRender(); }
 
 function mkRender(){
   const list = document.getElementById('mk-list');
   if(!list) return;
-  const g = document.getElementById('mk-grp')?.value || '';
   const q = (document.getElementById('mk-q')?.value||'').trim();
-  let rows = MK.branches.filter(b=>(!g || b.grp===g));
-  if(q) rows = rows.filter(b=>(b.branch_name||'').includes(q) || (b.rep_name||'').includes(q) || ((MK.rep[b.branch_name]||{}).rep_name||'').includes(q));
-  if(!rows.length){ list.innerHTML = '<div style="text-align:center;padding:2rem;color:#aaa;font-size:12px">لا توجد فروع</div>'; return; }
-  const LIM = 80;
+  // شرائح أيام الخطة
+  const dEl = document.getElementById('mk-days');
+  if(dEl){
+    const DN = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+    const chip = (v,label,sub)=>`<button onclick="mkSetDay('${v}')" style="flex:0 0 auto;padding:7px 12px;border-radius:10px;border:none;font-family:Cairo,sans-serif;font-size:12px;font-weight:700;cursor:pointer;background:${MK.day===v?'var(--navy)':'#f0e8d8'};color:${MK.day===v?'#fff':'var(--navy)'}">${label}${sub?`<div style="font-size:9.5px;font-weight:600;opacity:.8">${sub}</div>`:''}</button>`;
+    dEl.innerHTML = MK.days.map(d=>{ const dt=new Date(d+'T00:00:00'); return chip(d, DN[dt.getDay()], d.slice(5)); }).join('') + (MK.days.length ? chip('all','كل الأسبوع','') : '');
+  }
+  if(!MK.planItems || !MK.planItems.length){
+    list.innerHTML = '<div style="text-align:center;padding:2rem;color:#aaa;font-size:12px">لا توجد خطة للأسبوع الحالي — اعمل خطة من "خططي بلس" وهتظهر فروعها هنا</div>'; return;
+  }
+  const seen = {};
+  let rows = [];
+  MK.planItems.forEach(it=>{
+    if(MK.day!=='all' && it.visit_date!==MK.day) return;
+    const key = it.client_name+'|'+it.visit_date;
+    if(seen[key]) return; seen[key] = 1;
+    const br = MK.branches.find(b=>b.branch_name===it.client_name) || {};
+    rows.push({branch_name:it.client_name, route:it.area||br.route||'', grp:br.grp||'', rep_name:br.rep_name||'', day:it.visit_date, staff:it.staff, vstatus:it.visit_status});
+  });
+  if(q) rows = rows.filter(b=>(b.branch_name||'').includes(q) || (b.rep_name||'').includes(q) || ((MK.rep[b.branch_name]||{}).rep_name||'').includes(q) || (b.route||'').includes(q));
+  if(!rows.length){ list.innerHTML = '<div style="text-align:center;padding:2rem;color:#aaa;font-size:12px">لا توجد فروع في الخطة لهذا اليوم</div>'; return; }
+  const LIM = 120;
   const shown = rows.slice(0,LIM);
   list.innerHTML = shown.map((b,i)=>{
     const bn = b.branch_name;
@@ -13189,13 +13221,13 @@ function mkRender(){
         <div style="font-weight:800;font-size:13px;color:#4B3C1A">${mkEsc(bn)}</div>
         <button onclick="mkToggle(${i})" style="padding:5px 10px;border:none;border-radius:8px;background:#F0E8D8;color:var(--navy);font-family:Cairo,sans-serif;font-size:11px;font-weight:700;cursor:pointer">تفاصيل ▾</button>
       </div>
-      <div style="font-size:10px;color:#888">${mkEsc(b.route||'')}${b.grp?' · '+mkEsc((GROUPS[b.grp]&&GROUPS[b.grp].label)||b.grp):''}</div>
+      <div style="font-size:10px;color:#888">${mkEsc(b.route||'')}${MK.day==='all'&&b.day?' · '+mkEsc(b.day):''}${(cu?.level==='manager'||cu?.level==='gm')&&b.staff?' · '+mkEsc(b.staff):''}${b.vstatus==='done'?' · ✅ تمت في الخطة':''}</div>
       ${line('👔','آخر زيارة مشرف: '+(sp ? `<b>${mkEsc(spD)}</b> (${mkAgo(spD)}) — ${mkEsc(sp.supervisor_name||'—')}` : '<span style="color:#B71C1C">لم يُزَر من قبل</span>'))}
       ${line('🚚','آخر زيارة مندوب ('+mkEsc(rpName)+'): '+(rp ? `<b>${mkEsc(rp.delivery_date)}</b> (${mkAgo(rp.delivery_date)})` : '<span style="color:#B71C1C">لا تسليمات خلال 120 يوم</span>'))}
       ${line('📋','آخر تقرير منسق: '+(cd ? `<b>${mkEsc(cd.date)}</b> (${mkAgo(cd.date)}) — ${mkEsc(cd.name||'—')}` : '<span style="color:#888">لا يوجد تقرير</span>'))}
       <div id="mk-d-${i}" data-bn="${mkEsc(bn)}" style="display:none;margin-top:8px"></div>
     </div>`;
-  }).join('') + (rows.length>LIM ? `<div style="text-align:center;font-size:11px;color:#888;padding:6px">معروض ${LIM} من ${rows.length} — استخدم البحث أو فلتر المجموعة</div>` : '');
+  }).join('') + (rows.length>LIM ? `<div style="text-align:center;font-size:11px;color:#888;padding:6px">معروض ${LIM} من ${rows.length} — استخدم البحث</div>` : '');
 }
 
 async function mkToggle(i){
@@ -13313,6 +13345,7 @@ async function mkDetailHTML(bn){
     <button onclick="mkOpenRate('${mkEsc(bn).replace(/'/g,"\\'")}','${mkEsc(rep).replace(/'/g,"\\'")}')" style="margin-top:8px;width:100%;padding:10px;border:none;border-radius:10px;background:#731E2E;color:#fff;font-family:Cairo,sans-serif;font-size:12.5px;font-weight:700;cursor:pointer">⭐ قيّم المندوب بعد الزيارة</button>`;
 
   return kpis + bal + retHtml + rateHtml;
+  // (rows مبنية من الخطة؛ التفاصيل بتتحمل حسب اسم الفرع)
 }
 
 // ── تقييم المندوب ──
