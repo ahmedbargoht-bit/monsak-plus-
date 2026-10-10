@@ -209,8 +209,9 @@ function loadSales(){
     getAll('branches?select=branch_name,grp&status=eq.active&order=id.asc').catch(function(){return []}),
     loadMt(monthStart,today),
     getAll('tamr_sales_rep_routes?select=branch_name,route,group_name&order=id.asc').catch(function(){return []}),
-    get('users?select=name,grp&role=eq.sales&level=eq.rep&status=eq.active&limit=1000').catch(function(){return []})
-  ]).then(function(r){return {ug:r[8]||[],rr:r[7]||[],del:r[0]||[],ret:r[1]||[],tgt:r[2]||[],ovr:r[3]||[],usr:r[4]||[],br:r[5]||[],mt:r[6]||{cut:null,inv:[],ret:[]},c:c,month:month,monthStart:monthStart,today:today}});
+    get('users?select=name,grp&role=eq.sales&level=eq.rep&status=eq.active&limit=1000').catch(function(){return []}),
+    get('sales_goal_discounts?select=cairo_discount,alex_discount&month=eq.'+month).catch(function(){return []})
+  ]).then(function(r){return {disc:(r[9]&&r[9][0])||null,ug:r[8]||[],rr:r[7]||[],del:r[0]||[],ret:r[1]||[],tgt:r[2]||[],ovr:r[3]||[],usr:r[4]||[],br:r[5]||[],mt:r[6]||{cut:null,inv:[],ret:[]},c:c,month:month,monthStart:monthStart,today:today}});
 }
 function refresh(){
   if(S.loading)return;S.loading=true;
@@ -342,6 +343,14 @@ function hmGroups(){
     var g=o.g==='private_cairo'?'private_chains_cairo':o.g;
     o.target=tg[g]||0;
   });
+  /* خصومات العملاء على كروت المجموعات: خصم كل إقليم بيتوزع على مجموعاته بنسبة إجمالي كل مجموعة */
+  var dsc2=d.disc||{},dReg={cairo:+dsc2.cairo_discount||0,alex:+dsc2.alex_discount||0},regSum={cairo:0,alex:0};
+  arr.forEach(function(o){regSum[o.g==='alex'?'alex':'cairo']+=Math.max(0,o.total)});
+  arr.forEach(function(o){
+    var rg=o.g==='alex'?'alex':'cairo';
+    o.disc=(dReg[rg]>0&&regSum[rg]>0)?dReg[rg]*Math.max(0,o.total)/regSum[rg]:0;
+    o.discPct=o.total>0?o.disc/o.total*100:0;
+  });
   return {groups:arr,max:max,total:total,from:d.monthStart,cut:cut};
 }
 function hmColor(v,max){
@@ -393,8 +402,10 @@ function renderHm(){
       (blk.gr.cov?(function(cv){
         function cell(n,l,c){return '<div style="flex:1;text-align:center;background:#fff;border:1px solid #e5e7eb;border-radius:.45rem;padding:.2rem .3rem"><div style="font-size:1.15rem;font-weight:800;line-height:1.1;color:'+c+'">'+n+'</div><div style="font-size:.6rem;color:#666;font-weight:700">'+l+'</div></div>';}
         var cp=cv.tot>0?Math.round(cv.vis/cv.tot*100):0;
-        var ap=blk.gr.target>0?Math.round(blk.gr.total/blk.gr.target*100):null;
-        return '<div style="display:flex;gap:.4rem;margin-bottom:.3rem">'+cell(cv.tot,'عدد الفروع','#003049')+cell(cv.vis,'اتزارت','#15803D')+cell(cv.not,'لم تُزَر','#B71C1C')+cell(cp+'%','نسبة التغطية','#0369A1')+cell(ap===null?'—':ap+'%','المحقق','#B45309')+'</div>';
+        var net2=blk.gr.total-(blk.gr.disc||0);
+        var ap=blk.gr.target>0?Math.round(net2/blk.gr.target*100):null;
+        var dcell=(blk.gr.disc>0)?cell(blk.gr.discPct.toFixed(1)+'%','خصم العملاء ('+fmt(blk.gr.disc)+' ج)','#B71C1C'):'';
+        return '<div style="display:flex;gap:.4rem;margin-bottom:.3rem">'+cell(cv.tot,'عدد الفروع','#003049')+cell(cv.vis,'اتزارت','#15803D')+cell(cv.not,'لم تُزَر','#B71C1C')+cell(cp+'%','نسبة التغطية','#0369A1')+cell(ap===null?'—':ap+'%','المحقق'+(blk.gr.disc>0?' (بعد الخصم)':''),'#B45309')+dcell+'</div>';
       })(blk.gr.cov):'')+
       '<div style="display:grid;grid-template-columns:repeat('+L.cols+',1fr);gap:.4rem">';
     blk.rows.forEach(function(b){
@@ -623,6 +634,19 @@ function computeSales(d){
     (retBy[o.rep_name]||[]).forEach(function(r){if((r.return_date||'')>cut)after-=net(r)});
     repNet[o.rep_name]=(+o.amount||0)+after;
   });
+  /* خصومات العملاء: بتتوزع على مناديب كل إقليم بنسبة مبيعاتهم (نفس لوحة التحكم) */
+  var grossAch=0;Object.keys(repNet).forEach(function(k){grossAch+=repNet[k]});
+  var dsc=d.disc||{},dCa=+dsc.cairo_discount||0,dAl=+dsc.alex_discount||0,discApplied=0;
+  if(dCa>0||dAl>0){
+    var rgOf={};(d.ug||[]).forEach(function(u){rgOf[u.name]=(u.grp==='alex'?'alex':'cairo')});
+    var rbase={cairo:0,alex:0};
+    Object.keys(repNet).forEach(function(n){if(rgOf[n])rbase[rgOf[n]]+=Math.max(0,repNet[n])});
+    var dd={cairo:dCa,alex:dAl};
+    Object.keys(repNet).forEach(function(n){
+      var rg=rgOf[n];if(!rg||!(dd[rg]>0)||!(rbase[rg]>0))return;
+      var sh=dd[rg]*Math.max(0,repNet[n])/rbase[rg];repNet[n]-=sh;discApplied+=sh;
+    });
+  }
   var achieved=0;Object.keys(repNet).forEach(function(k){achieved+=repNet[k]});
   var target=0,supT={},supA={},repSup={};
   // المشرف الفعلي من users.supervisors (زي لوحة التحكم) — عمود rep_targets.supervisor_name ممكن يكون قديم
@@ -636,7 +660,7 @@ function computeSales(d){
   var daily=target/WORK_DAYS,required=daily*passed;
   var todayNet=todaySales-todayRet;
   var sups=Object.keys(supT).map(function(s){return {name:s,target:supT[s],ach:supA[s]||0,pct:supT[s]>0?(supA[s]||0)/supT[s]*100:0}}).sort(function(a,b){return b.pct-a.pct});
-  return {days:days,todaySales:todaySales,todayRet:todayRet,todayNet:todayNet,achieved:achieved,target:target,passed:passed,
+  return {discApplied:discApplied,discPct:grossAch>0?discApplied/grossAch*100:0,days:days,todaySales:todaySales,todayRet:todayRet,todayNet:todayNet,achieved:achieved,target:target,passed:passed,
     daily:daily,required:required,pct:target>0?achieved/target*100:0,
     todayPct:daily>0?todayNet/daily*100:0,monthPct:passed/WORK_DAYS*100,
     expPct:(passed>0&&target>0)?(achieved/passed*WORK_DAYS)/target*100:0,remaining:target-achieved,sups:sups};
@@ -688,7 +712,7 @@ function renderSales(){
    '</div>'+
    '<div class="grid kpis6" style="margin-bottom:.6rem">'+
      card('s','#731E2E','الهدف الكلي',fmt(s.target),'w')+
-     card('s','#60A5FA','المحقق حتى الآن',fmt(s.achieved),'b')+
+     card('s','#60A5FA','المحقق حتى الآن'+(s.discApplied>0?'<div style="font-size:.6rem;color:#FBBF24;font-weight:700;margin-top:.1rem">بعد خصومات العملاء '+fmt(s.discApplied)+' ج ('+s.discPct.toFixed(1)+'% من المبيعات)</div>':''),fmt(s.achieved),'b')+
      card('s','#D97706','المطلوب حتى اليوم',fmt(s.required),'a')+
      card('s','#C4B5FD','المتوقع نهاية الشهر',Math.round(s.expPct)+'%',pctColor(s.expPct))+
      card('s','#F87171','الباقي من الهدف',fmt(Math.max(s.remaining,0)),'r')+
