@@ -3749,9 +3749,14 @@ h2,h3{color:#2C1F0A}
         <!-- ══ PANEL: متابعة زيارات المشرفين ══ -->
         <div id="panel-sup-visits-monitor" class="panel">
           <div class="page-header">
-            <div><h2>متابعة زيارات المشرفين</h2><p>زيارات مشرفي التنسيق للفروع من الخطة — الفرع، الموقع، والتقييم</p></div>
+            <div><h2>متابعة زيارات المشرفين</h2><p>زيارات المشرفين للفروع من الخطة — التنسيق والبيع</p></div>
+          </div>
+          <div style="display:flex;gap:8px;margin-bottom:14px">
+            <button id="svm-side-coord" onclick="svmSetSide('coord')" style="border:1.5px solid #005CBF;color:#fff;background:#005CBF;border-radius:10px;padding:8px 16px;font-family:inherit;font-weight:700;cursor:pointer">📋 قطاع التنسيق</button>
+            <button id="svm-side-sales" onclick="svmSetSide('sales')" style="border:1.5px solid #1A7A4A;color:#1A7A4A;background:#fff;border-radius:10px;padding:8px 16px;font-family:inherit;font-weight:700;cursor:pointer">🚚 قطاع البيع</button>
           </div>
           <div id="svm-root"></div>
+          <div id="svs-root" style="display:none"></div>
         </div>
 
         <!-- ══ PANEL: قوة القطاع (الهيكل التنظيمي الفعلي — مدير/مشرف/مندوب ومدير/مشرف/منسق) ══════ -->
@@ -40961,6 +40966,13 @@ async function hmComputeGrpCards(from, to, client){
     let y = +String(from).slice(0,4), m = +String(from).slice(5,7);
     const ey = +String(to).slice(0,4), em = +String(to).slice(5,7);
     while((y<ey || (y===ey && m<=em)) && months.length<24){ months.push(y+'-'+String(m).padStart(2,'0')); m++; if(m>12){m=1;y++;} }
+    // خصومات العملاء المحفوظة لشهور الفترة (قاهرة / إسكندرية)
+    _hmDisc = {cairo:0, alex:0};
+    try{
+      const dr = await fetch(`${SUPABASE_URL}/rest/v1/sales_goal_discounts?select=month,cairo_discount,alex_discount&month=in.(${months.join(',')})`,{headers:H});
+      const dj = dr.ok ? await dr.json() : [];
+      dj.forEach(r=>{ _hmDisc.cairo += +r.cairo_discount||0; _hmDisc.alex += +r.alex_discount||0; });
+    }catch(e){}
     const [tg, us] = await Promise.all([
       hmFetchAllRows(`${SUPABASE_URL}/rest/v1/rep_targets?select=rep_name,target_amount,month&deleted_at=is.null&month=in.(${months.join(',')})&order=id.asc`, H),
       hmFetchAllRows(`${SUPABASE_URL}/rest/v1/users?select=name,grp&role=eq.sales&level=eq.rep&status=eq.active&order=id.asc`, H)
@@ -40970,6 +40982,7 @@ async function hmComputeGrpCards(from, to, client){
   }catch(e){ console.warn('hm targets', e); }
 }
 let _hmGrpTarget = {};
+let _hmDisc = {cairo:0, alex:0};
 
 function hmShowGrpCardList(grp, type){
   const c = _hmGrpCards[grp]; if(!c) return;
@@ -40994,14 +41007,21 @@ function hmGrpCardHTML(grp){
       <div style="font-size:20px;font-weight:900;color:${col};line-height:1.1">${n}</div>
       <div style="font-size:10px;color:#666;margin-top:2px;font-weight:700">${lbl}</div></div>`;
   const cov = c.total.length ? Math.round(c.visited.length / c.total.length * 100) : 0;
-  let sales = 0;
-  (_hmRawData||[]).forEach(b=>{ const g = b.grp==='private_cairo' ? 'private_chains_cairo' : b.grp; if(g===grp) sales += (b.invoiceValue||0); });
+  let sales = 0; const gSales = {};
+  (_hmRawData||[]).forEach(b=>{ const g = b.grp==='private_cairo' ? 'private_chains_cairo' : b.grp; gSales[g] = (gSales[g]||0) + (b.invoiceValue||0); if(g===grp) sales += (b.invoiceValue||0); });
+  // خصم العملاء: خصم الإقليم بيتوزع على مجموعاته بنسبة مبيعات كل مجموعة
+  const regOf = g => g==='alex' ? 'alex' : 'cairo';
+  const regSum = {cairo:0, alex:0}; Object.keys(gSales).forEach(g=>{ regSum[regOf(g)] += Math.max(0,gSales[g]); });
+  const rg = regOf(grp), regDisc = rg==='alex' ? (_hmDisc.alex||0) : (_hmDisc.cairo||0);
+  const disc = (regDisc>0 && regSum[rg]>0) ? regDisc*Math.max(0,sales)/regSum[rg] : 0;
+  const discPct = sales>0 ? disc/sales*100 : 0;
+  const netSales = sales - disc;
   const tgt = _hmGrpTarget[grp] || 0;
-  const ach = tgt>0 ? Math.round(sales/tgt*100)+'%' : '—';
+  const ach = tgt>0 ? Math.round(netSales/tgt*100)+'%' : '—';
   const info = (n, lbl, col, tip) => `<div title="${tip}" style="flex:1;min-width:90px;text-align:center;padding:8px 6px;background:#fff;border:1px solid #E8E8E8;border-radius:8px">
       <div style="font-size:20px;font-weight:900;color:${col};line-height:1.1">${n}</div>
       <div style="font-size:10px;color:#666;margin-top:2px;font-weight:700">${lbl}</div></div>`;
-  return `<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">${cell(c.total.length,'عدد الفروع','#003049','total')}${cell(c.visited.length,'اتزارت','#15803D','visited')}${cell(c.notVisited.length,'لم تُزَر','#B71C1C','not_visited')}${info(cov+'%','نسبة التغطية','#0369A1','اتزارت ÷ عدد الفروع')}${info(ach,'المحقق','#B45309', tgt>0 ? ('المبيعات '+sales.toFixed(0)+' ÷ التارجت '+tgt.toFixed(0)) : 'لا يوجد تارجت للمجموعة')}</div>`;
+  return `<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">${cell(c.total.length,'عدد الفروع','#003049','total')}${cell(c.visited.length,'اتزارت','#15803D','visited')}${cell(c.notVisited.length,'لم تُزَر','#B71C1C','not_visited')}${info(cov+'%','نسبة التغطية','#0369A1','اتزارت ÷ عدد الفروع')}${info(ach,'المحقق'+(disc>0?' (بعد الخصم)':''),'#B45309', tgt>0 ? ('المبيعات '+sales.toFixed(0)+(disc>0?' − خصومات '+disc.toFixed(0):'')+' ÷ التارجت '+tgt.toFixed(0)) : 'لا يوجد تارجت للمجموعة')}${disc>0 ? info(discPct.toFixed(1)+'%','خصم العملاء ('+Math.round(disc).toLocaleString('en-US')+' ج)','#B71C1C','خصومات العملاء ÷ مبيعات المجموعة') : ''}</div>`;
 }
 
 function hmRender(data, metric){
@@ -55577,6 +55597,190 @@ function svmDetail(id){
   document.body.appendChild(m);
 }
 
+
+// ══════════════════════════════════════════════════════════════
+// متابعة زيارات المشرفين — قطاع البيع (svs): فروع خطط مشرفي البيع (sales_plan_items)
+// الزيارة "موثّقة" = سجل للمشرف على نفس الفرع واليوم في field_support_logs (بموقع ووقت)
+// التأشير اليدوي في الخطة (visit_status=done) بيظهر كعلامة جنبها
+// ══════════════════════════════════════════════════════════════
+let SVS_ROWS = [], SVS_VIEW = [], SVS_BUSY = false, SVS_LIMIT = 300;
+function svmSetSide(side){
+  const c = side==='coord';
+  document.getElementById('svm-root').style.display = c ? '' : 'none';
+  document.getElementById('svs-root').style.display = c ? 'none' : '';
+  const bc = document.getElementById('svm-side-coord'), bs = document.getElementById('svm-side-sales');
+  bc.style.background = c ? '#005CBF' : '#fff'; bc.style.color = c ? '#fff' : '#005CBF';
+  bs.style.background = c ? '#fff' : '#1A7A4A'; bs.style.color = c ? '#1A7A4A' : '#fff';
+  if(!c) svsInit();
+}
+function svsInit(){
+  const root = document.getElementById('svs-root');
+  if(!root) return;
+  if(!root.dataset.built){
+    const today = new Date(), from = new Date(today.getTime()-6*86400000);
+    const inp = 'border:1.5px solid #D4C4A8;border-radius:8px;padding:7px 10px;font-family:inherit;font-size:13px;background:#fff;color:#2C1F0A';
+    const btn = 'border:1.5px solid #D4C4A8;border-radius:8px;padding:7px 12px;font-family:inherit;font-size:12.5px;background:#fff;color:#4B3C1A;cursor:pointer;font-weight:700';
+    root.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px">
+      <label style="font-size:12px;color:#7A6A4A">من <input type="date" id="svs-from" value="${svmIso(from)}" style="${inp}"></label>
+      <label style="font-size:12px;color:#7A6A4A">إلى <input type="date" id="svs-to" value="${svmIso(today)}" style="${inp}"></label>
+      <select id="svs-grp" onchange="svsRender()" style="${inp}"><option value="">كل المجموعات</option></select>
+      <select id="svs-sup" onchange="svsRender()" style="${inp}"><option value="">كل المشرفين</option></select>
+      <select id="svs-status" onchange="svsRender()" style="${inp}">
+        <option value="">كل الحالات</option><option value="doc">موثّقة (سجل بموقع)</option><option value="manual">تأشير يدوي فقط</option>
+        <option value="missed">لم تتم</option><option value="pending">مجدولة</option>
+      </select>
+      <input type="text" id="svs-q" oninput="svsRender()" placeholder="بحث بالفرع أو خط السير..." style="${inp};min-width:170px">
+      <button onclick="svsLoad()" style="${btn}">🔄 تحديث</button>
+      <button onclick="svsExportExcel()" style="${btn}">📊 تصدير Excel</button>
+    </div>
+    <div id="svs-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px"></div>
+    <div id="svs-body"><div style="text-align:center;padding:30px;color:#999">جاري التحميل...</div></div>`;
+    root.dataset.built='1';
+    document.getElementById('svs-from').addEventListener('change',svsLoad);
+    document.getElementById('svs-to').addEventListener('change',svsLoad);
+  }
+  svsLoad();
+}
+async function svsLoad(){
+  if(SVS_BUSY) return;
+  SVS_BUSY = true;
+  const body = document.getElementById('svs-body');
+  if(body) body.innerHTML = '<div style="text-align:center;padding:30px;color:#999">جاري التحميل...</div>';
+  try{
+    const from = document.getElementById('svs-from').value, to = document.getElementById('svs-to').value;
+    const B = SUPABASE_URL+'/rest/v1/';
+    const addD = (d,n)=>{ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()+n); return svmIso(x); };
+    if(!SVM_BRANCH_CACHE){
+      const bs = await svmGetAll(`${B}branches?select=branch_name,route,grp,lat,lng&order=branch_name.asc`);
+      SVM_BRANCH_CACHE = {}; bs.forEach(b=>{ SVM_BRANCH_CACHE[b.branch_name]=b; });
+    }
+    const [plans, items, logs, dels, vis, rets, rates] = await Promise.all([
+      svmGetAll(`${B}sales_plans_plus?select=id,staff_name,sector,week_start&week_start=gte.${addD(from,-7)}&week_start=lte.${to}`),
+      svmGetAll(`${B}sales_plan_items?select=id,plan_id,client_name,area,visit_date,visit_status&visit_date=gte.${from}&visit_date=lte.${to}&order=visit_date.desc,id.desc`),
+      svmGetAll(`${B}field_support_logs?select=supervisor_name,branch_name,visit_date,created_at,support_type&branch_name=not.is.null&created_at=gte.${addD(from,-1)}&created_at=lte.${addD(to,2)}&order=created_at.asc`),
+      svmGetAll(`${B}sales_deliveries?select=branch_name,rep_name,delivery_date&deleted_at=is.null&delivery_date=gte.${addD(to,-120)}&order=delivery_date.desc,id.desc`),
+      svmGetAll(`${B}visits?select=branch,date,name&branch=not.is.null&order=date.desc`),
+      svmGetAll(`${B}returns?select=branch,pulled&order=id.desc`),
+      svmGetAll(`${B}sales_visit_ratings?select=*&visit_date=gte.${from}&visit_date=lte.${to}&order=created_at.desc`).catch(()=>[])
+    ]);
+    const planBy = {}; plans.forEach(p=>{ planBy[p.id]=p; });
+    const logKey = {}, logAny = {};
+    logs.forEach(l=>{
+      const d = l.visit_date || new Date(new Date(l.created_at).getTime()+2*3600000).toISOString().slice(0,10);
+      logKey[l.supervisor_name+'|'+l.branch_name+'|'+d] = l;
+      logAny[l.branch_name+'|'+d] = l;
+    });
+    const lastRep = {}; dels.forEach(d=>{ if(d.branch_name && !lastRep[d.branch_name]) lastRep[d.branch_name]=d; });
+    const lastCoord = {}; vis.forEach(v=>{ if(v.branch && !lastCoord[v.branch]) lastCoord[v.branch]=v; });
+    const pend = {}; rets.forEach(r=>{ if(r.branch && r.pulled!==true) pend[r.branch]=(pend[r.branch]||0)+1; });
+    const rateBy = {}; rates.forEach(r=>{ if(!rateBy[r.branch_name]) rateBy[r.branch_name]=r; });
+    const today = svmIso(new Date());
+    SVS_ROWS = items.filter(i=>planBy[i.plan_id] && i.client_name).map(i=>{
+      const p = planBy[i.plan_id], b = SVM_BRANCH_CACHE[i.client_name]||{};
+      const lg = logKey[p.staff_name+'|'+i.client_name+'|'+i.visit_date] || null;
+      const lgOther = !lg ? (logAny[i.client_name+'|'+i.visit_date]||null) : null;
+      const manual = i.visit_status==='done';
+      let st = 'pending';
+      if(lg || lgOther) st='doc'; else if(manual) st='manual'; else if(i.visit_date < today) st='missed';
+      const rp = lastRep[i.client_name], cd = lastCoord[i.client_name], rt = rateBy[i.client_name];
+      return {id:i.id, date:i.visit_date, sup:p.staff_name||'—', route:i.area||b.route||'—', branch:i.client_name, grp:b.grp||'',
+        st, manual, log:lg||lgOther, logOther:!!lgOther, repName:rp?rp.rep_name:'', repDate:rp?rp.delivery_date:'', coordDate:cd?cd.date:'', coordName:cd?cd.name:'',
+        pend:pend[i.client_name]||0, rate:rt};
+    });
+    const gs = [...new Set(SVS_ROWS.map(r=>r.grp).filter(Boolean))].sort();
+    const ss = [...new Set(SVS_ROWS.map(r=>r.sup).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ar'));
+    const gSel = document.getElementById('svs-grp'), sSel = document.getElementById('svs-sup');
+    const gCur = gSel.value, sCur = sSel.value;
+    gSel.innerHTML = '<option value="">كل المجموعات</option>'+gs.map(g=>`<option value="${svmEsc(g)}">${svmEsc(SVM_GRP[g]||g)}</option>`).join('');
+    sSel.innerHTML = '<option value="">كل المشرفين</option>'+ss.map(s=>`<option value="${svmEsc(s)}">${svmEsc(s)}</option>`).join('');
+    gSel.value = gs.includes(gCur)?gCur:''; sSel.value = ss.includes(sCur)?sCur:'';
+    SVS_BUSY = false;
+    svsRender();
+  }catch(e){
+    SVS_BUSY = false;
+    if(body) body.innerHTML = `<div style="text-align:center;color:#C0392B;padding:24px">تعذّر التحميل: ${svmEsc(e.message)}</div>`;
+  }
+}
+function svsFiltered(){
+  const g=document.getElementById('svs-grp').value, s=document.getElementById('svs-sup').value;
+  const st=document.getElementById('svs-status').value, q=document.getElementById('svs-q').value.trim();
+  return SVS_ROWS.filter(r=>{
+    if(g && r.grp!==g) return false;
+    if(s && r.sup!==s) return false;
+    if(q && !(r.branch.includes(q)||r.route.includes(q))) return false;
+    if(st && r.st!==st) return false;
+    return true;
+  });
+}
+function svsAgo(d){
+  if(!d) return '';
+  const n = Math.round((new Date(svmIso(new Date())+'T00:00:00') - new Date(String(d).slice(0,10)+'T00:00:00'))/86400000);
+  return n<=0 ? 'النهارده' : 'من '+n+' يوم';
+}
+function svsStLbl(r){
+  const m = {doc:['موثّقة','#E8F5E9','#2E7D32'], manual:['تأشير يدوي فقط','#FFF3E0','#E65100'], missed:['لم تتم','#FFEBEE','#C62828'], pending:['مجدولة','#F1F1F1','#666666']}[r.st];
+  return m;
+}
+function svsRender(reset){
+  if(reset!==false) SVS_LIMIT = 300;
+  SVS_VIEW = svsFiltered();
+  const v = SVS_VIEW;
+  const c = k=>v.filter(r=>r.st===k).length;
+  const doc=c('doc'), man=c('manual'), mis=c('missed'), pen=c('pending');
+  const due = doc+man+mis;
+  const pct = due ? Math.round(doc/due*100) : 0;
+  const card=(l,val,col)=>`<div style="background:#FAF6EE;border:1px solid #E8DCC4;border-radius:10px;padding:10px 12px"><div style="font-size:11px;color:#7A6A4A">${l}</div><div style="font-size:21px;font-weight:800;color:${col}">${val}</div></div>`;
+  document.getElementById('svs-stats').innerHTML =
+    card('الزيارات المخططة',v.length,'#4B3C1A')+card('موثّقة بسجل',doc,'#1A7A4A')+card('تأشير يدوي فقط',man,'#E65100')+card('لم تتم',mis,'#B71C1C')+card('مجدولة',pen,'#666')+
+    card('نسبة التوثيق',pct+'%',pct>=80?'#2E7D32':pct>=50?'#B8860B':'#B71C1C')+card('فروع عليها مرتجع معلّق',v.filter(r=>r.pend>0).length,'#C62828');
+  const body = document.getElementById('svs-body');
+  if(!v.length){ body.innerHTML = '<div style="text-align:center;padding:30px;color:#999">مفيش زيارات في خطط البيع للفترة والفلاتر دي</div>'; return; }
+  const VR = {excellent:'ممتاز', good:'جيد', needs:'يحتاج تحسين'};
+  const shown = v.slice(0,SVS_LIMIT);
+  body.innerHTML = `<div style="overflow-x:auto;border:1px solid #E8DCC4;border-radius:10px"><table style="width:100%;border-collapse:collapse;font-size:12px;min-width:980px">
+    <thead><tr style="background:#1A7A4A;color:#fff">
+      ${['التاريخ','المشرف','خط السير','الفرع','حالة الزيارة','آخر زيارة مندوب','آخر تقرير منسق','مرتجع معلّق','تقييم المندوب'].map(h=>`<th style="padding:8px;text-align:right;white-space:nowrap">${h}</th>`).join('')}
+    </tr></thead><tbody>
+    ${shown.map((r,i)=>{
+      const m = svsStLbl(r);
+      const t = r.log && r.log.created_at ? new Date(r.log.created_at).toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'}) : '';
+      return `<tr style="background:${i%2?'#FBF8F1':'#fff'};border-top:1px solid #F0E8D6">
+        <td style="padding:7px 8px;white-space:nowrap">${svmEsc(r.date)}</td>
+        <td style="padding:7px 8px;font-weight:700">${svmEsc(r.sup)}</td>
+        <td style="padding:7px 8px">${svmEsc(r.route)}</td>
+        <td style="padding:7px 8px">${svmEsc(r.branch)}</td>
+        <td style="padding:7px 8px;white-space:nowrap"><span style="padding:2px 8px;border-radius:99px;font-size:10.5px;font-weight:700;background:${m[1]};color:${m[2]}">${m[0]}</span>
+          ${r.st==='doc'?`<div style="font-size:10px;color:#1A7A4A;margin-top:2px">📍 ${svmEsc(t)}${r.logOther?' · '+svmEsc(r.log.supervisor_name||''):''}${r.manual?' · ✅ مؤشّر يدويًا':''}</div>`:''}</td>
+        <td style="padding:7px 8px;white-space:nowrap">${r.repDate?`${svmEsc(r.repDate)} <span style="color:#888;font-size:10.5px">(${svsAgo(r.repDate)})</span><div style="font-size:10.5px;color:#7A6A4A">${svmEsc(r.repName||'')}</div>`:'<span style="color:#bbb">—</span>'}</td>
+        <td style="padding:7px 8px;white-space:nowrap">${r.coordDate?`${svmEsc(r.coordDate)} <span style="color:#888;font-size:10.5px">(${svsAgo(r.coordDate)})</span>`:'<span style="color:#bbb">—</span>'}</td>
+        <td style="padding:7px 8px;text-align:center;${r.pend?'color:#C62828;font-weight:800':'color:#bbb'}">${r.pend||'—'}</td>
+        <td style="padding:7px 8px;white-space:nowrap;font-size:11px">${r.rate?`${VR[r.rate.rate_display]||'—'} / ${VR[r.rate.rate_handling]||'—'} / ${VR[r.rate.rate_stock]||'—'}`:'<span style="color:#bbb">—</span>'}</td>
+      </tr>`;
+    }).join('')}
+    </tbody></table></div>
+    <div style="text-align:center;margin-top:10px;font-size:12px;color:#7A6A4A">
+      عرض ${shown.length} من ${v.length}
+      ${v.length>shown.length?`<button onclick="SVS_LIMIT+=300;svsRender(false)" style="margin-right:8px;border:1px solid #D4C4A8;background:#fff;border-radius:7px;padding:4px 12px;font-family:inherit;font-size:12px;cursor:pointer;font-weight:700">عرض المزيد</button>`:''}
+    </div>`;
+}
+function svsExportExcel(){
+  if(!SVS_VIEW.length){ alert('مفيش بيانات للتصدير'); return; }
+  if(!window.XLSX){ alert('مكتبة Excel لسه بتتحمّل، جرّب بعد لحظة'); return; }
+  const VR = {excellent:'ممتاز', good:'جيد', needs:'يحتاج تحسين'};
+  const from=document.getElementById('svs-from').value, to=document.getElementById('svs-to').value;
+  const aoa = [['الطحان جولدن داتس — متابعة زيارات المشرفين (قطاع البيع)'],[`الفترة: ${from} ← ${to}`],[],
+    ['التاريخ','المشرف','خط السير','الفرع','حالة الزيارة','وقت التوثيق','تأشير يدوي','آخر زيارة مندوب','المندوب','آخر تقرير منسق','مرتجع معلّق','تقييم (عرض/تعامل/مخزون)']];
+  SVS_VIEW.forEach(r=>{
+    aoa.push([r.date,r.sup,r.route,r.branch,svsStLbl(r)[0], r.log&&r.log.created_at?new Date(r.log.created_at).toLocaleString('ar-EG',{dateStyle:'short',timeStyle:'short'}):'', r.manual?'نعم':'',
+      r.repDate,r.repName,r.coordDate,r.pend||'', r.rate?`${VR[r.rate.rate_display]||'—'} / ${VR[r.rate.rate_handling]||'—'} / ${VR[r.rate.rate_stock]||'—'}`:'']);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [12,18,24,28,16,16,10,14,18,14,10,26].map(w=>({wch:w}));
+  ws['!views'] = [{RTL:true}];
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'قطاع البيع');
+  XLSX.writeFile(wb, `متابعة_زيارات_مشرفي_البيع_${from}_${to}.xlsx`);
+}
 
 // ── معيار "متابعة زيارات المشرفين" — دالة واحدة مشتركة بين التاب وتقييم مشرفي/مديري التنسيق ──
 // items: [{date,status,checkIn,geoStatus,reviewedAll,hasNeeds,notes}]
