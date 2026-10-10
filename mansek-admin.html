@@ -1162,7 +1162,7 @@ h2,h3{color:#2C1F0A}
           <div class="stats-grid" id="dash-stats"></div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
             <div class="card">
-              <div class="card-title"><i class="ti ti-trending-up"></i> أداء المجموعات اليوم</div>
+              <div class="card-title"><i class="ti ti-trending-up"></i> أداء المجموعات — من أول الشهر</div>
               <div id="dash-groups"></div>
             </div>
             <div class="card">
@@ -1171,7 +1171,7 @@ h2,h3{color:#2C1F0A}
             </div>
           </div>
           <div class="card">
-            <div class="card-title"><i class="ti ti-alert-triangle" style="color:var(--red)"></i> نواقص اليوم</div>
+            <div class="card-title"><i class="ti ti-alert-triangle" style="color:var(--red)"></i> نواقص الشهر</div>
             <div id="dash-missing"></div>
           </div>
         </div>
@@ -16599,39 +16599,75 @@ function showPanel(id){
 // ══════════════════════════════════════════════════════════════
 // DASHBOARD
 // ══════════════════════════════════════════════════════════════
+// زيارات المشرفين الشهرية لكل مجموعة (plan_branches + branches.grp) — بتتحمّل مرة كل 5 دقائق
+let _dashSup = {at:0, month:'', byGrp:{}, total:{done:0,planned:0}, busy:false};
+async function dashLoadSupVisits(monthStart, todayStr){
+  if(_dashSup.busy) return;
+  if(_dashSup.month===monthStart && Date.now()-_dashSup.at<5*60*1000) return;
+  _dashSup.busy = true;
+  try{
+    const H = {apikey:SUPABASE_KEY, Authorization:'Bearer '+SUPABASE_KEY};
+    const [brs, pbs] = await Promise.all([
+      hmFetchAllRows(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,grp&order=id.asc`, H),
+      hmFetchAllRows(`${SUPABASE_URL}/rest/v1/plan_branches?select=branch_name,visit_status,visit_date&visit_date=gte.${monthStart}&visit_date=lte.${todayStr}&order=id.asc`, H)
+    ]);
+    const bg = {}; brs.forEach(b=>{ bg[b.branch_name] = b.grp==='private_cairo' ? 'private_chains_cairo' : b.grp; });
+    const byGrp = {}, total = {done:0, planned:0};
+    pbs.forEach(p=>{
+      const g = bg[p.branch_name] || 'other';
+      const o = byGrp[g] || (byGrp[g] = {done:0, planned:0});
+      o.planned++; total.planned++;
+      if(p.visit_status==='done'){ o.done++; total.done++; }
+    });
+    _dashSup = {at:Date.now(), month:monthStart, byGrp, total, busy:false};
+  }catch(e){ console.warn('dash sup visits', e); _dashSup.busy = false; _dashSup.at = Date.now(); _dashSup.month = monthStart; }
+  try{ if(document.getElementById('panel-dashboard')?.classList.contains('active')) renderDashboard(); }catch(e){}
+}
+
 function renderDashboard(){
   const today=new Date().toLocaleDateString('en-US');
   const todayStr=localISO();
+  const monthStart=todayStr.slice(0,8)+'01';
   const {visits,missing,attendance,location}=cachedData;
+  // التاريخ ممكن يكون متسجل ISO (2026-10-10) أو M/D/YYYY — نوحّدهم لـ ISO
+  const toISO=d=>{
+    d=String(d||'');
+    if(/^\d{4}-\d{2}-\d{2}/.test(d)) return d.slice(0,10);
+    const m=d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    return m ? `${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}` : '';
+  };
+  const inMonth=d=>{ const i=toISO(d); return i>=monthStart && i<=todayStr; };
   // الأدمين يشوف كل المجموعات بما فيها alex
   const visible = CU.level==='gm' ? Object.keys(GROUPS) : CU.groups;
-  const todayV=visits.filter(v=>v.date===today&&visible.includes(v.grp||''));
-  const todayM=missing.filter(m=>m.created_at?.startsWith(todayStr)&&visible.includes(m.grp||''));
-  const todayA=attendance.filter(a=>a.date===today);
+  const monthV=visits.filter(v=>inMonth(v.date)&&visible.includes(v.grp||''));
+  const monthM=missing.filter(m=>(m.created_at||'').slice(0,10)>=monthStart&&visible.includes(m.grp||''));
+  const monthA=attendance.filter(a=>inMonth(a.date));
   const TEN=10*60*1000,nowMs=Date.now();
   const online=location.filter(l=>visible.includes(l.grp||'')&&(nowMs-new Date(l.updated_at).getTime())<TEN).length;
-  const totalPts=todayV.reduce((s,v)=>s+(+v.points||0),0);
 
+  dashLoadSupVisits(monthStart, todayStr);
+  const st=_dashSup.total;
   document.getElementById('dash-stats').innerHTML=`
-    <div class="stat-card blue"><div class="stat-n">${todayV.length}</div><div class="stat-l">زيارة اليوم</div></div>
-    <div class="stat-card green"><div class="stat-n">${totalPts}</div><div class="stat-l">نقاط اليوم</div></div>
-    <div class="stat-card orange"><div class="stat-n">${todayA.filter(a=>a.time_in).length}</div><div class="stat-l">حضروا اليوم</div></div>
-    <div class="stat-card red"><div class="stat-n">${todayM.length}</div><div class="stat-l">نواقص اليوم</div></div>
+    <div class="stat-card blue"><div class="stat-n">${monthV.length}</div><div class="stat-l">زيارات المنسقين (الشهر)</div></div>
+    <div class="stat-card green"><div class="stat-n">${_dashSup.month===monthStart?st.done+'/'+st.planned:'…'}</div><div class="stat-l">زيارات المشرفين (الشهر)</div></div>
+    <div class="stat-card orange"><div class="stat-n">${monthA.filter(a=>a.time_in).length}</div><div class="stat-l">أيام حضور (الشهر)</div></div>
+    <div class="stat-card red"><div class="stat-n">${monthM.length}</div><div class="stat-l">نواقص (الشهر)</div></div>
     <div class="stat-card purple"><div class="stat-n">${online}</div><div class="stat-l">متصل الآن</div></div>
     <div class="stat-card yellow"><div class="stat-n">${cachedData.orders.filter(o=>o.status==='pending').length}</div><div class="stat-l">طلبيات معلقة</div></div>
   `;
 
-  // Groups
-  const maxPts=Math.max(...visible.map(g=>todayV.filter(v=>v.grp===g).reduce((s,v)=>s+(+v.points||0),0)),1);
+  // أداء المجموعات: زيارات المنسقين + زيارات المشرف (من متابعة زيارات المشرفين) — من أول الشهر
+  const maxV=Math.max(...visible.map(g=>monthV.filter(v=>v.grp===g).length),1);
   document.getElementById('dash-groups').innerHTML=visible.map(gid=>{
     const g=GROUPS[gid];
-    const gv=todayV.filter(v=>v.grp===gid);
-    const pts=gv.reduce((s,v)=>s+(+v.points||0),0);
-    const pct=Math.round(pts/maxPts*100);
+    const cnt=monthV.filter(v=>v.grp===gid).length;
+    const pct=Math.round(cnt/maxV*100);
+    const sv=_dashSup.byGrp[gid==='private_cairo'?'private_chains_cairo':gid];
+    const svTxt=_dashSup.month===monthStart ? (sv?` · زيارات المشرف ${sv.done}/${sv.planned}`:' · زيارات المشرف 0') : '';
     return`<div style="margin-bottom:10px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
         <span style="font-size:12px;font-weight:600">${g.label}</span>
-        <span style="font-size:11px;color:var(--text2)">${gv.length} زيارة · ${pts} نقطة</span>
+        <span style="font-size:11px;color:var(--text2)">${cnt} زيارة منسق${svTxt}</span>
       </div>
       <div style="background:#f0f0f0;border-radius:999px;height:8px;overflow:hidden">
         <div style="height:100%;border-radius:999px;background:${g.color};width:${pct}%;transition:width .5s"></div>
@@ -16639,30 +16675,31 @@ function renderDashboard(){
     </div>`;
   }).join('');
 
-  // Activity
-  const recent=visits.slice(0,15);
+  // آخر الأنشطة: أحدث زيارات (القايمة مرتبة من الأقدم) باسم المنسق وخط السير
+  const routeOf={}; (typeof REPS!=='undefined'?REPS:[]).forEach(r=>{ routeOf[r.name]=r.route||''; });
+  const recent=monthV.slice(-15).reverse();
   document.getElementById('dash-activity').innerHTML=recent.map(v=>`
     <div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #f5f5f5">
       <div style="width:8px;height:8px;border-radius:50%;background:${GROUPS[v.grp]?.color||'#ccc'};flex-shrink:0"></div>
       <div style="flex:1;min-width:0">
-        <div style="font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v.name}</div>
+        <div style="font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v.name}${routeOf[v.name]?` <span style="font-weight:500;color:var(--text2)">— ${routeOf[v.name]}</span>`:''}</div>
         <div style="font-size:10px;color:var(--text2)">${v.branch||''}</div>
       </div>
-      <span class="badge b-blue">${v.points||0} نقطة</span>
-    </div>`).join('') || '<div style="color:var(--text2);font-size:12px;text-align:center;padding:1rem">لا توجد زيارات</div>';
+      <span class="badge b-blue">${toISO(v.date).slice(5).replace('-','/')}</span>
+    </div>`).join('') || '<div style="color:var(--text2);font-size:12px;text-align:center;padding:1rem">لا توجد زيارات هذا الشهر</div>';
 
-  // Missing
-  const todayMiss=missing.filter(m=>m.created_at?.startsWith(localISO()));
-  document.getElementById('dash-missing').innerHTML=todayMiss.length?`
+  // النواقص (من أول الشهر — الأحدث أولاً)
+  const monthMiss=monthM.slice().reverse();
+  document.getElementById('dash-missing').innerHTML=monthMiss.length?`
     <div class="table-wrap"><table>
       <thead><tr><th>المنسق</th><th>الفرع</th><th>الصنف</th><th>السبب</th></tr></thead>
-      <tbody>${todayMiss.map(m=>`<tr>
+      <tbody>${monthMiss.slice(0,100).map(m=>`<tr>
         <td>${m.name}</td><td>${m.branch||'—'}</td>
         <td style="font-weight:600">${m.snf||''}</td>
         <td><span class="badge b-orange">${m.reason||''}</span></td>
       </tr>`).join('')}</tbody>
-    </table></div>
-  `:'<div style="color:var(--text2);font-size:12px;text-align:center;padding:1rem">لا توجد نواقص اليوم ✅</div>';
+    </table></div>${monthMiss.length>100?`<div style="text-align:center;font-size:11px;color:var(--text2);padding:6px">عرض أحدث 100 من ${monthMiss.length}</div>`:''}
+  `:'<div style="color:var(--text2);font-size:12px;text-align:center;padding:1rem">لا توجد نواقص هذا الشهر ✅</div>';
 }
 
 // ══════════════════════════════════════════════════════════════
