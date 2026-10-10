@@ -659,10 +659,15 @@ input[type=number] { -moz-appearance:textfield; }
         <div id="ret-rep-raised-list"></div>
       </div>
 
+      <!-- اختيار الفرع لمرتجعات المندوب (تأكيد الرفع + فواتير المرتجع) -->
+      <div id="ret-branch-wrap" style="display:none;margin-bottom:10px">
+        <div class="card-title" style="color:#6B3D15"><i class="ti ti-building-store"></i> اختر الفرع</div>
+        <select id="ret-branch-filter" onchange="_retBrSel=this.value;renderReturnsPendingAck();renderRepRaisedReturns()" style="width:100%;padding:9px;border:1.5px solid #E8D9C0;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:#fff"></select>
+      </div>
+
       <!-- مرتجعات المندوب رفعها فعلاً وبانتظار تأكيدك -->
       <div id="ret-pending-ack-wrap" style="display:none;margin-bottom:14px">
-        <div class="card-title" style="color:#1A7A4A"><i class="ti ti-checkbox"></i> حالة مرتجعات الفروع — أكّد اللي اترفع</div>
-        <select id="ret-branch-filter" onchange="_retBrSel=this.value;renderReturnsPendingAck()" style="width:100%;padding:9px;margin-bottom:8px;border:1.5px solid #C8E6D4;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:#fff"></select>
+        <div class="card-title" style="color:#1A7A4A"><i class="ti ti-checkbox"></i> مرتجعات رفعها المندوب — أكّد</div>
         <div id="ret-pending-ack-list"></div>
       </div>
 
@@ -5011,83 +5016,91 @@ async function confirmSupplyReceived(id, btn){
 // (نفس منطق نواقص التوريد فوق: المنسق هو اللي بيقفل الحلقة ويأكد إن المرتجع اللي
 // المندوب سجّل رفعه (pulled=true) اترفع فعلاً، وكمان بيشوف أي مرتجع واجه فيه المندوب
 // مشكلة (مش موجود بالفرع / جزء بس / سبب آخر) عشان يبقى عالم بالموقف حتى لو لسه بيتحل)
+let _retAckCnt = {}, _retInvCnt = {};
+async function _retRefreshSel(){
+  const sel = document.getElementById('ret-branch-filter'), wrap = document.getElementById('ret-branch-wrap');
+  if(!sel || !wrap) return;
+  const esc = t=>String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  let names=[]; try{ names = await myAssignedBranchNames(); }catch(e){}
+  const all = [...new Set([...(names||[]), ...Object.keys(_retAckCnt), ...Object.keys(_retInvCnt)])].filter(Boolean).sort((a,b)=>a.localeCompare(b,'ar'));
+  const tot = Object.values(_retAckCnt).reduce((x,y)=>x+y,0) + Object.values(_retInvCnt).reduce((x,y)=>x+y,0);
+  if(!all.length){ wrap.style.display='none'; return; }
+  if(_retBrSel!=='__all' && !all.includes(_retBrSel)) _retBrSel='__all';
+  sel.innerHTML = `<option value="__all">كل الفروع${tot?` — ${tot} بانتظار تأكيدك`:''}</option>` +
+    all.map(n=>{ const c=(_retAckCnt[n]||0)+(_retInvCnt[n]||0); return `<option value="${esc(n)}">${esc(n)}${c?` — ${c} بانتظار تأكيدك`:''}</option>`; }).join('');
+  sel.value = _retBrSel;
+  wrap.style.display='block';
+}
+
 async function renderReturnsPendingAck(){
   const ackWrap   = document.getElementById('ret-pending-ack-wrap');
   const ackList   = document.getElementById('ret-pending-ack-list');
   const issueWrap = document.getElementById('ret-pending-issue-wrap');
+  const issueList = document.getElementById('ret-pending-issue-list');
   if(!ackWrap || !ackList || !cu?.name) return;
   try{
     const rows = await sbSelect('returns', {name: cu.name});
     const list = Array.isArray(rows) ? rows : [];
     const esc = t=>String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;');
-    const cutoff = Date.now() - 30*24*3600*1000;
-    // كل مرتجع المنسق سجّله ولسه مقفولش: (المندوب رفعه وبانتظار تأكيدك) أو (لسه مارفعش / فيه مشكلة) خلال 30 يوم
-    const open = list.filter(r=>{
-      if(r.coord_ack===true) return false;
-      if(r.pulled===true) return true;
-      return new Date(r.created_at||0).getTime() >= cutoff;
-    });
-    if(issueWrap) issueWrap.style.display='none';
-    if(!open.length){ ackWrap.style.display='none'; return; }
-    ackWrap.style.display='block';
+    const allAck = list.filter(r => r.pulled === true && r.coord_ack !== true);
+    _retAckCnt = {}; allAck.forEach(r=>{ const b=r.branch||'—'; _retAckCnt[b]=(_retAckCnt[b]||0)+1; });
+    await _retRefreshSel();
+    const byBr = r => _retBrSel==='__all' || (r.branch||'—')===_retBrSel;
 
-    const cnt = {}, needs = {};
-    open.forEach(r=>{ const b=r.branch||'—'; cnt[b]=(cnt[b]||0)+1; if(r.pulled===true) needs[b]=(needs[b]||0)+1; });
-    const sel = document.getElementById('ret-branch-filter');
-    let names = []; try{ names = await myAssignedBranchNames(); }catch(e){}
-    const all = [...new Set([...(names||[]), ...Object.keys(cnt)])].filter(Boolean).sort((a,b)=>a.localeCompare(b,'ar'));
-    if(_retBrSel!=='__all' && !all.includes(_retBrSel)) _retBrSel='__all';
-    if(sel){
-      sel.innerHTML = `<option value="__all">كل الفروع (${open.length})</option>` +
-        all.map(n=>`<option value="${esc(n).replace(/"/g,'&quot;')}">${esc(n)} — ${cnt[n]||0} مرتجع${needs[n]?` · ✅ ${needs[n]} اترفع`:''}</option>`).join('');
-      sel.value = _retBrSel;
+    const toAck = allAck.filter(byBr);
+    if(!toAck.length){ ackWrap.style.display='none'; }
+    else{
+      ackWrap.style.display='block';
+      ackList.innerHTML = toAck.map(r=>`
+        <div style="background:#F0FBF5;border:1px solid #C8E6D4;border-radius:10px;padding:10px;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:700;color:#1A7A4A">${esc(r.snf)}</div>
+          <div style="font-size:10px;color:#666;margin-top:2px">${esc(r.branch)} ${r.qty?'· '+r.qty+' وحدة':''}</div>
+          <div style="font-size:10px;color:#888;margin-top:2px">المندوب ${esc(r.pulled_by||'—')} أكّد إنه رفعه</div>
+          <button onclick="confirmReturnPickedUp(${r.id}, this)"
+            style="width:100%;margin-top:8px;padding:9px;background:#1A7A4A;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
+            ✅ أأكد إن المرتجع اترفع فعلاً
+          </button>
+        </div>`).join('');
     }
-    const shown = (_retBrSel==='__all' ? open : open.filter(r=>(r.branch||'—')===_retBrSel))
-      .slice().sort((x,y)=> (y.pulled===true) - (x.pulled===true));
-    if(!shown.length){ ackList.innerHTML='<div style="text-align:center;color:#999;font-size:12px;padding:14px">لا توجد مرتجعات مفتوحة في هذا الفرع</div>'; return; }
 
-    ackList.innerHTML = shown.map(r=>{
-      const name = `<div style="font-size:12px;font-weight:700;color:#2C1F0A">${esc(r.snf)}</div>
-        <div style="font-size:10px;color:#666;margin-top:2px">${esc(r.branch)} ${r.qty?'· '+r.qty+' وحدة':''}</div>`;
-      if(r.pulled===true){
-        return `<div style="background:#F0FBF5;border:1px solid #C8E6D4;border-radius:10px;padding:10px;margin-bottom:8px">
-          ${name}
-          <div style="font-size:11px;color:#1A7A4A;margin-top:4px">✅ المندوب سجّل إنه رفعه ${r.pulled_by?'('+esc(r.pulled_by)+')':''}</div>
-          <div style="display:flex;gap:6px;margin-top:8px">
-            <button onclick="confirmReturnPickedUp(${r.id}, this)" style="flex:1;padding:9px;background:#1A7A4A;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">✅ اترفع من الفرع</button>
-            <button onclick="markReturnStillAtBranch(${r.id}, this)" style="flex:1;padding:9px;background:#fff;color:#C62828;border:1.5px solid #C62828;border-radius:8px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">❌ لسه موجود بالفرع</button>
-          </div></div>`;
+    if(issueWrap && issueList){
+      const issues = list.filter(r => r.pulled !== true && r.pull_result && r.pull_result !== 'pulled').filter(byBr);
+      if(!issues.length){ issueWrap.style.display='none'; }
+      else{
+        issueWrap.style.display='block';
+        issueList.innerHTML = issues.map(r=>{
+          const lbl = r.pull_result==='not_found' ? '❌ المندوب راح الفرع ومالقاش المرتجع'
+                    : r.pull_result==='partial'   ? '📦 المندوب رفع جزء بس'
+                    : '📝 ملاحظة من المندوب';
+          const stage = r.escalated_to_coord ? 'محوّلة لمشرف التنسيق للمتابعة' : 'عند مشرف البيع';
+          return `<div style="background:#FFF8E1;border:1px solid #FFE0B2;border-radius:10px;padding:10px;margin-bottom:8px">
+            <div style="font-size:12px;font-weight:700;color:#E65100">${esc(r.snf)}</div>
+            <div style="font-size:10px;color:#666;margin-top:2px">${esc(r.branch)}</div>
+            <div style="font-size:11px;color:#E65100;margin-top:4px">${lbl}</div>
+            ${r.pull_note?`<div style="font-size:10px;color:#888;margin-top:2px">"${esc(r.pull_note)}"</div>`:''}
+            <div style="font-size:9px;color:#aaa;margin-top:4px">📍 ${stage}</div></div>`;
+        }).join('');
       }
-      if(r.pull_result && r.pull_result!=='pulled'){
-        const lbl = r.pull_result==='not_found' ? '❌ المندوب راح الفرع ومالقاش المرتجع'
-                  : r.pull_result==='partial'   ? '📦 المندوب رفع جزء بس'
-                  : '📝 ملاحظة من المندوب';
-        const stage = r.escalated_to_coord ? 'محوّلة لمشرف التنسيق للمتابعة' : 'عند مشرف البيع';
-        return `<div style="background:#FFF8E1;border:1px solid #FFE0B2;border-radius:10px;padding:10px;margin-bottom:8px">
-          ${name}
-          <div style="font-size:11px;color:#E65100;margin-top:4px">${lbl}</div>
-          ${r.pull_note?`<div style="font-size:10px;color:#888;margin-top:2px">"${esc(r.pull_note)}"</div>`:''}
-          <div style="font-size:9px;color:#aaa;margin-top:4px">📍 ${stage}</div></div>`;
-      }
-      return `<div style="background:#F7F7F7;border:1px solid #E5E5E5;border-radius:10px;padding:10px;margin-bottom:8px">
-        ${name}
-        <div style="font-size:11px;color:#888;margin-top:4px">⏳ لسه مترفعش — موجود بالفرع بانتظار المندوب</div></div>`;
-    }).join('');
+    }
   }catch(e){ console.warn('renderReturnsPendingAck error:', e); }
 }
 
-// المنسق راجع الفرع ولقى المرتجع لسه موجود (عكس كلام المندوب): يرجع "لم يُرفع" ويتحوّل لمشرف التنسيق
-async function markReturnStillAtBranch(id, btn){
-  if(!confirm('تأكيد: المرتجع ده لسه موجود في الفرع ومترفعش؟')) return;
-  if(btn){ btn.disabled=true; btn.textContent='جارِ التسجيل...'; }
-  const now = new Date().toISOString();
-  const ok = await sbUpdate('returns', {id}, {
-    pulled: false, pulled_at: null, coord_ack: false,
-    pull_result: 'other', pull_note: 'المنسق '+(cu?.name||'')+' أفاد إن المرتجع لسه موجود في الفرع',
-    escalated_to_coord: true, escalated_by: cu?.name||'', escalated_at: now
-  });
-  if(ok){ showToastPWA?.('تم تسجيل إن المرتجع لسه موجود وتحويله للمتابعة'); renderReturnsPendingAck(); }
-  else{ if(btn){ btn.disabled=false; btn.textContent='❌ لسه موجود بالفرع'; } alert('فشل التسجيل — تأكد من الاتصال بالإنترنت وحاول تاني'); }
+// تأكيد المنسق على فاتورة مرتجع رفعها المندوب من الفرع
+async function confirmRepReturnInvoice(id, btn){
+  if(btn){ btn.disabled=true; btn.textContent='جارِ التأكيد...'; }
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/sales_returns?id=eq.${id}`,{
+      method:'PATCH',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'},
+      body:JSON.stringify({coord_ack:true, coord_ack_by:cu?.name||'', coord_ack_at:new Date().toISOString()})
+    });
+    if(!r.ok) throw new Error(r.status);
+    showToastPWA?.('✅ تم تأكيد المرتجع');
+    renderRepRaisedReturns();
+  }catch(e){
+    if(btn){ btn.disabled=false; btn.textContent='✅ أأكد استلام/رفع المرتجع'; }
+    alert('فشل التأكيد — تأكد من الاتصال بالإنترنت وحاول تاني');
+  }
 }
 
 async function confirmReturnPickedUp(id, btn){
@@ -5118,11 +5131,14 @@ async function renderRepRaisedReturns(){
     let rows=[];
     for(let i=0;i<names.length;i+=40){
       const chunk=names.slice(i,i+40).map(n=>'"'+String(n).replace(/"/g,'\\"')+'"').join(',');
-      const r=await fetch(`${SUPABASE_URL}/rest/v1/sales_returns?branch_name=in.(${encodeURIComponent(chunk)})&deleted_at=is.null&return_date=gte.${from}&select=id,rep_name,branch_name,return_date,items&order=return_date.desc,created_at.desc&limit=300`,{headers:H});
+      const r=await fetch(`${SUPABASE_URL}/rest/v1/sales_returns?branch_name=in.(${encodeURIComponent(chunk)})&deleted_at=is.null&return_date=gte.${from}&select=id,rep_name,branch_name,return_date,items,coord_ack,coord_ack_by&order=return_date.desc,created_at.desc&limit=300`,{headers:H});
       if(r.ok){ const j=await r.json().catch(()=>[]); if(Array.isArray(j)) rows=rows.concat(j); }
     }
+    _retInvCnt = {}; rows.forEach(r=>{ if(r.coord_ack!==true){ const b=r.branch_name||'—'; _retInvCnt[b]=(_retInvCnt[b]||0)+1; } });
+    await _retRefreshSel();
+    if(_retBrSel!=='__all') rows = rows.filter(r=>(r.branch_name||'—')===_retBrSel);
     if(!rows.length){ wrap.style.display='none'; return; }
-    rows.sort((a,b)=>String(b.return_date).localeCompare(String(a.return_date)));
+    rows.sort((a,b)=>(a.coord_ack===true)-(b.coord_ack===true) || String(b.return_date).localeCompare(String(a.return_date)));
     const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
     list.innerHTML=rows.map(r=>{
       let items=r.items; if(typeof items==='string'){ try{ items=JSON.parse(items); }catch(e){ items=[]; } }
@@ -5139,6 +5155,9 @@ async function renderRepRaisedReturns(){
         </div>
         <div style="font-size:10px;color:#666;margin:2px 0 6px">المندوب: ${esc(r.rep_name)}</div>
         ${lines||'<div style="font-size:11px;color:#999">—</div>'}
+        ${r.coord_ack===true
+          ? `<div style="margin-top:6px;font-size:11px;color:#1A7A4A;font-weight:700">✅ تم تأكيدك${r.coord_ack_by?' ('+esc(r.coord_ack_by)+')':''}</div>`
+          : `<button onclick="confirmRepReturnInvoice(${r.id}, this)" style="width:100%;margin-top:8px;padding:9px;background:#1A7A4A;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">✅ أأكد استلام/رفع المرتجع</button>`}
       </div>`;
     }).join('');
     wrap.style.display='block';
