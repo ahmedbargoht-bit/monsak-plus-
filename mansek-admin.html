@@ -5926,9 +5926,9 @@ h2,h3{color:#2C1F0A}
 
           <!-- خصومات العملاء -->
           <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:#FFF8EC;border:0.5px solid #E8C98A;border-radius:8px;padding:8px 12px;margin-bottom:12px">
-            <span style="font-size:11px;font-weight:700;color:#854F0B">خصومات العملاء (تُخصم من المبيعات الفعلية، وتتوزع على المشرفين بنسبة مبيعاتهم):</span>
-            <label style="font-size:11px">خصومات مجموعات القاهرة <input type="number" id="sg-disc-cairo" min="0" step="1" value="0" oninput="sgDiscChanged()" style="width:110px;padding:4px 7px;border:0.5px solid var(--border-strong);border-radius:6px;font-family:Cairo,sans-serif;text-align:center"/></label>
-            <label style="font-size:11px">خصومات مجموعات الإسكندرية <input type="number" id="sg-disc-alex" min="0" step="1" value="0" oninput="sgDiscChanged()" style="width:110px;padding:4px 7px;border:0.5px solid var(--border-strong);border-radius:6px;font-family:Cairo,sans-serif;text-align:center"/></label>
+            <span style="font-size:11px;font-weight:700;color:#854F0B">خصومات العملاء (تُخصم من المبيعات الفعلية — خصم القاهرة على مجموعة القاهرة فقط، وخصم الإسكندرية على مجموعة الإسكندرية فقط، وتتوزع على مناديبها بنسبة مبيعاتهم):</span>
+            <label style="font-size:11px">خصومات مجموعة القاهرة <input type="number" id="sg-disc-cairo" min="0" step="1" value="0" oninput="sgDiscChanged()" style="width:110px;padding:4px 7px;border:0.5px solid var(--border-strong);border-radius:6px;font-family:Cairo,sans-serif;text-align:center"/></label>
+            <label style="font-size:11px">خصومات مجموعة الإسكندرية <input type="number" id="sg-disc-alex" min="0" step="1" value="0" oninput="sgDiscChanged()" style="width:110px;padding:4px 7px;border:0.5px solid var(--border-strong);border-radius:6px;font-family:Cairo,sans-serif;text-align:center"/></label>
             <button onclick="sgSaveDiscounts()" style="background:#854F0B;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">حفظ الخصومات</button>
           </div>
 
@@ -10279,9 +10279,20 @@ async function sgLoad(){
 }
 
 // ── خصومات العملاء: بتتوزع على المناديب (وبالتالي المشرفين) بنسبة مبيعاتهم داخل كل إقليم ──
+// خصم القاهرة بيتطبق على مجموعة "cairo" (وسط القاهرة) بس، وخصم الإسكندرية على مجموعة "alex" بس — باقي المجموعات (جيزة/جنوب/...) من غير خصم
+// خصم القاهرة = الجيزة + جنوب وشرق القاهرة + الهايبر + الأسواق الخاصة + وسط القاهرة + التجمعات | خصم الإسكندرية = الإسكندرية
+const DISC_CAIRO_GRPS = ['cairo','tajmuat','giza','south','hyper','private_chains_cairo','private_chains_giza','private_cairo'];
+function discRegionOfGrp(g){
+  g = String(g||'').toLowerCase().trim();
+  if(g==='alex' || g==='private_alex') return 'alex';
+  if(DISC_CAIRO_GRPS.includes(g)) return 'cairo';
+  return null;
+}
 function sgRepRegion(r){
-  const g = ((r.grp||'')+','+(r.groups||'')).toLowerCase();
-  return g.includes('alex') ? 'alex' : 'cairo';
+  const toks = ((r.grp||'')+','+(r.groups||'')).toLowerCase().split(',').map(s=>s.trim());
+  if(toks.includes('alex') || toks.includes('private_alex')) return 'alex';
+  for(const t of toks){ if(discRegionOfGrp(t)==='cairo') return 'cairo'; }
+  return null;
 }
 function sgApplyDiscounts(){
   if(!_sgData || !_sgData.preDiscSales) return;
@@ -10290,11 +10301,12 @@ function sgApplyDiscounts(){
   const pre = _sgData.preDiscSales;
   const out = {...pre};
   const base = {cairo:0, alex:0};
-  _sgData.reps.forEach(r=>{ const v=Math.max(0,pre[r.name]||0); base[sgRepRegion(r)] += v; });
+  _sgData.reps.forEach(r=>{ const rg0=sgRepRegion(r); if(!rg0) return; const v=Math.max(0,pre[r.name]||0); base[rg0] += v; });
   const disc = {cairo:dC, alex:dA};
   let applied = {cairo:0, alex:0};
   _sgData.reps.forEach(r=>{
     const rg = sgRepRegion(r);
+    if(!rg) return;
     const v = Math.max(0,pre[r.name]||0);
     if(base[rg]>0 && disc[rg]>0){
       const share = disc[rg]*v/base[rg];
@@ -41011,10 +41023,11 @@ function hmGrpCardHTML(grp){
   let sales = 0; const gSales = {};
   (_hmRawData||[]).forEach(b=>{ const g = b.grp==='private_cairo' ? 'private_chains_cairo' : b.grp; gSales[g] = (gSales[g]||0) + (b.invoiceValue||0); if(g===grp) sales += (b.invoiceValue||0); });
   // خصم العملاء: خصم الإقليم بيتوزع على مجموعاته بنسبة مبيعات كل مجموعة
-  const regOf = g => g==='alex' ? 'alex' : 'cairo';
-  const regSum = {cairo:0, alex:0}; Object.keys(gSales).forEach(g=>{ regSum[regOf(g)] += Math.max(0,gSales[g]); });
-  const rg = regOf(grp), regDisc = rg==='alex' ? (_hmDisc.alex||0) : (_hmDisc.cairo||0);
-  const disc = (regDisc>0 && regSum[rg]>0) ? regDisc*Math.max(0,sales)/regSum[rg] : 0;
+  // خصم القاهرة بيتوزع على (جيزة/جنوب/هايبر/أسواق خاصة/وسط/تجمعات) بنسبة المبيعات، وخصم الإسكندرية على alex — باقي المجموعات من غير خصم
+  const rgK = discRegionOfGrp(grp);
+  let regSum = 0; Object.keys(gSales).forEach(k=>{ if(discRegionOfGrp(k)===rgK) regSum += Math.max(0,gSales[k]||0); });
+  const regDisc = rgK ? (_hmDisc[rgK]||0) : 0;
+  const disc = (rgK && regDisc>0 && regSum>0 && sales>0) ? regDisc*Math.max(0,sales)/regSum : 0;
   const discPct = sales>0 ? disc/sales*100 : 0;
   const netSales = sales - disc;
   const tgt = _hmGrpTarget[grp] || 0;
@@ -44322,12 +44335,14 @@ async function sdLoad(){
     const uList = uRes.ok ? await uRes.json() : [];
     if(dRow){
       const disc = {cairo:Math.max(0,+dRow.cairo_discount||0), alex:Math.max(0,+dRow.alex_discount||0)};
-      const regOfRep = {}; (Array.isArray(uList)?uList:[]).forEach(u=>{ regOfRep[u.name] = String(u.grp||'').toLowerCase().includes('alex') ? 'alex' : 'cairo'; });
+      // الخصم على مجموعة cairo بس (خصم القاهرة) ومجموعة alex بس (خصم الإسكندرية) — باقي المجموعات من غير خصم
+      const regOfRep = {}; (Array.isArray(uList)?uList:[]).forEach(u=>{ const g=String(u.grp||'').toLowerCase().trim(); regOfRep[u.name] = discRegionOfGrp(g); });
       const base = {cairo:0, alex:0};
-      Object.entries(sdRepNetMap).forEach(([n,v])=>{ base[regOfRep[n]||'cairo'] += Math.max(0,v||0); });
+      Object.entries(sdRepNetMap).forEach(([n,v])=>{ const rg0=regOfRep[n]; if(rg0) base[rg0] += Math.max(0,v||0); });
       sdDiscPre = Object.values(sdRepNetMap).reduce((s,v)=>s+(v||0),0);
       Object.keys(sdRepNetMap).forEach(n=>{
-        const rg = regOfRep[n]||'cairo', v = Math.max(0,sdRepNetMap[n]||0);
+        const rg = regOfRep[n]; if(!rg) return;
+        const v = Math.max(0,sdRepNetMap[n]||0);
         if(base[rg]>0 && disc[rg]>0){ const share = disc[rg]*v/base[rg]; sdRepNetMap[n] -= share; sdDiscApplied += share; }
       });
     }
