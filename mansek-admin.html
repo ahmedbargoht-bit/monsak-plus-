@@ -56008,8 +56008,12 @@ function svmDetail(id){
     ${row('المسافة من الفرع',r.dist!=null?r.dist+' متر':'—')}${row('وقت الدخول',svmEsc(t))}
     ${row('موقع المشرف',svmMapLink(r.vlat,r.vlng,'عرض على الخريطة'))}${row('موقع الفرع',svmMapLink(r.blat,r.blng,'عرض على الخريطة'))}
     ${row(SVM_RC()[0],rate(r.rc))}${row(SVM_RC()[1],rate(r.rd))}${row(SVM_RC()[2],rate(r.rl))}
-    ${r.done&&r.isNew&&!r.reviewed?'<div style="margin-top:8px;color:#B71C1C;font-size:12px;font-weight:700">نموذج المراجعة غير مكتمل</div>':''}
-    ${r.done&&!r.isNew&&!r.reviewed?'<div style="margin-top:8px;color:#888;font-size:12px">زيارة قديمة (قبل تفعيل التوثيق بالموقع والتقييم)</div>':''}
+    ${r.sx?`${row('نوع الزيارة المسجّلة', r.sx.supType?svmEsc(r.sx.supType)+(r.sx.logOther?` <span style="color:#E65100;font-size:11px">(مسجّلة باسم ${svmEsc(r.sx.logBy||'')})</span>`:''):(r.sx.manual?'تأشير يدوي في الخطة':'—'))}
+    ${row('آخر زيارة مندوب', r.sx.repDate?svmEsc(r.sx.repDate)+' ('+svsAgo(r.sx.repDate)+') — '+svmEsc(r.sx.repName||'—'):'—')}
+    ${row('آخر تقرير منسق', r.sx.coordDate?svmEsc(r.sx.coordDate)+' ('+svsAgo(r.sx.coordDate)+')'+(r.sx.coordName?' — '+svmEsc(r.sx.coordName):''):'—')}
+    ${row('مرتجعات معلّقة بالفرع', r.sx.pend?`<b style="color:#C62828">${r.sx.pend}</b>`:'لا يوجد')}`:''}
+    ${r.done&&r.isNew&&!r.reviewed&&!r.sx?'<div style="margin-top:8px;color:#B71C1C;font-size:12px;font-weight:700">نموذج المراجعة غير مكتمل</div>':''}
+    ${r.done&&!r.isNew&&!r.reviewed&&!r.sx?'<div style="margin-top:8px;color:#888;font-size:12px">زيارة قديمة (قبل تفعيل التوثيق بالموقع والتقييم)</div>':''}
     <div style="margin-top:10px;font-size:12.5px"><b>الملاحظات:</b> ${r.notes?svmEsc(r.notes):'<span style="color:#999">لا يوجد</span>'}</div>
   </div>`;
   document.body.appendChild(m);
@@ -56029,6 +56033,11 @@ function svmSetSide(side){
   bs.style.background = c ? '#fff' : '#1A7A4A'; bs.style.color = c ? '#1A7A4A' : '#fff';
   svmLoad();
 }
+function svsAgo(d){
+  if(!d) return '';
+  const n = Math.round((new Date(svmIso(new Date())+'T00:00:00') - new Date(String(d).slice(0,10)+'T00:00:00'))/86400000);
+  return n<=0 ? 'النهارده' : 'من '+n+' يوم';
+}
 function svsHav(a,b,c,d){
   const R=6371000, p=Math.PI/180, dl=(c-a)*p, dn=(d-b)*p;
   const x=Math.sin(dl/2)**2+Math.cos(a*p)*Math.cos(c*p)*Math.sin(dn/2)**2;
@@ -56040,36 +56049,48 @@ function svsHav(a,b,c,d){
 async function svsBuildRows(from,to){
   const B = SUPABASE_URL+'/rest/v1/';
   const addD = (d,n)=>{ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()+n); return svmIso(x); };
-  const [plans, items, logs, rates] = await Promise.all([
+  const [plans, items, logs, rates, dels, vis, rets] = await Promise.all([
     svmGetAll(`${B}sales_plans_plus?select=id,staff_name,sector,week_start&week_start=gte.${addD(from,-7)}&week_start=lte.${to}`),
     svmGetAll(`${B}sales_plan_items?select=id,plan_id,client_name,area,visit_date,visit_status,notes&visit_date=gte.${from}&visit_date=lte.${to}&order=visit_date.desc,id.desc`),
     svmGetAll(`${B}field_support_logs?select=supervisor_name,branch_name,visit_date,created_at,support_type,rep_name,lat,lng&branch_name=not.is.null&created_at=gte.${addD(from,-1)}&created_at=lte.${addD(to,2)}&order=created_at.asc`),
-    svmGetAll(`${B}sales_visit_ratings?select=*&visit_date=gte.${from}&visit_date=lte.${to}&order=created_at.desc`).catch(()=>[])
+    svmGetAll(`${B}sales_visit_ratings?select=*&visit_date=gte.${from}&visit_date=lte.${to}&order=created_at.desc`).catch(()=>[]),
+    svmGetAll(`${B}sales_deliveries?select=branch_name,rep_name,delivery_date&deleted_at=is.null&delivery_date=gte.${addD(to,-120)}&order=delivery_date.desc,id.desc`).catch(()=>[]),
+    svmGetAll(`${B}visits?select=branch,date,name&branch=not.is.null&order=date.desc`).catch(()=>[]),
+    svmGetAll(`${B}returns?select=branch,pulled&order=id.desc`).catch(()=>[])
   ]);
+  const lastRep = {}; dels.forEach(d=>{ if(d.branch_name && !lastRep[d.branch_name]) lastRep[d.branch_name]=d; });
+  const lastCoord = {}; vis.forEach(v=>{ if(v.branch && !lastCoord[v.branch]) lastCoord[v.branch]=v; });
+  const pend = {}; rets.forEach(r=>{ if(r.branch && r.pulled!==true) pend[r.branch]=(pend[r.branch]||0)+1; });
   const planBy = {}; plans.forEach(p=>{ planBy[p.id]=p; });
   const logKey = {}, logAny = {};
   logs.forEach(l=>{
-    const d = l.visit_date || new Date(new Date(l.created_at).getTime()+2*3600000).toISOString().slice(0,10);
-    logKey[l.supervisor_name+'|'+l.branch_name+'|'+d] = l;
-    logAny[l.branch_name+'|'+d] = l;
+    let d = l.visit_date || '';
+    const mm = /^(\d{2})-(\d{2})-(\d{4})$/.exec(d);
+    if(mm) d = mm[3]+'-'+mm[2]+'-'+mm[1];
+    else if(!/^\d{4}-\d{2}-\d{2}/.test(d)) d = new Date(new Date(l.created_at).getTime()+2*3600000).toISOString().slice(0,10);
+    d = d.slice(0,10);
+    (logKey[l.branch_name+'|'+d] = logKey[l.branch_name+'|'+d] || []).push(l);
+    if(!logAny[l.branch_name+'|'+d] || (l.lat!=null && logAny[l.branch_name+'|'+d].lat==null)) logAny[l.branch_name+'|'+d] = l;
   });
+  const sameSup = (a,b)=>{ a=String(a||'').trim(); b=String(b||'').trim(); return !!a && !!b && (a===b || a.indexOf(b)===0 || b.indexOf(a)===0); };
   const rateKey = {}, rateAny = {};
   rates.forEach(r=>{ const k=r.branch_name+'|'+r.visit_date; if(!rateAny[k]) rateAny[k]=r; if(!rateKey[r.supervisor_name+'|'+k]) rateKey[r.supervisor_name+'|'+k]=r; });
   const today = svmIso(new Date());
   return items.filter(i=>planBy[i.plan_id] && i.client_name).map(i=>{
     const p = planBy[i.plan_id], b = SVM_BRANCH_CACHE[i.client_name]||{};
-    const lg = logKey[p.staff_name+'|'+i.client_name+'|'+i.visit_date] || logAny[i.client_name+'|'+i.visit_date] || null;
+    const lgOwn = (logKey[i.client_name+'|'+i.visit_date]||[]).filter(l=>sameSup(l.supervisor_name,p.staff_name)).sort((x,y)=>(y.lat!=null)-(x.lat!=null))[0] || null;
+    const lg = lgOwn || logAny[i.client_name+'|'+i.visit_date] || null;
+    const rp = lastRep[i.client_name], cd = lastCoord[i.client_name];
     const manual = i.visit_status==='done';
-    const done = !!lg || manual;
-    const status = done ? 'done' : (i.visit_date < today ? 'missed' : 'pending');
     const hasLoc = !!(lg && lg.lat!=null && lg.lng!=null);
+    // اللوكيشن شرط لتسجيل الزيارة: التأشير اليدوي بدون سجل بموقع مش زيارة منجزة
+    const done = hasLoc;
+    const status = done ? 'done' : (i.visit_date < today ? 'missed' : 'pending');
     const dist = (hasLoc && b.lat!=null && b.lng!=null) ? Math.round(svsHav(+lg.lat,+lg.lng,+b.lat,+b.lng)) : null;
     let geoLbl='—', geoClr='#888';
-    if(done){
-      if(hasLoc){ geoLbl='موثّقة بالموقع'; geoClr = (dist!=null && dist>200) ? '#B8860B' : '#1A7A4A'; }
-      else if(lg){ geoLbl='سجل بدون موقع'; geoClr='#B8860B'; }
-      else { geoLbl='تأشير يدوي فقط'; geoClr='#B71C1C'; }
-    }
+    if(hasLoc){ geoLbl='موثّقة بالموقع'; geoClr = (dist!=null && dist>200) ? '#B8860B' : '#1A7A4A'; }
+    else if(lg){ geoLbl='سجل بدون موقع'; geoClr='#B8860B'; }
+    else if(manual){ geoLbl='تأشير يدوي بدون موقع (غير محتسبة)'; geoClr='#B71C1C'; }
     const rt = rateKey[p.staff_name+'|'+i.client_name+'|'+i.visit_date] || rateAny[i.client_name+'|'+i.visit_date] || null;
     const rc = rt?rt.rate_display||'':'', rd = rt?rt.rate_handling||'':'', rl = rt?rt.rate_stock||'':'';
     const reviewed = !!(rc && rd && rl);
@@ -56079,7 +56100,8 @@ async function svsBuildRows(from,to){
       grp:b.grp||'', status, done, geoOK:done&&hasLoc, geoSt:(done&&hasLoc)?'inside':'', geoLbl, geoClr, dist,
       checkIn:lg&&lg.created_at?lg.created_at:'', vlat:lg?lg.lat:null, vlng:lg?lg.lng:null, blat:b.lat, blng:b.lng,
       reviewed, isNew:(i.visit_date||'')>=SVM_GEO_START, rc, rd, rl, notes:(rt&&rt.notes)||i.notes||'',
-      verified: done && hasLoc && reviewed, needs, coord:''
+      verified: done && hasLoc && reviewed, needs, coord:'',
+      sx:{manual, logOther:!!(lg&&!lgOwn), logBy:lg?lg.supervisor_name:'', supType:lg?lg.support_type:'', repName:rp?rp.rep_name:'', repDate:rp?rp.delivery_date:'', coordDate:cd?cd.date:'', coordName:cd?cd.name:'', pend:pend[i.client_name]||0}
     };
   });
 }
