@@ -49,7 +49,7 @@ th{font-size:.75rem;color:#bfae98;font-weight:600;text-align:right;padding:.3rem
 td{padding:.38rem .5rem;border-bottom:1px solid #2d171e;font-size:.9rem;vertical-align:middle}
 .tc{text-align:center}
 .pill{display:inline-block;padding:.05rem .6rem;border-radius:99px;font-size:.8rem;font-weight:700}
-.pill.g{background:#0f3a24}.pill.r{background:#4a1616}.pill.a{background:#4a3410}.pill.n{background:#33262b;color:#bfae98}
+.pill.b{background:#10294a;color:#93c5fd}.pill.g{background:#0f3a24}.pill.r{background:#4a1616}.pill.a{background:#4a3410}.pill.n{background:#33262b;color:#bfae98}
 .two{display:grid;grid-template-columns:1.4fr 1fr;gap:.7rem}
 .three{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem;height:100%}
 .empty{text-align:center;color:#bfae98;padding:2rem 0;font-size:1rem}
@@ -86,7 +86,8 @@ td{padding:.38rem .5rem;border-bottom:1px solid #2d171e;font-size:.9rem;vertical
   <nav id="tabs"></nav>
   <main>
     <section class="view" id="v-hm"></section>
-    <section class="view" id="v-lb"></section>
+    <section class="view" id="v-svc"></section>
+    <section class="view" id="v-svs"></section>
     <section class="view" id="v-loc"></section>
     <section class="view" id="v-sales"></section>
   </main>
@@ -103,7 +104,7 @@ var REFRESH_MS=5*60*1000;
 var WORK_DAYS=26;
 var AR_DAYS=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
 var DAY_KEYS={sunday:0,monday:1,tuesday:2,wednesday:3,thursday:4,friday:5,saturday:6,'الأحد':0,'الاثنين':1,'الثلاثاء':2,'الأربعاء':3,'الخميس':4,'الجمعة':5,'السبت':6};
-var TABS=[{id:'lb',label:'لوحة شرف المنسقين'},{id:'hm',label:'خريطة حرارة الفروع'},{id:'loc',label:'الموقع الحالي'},{id:'sales',label:'المبيعات'}];
+var TABS=[{id:'svc',label:'مشرفي التنسيق'},{id:'svs',label:'مشرفي البيع'},{id:'hm',label:'خريطة حرارة الفروع'},{id:'loc',label:'الموقع الحالي'},{id:'sales',label:'المبيعات'}];
 var GROUPS={giza:'الجيزة',cairo:'وسط القاهرة',south:'جنوب وشرق القاهرة',tajmuat:'التجمعات',hyper:'الهايبر ماركت',alex:'الإسكندرية',delta:'الدلتا'};
 var S={tab:0,data:{},errs:{},page:0,nextAt:0,loading:false,lastOk:0};
 
@@ -215,7 +216,7 @@ function loadSales(){
 }
 function refresh(){
   if(S.loading)return;S.loading=true;
-  var jobs=[['today',loadToday],['lb',loadLb],['sup',loadSup],['sales',loadSales]];
+  var jobs=[['today',loadToday],['sup',loadSup],['sales',loadSales],['svc',loadSvc],['svs',loadSvs]];
   Promise.all(jobs.map(function(j){
     return j[1]().then(function(d){S.data[j[0]]=d;delete S.errs[j[0]]}).catch(function(e){S.errs[j[0]]=e&&e.message||'خطأ'});
   })).then(function(){
@@ -730,8 +731,154 @@ function renderSales(){
   drawChart($('ch7'),s.days);
 }
 
+
+/* ───────── مشرفي التنسيق / مشرفي البيع — زيارات اليوم + التوثيق بالموقع + التقييم ───────── */
+var SUPV={
+  svc:{title:'👔 مشرفي التنسيق — زيارات اليوم',cols:['تقرير المنسق','العرض','النظافة']},
+  svs:{title:'🚚 مشرفي البيع — زيارات اليوم',cols:['العرض','التعامل','المخزون']}
+};
+var SUPV_PAGES=1;
+var SUPV_RATE={excellent:['ممتاز','g'],good:['جيد','b'],needs:['يحتاج تحسين','r']};
+var SUPV_GEO_START='2026-10-05';
+function hav(a,b,c,d){
+  var R=6371000,p=Math.PI/180,dl=(c-a)*p,dn=(d-b)*p;
+  var x=Math.sin(dl/2)*Math.sin(dl/2)+Math.cos(a*p)*Math.cos(c*p)*Math.sin(dn/2)*Math.sin(dn/2);
+  return 2*R*Math.asin(Math.sqrt(x));
+}
+function chunkIds(ids,n){var o=[];for(var i=0;i<ids.length;i+=n)o.push(ids.slice(i,i+n));return o}
+function loadSvc(){
+  var c=cairo(),iso=isoOf(c.y,c.m,c.d);
+  return Promise.all([
+    getAll('plan_branches?select=id,plan_id,branch_name,visit_date,visit_status,check_in_at,geo_status,geo_distance_m,reviewed_at,review_coord_report,review_display,review_clean&visit_date=eq.'+iso+'&order=id.asc'),
+    getAll('branches?select=branch_name,route,grp&order=id.asc').catch(function(){return []})
+  ]).then(function(r){
+    var pbs=r[0]||[],br={};(r[1]||[]).forEach(function(b){br[b.branch_name]=b});
+    var ids=[],seen={};pbs.forEach(function(x){if(x.plan_id&&!seen[x.plan_id]){seen[x.plan_id]=1;ids.push(x.plan_id)}});
+    return Promise.all(chunkIds(ids,100).map(function(ch){return get('plans?select=id,supervisor_name&id=in.('+ch.join(',')+')').catch(function(){return []})})).then(function(res){
+      var pl={};res.forEach(function(a){(a||[]).forEach(function(p){pl[p.id]=p})});
+      var rows=pbs.map(function(x){
+        var p=pl[x.plan_id]||{},b=br[x.branch_name]||{};
+        var done=x.visit_status==='done';
+        var geoOK=!!x.check_in_at&&x.geo_status==='inside';
+        var rc=x.review_coord_report||'',rd=x.review_display||'',rl=x.review_clean||'';
+        var reviewed=!!x.reviewed_at&&!!rc&&!!rd&&!!rl;
+        var geoLbl='—',geoCls='n';
+        if(done){
+          if(geoOK){geoLbl='موثّقة بالموقع'+(x.geo_distance_m!=null?' · '+x.geo_distance_m+' م':'');geoCls='g'}
+          else if(x.check_in_at&&x.geo_status==='no_branch_loc'){geoLbl='لوكيشن الفرع غير مسجّل';geoCls='a'}
+          else{geoLbl='غير موثّقة';geoCls='r'}
+        }
+        return {sup:p.supervisor_name||'—',route:b.route||'—',branch:x.branch_name||'',status:x.visit_status||'pending',done:done,geoOK:geoOK,geoLbl:geoLbl,geoCls:geoCls,
+          checkIn:x.check_in_at||'',r:[rc,rd,rl],reviewed:reviewed,verified:done&&geoOK&&reviewed,needs:reviewed&&(rc==='needs'||rd==='needs'||rl==='needs')};
+      });
+      return {rows:rows,iso:iso};
+    });
+  });
+}
+function loadSvs(){
+  var c=cairo(),iso=isoOf(c.y,c.m,c.d),wk=addDays(c.y,c.m,c.d,-7),wkIso=isoOf(wk.y,wk.m,wk.d);
+  var startUtc=cairoMidnightUtcIso(c);
+  return Promise.all([
+    get('sales_plans_plus?select=id,staff_name&week_start=gte.'+wkIso+'&week_start=lte.'+iso+'&limit=1000'),
+    getAll('sales_plan_items?select=id,plan_id,client_name,area,visit_date,visit_status&visit_date=eq.'+iso+'&order=id.asc'),
+    getAll('field_support_logs?select=supervisor_name,branch_name,visit_date,created_at,lat,lng&branch_name=not.is.null&created_at=gte.'+startUtc+'&order=created_at.asc').catch(function(){return []}),
+    get('sales_visit_ratings?select=branch_name,supervisor_name,visit_date,rate_display,rate_handling,rate_stock&visit_date=eq.'+iso+'&limit=1000').catch(function(){return []}),
+    getAll('branches?select=branch_name,route,grp,lat,lng&order=id.asc').catch(function(){return []})
+  ]).then(function(r){
+    var pl={};(r[0]||[]).forEach(function(p){pl[p.id]=p});
+    var br={};(r[4]||[]).forEach(function(b){br[b.branch_name]=b});
+    var logKey={},logAny={};
+    (r[2]||[]).forEach(function(l){logKey[l.supervisor_name+'|'+l.branch_name]=l;logAny[l.branch_name]=l});
+    var rk={},ra={};
+    (r[3]||[]).forEach(function(t){if(!ra[t.branch_name])ra[t.branch_name]=t;if(!rk[t.supervisor_name+'|'+t.branch_name])rk[t.supervisor_name+'|'+t.branch_name]=t});
+    var rows=(r[1]||[]).filter(function(i){return pl[i.plan_id]&&i.client_name}).map(function(i){
+      var p=pl[i.plan_id],b=br[i.client_name]||{};
+      var lg=logKey[p.staff_name+'|'+i.client_name]||logAny[i.client_name]||null;
+      var manual=i.visit_status==='done',done=!!lg||manual;
+      var hasLoc=!!(lg&&lg.lat!=null&&lg.lng!=null);
+      var dist=(hasLoc&&b.lat!=null&&b.lng!=null)?Math.round(hav(+lg.lat,+lg.lng,+b.lat,+b.lng)):null;
+      var geoLbl='—',geoCls='n';
+      if(done){
+        if(hasLoc){geoLbl='موثّقة بالموقع'+(dist!=null?' · '+dist+' م':'');geoCls=(dist!=null&&dist>200)?'a':'g'}
+        else if(lg){geoLbl='سجل بدون موقع';geoCls='a'}
+        else{geoLbl='تأشير يدوي فقط';geoCls='r'}
+      }
+      var t=rk[p.staff_name+'|'+i.client_name]||ra[i.client_name]||null;
+      var rc=t?t.rate_display||'':'',rd=t?t.rate_handling||'':'',rl=t?t.rate_stock||'':'';
+      var reviewed=!!(rc&&rd&&rl);
+      return {sup:p.staff_name||'—',route:i.area||b.route||'—',branch:i.client_name,status:done?'done':'pending',done:done,geoOK:done&&hasLoc,geoLbl:geoLbl,geoCls:geoCls,
+        checkIn:lg&&lg.created_at?lg.created_at:'',r:[rc,rd,rl],reviewed:reviewed,verified:done&&hasLoc&&reviewed,needs:reviewed&&(rc==='needs'||rd==='needs'||rl==='needs')};
+    });
+    return {rows:rows,iso:iso};
+  });
+}
+function supvState(r,cols){
+  if(r.status==='missed'||r.status==='skipped')return ['فائتة','r',''];
+  if(!r.done)return ['مجدولة','n',''];
+  var m=[];
+  if(!r.geoOK)m.push('الموقع');
+  for(var i=0;i<3;i++)if(!r.r[i])m.push(cols[i]);
+  if(!m.length&&!r.reviewed)m.push('اعتماد التقييم');
+  if(!m.length)return ['منجزة ومكتملة','g',''];
+  return ['منجزة وناقصة','a','ناقص: '+m.join('، ')];
+}
+function supvLayout(){
+  var el=document.querySelector('.view.active');
+  var fs=parseFloat(window.getComputedStyle(document.documentElement).fontSize)||18;
+  var h=el?el.clientHeight:650;
+  return Math.max(4,Math.floor((h-fs*10.5)/(fs*2.7)));
+}
+function renderSupv(key){
+  var el=$('v-'+key),d=S.data[key],cfg=SUPV[key];
+  if(!d){el.innerHTML='<div class="empty">جاري التحميل...</div>';return}
+  var rows=d.rows.slice();
+  var ord={done:0,pending:1,missed:2,skipped:2};
+  rows.sort(function(a,b){
+    var oa=ord[a.status]==null?1:ord[a.status],ob=ord[b.status]==null?1:ord[b.status];
+    if(oa!==ob)return oa-ob;
+    return String(b.checkIn).localeCompare(String(a.checkIn));
+  });
+  var total=rows.length,done=0,ver=0,geo=0,needs=0;
+  rows.forEach(function(r){if(r.done)done++;if(r.verified)ver++;if(r.done&&r.geoOK)geo++;if(r.needs)needs++});
+  var pct=total?Math.round(ver/total*100):0;
+  function kc(color,lbl,val,vc){return '<div class="card kcard s" style="border-top-color:'+color+'"><div class="lbl">'+lbl+'</div><div class="num '+vc+'">'+val+'</div></div>'}
+  var per=supvLayout(),pages=Math.max(1,Math.ceil(total/per));
+  SUPV_PAGES=pages;if(S.page>=pages)S.page=0;
+  var sl=rows.slice(S.page*per,S.page*per+per);
+  var h='<div class="sv"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem"><b style="font-size:1.05rem;color:#F0C880">'+cfg.title+'</b><span class="leg">'+esc(d.iso)+'</span></div>'+
+    '<div class="grid kpis6" style="margin-bottom:.5rem">'+
+      kc('#C4B5FD','الزيارات المخططة اليوم',total,'p')+
+      kc('#4ADE80','منجزة ومكتملة',ver,'g')+
+      kc('#FBBF24','منجزة وناقصة',Math.max(done-ver,0),'a')+
+      kc('#60A5FA','موثّقة بالموقع',geo,'b')+
+      kc('#F87171','بند يحتاج تحسين',needs,'r')+
+      kc('#F0C880','نسبة المتابعة',pct+'%',pctColor(pct))+
+    '</div>'+
+    '<div class="card fill" style="overflow:hidden;min-height:0">';
+  if(!total){h+='<div class="empty">لا توجد زيارات مخططة اليوم</div>'}
+  else{
+    h+='<table><thead><tr><th>المشرف</th><th>خط السير</th><th>الفرع</th><th>الحالة</th><th>الموقع</th>';
+    cfg.cols.forEach(function(c){h+='<th class="tc">'+c+'</th>'});
+    h+='</tr></thead><tbody>';
+    sl.forEach(function(r){
+      var st=supvState(r,cfg.cols);
+      h+='<tr><td><b>'+esc(r.sup)+'</b></td><td style="font-size:.8rem">'+esc(r.route)+'</td><td style="font-size:.8rem">'+esc(r.branch)+'</td>'+
+        '<td><span class="pill '+st[1]+'">'+st[0]+'</span>'+(st[2]?'<div style="font-size:.62rem;color:#FBBF24;margin-top:.1rem">'+esc(st[2])+'</div>':'')+'</td>'+
+        '<td><span class="pill '+r.geoCls+'" style="font-size:.72rem">'+esc(r.geoLbl)+'</span></td>';
+      for(var i=0;i<3;i++){
+        var rt=SUPV_RATE[r.r[i]];
+        h+='<td class="tc">'+(rt?'<span class="pill '+rt[1]+'" style="font-size:.72rem">'+rt[0]+'</span>':'<span style="color:#6b5b50">—</span>')+'</td>';
+      }
+      h+='</tr>';
+    });
+    h+='</tbody></table>';
+  }
+  h+='</div><div class="hint">صفحة '+(S.page+1)+' من '+pages+(pages>1?' (بتتغيّر تلقائيًا أو بأزرار ↑ ↓)':'')+' • زيارات اليوم فقط • الحالة حسب الموقع + التقييم</div></div>';
+  el.innerHTML=h;
+}
+
 /* ───────── التنقل والعرض ───────── */
-var RENDER={hm:renderHm,lb:renderLb,loc:renderLoc,sales:renderSales};
+var RENDER={svc:function(){renderSupv('svc')},svs:function(){renderSupv('svs')},hm:renderHm,loc:renderLoc,sales:renderSales};
 function renderAll(){
   TABS.forEach(function(t,i){var v=$('v-'+t.id);if(i===S.tab)v.className='view active';else v.className='view'});
   RENDER[TABS[S.tab].id]();
@@ -765,9 +912,9 @@ document.addEventListener('keydown',function(e){
   // التابات مرتبة من اليمين للشمال: السهم الشمال = التالي
   if(k==='ArrowLeft'||c===37){go(S.tab+1);e.preventDefault()}
   else if(k==='ArrowRight'||c===39){go(S.tab-1);e.preventDefault()}
-  else if(k==='ArrowDown'||c===40){var tid=TABS[S.tab].id;if(tid==='loc'){S.page++;renderLoc();e.preventDefault()}else if(tid==='hm'){S.page=(S.page+1)%Math.max(1,HM_PAGES);renderHm();e.preventDefault()}else if(tid==='lb'){S.page=(S.page+1)%Math.max(1,LB_PAGES);renderLb();e.preventDefault()}}
-  else if(k==='ArrowUp'||c===38){var tid2=TABS[S.tab].id;if(tid2==='loc'){S.page=Math.max(0,S.page-1);renderLoc();e.preventDefault()}else if(tid2==='hm'){S.page=(S.page-1+Math.max(1,HM_PAGES))%Math.max(1,HM_PAGES);renderHm();e.preventDefault()}else if(tid2==='lb'){S.page=(S.page-1+Math.max(1,LB_PAGES))%Math.max(1,LB_PAGES);renderLb();e.preventDefault()}}
-  else if(k>='1'&&k<='4'){go(+k-1)}
+  else if(k==='ArrowDown'||c===40){var tid=TABS[S.tab].id;if(tid==='loc'){S.page++;renderLoc();e.preventDefault()}else if(tid==='hm'){S.page=(S.page+1)%Math.max(1,HM_PAGES);renderHm();e.preventDefault()}else if(tid==='svc'||tid==='svs'){S.page=(S.page+1)%Math.max(1,SUPV_PAGES);RENDER[tid]();e.preventDefault()}}
+  else if(k==='ArrowUp'||c===38){var tid2=TABS[S.tab].id;if(tid2==='loc'){S.page=Math.max(0,S.page-1);renderLoc();e.preventDefault()}else if(tid2==='hm'){S.page=(S.page-1+Math.max(1,HM_PAGES))%Math.max(1,HM_PAGES);renderHm();e.preventDefault()}else if(tid2==='svc'||tid2==='svs'){S.page=(S.page-1+Math.max(1,SUPV_PAGES))%Math.max(1,SUPV_PAGES);RENDER[tid2]();e.preventDefault()}}
+  else if(k>='1'&&k<='5'){go(+k-1)}
   else if(k==='r'||k==='R'){refresh()}
   else if(k==='f'||k==='F'){toggleFs()}
 });
@@ -791,10 +938,11 @@ setInterval(function(){
   if(HM_PAGES>1){S.page=(S.page+1)%HM_PAGES;renderHm()}
 },15000);
 setInterval(function(){
-  if(TABS[S.tab].id!=='lb'||!S.data.lb)return;
-  if(LB_PAGES>1){S.page=(S.page+1)%LB_PAGES;renderLb()}
-},15000);
-window.addEventListener('resize',function(){var t=TABS[S.tab].id;if(t==='sales')renderSales();else if(t==='hm')renderHm();else if(t==='lb')renderLb()});
+  var tid=TABS[S.tab].id;
+  if((tid!=='svc'&&tid!=='svs')||!S.data[tid])return;
+  if(SUPV_PAGES>1){S.page=(S.page+1)%SUPV_PAGES;RENDER[tid]()}
+},12000);
+window.addEventListener('resize',function(){var t=TABS[S.tab].id;if(t==='sales')renderSales();else if(t==='hm')renderHm();else if(t==='svc'||t==='svs')RENDER[t]()});
 
 /* ───────── وضع تجريبي (?demo=1) لمعاينة الشكل بدون اتصال ───────── */
 function demoGet(path){
