@@ -38036,7 +38036,18 @@ function fcMsAll(key){
 
 const FC_CATS = ['تمر سعودى','تمر سيوي','تمر وادي خام','مصنعات','أخرى'];
 // التصنيف: من قاعدة الأصناف (PDB) بالاسم المعتمد، وإلا تخمين بالكلمات (سعودي / سيوي / وادي / مصنعات)
+let FC_CATOV = {};
+async function fcLoadCatOv(){
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/item_category_overrides?select=item_key,category&limit=5000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const j = r.ok ? await r.json() : [];
+    FC_CATOV = {}; (Array.isArray(j)?j:[]).forEach(x=>{ if(x.item_key && x.category) FC_CATOV[x.item_key]=x.category; });
+  }catch(e){ console.warn('[fcLoadCatOv]', e); }
+  return FC_CATOV;
+}
 function fcCategoryOf(name, canon, pdbIdx, pdbNorm){
+  const ov = FC_CATOV[sciNormalizeItemKey(canon)] || FC_CATOV[sciNormalizeItemKey(name)];
+  if(ov) return ov;
   const m = (pdbIdx&&(pdbIdx[canon]||pdbIdx[name])) || pdbNorm[sciNormalizeItemKey(canon)] || pdbNorm[sciNormalizeItemKey(name)];
   if(m && m.cat) return m.cat;
   const t = sciNormalizeItemKey(name);
@@ -38055,11 +38066,12 @@ async function fcLoad(){
   tb.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:30px;color:var(--text2)">جاري التحميل...</td></tr>';
   try{
     const arr = k => FC.sel[k].size ? [...FC.sel[k]] : null;
-    const [rows, bcIdx] = await Promise.all([
+    const [rows, , bcIdx, , ovRows] = await Promise.all([
       fcRpc('mt_supply_price_report', {p_from:from, p_to:to, p_sectors:arr('sector'), p_routes:arr('route'), p_items:arr('item'), p_branches:arr('branch')}),
       ensureSplPrices().catch(()=>{}),
       sciBuildBarcodeIndex().catch(()=>({})),
-      (typeof sciLoadItemAliasMap==='function' ? sciLoadItemAliasMap() : Promise.resolve()).catch(()=>{})
+      (typeof sciLoadItemAliasMap==='function' ? sciLoadItemAliasMap() : Promise.resolve()).catch(()=>{}),
+      fcLoadCatOv()
     ]);
     // سعر القطعة الحالي: تاب الأسعار (sales_prices) بعد توحيد الاسم، وإلا آخر فاتورة MT
     const idx = {};
@@ -38076,7 +38088,7 @@ async function fcLoad(){
       const cur = tabP>0 ? tabP : (lastP>0 ? lastP : null);
       const ppc = +r.pieces_per_carton || 0;
       const bc = r.barcode || (bcIdx&&(bcIdx[canon]||bcIdx[r.item])) || bcNorm[sciNormalizeItemKey(canon)] || bcNorm[sciNormalizeItemKey(r.item)] || '';
-      return { name:r.item, barcode:bc, cat:fcCategoryOf(r.item, canon, pdbIdx, pdbNorm), qp:+r.qty_piece||0, qc:+r.qty_carton||0, cartons:+r.cartons||0,
+      return { name:r.item, key:sciNormalizeItemKey(canon||r.item), barcode:bc, cat:fcCategoryOf(r.item, canon, pdbIdx, pdbNorm), qp:+r.qty_piece||0, qc:+r.qty_carton||0, cartons:+r.cartons||0,
         period:(+r.period_piece_price>0 ? +r.period_piece_price : null), cur, fromTab:tabP>0, totalValue:+r.total_value||0,
         curCarton:(cur && ppc>0) ? cur*ppc : null };
     }).sort((a,b)=> (FC_CATS.indexOf(a.cat)-FC_CATS.indexOf(b.cat)) || (b.cartons-a.cartons));
@@ -38095,6 +38107,27 @@ function fcPriceColor(r){
   if(r.cur < r.period*0.9999) return '#065F46';
   return '#2C1F0A';
 }
+function fcPickCat(i){
+  const td = document.getElementById('fc-cat-'+i); if(!td) return;
+  td.innerHTML = `<select onchange="fcSetCat(${i},this.value)" style="padding:4px 6px;border:1.5px solid #D4C4A8;border-radius:7px;font-family:inherit;font-size:11.5px"><option value="">اختر التصنيف...</option>${FC_CATS.filter(c=>c!=='أخرى').map(c=>`<option>${c}</option>`).join('')}</select>`;
+  td.querySelector('select').focus();
+}
+async function fcSetCat(i, cat){
+  const r = FC.rows[i]; if(!r || !cat) return;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/item_category_overrides?on_conflict=item_key`,{
+      method:'POST',
+      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=minimal'},
+      body: JSON.stringify({item_key:r.key, item_name:r.name, category:cat, updated_at:new Date().toISOString()})
+    });
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    FC_CATOV[r.key] = cat;
+    FC.rows.forEach(x=>{ if(x.key===r.key) x.cat = cat; });
+    FC.rows.sort((a,b)=> (FC_CATS.indexOf(a.cat)-FC_CATS.indexOf(b.cat)) || (b.cartons-a.cartons));
+    showToast('✅ تم حفظ التصنيف: '+cat);
+    fcRender();
+  }catch(e){ console.error('[fcSetCat]', e); showToast('❌ فشل حفظ التصنيف — جرّب تاني'); fcRender(); }
+}
 function fcRender(){
   const rows = FC.rows, tb = document.getElementById('fc-tbody'), st = document.getElementById('fc-stats');
   const totP = rows.reduce((a,r)=>a+r.qp,0), totC = rows.reduce((a,r)=>a+r.cartons,0);
@@ -38105,7 +38138,7 @@ function fcRender(){
   if(!rows.length){ tb.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:30px;color:var(--text2)">لا توجد توريدات في الفترة والفلاتر المختارة</td></tr>'; return; }
   tb.innerHTML = rows.map((r,i)=>`<tr style="background:${i%2?'#FDFAF5':'#fff'};border-bottom:1px solid #F0E8D8">
     <td style="padding:8px 10px;font-size:11.5px;color:#666;direction:ltr;text-align:right">${svmEsc(r.barcode)||'—'}</td>
-    <td style="padding:8px 10px;font-size:11.5px;color:#854F0B;font-weight:700;white-space:nowrap">${svmEsc(r.cat)}</td>
+    <td id="fc-cat-${i}" style="padding:8px 10px;font-size:11.5px;color:#854F0B;font-weight:700;white-space:nowrap">${svmEsc(r.cat)}${r.cat==='أخرى'?` <button onclick="fcPickCat(${i})" title="اختيار التصنيف" style="border:none;background:#F0E8D8;color:#731E2E;border-radius:6px;padding:2px 7px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit"><i class="ti ti-pencil"></i> تحديد</button>`:''}</td>
     <td style="padding:8px 10px;font-weight:700;color:#731E2E">${svmEsc(r.name)}</td>
     <td style="padding:8px 10px;text-align:center">${fcFmt(r.qp)}</td>
     <td style="padding:8px 10px;text-align:center">${fcFmt(Math.round(r.cartons))}</td>
