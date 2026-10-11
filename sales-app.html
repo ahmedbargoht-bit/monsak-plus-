@@ -13126,6 +13126,7 @@ function mkAgo(d){
   if(n==null) return '';
   return n<=0 ? 'النهارده' : n===1 ? 'من يوم' : n===2 ? 'من يومين' : n<=10 ? `من ${n} أيام` : `من ${n} يوم`;
 }
+function mkNormD(d){ const m=/^(\d{2})-(\d{2})-(\d{4})$/.exec(String(d||'')); return m ? m[3]+'-'+m[2]+'-'+m[1] : String(d||'').slice(0,10); }
 function mkMoney(v){ return Math.round(+v||0).toLocaleString('en-US'); }
 function mkGroups(){
   return Array.isArray(cu?.groups) ? cu.groups.map(g=>String(g).trim()).filter(Boolean) : [];
@@ -13142,7 +13143,7 @@ async function mkLoad(force){
     const gIn = groups.length ? `&grp=in.(${groups.join(',')})` : '';
     const since = (()=>{ const d=new Date(); d.setDate(d.getDate()-120); return localDateStr(d); })();
     const [brs, logs, dels, vis] = await Promise.all([
-      mkAll(`branches?select=branch_name,route,grp,rep_name,status&order=branch_name.asc${gIn}`),
+      mkAll(`branches?select=branch_name,route,grp,rep_name,status,lat,lng&order=branch_name.asc${gIn}`),
       mkAll(`field_support_logs?select=branch_name,supervisor_name,rep_name,support_type,visit_date,created_at&branch_name=not.is.null&order=created_at.desc${gIn}`),
       mkAll(`sales_deliveries?select=branch_name,rep_name,delivery_date,total_net&deleted_at=is.null&delivery_date=gte.${since}&order=delivery_date.desc,id.desc${gIn}`),
       mkAll(`visits?select=branch,date,name,created_at&branch=not.is.null&order=date.desc${gIn}`)
@@ -13210,16 +13211,22 @@ function mkRender(){
   if(!rows.length){ list.innerHTML = '<div style="text-align:center;padding:2rem;color:#aaa;font-size:12px">لا توجد فروع في الخطة لهذا اليوم</div>'; return; }
   const LIM = 120;
   const shown = rows.slice(0,LIM);
+  MK.shown = shown;
+  const _td = new Date(), _tdD = String(_td.getDate()).padStart(2,'0')+'-'+String(_td.getMonth()+1).padStart(2,'0')+'-'+_td.getFullYear(), _tdI = localDateStr(_td);
   list.innerHTML = shown.map((b,i)=>{
     const bn = b.branch_name;
     const sp = MK.sup[bn], rp = MK.rep[bn], cd = MK.coord[bn];
-    const spD = sp ? (sp.visit_date || String(sp.created_at||'').slice(0,10)) : '';
+    const openedToday = !!(MK.opened && MK.opened[bn+'|'+_tdI]) || !!(sp && sp.supervisor_name===cu?.name && (sp.visit_date===_tdD || sp.visit_date===_tdI));
+    const spD = sp ? mkNormD(sp.visit_date || String(sp.created_at||'').slice(0,10)) : '';
     const rpName = (rp && rp.rep_name) || b.rep_name || '—';
     const line = (ic,txt)=>`<div style="font-size:11.5px;color:#4B3C1A;margin-top:3px">${ic} ${txt}</div>`;
     return `<div style="background:#fff;border:1.5px solid #E8DCC4;border-radius:12px;padding:10px 12px;margin-bottom:8px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
         <div style="font-weight:800;font-size:13px;color:#4B3C1A">${mkEsc(bn)}</div>
-        <button onclick="mkToggle(${i})" style="padding:5px 10px;border:none;border-radius:8px;background:#F0E8D8;color:var(--navy);font-family:Cairo,sans-serif;font-size:11px;font-weight:700;cursor:pointer">تفاصيل ▾</button>
+        <div style="display:flex;gap:6px">
+          ${openedToday ? '<span style="padding:5px 9px;border-radius:8px;background:#E8F5E9;color:#2E7D32;font-size:11px;font-weight:700">✅ تم فتح الزيارة</span>' : `<button onclick="mkOpenVisit(${i},this)" style="padding:5px 10px;border:none;border-radius:8px;background:#1A7A4A;color:#fff;font-family:Cairo,sans-serif;font-size:11px;font-weight:700;cursor:pointer">📍 فتح الزيارة</button>`}
+          <button onclick="mkToggle(${i})" style="padding:5px 10px;border:none;border-radius:8px;background:#F0E8D8;color:var(--navy);font-family:Cairo,sans-serif;font-size:11px;font-weight:700;cursor:pointer">تفاصيل ▾</button>
+        </div>
       </div>
       <div style="font-size:10px;color:#888">${mkEsc(b.route||'')}${MK.day==='all'&&b.day?' · '+mkEsc(b.day):''}${(cu?.level==='manager'||cu?.level==='gm')&&b.staff?' · '+mkEsc(b.staff):''}${b.vstatus==='done'?' · ✅ تمت في الخطة':''}</div>
       ${line('👔','آخر زيارة مشرف: '+(sp ? `<b>${mkEsc(spD)}</b> (${mkAgo(spD)}) — ${mkEsc(sp.supervisor_name||'—')}` : '<span style="color:#B71C1C">لم يُزَر من قبل</span>'))}
@@ -13228,6 +13235,61 @@ function mkRender(){
       <div id="mk-d-${i}" data-bn="${mkEsc(bn)}" style="display:none;margin-top:8px"></div>
     </div>`;
   }).join('') + (rows.length>LIM ? `<div style="text-align:center;font-size:11px;color:#888;padding:6px">معروض ${LIM} من ${rows.length} — استخدم البحث</div>` : '');
+}
+
+// فتح الزيارة: اللوكيشن شرط — من غيره الزيارة متتفتحش. لو بعيد عن الفرع بنحذّره ونسيب له القرار
+function mkDistM(a,b,c,d){
+  const R=6371000, p=Math.PI/180, dl=(c-a)*p, dn=(d-b)*p;
+  const x=Math.sin(dl/2)**2+Math.cos(a*p)*Math.cos(c*p)*Math.sin(dn/2)**2;
+  return 2*R*Math.asin(Math.sqrt(x));
+}
+let _mkOpening = false;
+async function mkOpenVisit(i, btn){
+  if(_mkOpening) return;
+  const b = (MK.shown||[])[i]; if(!b) return;
+  const bn = b.branch_name;
+  if(!navigator.geolocation){ showToast('❌ الجهاز لا يدعم تحديد الموقع — مينفعش تفتح الزيارة'); return; }
+  _mkOpening = true;
+  const oldTxt = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ تحديد الموقع...'; }
+  try{
+    let pos;
+    try{
+      pos = await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{enableHighAccuracy:true,timeout:15000,maximumAge:0}));
+    }catch(e){
+      const why = e && e.code===1 ? 'تم رفض إذن الموقع — فعّله من إعدادات المتصفح' : e && e.code===3 ? 'انتهت مهلة تحديد الموقع — جرّب تاني' : 'تعذّر تحديد الموقع — فعّل الـ GPS';
+      alert('📍 اللوكيشن شرط لفتح الزيارة\n\n'+why);
+      return;
+    }
+    const lat = pos.coords.latitude, lng = pos.coords.longitude;
+    const br = MK.branches.find(x=>x.branch_name===bn) || {};
+    if(br.lat!=null && br.lng!=null){
+      const d = Math.round(mkDistM(lat,lng,+br.lat,+br.lng));
+      if(d>200){
+        if(!confirm(`⚠️ لازم تكون قريب من الفرع لفتح الزيارة.\nأنت بعيد عن "${bn}" حوالي ${d} متر (المسموح 200 متر).\n\nتفتح الزيارة برضه؟ (هتتسجل بالمسافة دي)`)) return;
+      }
+    }
+    const n = new Date();
+    const dateD = String(n.getDate()).padStart(2,'0')+'-'+String(n.getMonth()+1).padStart(2,'0')+'-'+n.getFullYear();
+    const rep = (MK.rep[bn]||{}).rep_name || b.rep_name || br.rep_name || '—';
+    const body = {
+      supervisor_name: cu?.name||'', rep_name: rep, branch_name: bn,
+      grp: br.grp || b.grp || (cu?.groups||[])[0] || '', support_type: 'زيارة سوق',
+      status: 'ended', end_time: n.toISOString(), lat, lng, rep_pts_given: 0,
+      visit_day: new Intl.DateTimeFormat('ar-EG',{weekday:'long'}).format(n), visit_date: dateD
+    };
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/field_support_logs`,{
+      method:'POST', headers:{...mkH(),'Content-Type':'application/json','Prefer':'return=minimal'}, body: JSON.stringify(body)
+    });
+    if(!res.ok){ showToast('❌ فشل فتح الزيارة — جرّب تاني'); return; }
+    MK.opened = MK.opened || {}; MK.opened[bn+'|'+localDateStr(n)] = 1;
+    MK.sup[bn] = {branch_name:bn, supervisor_name:cu?.name||'', visit_date:dateD, created_at:n.toISOString(), support_type:'زيارة سوق'};
+    showToast('✅ تم فتح الزيارة وتسجيل الموقع');
+    mkRender();
+  } finally {
+    _mkOpening = false;
+    if(btn && btn.isConnected){ btn.disabled = false; btn.textContent = oldTxt; }
+  }
 }
 
 async function mkToggle(i){
@@ -13303,7 +13365,7 @@ async function mkDetailHTML(bn){
   }
   const regC = sinceLast==null ? '#888' : sinceLast<=7 ? '#2E7D32' : sinceLast<=14 ? '#E65100' : '#C62828';
   let after = null;
-  const spD = sp ? (sp.visit_date || String(sp.created_at||'').slice(0,10)) : '';
+  const spD = sp ? mkNormD(sp.visit_date || String(sp.created_at||'').slice(0,10)) : '';
   if(spD && mkDays(spD)>=14){
     const add = (d,n)=>{ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()+n); return localDateStr(x); };
     const sumR = (a,b)=>deliv.filter(d=>d.delivery_date>=a && d.delivery_date<=b).reduce((s,x)=>s+(+x.total_net||0),0);
