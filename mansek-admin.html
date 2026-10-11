@@ -6647,6 +6647,7 @@ h2,h3{color:#2C1F0A}
             <div style="background:#fff;border-radius:14px;padding:16px;border-top:4px solid #2563EB;box-shadow:0 2px 12px rgba(0,0,0,.08);text-align:center">
               <div style="font-size:10px;color:#888;font-weight:600;margin-bottom:6px">المحقق حتى الآن</div>
               <div style="font-size:24px;font-weight:900;color:#2563EB;direction:ltr;line-height:1.1" id="sd-achieved">--</div>
+              <div id="sd-achieved-disc" style="font-size:10px;color:#B71C1C;font-weight:700;margin-top:3px"></div>
             </div>
             <div style="background:#fff;border-radius:14px;padding:16px;border-top:4px solid #D97706;box-shadow:0 2px 12px rgba(0,0,0,.08);text-align:center">
               <div style="font-size:10px;color:#888;font-weight:600;margin-bottom:6px">المطلوب حتى اليوم</div>
@@ -44309,6 +44310,28 @@ async function sdLoad(){
     (sdReturnsByRep[o.rep_name]||[]).forEach(r=>{ if((r.return_date||'')>cutoff) afterCutoff -= (+(r.total_net||0))-(+(r.total_tax||0)); });
     sdRepNetMap[o.rep_name] = (+o.amount||0) + afterCutoff;
   });
+  // ── خصومات العملاء (نفس منطق الخريطة الحرارية وشاشة الأهداف): خصم القاهرة وخصم الإسكندرية بيتوزعوا
+  // على المناديب بنسبة مبيعاتهم داخل الإقليم، فبيتخصموا من المحقق وتتأثر كل الأرقام والتصنيفات ──
+  let sdDiscApplied = 0, sdDiscPre = 0;
+  try{
+    const [dRes, uRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/sales_goal_discounts?select=cairo_discount,alex_discount&month=eq.${month}`,{headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/users?select=name,grp&role=eq.sales&limit=2000`,{headers:H})
+    ]);
+    const dRow = (dRes.ok ? await dRes.json() : [])[0];
+    const uList = uRes.ok ? await uRes.json() : [];
+    if(dRow){
+      const disc = {cairo:Math.max(0,+dRow.cairo_discount||0), alex:Math.max(0,+dRow.alex_discount||0)};
+      const regOfRep = {}; (Array.isArray(uList)?uList:[]).forEach(u=>{ regOfRep[u.name] = String(u.grp||'').toLowerCase().includes('alex') ? 'alex' : 'cairo'; });
+      const base = {cairo:0, alex:0};
+      Object.entries(sdRepNetMap).forEach(([n,v])=>{ base[regOfRep[n]||'cairo'] += Math.max(0,v||0); });
+      sdDiscPre = Object.values(sdRepNetMap).reduce((s,v)=>s+(v||0),0);
+      Object.keys(sdRepNetMap).forEach(n=>{
+        const rg = regOfRep[n]||'cairo', v = Math.max(0,sdRepNetMap[n]||0);
+        if(base[rg]>0 && disc[rg]>0){ const share = disc[rg]*v/base[rg]; sdRepNetMap[n] -= share; sdDiscApplied += share; }
+      });
+    }
+  }catch(e){ console.warn('sd discounts', e); }
   // الإجمالي الصحيح لـ"المحقق حتى الآن" = مجموع صافي كل المناديب مباشرة (نفس مصدر ونفس صيغة "المبيعات
   // الفعلية" في شاشة الأهداف بالظبط) — بدل الاعتماد على تجميع القطاعات اللي ممكن يسقط مندوب لو اسمه
   // معندوش ربط مباشر بمشرف (مصدر الفرق اللي كان موجود قبل كده بين الشاشتين)
@@ -44408,6 +44431,8 @@ async function sdLoad(){
   // ── KPI ──
   document.getElementById('sd-total-goal').textContent = fmt(totTarget);
   document.getElementById('sd-achieved').textContent = fmt(totAchieved);
+  { const dEl = document.getElementById('sd-achieved-disc');
+    if(dEl) dEl.textContent = sdDiscApplied>0 ? `بعد خصم العملاء ${fmt(sdDiscApplied)} ج (${(sdDiscPre>0?sdDiscApplied/sdDiscPre*100:0).toFixed(1)}%)` : ''; }
   document.getElementById('sd-required').textContent = fmt(totRequired);
   document.getElementById('sd-today-sale').textContent = fmt(totToday);
   document.getElementById('sd-remaining').textContent = fmt(totTarget-totAchieved);
