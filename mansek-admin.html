@@ -6830,6 +6830,7 @@ h2,h3{color:#2C1F0A}
                 <label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">إلى تاريخ</label>
                 <input type="date" id="fc-to" style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"/>
               </div>
+              <div id="fc-ms-branch" style="position:relative"></div>
               <div id="fc-ms-sector" style="position:relative"></div>
               <div id="fc-ms-route" style="position:relative"></div>
               <div id="fc-ms-item" style="position:relative"></div>
@@ -37936,10 +37937,10 @@ function stkcmpExportPDF(){
 // (متوسط مرجّح بالكمية) وسعر القطعة الحالي (تاب الأسعار ثم آخر فاتورة MT) وسعر الكرتونة الحالي.
 // التجميع بيتم في القاعدة عبر RPC (mt_supply_price_report) عشان ميتحملش آلاف الصفوف على المتصفح.
 // ══════════════════════════════════════════════════════════════
-const FC = { meta:false, sectors:[], routesBySector:{}, items:[], opts:{sector:[],route:[],item:[]}, q:{sector:'',route:'',item:''},
-  sel:{sector:new Set(), route:new Set(), item:new Set()}, rows:[], filterInfo:'', from:'', to:'' };
-const FC_LBL = {sector:'القطاع', route:'خط السير', item:'الأصناف'};
-const FC_ALL = {sector:'كل القطاعات', route:'كل الخطوط', item:'كل الأصناف'};
+const FC = { meta:false, branches:[], routeRows:[], itemRows:[], opts:{branch:[],sector:[],route:[],item:[]}, q:{branch:'',sector:'',route:'',item:''},
+  sel:{branch:new Set(), sector:new Set(), route:new Set(), item:new Set()}, rows:[], filterInfo:'', from:'', to:'' };
+const FC_LBL = {branch:'الفرع', sector:'القطاع', route:'خط السير', item:'الأصناف'};
+const FC_ALL = {branch:'كل الفروع', sector:'كل القطاعات', route:'كل الخطوط', item:'كل الأصناف'};
 const FC_BASE = ['الباركود','الصنف','العدد (قطعة)','العدد (كرتونة)','سعر القطعة خلال الفترة','سعر القطعة حاليًا','سعر الكرتونة حاليًا'];
 
 async function fcRpc(name, body){
@@ -37952,28 +37953,38 @@ function fcFmt(n,d){ if(n==null||isNaN(n)) return '—'; return Number(n).toLoca
 async function fcInit(){
   const f=document.getElementById('fc-from'), t=document.getElementById('fc-to');
   if(f && !f.value){ const d=new Date(); f.value=svmIso(new Date(d.getFullYear(),d.getMonth(),1)); t.value=svmIso(d); }
-  ['sector','route','item'].forEach(fcBuildMs);
+  ['branch','sector','route','item'].forEach(fcBuildMs);
   if(FC.meta) return;
   try{
     let rows; try{ rows = await fcRpc('mt_supply_price_meta'); }catch(_e){ rows = await fcRpc('mt_supply_price_meta'); }
-    const secSet = new Set(); FC.routesBySector = {}; const items = [];
+    const brSet = new Set(); FC.routeRows = []; FC.itemRows = [];
     (Array.isArray(rows)?rows:[]).forEach(r=>{
-      if(r.kind==='route'){ secSet.add(r.a); (FC.routesBySector[r.a] ||= []).push(r.b); }
-      else if(r.kind==='item' && r.a){ items.push(r.a); }
+      if(r.c) brSet.add(r.c);
+      if(r.kind==='route'){ FC.routeRows.push({sector:r.a, route:r.b, branch:r.c}); }
+      else if(r.kind==='item' && r.a){ FC.itemRows.push({item:r.a, branch:r.c}); }
     });
-    FC.sectors = [...secSet].sort((a,b)=>a.localeCompare(b,'ar'));
-    FC.items = items.sort((a,b)=>a.localeCompare(b,'ar'));
+    FC.branches = [...brSet].sort((a,b)=>a.localeCompare(b,'ar'));
     FC.meta = true;
-    ['sector','route','item'].forEach(fcRenderOpts);
+    ['branch','sector','route','item'].forEach(fcRenderOpts);
   }catch(e){ console.error('[fcInit]', e); showToast('تعذر تحميل قوائم الفلاتر — اضغط عرض للمحاولة تاني'); }
 }
 
 function fcOptionList(key){
-  if(key==='sector') return FC.sectors;
-  if(key==='item') return FC.items;
-  const secs = FC.sel.sector.size ? [...FC.sel.sector] : FC.sectors;
-  const s = new Set(); secs.forEach(x=>(FC.routesBySector[x]||[]).forEach(r=>s.add(r)));
-  return [...s].sort((a,b)=>a.localeCompare(b,'ar'));
+  const srt = set => [...set].sort((a,b)=>a.localeCompare(b,'ar'));
+  const bs = FC.sel.branch, ss = FC.sel.sector;
+  const okB = r => !bs.size || bs.has(r.branch);
+  if(key==='branch') return FC.branches;
+  if(key==='sector') return srt(new Set(FC.routeRows.filter(okB).map(r=>r.sector)));
+  if(key==='item') return srt(new Set(FC.itemRows.filter(okB).map(r=>r.item)));
+  return srt(new Set(FC.routeRows.filter(r=>okB(r) && (!ss.size || ss.has(r.sector))).map(r=>r.route)));
+}
+function fcPrune(key){
+  const valid = new Set(fcOptionList(key));
+  [...FC.sel[key]].forEach(v=>{ if(!valid.has(v)) FC.sel[key].delete(v); });
+}
+function fcCascade(key){
+  const order = ['branch','sector','route','item'];
+  order.slice(order.indexOf(key)+1).forEach(k=>{ if(k!=='item' || key==='branch'){ fcPrune(k); } fcRenderOpts(k); });
 }
 function fcBuildMs(key){
   const box = document.getElementById('fc-ms-'+key); if(!box || box.dataset.built) return;
@@ -38013,16 +38024,12 @@ function fcSearchMs(key,v){ FC.q[key] = (v||'').trim(); fcRenderOpts(key); }
 function fcMsToggle(key,i,on){
   const v = FC.opts[key][i]; if(v==null) return;
   if(on) FC.sel[key].add(v); else FC.sel[key].delete(v);
-  if(key==='sector'){
-    const valid = new Set(fcOptionList('route'));
-    [...FC.sel.route].forEach(r=>{ if(!valid.has(r)) FC.sel.route.delete(r); });
-    fcRenderOpts('route');
-  }
+  if(key==='branch' || key==='sector') fcCascade(key);
   fcUpdateLbl(key);
 }
 function fcMsAll(key){
   FC.sel[key].clear();
-  if(key==='sector') fcRenderOpts('route');
+  if(key==='branch' || key==='sector') fcCascade(key);
   fcRenderOpts(key);
 }
 
@@ -38034,27 +38041,32 @@ async function fcLoad(){
   tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text2)">جاري التحميل...</td></tr>';
   try{
     const arr = k => FC.sel[k].size ? [...FC.sel[k]] : null;
-    const [rows] = await Promise.all([
-      fcRpc('mt_supply_price_report', {p_from:from, p_to:to, p_sectors:arr('sector'), p_routes:arr('route'), p_items:arr('item')}),
+    const [rows, bcIdx] = await Promise.all([
+      fcRpc('mt_supply_price_report', {p_from:from, p_to:to, p_sectors:arr('sector'), p_routes:arr('route'), p_items:arr('item'), p_branches:arr('branch')}),
       ensureSplPrices().catch(()=>{}),
+      sciBuildBarcodeIndex().catch(()=>({})),
       (typeof sciLoadItemAliasMap==='function' ? sciLoadItemAliasMap() : Promise.resolve()).catch(()=>{})
     ]);
     // سعر القطعة الحالي: تاب الأسعار (sales_prices) بعد توحيد الاسم، وإلا آخر فاتورة MT
     const idx = {};
     (_splPrices||[]).forEach(p=>{ const k=sciNormalizeItemKey(p.snf_name); const v=+p.price; if(k && v>0 && !idx[k]) idx[k]=v; });
+    // باركود من تاب أسعار الأصناف (كتالوج الأصناف) بالاسم المعتمد، لو الصنف مالوش باركود من الفاتورة
+    const bcNorm = {};
+    Object.keys(bcIdx||{}).forEach(n=>{ const k=sciNormalizeItemKey(n); if(k && !bcNorm[k]) bcNorm[k]=bcIdx[n]; });
     FC.rows = (Array.isArray(rows)?rows:[]).map(r=>{
       const canon = (typeof sciCanonicalItemName==='function') ? sciCanonicalItemName(r.item) : r.item;
       const tabP = idx[sciNormalizeItemKey(canon)] || idx[sciNormalizeItemKey(r.item)] || 0;
       const lastP = +r.last_piece_price || 0;
       const cur = tabP>0 ? tabP : (lastP>0 ? lastP : null);
       const ppc = +r.pieces_per_carton || 0;
-      return { name:r.item, barcode:r.barcode||'', qp:+r.qty_piece||0, qc:+r.qty_carton||0, cartons:+r.cartons||0,
+      const bc = r.barcode || (bcIdx&&(bcIdx[canon]||bcIdx[r.item])) || bcNorm[sciNormalizeItemKey(canon)] || bcNorm[sciNormalizeItemKey(r.item)] || '';
+      return { name:r.item, barcode:bc, qp:+r.qty_piece||0, qc:+r.qty_carton||0, cartons:+r.cartons||0,
         period:(+r.period_piece_price>0 ? +r.period_piece_price : null), cur, fromTab:tabP>0, totalValue:+r.total_value||0,
         curCarton:(cur && ppc>0) ? cur*ppc : null };
     }).sort((a,b)=>b.cartons-a.cartons);
     FC.from = from; FC.to = to;
     const nm = k => FC.sel[k].size ? [...FC.sel[k]].join('، ') : FC_ALL[k];
-    FC.filterInfo = `الفترة: ${from} ← ${to}  |  ${FC_LBL.sector}: ${nm('sector')}  |  ${FC_LBL.route}: ${nm('route')}  |  ${FC_LBL.item}: ${FC.sel.item.size ? FC.sel.item.size+' صنف' : FC_ALL.item}`;
+    FC.filterInfo = `الفترة: ${from} ← ${to}  |  ${FC_LBL.branch}: ${nm('branch')}  |  ${FC_LBL.sector}: ${nm('sector')}  |  ${FC_LBL.route}: ${nm('route')}  |  ${FC_LBL.item}: ${FC.sel.item.size ? FC.sel.item.size+' صنف' : FC_ALL.item}`;
     fcRender();
   }catch(e){
     console.error('[fcLoad]', e);
@@ -38073,13 +38085,13 @@ function fcRender(){
   const up = rows.filter(r=>r.cur!=null && r.period!=null && r.cur>r.period*1.0001).length;
   const card = (l,v,c)=>`<div style="background:var(--surface-1,#F9F6F1);border:1px solid #E8D9C0;border-radius:10px;padding:10px;text-align:center"><div style="font-size:11px;color:#8B6F47">${l}</div><div style="font-size:20px;font-weight:800;color:${c};margin-top:2px">${v}</div></div>`;
   const totV = rows.reduce((a,r)=>a+(r.totalValue||0),0);
-  st.innerHTML = card('عدد الأصناف',fcFmt(rows.length),'#731E2E') + card('إجمالي القطع',fcFmt(totP),'#854F0B') + card('إجمالي الكراتين',fcFmt(totC,1),'#065F46') + card('إجمالي السعر في الفترة (ج)',fcFmt(totV),'#1565C0') + card('أصناف سعرها الحالي أعلى',fcFmt(up),'#A32D2D');
+  st.innerHTML = card('عدد الأصناف',fcFmt(rows.length),'#731E2E') + card('إجمالي القطع',fcFmt(totP),'#854F0B') + card('إجمالي الكراتين',fcFmt(Math.round(totC)),'#065F46') + card('إجمالي السعر في الفترة (ج)',fcFmt(totV),'#1565C0') + card('أصناف سعرها الحالي أعلى',fcFmt(up),'#A32D2D');
   if(!rows.length){ tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text2)">لا توجد توريدات في الفترة والفلاتر المختارة</td></tr>'; return; }
   tb.innerHTML = rows.map((r,i)=>`<tr style="background:${i%2?'#FDFAF5':'#fff'};border-bottom:1px solid #F0E8D8">
     <td style="padding:8px 10px;font-size:11.5px;color:#666;direction:ltr;text-align:right">${svmEsc(r.barcode)||'—'}</td>
     <td style="padding:8px 10px;font-weight:700;color:#731E2E">${svmEsc(r.name)}</td>
     <td style="padding:8px 10px;text-align:center">${fcFmt(r.qp)}</td>
-    <td style="padding:8px 10px;text-align:center">${fcFmt(r.cartons,1)}</td>
+    <td style="padding:8px 10px;text-align:center">${fcFmt(Math.round(r.cartons))}</td>
     <td style="padding:8px 10px;text-align:center">${fcFmt(r.period,2)}</td>
     <td style="padding:8px 10px;text-align:center;font-weight:700;color:${fcPriceColor(r)};${r.fromTab?'':'opacity:.65'}" title="${r.fromTab?'من تاب الأسعار':'من آخر فاتورة MT'}">${fcFmt(r.cur,2)}</td>
     <td style="padding:8px 10px;text-align:center;font-weight:700;${r.fromTab?'':'opacity:.65'}">${fcFmt(r.curCarton,2)}</td></tr>`).join('');
@@ -38095,7 +38107,7 @@ function fcBuildWorkbook(){
     [`${FC.filterInfo}  |  تاريخ التصدير: ${new Date().toLocaleDateString('en-US')}  |  عدد الأصناف: ${rows.length}  |  إجمالي السعر في الفترة: ${fcFmt(rows.reduce((a,r)=>a+(r.totalValue||0),0))} ج`],
     [], head
   ];
-  rows.forEach((r,i)=> aoa.push([i+1, r.barcode||'', r.name, Math.round(r.qp), r.cartons?+r.cartons.toFixed(1):0, r.period!=null?+r.period.toFixed(2):'—', r.cur!=null?+r.cur.toFixed(2):'—', r.curCarton!=null?+r.curCarton.toFixed(2):'—']));
+  rows.forEach((r,i)=> aoa.push([i+1, r.barcode||'', r.name, Math.round(r.qp), Math.round(r.cartons||0), r.period!=null?+r.period.toFixed(2):'—', r.cur!=null?+r.cur.toFixed(2):'—', r.curCarton!=null?+r.curCarton.toFixed(2):'—']));
   const ws = XL.utils.aoa_to_sheet(aoa);
   const thin = {style:'thin',color:{rgb:'E8DCC4'}}, border = {top:thin,bottom:thin,left:thin,right:thin};
   const fill = rgb=>({patternType:'solid',fgColor:{rgb}});
@@ -38145,7 +38157,7 @@ function fcPages(){
         <td style="${cell};direction:ltr;text-align:right;color:#666">${svmEsc(r.barcode)||'—'}</td>
         <td style="${cell};font-weight:700;color:${SVM_C.maroon}">${svmEsc(r.name)}</td>
         <td style="${cell};text-align:center">${fcFmt(r.qp)}</td>
-        <td style="${cell};text-align:center">${fcFmt(r.cartons,1)}</td>
+        <td style="${cell};text-align:center">${fcFmt(Math.round(r.cartons))}</td>
         <td style="${cell};text-align:center">${fcFmt(r.period,2)}</td>
         <td style="${cell};text-align:center;font-weight:700;color:${fcPriceColor(r)}">${fcFmt(r.cur,2)}</td>
         <td style="${cell};text-align:center;font-weight:700">${fcFmt(r.curCarton,2)}</td></tr>`).join('')}
@@ -38162,7 +38174,7 @@ function fcPages(){
       </div>
       <div style="height:5px;background:${SVM_C.gold}"></div>
       <div style="padding:12px 24px 0">
-        ${pi===0?`<div style="display:flex;gap:8px;margin-bottom:10px">${card('عدد الأصناف',fcFmt(rows.length),SVM_C.maroon)}${card('إجمالي القطع',fcFmt(totP),'#854F0B')}${card('إجمالي الكراتين',fcFmt(totC,1),'#1A7A4A')}${card('إجمالي السعر في الفترة (ج)',fcFmt(rows.reduce((a,r)=>a+(r.totalValue||0),0)),'#1565C0')}${card('أصناف سعرها الحالي أعلى',fcFmt(up),'#B71C1C')}</div>`:''}
+        ${pi===0?`<div style="display:flex;gap:8px;margin-bottom:10px">${card('عدد الأصناف',fcFmt(rows.length),SVM_C.maroon)}${card('إجمالي القطع',fcFmt(totP),'#854F0B')}${card('إجمالي الكراتين',fcFmt(Math.round(totC)),'#1A7A4A')}${card('إجمالي السعر في الفترة (ج)',fcFmt(rows.reduce((a,r)=>a+(r.totalValue||0),0)),'#1565C0')}${card('أصناف سعرها الحالي أعلى',fcFmt(up),'#B71C1C')}</div>`:''}
         ${body}
       </div>
       <div style="position:absolute;bottom:0;left:0;right:0;height:30px;background:${SVM_C.cream};border-top:2px solid ${SVM_C.gold};display:flex;align-items:center;justify-content:space-between;padding:0 24px;font-size:10px;color:#7A6A4A">
