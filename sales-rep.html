@@ -1038,7 +1038,7 @@ function resolvePromoPrice(promo, basePrice){
   return promo.value;
 }
 function promoLabel(p){
-  return p.promo_type==='percent' ? `${p.promo_price}% خصم` : `${p.promo_price} ج`;
+  return p.promo_type==='percent' ? `${p.promo_price}% خصم` : p.promo_type==='fixed' ? `سعر ثابت ${p.promo_price} ج (يخضع لخصم العميل)` : `سعر قطعي ${p.promo_price} ج`;
 }
 // يحسب السعر النهائي لصنف. الأولوية بين "قائمة أسعار خاصة بالعميل" و"العرض" بتختلف حسب مكان
 // الاستخدام (promoFirst) — نفس التفاوت اللي كان موجود أصلاً في الكود قبل التعديل، محافظين عليه
@@ -1053,6 +1053,9 @@ function computeItemPricing(basePrice, clientSpecialPrice, promoEntry, catDiscPc
   const trySpecial=()=> clientSpecialPrice!=null ? {finalPrice:+clientSpecialPrice, discPct:0, isPromo:false, isSpecial:true} : null;
   const tryPromo=()=>{
     if(!promoEntry) return null;
+    // 'fixed' = سعر ثابت بيخضع لخصم العميل — بيتعامل زي سعر القائمة الخاصة (الخصم بيتطبق على مستوى الفاتورة)
+    if(promoEntry.type==='fixed') return {finalPrice:+promoEntry.value, discPct:0, isPromo:false, isSpecial:true, isPromoFixed:true};
+    // 'final' = سعر قطعي، لا يخضع لأي خصم
     if(promoEntry.type!=='percent') return {finalPrice:+promoEntry.value, discPct:0, isPromo:true, isSpecial:false};
     const discPct=Math.min(100,(+catDiscPct||0)+(+promoEntry.value||0));
     const finalPrice=+((+basePrice||0)*(1-discPct/100)).toFixed(2);
@@ -2914,7 +2917,7 @@ async function openDelVisit(branch){
       if(Array.isArray(promos) && promos.length){
         visitState.promos = {};
         visitState.promoNotes = {};
-        promos.forEach(p=>{ if(p.snf_name){ visitState.promos[p.snf_name]={value:p.promo_price, type:p.promo_type||'fixed'}; visitState.promoNotes[p.snf_name]=p.notes||''; } });
+        promos.forEach(p=>{ if(p.snf_name){ visitState.promos[p.snf_name]={value:p.promo_price, type:p.promo_type||'final'}; visitState.promoNotes[p.snf_name]=p.notes||''; } });
         $('v-promos').innerHTML = promos.map(p=>
           `🔖 عرض على ${p.snf_name} — ${promoLabel(p)} (${p.date_from} → ${p.date_to})`
         ).join('<br>');
@@ -3092,7 +3095,9 @@ function selectCat(cat,grpData){
       const price=pricing.finalPrice;
       const effectiveDisc=pricing.discPct;
       const noteTag=promoNote?`<span style="font-size:9px;color:#E65100;display:block;margin-top:1px">${promoNote}</span>`:'';
-      const priceDisplay=pricing.isSpecial
+      const priceDisplay=pricing.isPromoFixed
+        ?`<span style="color:#E65100;font-weight:800">${price} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض ثابت + خصم العميل</span>${noteTag}`
+        :pricing.isSpecial
         ?`<span style="color:#2E7D32;font-weight:800">${price} ج</span> <span style="font-size:9px;background:#E8F5E9;color:#2E7D32;padding:1px 5px;border-radius:6px">💲خاص</span>`
         :isPromoActive
         ?`<span style="color:#E65100;font-weight:800">${price} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض${effectiveDisc>0?' + خصم':''}</span>${noteTag}`
@@ -3545,7 +3550,7 @@ async function openRetVisit(branch){
       if(Array.isArray(promos)&&promos.length){
         returnState.promos={};
         returnState.promoNotes={};
-        promos.forEach(p=>{ if(p.snf_name){ returnState.promos[p.snf_name]={value:p.promo_price, type:p.promo_type||'fixed'}; returnState.promoNotes[p.snf_name]=p.notes||''; } });
+        promos.forEach(p=>{ if(p.snf_name){ returnState.promos[p.snf_name]={value:p.promo_price, type:p.promo_type||'final'}; returnState.promoNotes[p.snf_name]=p.notes||''; } });
         $('rv-promos').innerHTML=promos.map(p=>`🔖 عرض على ${p.snf_name} — ${promoLabel(p)} (${p.date_from} → ${p.date_to})`).join('<br>');
       } else {
         returnState.promos={};
@@ -3697,8 +3702,8 @@ function selectRetCat(cat,grpData){
       const price=pricing.finalPrice;
       const effectiveDisc=pricing.discPct;
       const noteTag=promoNote?`<span style="font-size:9px;color:#E65100;display:block;margin-top:1px">${promoNote}</span>`:'';
-      const priceDisplay=isPromoActive
-        ?`<span style="color:#E65100;font-weight:800">${price} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖عرض${effectiveDisc>0?' + خصم':''}</span>${noteTag}`
+      const priceDisplay=(isPromoActive||pricing.isPromoFixed)
+        ?`<span style="color:#E65100;font-weight:800">${price} ج</span> <span style="font-size:9px;background:#FFF3E0;color:#E65100;padding:1px 5px;border-radius:6px">🔖${pricing.isPromoFixed?'عرض ثابت + خصم العميل':'عرض'+(effectiveDisc>0?' + خصم':'')}</span>${noteTag}`
         :(effectiveDisc>0?`${price} ج <span style="text-decoration:line-through;color:var(--t3);font-size:10px">${basePrice}</span>`:`${price} ج`);
       html+=`<div class="prod-row">
         <div class="prod-name">${iname}<br><small style="color:#8B2635;font-weight:700">${priceDisplay}</small></div>
