@@ -5973,7 +5973,7 @@ h2,h3{color:#2C1F0A}
 
           <!-- خصومات العملاء -->
           <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:#FFF8EC;border:0.5px solid #E8C98A;border-radius:8px;padding:8px 12px;margin-bottom:12px">
-            <span style="font-size:11px;font-weight:700;color:#854F0B">خصومات العملاء (تُخصم من المبيعات الفعلية — خصم القاهرة على مجموعة القاهرة فقط، وخصم الإسكندرية على مجموعة الإسكندرية فقط، وتتوزع على مناديبها بنسبة مبيعاتهم):</span>
+            <span style="font-size:11px;font-weight:700;color:#854F0B">خصومات العملاء (تُخصم من المبيعات الفعلية — خصم القاهرة على مجموعة القاهرة فقط، وخصم الإسكندرية على مجموعة الإسكندرية فقط، وتتوزع على المناديب بنسبة مبيعات MT الثانوية لعملائهم في آخر 3 شهور قبل الشهر):</span>
             <label style="font-size:11px">خصومات مجموعة القاهرة <input type="number" id="sg-disc-cairo" min="0" step="1" value="0" oninput="sgDiscChanged()" style="width:110px;padding:4px 7px;border:0.5px solid var(--border-strong);border-radius:6px;font-family:Cairo,sans-serif;text-align:center"/></label>
             <label style="font-size:11px">خصومات مجموعة الإسكندرية <input type="number" id="sg-disc-alex" min="0" step="1" value="0" oninput="sgDiscChanged()" style="width:110px;padding:4px 7px;border:0.5px solid var(--border-strong);border-radius:6px;font-family:Cairo,sans-serif;text-align:center"/></label>
             <button onclick="sgSaveDiscounts()" style="background:#854F0B;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">حفظ الخصومات</button>
@@ -10365,7 +10365,13 @@ async function sgLoad(){
     if(dcEl) dcEl.value = discRow ? (+discRow.cairo_discount||0) : 0;
     if(daEl) daEl.value = discRow ? (+discRow.alex_discount||0) : 0;
 
-    _sgData = { supervisors: supData, reps: repData, targets: tgtMap, sales: salesMap, preDiscSales: {...salesMap}, rawSales: rawSalesMap, overrides: overridesMap, month: monthStr, branchCount: branchCountMap, supSourceTable, discTotals:{cairo:0,alex:0} };
+    // نسب توزيع الخصم: حسب مبيعات MT الثانوية لعملاء كل مندوب في آخر 3 شهور قبل الشهر المحدد
+    let discShares = null;
+    try{
+      const shr = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rep_goal_discount_shares`,{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({p_month:monthStr})});
+      if(shr.ok){ discShares = {}; (await shr.json()).forEach(x=>{ discShares[x.rep_name] = {region:x.region, share:+x.share||0}; }); }
+    }catch(e){}
+    _sgData = { supervisors: supData, reps: repData, targets: tgtMap, sales: salesMap, preDiscSales: {...salesMap}, rawSales: rawSalesMap, overrides: overridesMap, month: monthStr, branchCount: branchCountMap, supSourceTable, discShares, discTotals:{cairo:0,alex:0} };
     sgApplyDiscounts();
     sgRender();
   }catch(e){
@@ -10383,6 +10389,17 @@ function discRegionOfGrp(g){
   if(DISC_CAIRO_GRPS.includes(g)) return 'cairo';
   return null;
 }
+// نسب توزيع الخصم على المناديب (مبيعات MT الثانوية لعملائهم في آخر 3 شهور قبل الشهر) — {repName:{region,share}} أو null
+const _discSharesCache = {};
+async function discSharesFor(month){
+  if(_discSharesCache[month]) return _discSharesCache[month];
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rep_goal_discount_shares`,{method:'POST',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({p_month:month})});
+    if(!r.ok) return null;
+    const o = {}; (await r.json()).forEach(x=>{ o[x.rep_name] = {region:x.region, share:+x.share||0}; });
+    _discSharesCache[month] = o; return o;
+  }catch(e){ return null; }
+}
 function sgRepRegion(r){
   const toks = ((r.grp||'')+','+(r.groups||'')).toLowerCase().split(',').map(s=>s.trim());
   if(toks.includes('alex') || toks.includes('private_alex')) return 'alex';
@@ -10399,6 +10416,19 @@ function sgApplyDiscounts(){
   _sgData.reps.forEach(r=>{ const rg0=sgRepRegion(r); if(!rg0) return; const v=Math.max(0,pre[r.name]||0); base[rg0] += v; });
   const disc = {cairo:dC, alex:dA};
   let applied = {cairo:0, alex:0};
+  // التوزيع الأساسي: حصة كل مندوب من مبيعات MT الثانوية لعملائه (آخر 3 شهور قبل الشهر)
+  if(_sgData.discShares){
+    _sgData.reps.forEach(r=>{
+      const s = _sgData.discShares[r.name];
+      if(!s || !disc[s.region]) return;
+      const amt = disc[s.region]*s.share;
+      out[r.name] = (pre[r.name]||0) - amt;
+      applied[s.region] += amt;
+    });
+    _sgData.sales = out;
+    _sgData.discTotals = applied;
+    return;
+  }
   _sgData.reps.forEach(r=>{
     const rg = sgRepRegion(r);
     if(!rg) return;
@@ -42303,17 +42333,31 @@ async function hmComputeGrpCards(from, to, client){
       const dr = await fetch(`${SUPABASE_URL}/rest/v1/sales_goal_discounts?select=month,cairo_discount,alex_discount&month=in.(${months.join(',')})`,{headers:H});
       const dj = dr.ok ? await dr.json() : [];
       dj.forEach(r=>{ _hmDisc.cairo += +r.cairo_discount||0; _hmDisc.alex += +r.alex_discount||0; });
-    }catch(e){}
+      window._hmDiscRows = dj;
+    }catch(e){ window._hmDiscRows = []; }
     const [tg, us] = await Promise.all([
       hmFetchAllRows(`${SUPABASE_URL}/rest/v1/rep_targets?select=rep_name,target_amount,month&deleted_at=is.null&month=in.(${months.join(',')})&order=id.asc`, H),
       hmFetchAllRows(`${SUPABASE_URL}/rest/v1/users?select=name,grp&role=eq.sales&level=eq.rep&status=eq.active&order=id.asc`, H)
     ]);
     const ug = {}; us.forEach(u=>{ ug[u.name] = u.grp==='private_cairo' ? 'private_chains_cairo' : u.grp; });
+    // خصم كل مجموعة = مجموع (خصم الإقليم × حصة كل مندوب فيها من مبيعات MT الثانوية لعملائه) على شهور الفترة
+    _hmGrpDisc = null;
+    try{
+      const gd = {}; let okAll = true;
+      for(const row of (window._hmDiscRows||[])){
+        const sh = await discSharesFor(row.month);
+        if(!sh){ okAll = false; break; }
+        const D = {cairo:+row.cairo_discount||0, alex:+row.alex_discount||0};
+        Object.keys(sh).forEach(n=>{ const g = ug[n]; if(!g) return; gd[g] = (gd[g]||0) + (D[sh[n].region]||0)*sh[n].share; });
+      }
+      if(okAll) _hmGrpDisc = gd;
+    }catch(e){ _hmGrpDisc = null; }
     tg.forEach(t=>{ const g = ug[t.rep_name]; if(g) _hmGrpTarget[g] = (_hmGrpTarget[g]||0) + (Number(t.target_amount)||0); });
   }catch(e){ console.warn('hm targets', e); }
 }
 let _hmGrpTarget = {};
 let _hmDisc = {cairo:0, alex:0};
+let _hmGrpDisc = null;
 
 function hmShowGrpCardList(grp, type){
   const c = _hmGrpCards[grp]; if(!c) return;
@@ -42345,7 +42389,7 @@ function hmGrpCardHTML(grp){
   const rgK = discRegionOfGrp(grp);
   let regSum = 0; Object.keys(gSales).forEach(k=>{ if(discRegionOfGrp(k)===rgK) regSum += Math.max(0,gSales[k]||0); });
   const regDisc = rgK ? (_hmDisc[rgK]||0) : 0;
-  const disc = (rgK && regDisc>0 && regSum>0 && sales>0) ? regDisc*Math.max(0,sales)/regSum : 0;
+  const disc = _hmGrpDisc ? (_hmGrpDisc[grp]||0) : ((rgK && regDisc>0 && regSum>0 && sales>0) ? regDisc*Math.max(0,sales)/regSum : 0);
   const discPct = sales>0 ? disc/sales*100 : 0;
   const netSales = sales - disc;
   const tgt = _hmGrpTarget[grp] || 0;
@@ -45658,7 +45702,13 @@ async function sdLoad(){
       const base = {cairo:0, alex:0};
       Object.entries(sdRepNetMap).forEach(([n,v])=>{ const rg0=regOfRep[n]; if(rg0) base[rg0] += Math.max(0,v||0); });
       sdDiscPre = Object.values(sdRepNetMap).reduce((s,v)=>s+(v||0),0);
-      Object.keys(sdRepNetMap).forEach(n=>{
+      const sdShares = await discSharesFor(month);
+      if(sdShares){
+        Object.keys(sdRepNetMap).forEach(n=>{
+          const s = sdShares[n]; if(!s || !(disc[s.region]>0)) return;
+          const amt = disc[s.region]*s.share; sdRepNetMap[n] -= amt; sdDiscApplied += amt;
+        });
+      }else Object.keys(sdRepNetMap).forEach(n=>{
         const rg = regOfRep[n]; if(!rg) return;
         const v = Math.max(0,sdRepNetMap[n]||0);
         if(base[rg]>0 && disc[rg]>0){ const share = disc[rg]*v/base[rg]; sdRepNetMap[n] -= share; sdDiscApplied += share; }
