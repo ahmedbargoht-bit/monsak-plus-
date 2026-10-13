@@ -38338,6 +38338,7 @@ const FC_COLS = [
   {k:'cat', t:'التصنيف', w:95, left:true},
   {k:'fac', t:'المصنع', w:110, left:true},
   {k:'name',t:'الصنف', w:275, left:true, fixed:true},
+  {k:'ou',  t:'وحدة الطلب', w:80},
   {k:'qp',  t:'العدد (قطعة)', w:100},
   {k:'ct',  t:'العدد (كرتونة)', w:100},
   {k:'per', t:'سعر القطعة خلال الفترة', w:125},
@@ -38349,6 +38350,7 @@ function fcCols(){ return FC_COLS.filter(c=>c.fixed || FC.cols.has(c.k)); }
 function fcColText(k,r){ // قيمة نصية للتصدير
   switch(k){
     case 'bc': return r.barcode||''; case 'cat': return r.cat||''; case 'fac': return factOf(r.name); case 'name': return r.name;
+    case 'ou': return r.ou||'كرتونة';
     case 'qp': return Math.round(r.qp); case 'ct': return Math.round(r.cartons||0);
     case 'per': return r.period!=null?+r.period.toFixed(2):'—'; case 'cur': return r.cur!=null?+r.cur.toFixed(2):'—'; case 'cc': return r.curCarton!=null?+r.curCarton.toFixed(2):'—';
   } return '';
@@ -38585,7 +38587,7 @@ async function fcLoad(){
       const cur = tabP>0 ? tabP : null; // السعر من قاعدة الأصناف الكاملة (قبل الضريبة) فقط — بدون بديل من فواتير MT
       const ppc = +r.pieces_per_carton || 0;
       const bc = (bcIdx&&(bcIdx[canon]||bcIdx[r.item])) || bcNorm[sciNormalizeItemKey(canon)] || bcNorm[sciNormalizeItemKey(r.item)] || r.barcode || '';
-      return { name:(canon&&canon!==r.item?canon:r.item), raw:r.item, aliased:!!(canon&&canon!==r.item), ppc, key:sciNormalizeItemKey(canon||r.item), barcode:bc, cat:fcCategoryOf(r.item, canon, pdbIdx, pdbNorm), qp:+r.qty_piece||0, qc:+r.qty_carton||0, cartons:+r.cartons||0,
+      return { ou:(r.order_unit||''), name:(canon&&canon!==r.item?canon:r.item), raw:r.item, aliased:!!(canon&&canon!==r.item), ppc, key:sciNormalizeItemKey(canon||r.item), barcode:bc, cat:fcCategoryOf(r.item, canon, pdbIdx, pdbNorm), qp:+r.qty_piece||0, qc:+r.qty_carton||0, cartons:+r.cartons||0,
         period:(+r.period_piece_price>0 ? +r.period_piece_price : null), cur, fromTab:tabP>0, totalValue:+r.total_value||0,
         curCarton:(cur && ppc>0) ? cur*ppc : null };
     });
@@ -38598,12 +38600,17 @@ async function fcLoad(){
       m.qp += r.qp; m.qc += r.qc; m.cartons += r.cartons; m.totalValue += r.totalValue;
       m.aliased = m.aliased || r.aliased;
       if(!m.ppc && r.ppc) m.ppc = r.ppc;
+      if(!m.ou && r.ou) m.ou = r.ou;
       if(!m.barcode && r.barcode) m.barcode = r.barcode;
       if(r.aliased){ m.name = r.name; }
       const pcs = pcsA + pcsB;
       m.period = (pcs>0 && m.totalValue>0) ? m.totalValue/pcs : (m.period||r.period);
       if(m.cur==null && r.cur!=null){ m.cur = r.cur; m.fromTab = r.fromTab; }
       m.curCarton = (m.cur && m.ppc>0) ? m.cur*m.ppc : m.curCarton;
+    });
+    // أصناف وحدة طلبها "علبة": سعر قاعدة الأسعار بيبقى سعر العلبة/الكرتونة الكاملة مش القطعة — نقسمه على العدد عشان ما يتضربش تاني
+    Object.values(mg).forEach(r=>{
+      if(r.ou==='علبة' && r.cur>0 && r.ppc>1 && r.period>0 && r.cur > 1.5*r.period){ r.curCarton = r.cur; r.cur = r.cur/r.ppc; }
     });
     FC.rows = Object.values(mg).sort((a,b)=> (FC_CATS.indexOf(a.cat)-FC_CATS.indexOf(b.cat)) || (b.cartons-a.cartons));
     FC.from = from; FC.to = to;
@@ -38624,18 +38631,19 @@ function fcBulkOpen(){
   const rows=FC.rows.map((r,i)=>{ const f=factOf(r.name); return `<tr data-i="${i}" data-nf="${f?0:1}" data-nb="${r.barcode?0:1}" data-t="${svmEsc(r.name)}" style="border-bottom:1px solid #F0E8D8">
     <td style="padding:6px 8px;font-size:12px;font-weight:700;color:#731E2E">${svmEsc(r.name)}</td>
     <td style="padding:6px 8px;white-space:nowrap"><select class="fcb-f" data-o="${svmEsc(f)}" onchange="fcBulkFacChg(this)" style="padding:5px 6px;border:1.5px solid #D4C4A8;border-radius:7px;font-family:inherit;font-size:12px;min-width:130px">${opts(f)}</select><input class="fcb-fn" placeholder="اسم المصنع" style="display:none;margin-top:4px;padding:5px 6px;border:1.5px solid #D4C4A8;border-radius:7px;font-family:inherit;font-size:12px;width:130px"/></td>
-    <td style="padding:6px 8px"><input class="fcb-b" data-o="${svmEsc(r.barcode||'')}" value="${svmEsc(r.barcode||'')}" style="direction:ltr;padding:5px 6px;border:1.5px solid #D4C4A8;border-radius:7px;font-family:inherit;font-size:12px;width:150px"/></td></tr>`; }).join('');
+    <td style="padding:6px 8px"><input class="fcb-b" data-o="${svmEsc(r.barcode||'')}" value="${svmEsc(r.barcode||'')}" style="direction:ltr;padding:5px 6px;border:1.5px solid #D4C4A8;border-radius:7px;font-family:inherit;font-size:12px;width:150px"/></td>
+    <td style="padding:6px 8px"><select class="fcb-u" data-o="${svmEsc(r.ou||'')}" style="padding:5px 6px;border:1.5px solid #D4C4A8;border-radius:7px;font-family:inherit;font-size:12px"><option value="" ${!r.ou?'selected':''}>—</option><option value="كرتونة" ${r.ou==='كرتونة'?'selected':''}>كرتونة</option><option value="علبة" ${r.ou==='علبة'?'selected':''}>علبة</option></select></td></tr>`; }).join('');
   const m=document.createElement('div'); m.id='fcb-modal';
   m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;direction:rtl;font-family:Cairo,sans-serif';
   m.innerHTML=`<div style="background:#fff;border-radius:14px;width:min(860px,96vw);max-height:90vh;display:flex;flex-direction:column;box-shadow:0 10px 40px rgba(0,0,0,.3)">
     <div style="padding:14px 18px;border-bottom:1px solid #E8DCC4;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <div style="font-weight:800;color:#731E2E;font-size:15px">تعديل المصنع والباركود</div>
+      <div style="font-weight:800;color:#731E2E;font-size:15px">تعديل المصنع والباركود ووحدة الطلب</div>
       <input id="fcb-q" placeholder="بحث بالاسم..." oninput="fcBulkFilter()" style="padding:6px 10px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:inherit;font-size:12px;min-width:180px"/>
       <select id="fcb-flt" onchange="fcBulkFilter()" style="padding:6px 8px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:inherit;font-size:12px"><option value="">كل الأصناف</option><option value="nf">بدون مصنع</option><option value="nb">بدون باركود</option></select>
       <span id="fcb-cnt" style="font-size:11px;color:#8B6F47"></span>
       <button class="btn btn-ghost btn-sm" style="margin-right:auto" onclick="document.getElementById('fcb-modal').remove()">✕</button>
     </div>
-    <div style="overflow:auto;flex:1"><table style="width:100%;border-collapse:collapse"><thead><tr style="background:#731E2E;color:#fff;position:sticky;top:0"><th style="padding:8px;text-align:right">الصنف</th><th style="padding:8px;text-align:right">المصنع</th><th style="padding:8px;text-align:right">الباركود</th></tr></thead><tbody id="fcb-body">${rows}</tbody></table></div>
+    <div style="overflow:auto;flex:1"><table style="width:100%;border-collapse:collapse"><thead><tr style="background:#731E2E;color:#fff;position:sticky;top:0"><th style="padding:8px;text-align:right">الصنف</th><th style="padding:8px;text-align:right">المصنع</th><th style="padding:8px;text-align:right">الباركود</th><th style="padding:8px;text-align:right">وحدة الطلب</th></tr></thead><tbody id="fcb-body">${rows}</tbody></table></div>
     <div style="padding:12px 18px;border-top:1px solid #E8DCC4;display:flex;gap:8px">
       <button id="fcb-save" class="btn btn-sm" style="background:#731E2E;color:#fff;border:none;cursor:pointer;font-family:inherit" onclick="fcBulkSave()">حفظ الكل</button>
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('fcb-modal').remove()">إلغاء</button>
@@ -38655,21 +38663,30 @@ function fcBulkFilter(){
 }
 async function fcBulkSave(){
   const btn=document.getElementById('fcb-save'); btn.disabled=true; btn.textContent='جاري الحفظ...';
-  const jobs=[]; let nf=0, nb=0, fail=0;
+  const jobs=[]; let nf=0, nb=0, nu=0, fail=0;
   document.querySelectorAll('#fcb-body tr').forEach(tr=>{
     const r=FC.rows[+tr.dataset.i]; if(!r) return;
     const sel=tr.querySelector('.fcb-f'), inp=tr.querySelector('.fcb-fn'), b=tr.querySelector('.fcb-b');
     const nfv=(sel.value==='__new__'?inp.value:sel.value).trim();
     if(sel.value==='__new__' && !nfv) return;
     if(nfv!==sel.dataset.o){ jobs.push(factSave(r.name,nfv).then(()=>{ nf++; }).catch(()=>{ fail++; })); }
+    const uSel=tr.querySelector('.fcb-u');
+    if(uSel && uSel.value!==uSel.dataset.o && uSel.value){ jobs.push(fcSaveOrderUnit(r.name,uSel.value).then(()=>{ nu++; r.ou=uSel.value; }).catch(()=>{ fail++; })); }
     const bv=b.value.trim();
     if(bv!==b.dataset.o && bv){ jobs.push(sciSaveBarcodeToMT(r.name,bv).then(()=>{ nb++; if(!_sciBarcodeIdx) _sciBarcodeIdx={}; _sciBarcodeIdx[r.name]=bv; r.barcode=bv; }).catch(()=>{ fail++; })); }
   });
   await Promise.all(jobs);
   btn.disabled=false; btn.textContent='حفظ الكل';
-  if(fail){ showToast('⚠️ اتحفظ '+(nf+nb)+' وفشل '+fail+' — جرّب تاني'); }
-  else { showToast('✅ تم الحفظ — مصنع: '+nf+' | باركود: '+nb); const m=document.getElementById('fcb-modal'); if(m) m.remove(); }
+  if(fail){ showToast('⚠️ اتحفظ '+(nf+nb+nu)+' وفشل '+fail+' — جرّب تاني'); }
+  else { showToast('✅ تم الحفظ — مصنع: '+nf+' | باركود: '+nb+' | وحدة الطلب: '+nu); const m=document.getElementById('fcb-modal'); if(m) m.remove(); }
   fcRender();
+}
+async function fcSaveOrderUnit(name,unit){
+  const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=representation'};
+  const r=await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?item_name=eq.${encodeURIComponent(name)}`,{method:'PATCH',headers:H,body:JSON.stringify({order_unit:unit,updated_at:new Date().toISOString()})});
+  if(!r.ok) throw new Error('patch');
+  const j=await r.json();
+  if(!j.length){ const r2=await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog`,{method:'POST',headers:H,body:JSON.stringify({item_name:name,order_unit:unit,updated_at:new Date().toISOString()})}); if(!r2.ok) throw new Error('post'); }
 }
 function fcPriceColor(r){
   if(r.cur==null || r.period==null) return '#2C1F0A';
@@ -38770,6 +38787,7 @@ function fcRender(){
       case 'cat': return `<td id="fc-cat-${i}" style="${td}font-size:11.5px;color:#854F0B;font-weight:700;white-space:nowrap">${svmEsc(r.cat)}${r.cat==='أخرى'?` <button onclick="fcPickCat(${i})" title="اختيار التصنيف" style="border:none;background:#F0E8D8;color:#731E2E;border-radius:6px;padding:2px 7px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit"><i class="ti ti-pencil"></i> تحديد</button>`:''}</td>`;
       case 'fac': return `<td style="${td}font-size:11.5px;color:#4B3C1A;white-space:nowrap">${factCellHTML(r.name,'font-weight:700')}</td>`;
       case 'name': return `<td style="${td}font-weight:700;color:#731E2E">${svmEsc(r.name)}${((!r.barcode||r.cur==null)&&!r.aliased)?` <button onclick="fcMatchOpen(${i})" title="مطابقة الصنف بصنف من قاعدة الأصناف" style="border:none;background:#E3F2FD;color:#1565C0;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;margin-right:6px"><i class="ti ti-link"></i> مطابقة</button>`:''}</td>`;
+      case 'ou': return `<td style="${td}text-align:center;font-size:11.5px;font-weight:700;color:${r.ou==='علبة'?'#0F6E56':'#854F0B'}">${svmEsc(r.ou||'كرتونة')}</td>`;
       case 'qp': return `<td style="${td}text-align:center">${fcFmt(r.qp)}</td>`;
       case 'ct': return `<td style="${td}text-align:center">${fcFmt(Math.round(r.cartons))}</td>`;
       case 'per': return `<td style="${td}text-align:center">${fcFmt(r.period,2)}</td>`;
@@ -38842,6 +38860,7 @@ function fcPages(){
           case 'cat': return `<td style="${cell};color:#854F0B;font-weight:700">${svmEsc(r.cat)}</td>`;
           case 'fac': return `<td style="${cell};color:#4B3C1A;font-weight:700">${svmEsc(factOf(r.name))||'—'}</td>`;
           case 'name': return `<td style="${cell};font-weight:700;color:${SVM_C.maroon}">${svmEsc(r.name)}</td>`;
+          case 'ou': return `<td style="${cell};text-align:center;font-weight:700">${svmEsc(r.ou||'كرتونة')}</td>`;
           case 'qp': return `<td style="${cell};text-align:center">${fcFmt(r.qp)}</td>`;
           case 'ct': return `<td style="${cell};text-align:center">${fcFmt(Math.round(r.cartons))}</td>`;
           case 'per': return `<td style="${cell};text-align:center">${fcFmt(r.period,2)}</td>`;
