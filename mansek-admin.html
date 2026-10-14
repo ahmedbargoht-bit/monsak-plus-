@@ -6906,20 +6906,26 @@ h2,h3{color:#2C1F0A}
               <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">
                 <h3 style="margin:0;font-size:15px;color:#731E2E"><i class="ti ti-calendar-stats"></i> خطة الشهر</h3>
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
+                  <button onclick="fcpRefill()" class="btn btn-sm" style="background:#C8A96E;color:#2C1F0A;border:none;cursor:pointer;font-family:Cairo,sans-serif;font-weight:700"><i class="ti ti-refresh"></i> إعادة تعبئة من الفواتير</button>
                   <button onclick="fcpSave(this)" class="btn btn-sm" style="background:#731E2E;color:#fff;border:none;cursor:pointer;font-family:Cairo,sans-serif;font-weight:700"><i class="ti ti-device-floppy"></i> حفظ الخطة</button>
                   <button onclick="fcpExportExcel()" class="btn btn-sm" style="background:#2E7D32;color:#fff;border:none;cursor:pointer;font-family:Cairo,sans-serif"><i class="ti ti-file-spreadsheet"></i> تصدير Excel</button>
                   <button onclick="fcpClose()" class="btn btn-sm" style="background:#fff;color:#731E2E;border:1.5px solid #731E2E;cursor:pointer;font-family:Cairo,sans-serif;font-weight:700"><i class="ti ti-arrow-right"></i> رجوع للفوركاست</button>
                 </div>
               </div>
               <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;align-items:end">
-                <div><label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">الفرع</label>
-                  <select id="fcp-branch" style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"></select></div>
+                <div id="fcp-ms-branch" style="position:relative"></div>
                 <div><label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">شهر الخطة</label>
                   <input type="month" id="fcp-month" style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"/></div>
                 <div><label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">الأصناف من فواتير (من)</label>
                   <input type="date" id="fcp-from" style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"/></div>
                 <div><label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">الأصناف من فواتير (إلى)</label>
                   <input type="date" id="fcp-to" style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px"/></div>
+                <div><label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">تعبئة الكميات من الفواتير</label>
+                  <select id="fcp-fillmode" onchange="fcpFillChange()" style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
+                    <option value="total">إجمالي الفترة</option>
+                    <option value="avg">متوسط شهري (الفترة ÷ عدد الشهور)</option>
+                    <option value="none">بدون تعبئة (كميات فاضية)</option>
+                  </select></div>
                 <div><button onclick="fcpLoad()" style="width:100%;background:#731E2E;color:white;border:none;border-radius:8px;padding:8px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer"><i class="ti ti-search"></i> عرض الأصناف</button></div>
               </div>
               <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;align-items:end;margin-top:10px">
@@ -38981,7 +38987,35 @@ async function fcLoad(){
 // خطة الشهر — صفحة داخل الفوركاست: تختار الفرع (سلاسل القاهرة / سلاسل الإسكندرية) والشهر وتكتب الكمية المطلوبة لكل صنف،
 // والنظام يحسب القطع والكراتين والقيمة + إجمالي الخطة + كارت لكل مصنع (عدد الأصناف المطلوبة وقيمتها). بتتحفظ في forecast_month_plans.
 // ══════════════════════════════════════════════════════════════
-const FCP = { rows:[], qty:{}, branch:'', month:'', loaded:false };
+const FCP = { rows:[], qty:{}, inv:{}, branch:'', month:'', loaded:false, selBr:new Set(), brQ:'' };
+// اختيار الفروع (مربعات اختيار): من غير اختيار = كل الفروع
+function fcpBrBuild(){
+  const box=document.getElementById('fcp-ms-branch'); if(!box) return;
+  if(!box.dataset.built){
+    box.dataset.built='1';
+    box.innerHTML=`<label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">الفرع</label>
+      <button type="button" onclick="fcpBrToggle(event)" style="width:100%;box-sizing:border-box;text-align:right;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;background:#fff;font-family:Cairo,sans-serif;font-size:12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:6px">
+        <span id="fcp-br-lbl" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">كل الفروع</span><i class="ti ti-chevron-down" style="font-size:14px;color:#888"></i></button>
+      <div id="fcp-br-dd" style="display:none;position:absolute;top:100%;right:0;left:0;background:#fff;border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.18);z-index:60;padding:6px;margin-top:4px;max-height:320px;overflow-y:auto;min-width:240px">
+        <input oninput="FCP.brQ=this.value.trim();fcpBrOpts()" placeholder="🔍 بحث" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #D4C4A8;border-radius:7px;font-family:inherit;font-size:12px;margin-bottom:6px"/>
+        <label style="display:flex;align-items:center;gap:6px;padding:5px 6px;font-size:12px;font-weight:700;cursor:pointer"><input type="checkbox" id="fcp-br-all" checked onchange="fcpBrAll()"/> كل الفروع</label>
+        <div id="fcp-br-opts"></div></div>`;
+    document.addEventListener('click',e=>{ const dd=document.getElementById('fcp-br-dd'); if(dd && dd.style.display!=='none' && !document.getElementById('fcp-ms-branch').contains(e.target)) dd.style.display='none'; });
+  }
+  fcpBrOpts();
+}
+function fcpBrToggle(e){ e.stopPropagation(); const dd=document.getElementById('fcp-br-dd'); dd.style.display = dd.style.display==='none' ? 'block' : 'none'; }
+function fcpBrOpts(){
+  const l=document.getElementById('fcp-br-opts'); if(!l) return;
+  const q=FCP.brQ.toLowerCase();
+  const list=(FC.branches||[]).filter(b=>!q || b.toLowerCase().includes(q));
+  l.innerHTML=list.map(b=>{ const i=(FC.branches||[]).indexOf(b);
+    return `<label style="display:flex;align-items:center;gap:6px;padding:5px 6px;font-size:12px;cursor:pointer"><input type="checkbox" ${FCP.selBr.has(b)?'checked':''} onchange="fcpBrCheck(${i},this.checked)"/> ${svmEsc(b.replace(/\s+/g,' ').trim())}</label>`; }).join('') || '<div style="padding:8px;font-size:12px;color:#999">لا توجد فروع</div>';
+  const lb=document.getElementById('fcp-br-lbl'); if(lb) lb.textContent = !FCP.selBr.size ? 'كل الفروع' : (FCP.selBr.size===1 ? [...FCP.selBr][0].replace(/\s+/g,' ').trim() : FCP.selBr.size+' فروع');
+  const all=document.getElementById('fcp-br-all'); if(all) all.checked = !FCP.selBr.size;
+}
+function fcpBrCheck(i,on){ const b=(FC.branches||[])[i]; if(b==null) return; on?FCP.selBr.add(b):FCP.selBr.delete(b); fcpBrOpts(); }
+function fcpBrAll(){ FCP.selBr.clear(); fcpBrOpts(); }
 const _fcpH = () => ({'Content-Type':'application/json', apikey:SUPABASE_KEY, Authorization:'Bearer '+SUPABASE_KEY});
 function fcpUnitPrice(r){ return (r.curCarton!=null && r.curCarton>0) ? r.curCarton : ((r.cur!=null && r.cur>0) ? r.cur : 0); }
 function fcpCalc(r){
@@ -38995,14 +39029,9 @@ async function fcpOpen(){
   document.getElementById('fcp-wrap').style.display='block';
   const m=document.getElementById('fcp-month'); if(m && !m.value){ const d=new Date(); m.value=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
   const f=document.getElementById('fcp-from'), t=document.getElementById('fcp-to');
-  if(f && !f.value){ const d=new Date(), p=new Date(d.getFullYear(),d.getMonth()-3,d.getDate()); f.value=svmIso(p); t.value=svmIso(d); }
+  if(f && !f.value){ const d=new Date(), p=new Date(d.getFullYear(),d.getMonth(),d.getDate()-30); f.value=svmIso(p); t.value=svmIso(d); }
   try{ await fcInit(); }catch(e){}
-  const sel=document.getElementById('fcp-branch');
-  if(sel && !sel.options.length){
-    let list=(FC.branches||[]).filter(b=>/قاهر|سكندر/.test(b));
-    if(!list.length) list=['سلاسل القاهرة  الطحان','سلاسل اسكندرية الطحان'];
-    sel.innerHTML=list.map(b=>`<option value="${svmEsc(b)}">${svmEsc(b.replace(/\s+/g,' ').trim())}</option>`).join('');
-  }
+  fcpBrBuild();
 }
 function fcpClose(){
   document.getElementById('fcp-wrap').style.display='none';
@@ -39010,22 +39039,26 @@ function fcpClose(){
   document.getElementById('fc-hdr-btns').style.display='flex';
 }
 async function fcpLoad(){
-  const branch=document.getElementById('fcp-branch').value, month=document.getElementById('fcp-month').value;
+  const brArr = FCP.selBr.size ? [...FCP.selBr] : null;
+  const branch = brArr ? [...brArr].sort().join(' + ') : 'كل الفروع', month=document.getElementById('fcp-month').value;
   const from=document.getElementById('fcp-from').value, to=document.getElementById('fcp-to').value;
-  if(!branch||!month){ showToast('اختر الفرع وشهر الخطة'); return; }
+  if(!month){ showToast('اختر شهر الخطة'); return; }
   if(!from||!to||from>to){ showToast('اختر فترة الأصناف صح (من / إلى)'); return; }
   const tb=document.getElementById('fcp-tbody');
   tb.innerHTML='<tr><td colspan="10" style="text-align:center;padding:30px;color:var(--text2)">جاري التحميل...</td></tr>';
   try{
     const [rows, saved] = await Promise.all([
-      fcFetchRows(from,to,{sectors:null,routes:null,items:null,branches:[branch]}),
+      fcFetchRows(from,to,{sectors:null,routes:null,items:null,branches:brArr}),
       fetch(`${SUPABASE_URL}/rest/v1/forecast_month_plans?month=eq.${month}&branch=eq.${encodeURIComponent(branch)}&select=item_name,qty&limit=5000`,{headers:_fcpH()}).then(r=>r.ok?r.json():[]).catch(()=>[])
     ]);
     FCP.rows = rows.slice().sort((a,b)=>a.name.localeCompare(b.name,'ar'));
-    FCP.qty = {}; (saved||[]).forEach(s=>{ FCP.qty[s.item_name] = +s.qty||0; });
+    // الكمية المقترحة = اللي اتورّد من فواتير MT خلال الفترة (بالكرتونة)، وانت بتعدّل اللي شايفه قليل. الكمية المحفوظة سابقًا بتفضل زي ما هي.
+    fcpBuildInv();
+    const savedMap = {}; (saved||[]).forEach(s=>{ savedMap[s.item_name] = +s.qty||0; });
+    FCP.qty = Object.assign({}, FCP.inv); Object.keys(savedMap).forEach(n=>{ if(savedMap[n]>0) FCP.qty[n]=savedMap[n]; else delete FCP.qty[n]; });
     // أصناف محفوظة في الخطة ومش في فواتير الفترة: نضيفها عشان متضيعش
     const have = new Set(FCP.rows.map(r=>r.name));
-    Object.keys(FCP.qty).forEach(n=>{ if(!have.has(n) && FCP.qty[n]>0) FCP.rows.push({name:n, ou:'', ppc:0, barcode:'', cat:'أخرى', cur:null, curCarton:null, stub:true}); });
+    Object.keys(savedMap).forEach(n=>{ if(!have.has(n) && savedMap[n]>0) FCP.rows.push({name:n, ou:'', ppc:0, barcode:'', cat:'أخرى', cur:null, curCarton:null, stub:true}); });
     FCP.branch=branch; FCP.month=month; FCP.loaded=true;
     const facs=[...new Set(FCP.rows.map(fcpFacOf))].sort((a,b)=>a.localeCompare(b,'ar'));
     const cats=[...new Set(FCP.rows.map(r=>r.cat||'أخرى'))].sort((a,b)=>a.localeCompare(b,'ar'));
@@ -39036,6 +39069,29 @@ async function fcpLoad(){
     console.error('[fcpLoad]',e);
     tb.innerHTML='<tr><td colspan="10" style="text-align:center;padding:30px;color:#B71C1C">تعذر تحميل الأصناف — جرّب تاني</td></tr>';
   }
+}
+// يبني الكميات المقترحة من الفواتير حسب وضع التعبئة (إجمالي / متوسط شهري / بدون)
+function fcpBuildInv(){
+  const mode=(document.getElementById('fcp-fillmode')||{}).value||'total';
+  FCP.inv = {};
+  if(mode==='none') return;
+  let div=1;
+  if(mode==='avg'){
+    const f=document.getElementById('fcp-from').value, t=document.getElementById('fcp-to').value;
+    const days=Math.max(1, Math.round((new Date(t)-new Date(f))/86400000)+1);
+    div=Math.max(days/30, 1/30);
+  }
+  (FCP.rows||[]).forEach(r=>{ const c=(+r.cartons||0)/div; if(c>0) FCP.inv[r.name]=Math.max(1,Math.round(c)); });
+}
+function fcpFillChange(){
+  if(!FCP.loaded) return;
+  if(!confirm('هتتغير تعبئة الكميات حسب الاختيار الجديد، وتتمسح تعديلاتك الحالية غير المحفوظة. تكمّل؟')){ return; }
+  fcpBuildInv(); FCP.qty = Object.assign({}, FCP.inv); fcpRender();
+}
+function fcpRefill(){
+  if(!FCP.loaded){ showToast('اضغط "عرض الأصناف" الأول'); return; }
+  if(!confirm('هترجع كل الكميات لكميات فواتير MT في الفترة، وتتمسح تعديلاتك الحالية. تكمّل؟')) return;
+  fcpBuildInv(); FCP.qty = Object.assign({}, FCP.inv); fcpRender();
 }
 function fcpFiltered(){
   const fac=document.getElementById('fcp-f-fac').value, cat=document.getElementById('fcp-f-cat').value, mode=document.getElementById('fcp-f-mode').value;
