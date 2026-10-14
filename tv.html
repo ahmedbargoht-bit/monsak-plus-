@@ -196,6 +196,14 @@ function loadMt(monthStart,today){
     ]).then(function(x){return {cut:cut,inv:x[0]||[],ret:x[1]||[]}});
   }).catch(function(){return {cut:null,inv:[],ret:[]}});
 }
+/* نسب توزيع خصم العملاء على المناديب: حسب مبيعات MT الثانوية لعملاء كل مندوب في آخر 3 شهور قبل الشهر */
+function loadShares(month){
+  if(DEMO)return Promise.resolve(null);
+  return fetch(SB_URL+'/rest/v1/rpc/rep_goal_discount_shares',{method:'POST',headers:{apikey:SB_KEY,Authorization:'Bearer '+SB_KEY,'Content-Type':'application/json'},body:JSON.stringify({p_month:month})})
+    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
+    .then(function(rows){var o={};(rows||[]).forEach(function(x){o[x.rep_name]={region:x.region,share:+x.share||0}});return o})
+    .catch(function(){return null});
+}
 function loadSales(){
   var c=cairo(),month=c.y+'-'+pad(c.m),monthStart=month+'-01';
   var wk=addDays(c.y,c.m,c.d,-6),weekStart=isoOf(wk.y,wk.m,wk.d);
@@ -211,8 +219,9 @@ function loadSales(){
     loadMt(monthStart,today),
     getAll('tamr_sales_rep_routes?select=branch_name,route,group_name&order=id.asc').catch(function(){return []}),
     get('users?select=name,grp&role=eq.sales&level=eq.rep&status=eq.active&limit=1000').catch(function(){return []}),
-    get('sales_goal_discounts?select=cairo_discount,alex_discount&month=eq.'+month).catch(function(){return []})
-  ]).then(function(r){return {disc:(r[9]&&r[9][0])||null,ug:r[8]||[],rr:r[7]||[],del:r[0]||[],ret:r[1]||[],tgt:r[2]||[],ovr:r[3]||[],usr:r[4]||[],br:r[5]||[],mt:r[6]||{cut:null,inv:[],ret:[]},c:c,month:month,monthStart:monthStart,today:today}});
+    get('sales_goal_discounts?select=cairo_discount,alex_discount&month=eq.'+month).catch(function(){return []}),
+    loadShares(month)
+  ]).then(function(r){return {shares:r[10]||null,disc:(r[9]&&r[9][0])||null,ug:r[8]||[],rr:r[7]||[],del:r[0]||[],ret:r[1]||[],tgt:r[2]||[],ovr:r[3]||[],usr:r[4]||[],br:r[5]||[],mt:r[6]||{cut:null,inv:[],ret:[]},c:c,month:month,monthStart:monthStart,today:today}});
 }
 function refresh(){
   if(S.loading)return;S.loading=true;
@@ -352,9 +361,13 @@ function hmGroups(){
   /* خصم القاهرة على مجموعة cairo بس، وخصم الإسكندرية على مجموعة alex بس — باقي المجموعات من غير خصم */
   var rgG=function(g){return discRg(g==='private_cairo'?'private_chains_cairo':g)};
   arr.forEach(function(o){var r0=rgG(o.g);if(r0)regSum[r0]+=Math.max(0,o.total)});
+  /* التوزيع الأساسي: مجموع حصص مناديب المجموعة (مبيعات MT الثانوية لعملائهم) */
+  var grpShare={};
+  if(d.shares){(d.ug||[]).forEach(function(u){var s=d.shares[u.name];if(!s)return;var gk=u.grp==='private_cairo'?'private_chains_cairo':u.grp;grpShare[gk]=(grpShare[gk]||0)+dReg[s.region]*s.share})}
   arr.forEach(function(o){
     var rg=rgG(o.g);
-    o.disc=(rg&&dReg[rg]>0&&regSum[rg]>0)?dReg[rg]*Math.max(0,o.total)/regSum[rg]:0;
+    if(d.shares){o.disc=grpShare[o.g==='private_cairo'?'private_chains_cairo':o.g]||0}
+    else o.disc=(rg&&dReg[rg]>0&&regSum[rg]>0)?dReg[rg]*Math.max(0,o.total)/regSum[rg]:0;
     o.discPct=o.total>0?o.disc/o.total*100:0;
   });
   return {groups:arr,max:max,total:total,from:d.monthStart,cut:cut};
@@ -643,7 +656,17 @@ function computeSales(d){
   /* خصومات العملاء: بتتوزع على مناديب كل إقليم بنسبة مبيعاتهم (نفس لوحة التحكم) */
   var grossAch=0;Object.keys(repNet).forEach(function(k){grossAch+=repNet[k]});
   var dsc=d.disc||{},dCa=+dsc.cairo_discount||0,dAl=+dsc.alex_discount||0,discApplied=0;
-  if(dCa>0||dAl>0){
+  var totalLevel=false;
+  if((dCa>0||dAl>0)&&d.shares&&!Object.keys(d.shares).length){
+    /* وضع "على إجمالي القاهرة والإسكندرية فقط": الخصم مش بيتوزع على المناديب، بيتخصم من الإجمالي الكلي بس */
+    discApplied=dCa+dAl;totalLevel=true;
+  }else if((dCa>0||dAl>0)&&d.shares){
+    var dd0={cairo:dCa,alex:dAl};
+    Object.keys(repNet).forEach(function(n){
+      var s=d.shares[n];if(!s||!(dd0[s.region]>0))return;
+      var sh0=dd0[s.region]*s.share;repNet[n]-=sh0;discApplied+=sh0;
+    });
+  }else if(dCa>0||dAl>0){
     var rgOf={};(d.ug||[]).forEach(function(u){rgOf[u.name]=discRg(u.grp)});
     var rbase={cairo:0,alex:0};
     Object.keys(repNet).forEach(function(n){if(rgOf[n])rbase[rgOf[n]]+=Math.max(0,repNet[n])});
@@ -654,6 +677,7 @@ function computeSales(d){
     });
   }
   var achieved=0;Object.keys(repNet).forEach(function(k){achieved+=repNet[k]});
+  if(totalLevel)achieved-=discApplied;
   var target=0,supT={},supA={},repSup={};
   // المشرف الفعلي من users.supervisors (زي لوحة التحكم) — عمود rep_targets.supervisor_name ممكن يكون قديم
   var usrSup={};(d.usr||[]).forEach(function(u){var s=String(u.supervisors||'').split(',')[0].replace(/^\s+|\s+$/g,'');if(s)usrSup[u.name]=s});

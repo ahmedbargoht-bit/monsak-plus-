@@ -9616,7 +9616,7 @@ async function tgtLoadData(){
       const totalSales = supResults.reduce((s,x)=>s+x.sales, 0);
       const totalRet   = supResults.reduce((s,x)=>s+x.ret, 0);
       const totalPre   = totalSales - totalRet;
-      const totalNet   = totalPre - supResults.reduce((s,x)=>s+x.disc, 0);
+      const totalNet   = totalPre - supResults.reduce((s,x)=>s+x.disc, 0) - (cu.level==='gm' ? (window._tgtTotalDisc||0) : 0);
       const pct        = totalGoal>0 ? Math.min(100,Math.round(totalNet/totalGoal*100)) : 0;
       const dailyAvg   = totalNet / salesDays;
       const projPct    = totalGoal>0 ? Math.round((dailyAvg*workDays)/totalGoal*100) : 0;
@@ -9693,9 +9693,11 @@ async function tgtLoadData(){
       }
 
       // جيب الأهداف: exact + short form
+      // الأهداف بتتجاب بأسماء مناديب المشرف الفعليين (users.supervisors) — عمود rep_targets.supervisor_name ممكن يكون قديم/مختلف
       const _tgtFetches = [
-        fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&supervisor_name=eq.${enc}&select=rep_name,target_amount,work_days&limit=200`,{headers:H}),
-        encShort ? fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&supervisor_name=eq.${encShort}&select=rep_name,target_amount,work_days&limit=200`,{headers:H}) : Promise.resolve(null),
+        fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&deleted_at=is.null&rep_name=in.(${repsList.map(r=>encodeURIComponent('"'+r.name+'"')).join(',')})&select=rep_name,target_amount,work_days&limit=500`,{headers:H}),
+        fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&deleted_at=is.null&supervisor_name=eq.${enc}&select=rep_name,target_amount,work_days&limit=200`,{headers:H}),
+        encShort ? fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${monthStr}&deleted_at=is.null&supervisor_name=eq.${encShort}&select=rep_name,target_amount,work_days&limit=200`,{headers:H}) : Promise.resolve(null),
       ];
       const _tgtResults = await Promise.all(_tgtFetches);
       const _tgtAll = [];
@@ -9814,6 +9816,13 @@ async function tgtLoadData(){
 async function tgtLoadDisc(monthStr){
   // خصومات العملاء موزعة على المناديب (نفس منطق لوحة التحكم)
   const m = {};
+  window._tgtTotalDisc = 0;
+  try{
+    // وضع "على إجمالي القاهرة والإسكندرية فقط": لو التوزيع على المناديب مقفول، الخصم بيتخصم من إجمالي الشركة بس (للـGM)
+    const gr = await fetch(`${SUPABASE_URL}/rest/v1/sales_goal_discounts?month=eq.${monthStr}&select=cairo_discount,alex_discount,distribute`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const gj = gr.ok ? await gr.json() : [];
+    if(gj[0] && !gj[0].distribute) window._tgtTotalDisc = (+gj[0].cairo_discount||0)+(+gj[0].alex_discount||0);
+  }catch(e){}
   try{
     const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rep_goal_discounts`,{method:'POST',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({p_month:monthStr})});
     const a = r.ok ? await r.json() : [];
