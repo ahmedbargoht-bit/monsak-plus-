@@ -3764,6 +3764,7 @@ h2,h3{color:#2C1F0A}
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn btn-ghost btn-sm" onclick="csLoad()"><i class="ti ti-refresh"></i> تحديث</button>
               <button class="btn btn-ghost btn-sm" onclick="mtUploadOpen()"><i class="ti ti-upload"></i> رفع بيانات</button>
+              <button class="btn btn-ghost btn-sm" onclick="unmOpen()"><i class="ti ti-link"></i> فروع غير مصنّفة</button>
               <button class="btn btn-ghost btn-sm" onclick="csExportExcel()"><i class="ti ti-file-spreadsheet" style="color:#1A7A4A"></i> تصدير Excel</button>
               <button class="btn btn-ghost btn-sm" onclick="csExportPDF()"><i class="ti ti-file-type-pdf" style="color:#731E2E"></i> تصدير PDF</button>
               <button class="btn btn-ghost btn-sm" onclick="csShare('pdf')"><i class="ti ti-brand-whatsapp" style="color:#25D366"></i> مشاركة PDF</button>
@@ -4524,6 +4525,7 @@ h2,h3{color:#2C1F0A}
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn btn-ghost btn-sm" onclick="hmLoad()"><i class="ti ti-refresh"></i> تحديث</button>
+              <button class="btn btn-ghost btn-sm" onclick="unmOpen()"><i class="ti ti-link"></i> فروع غير مصنّفة</button>
               <button class="btn btn-navy btn-sm" onclick="hmExport()"><i class="ti ti-file-download"></i> تصدير Excel</button>
               <button class="btn btn-navy btn-sm" onclick="hmExportPDF()"><i class="ti ti-file-type-pdf"></i> تصدير PDF</button>
             </div>
@@ -9431,6 +9433,33 @@ h2,h3{color:#2C1F0A}
       <button class="btn btn-ghost" onclick="closeModal('modal-edit-sup')">إلغاء</button>
       <button class="btn btn-blue" onclick="editSupervisor()"><i class="ti ti-device-floppy"></i> حفظ</button>
     </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-unm">
+  <div class="modal" style="max-width:1150px;width:96vw">
+    <div class="modal-title">
+      فروع جريد غير مصنّفة — اربطها بفرع موجود أو أضفها كفرع جديد
+      <button class="modal-close" onclick="unmClose()">✕</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;font-size:12px">
+      <span>من</span><input type="date" id="unm-from" onchange="unmLoad()"/>
+      <span>إلى</span><input type="date" id="unm-to" onchange="unmLoad()"/>
+      <input type="text" id="unm-q" placeholder="🔍 بحث بالاسم أو العميل" oninput="unmRender()" style="flex:1;min-width:160px"/>
+      <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="unm-hide-wh" checked onchange="unmRender()"/> إخفاء المخازن</label>
+      <button class="btn btn-ghost btn-sm" onclick="unmLoad()"><i class="ti ti-refresh"></i> تحديث</button>
+    </div>
+    <div id="unm-info" style="font-size:12px;color:#8B6F47;margin-bottom:6px"></div>
+    <div style="max-height:62vh;overflow:auto;border:1px solid #e6dccb;border-radius:8px">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead style="position:sticky;top:0;background:#f4ecdc;z-index:1"><tr>
+          <th style="padding:6px;text-align:right">اسم الفرع في جريد</th><th style="padding:6px;text-align:right">العميل</th>
+          <th style="padding:6px">المبيعات</th><th style="padding:6px;text-align:right;min-width:330px">ربط بفرع موجود</th>
+          <th style="padding:6px;text-align:right;min-width:330px">أو إضافة كفرع جديد</th><th style="padding:6px"></th></tr></thead>
+        <tbody id="unm-body"></tbody>
+      </table>
+    </div>
+    <datalist id="unm-dl"></datalist>
   </div>
 </div>
 
@@ -16784,6 +16813,87 @@ function switchAdminMode(mode){
   if(mode==='coord') showPanel('dashboard');
   else if(mode==='sales') showPanel('sales-routes');
   else if(mode==='ai') showPanel('ai-analysis');
+}
+
+// ══ فروع جريد غير المصنّفة: ربط بفرع موجود (alias) أو إضافة كفرع جديد ══
+const UNM = {rows:[], branches:[], loaded:false};
+const UNM_GRPS = {giza:'الجيزة',cairo:'وسط القاهرة',south:'جنوب وشرق',tajmuat:'التجمعات',hyper:'الهايبر',alex:'الإسكندرية',delta:'الدلتا',upper_egypt:'الصعيد',hurghada:'الغردقة',private_chains_cairo:'أسواق خاصة القاهرة',private_chains_giza:'أسواق خاصة الجيزة'};
+const unmH = () => ({apikey:SUPABASE_KEY, Authorization:'Bearer '+SUPABASE_KEY, 'Content-Type':'application/json'});
+const unmEsc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function unmSkipped(){ try{return new Set(JSON.parse(localStorage.getItem('unm_skip')||'[]'));}catch(e){return new Set();} }
+async function unmOpen(){
+  openModal('modal-unm');
+  if(!document.getElementById('unm-from').value){
+    const d=new Date(); d.setMonth(d.getMonth()-3);
+    document.getElementById('unm-from').value = d.toISOString().slice(0,10);
+  }
+  await unmLoad();
+}
+function unmClose(){
+  closeModal('modal-unm');
+  try{ if(document.getElementById('panel-heatmap')?.classList.contains('active') && typeof hmLoad==='function') hmLoad(); }catch(e){}
+  try{ if(document.getElementById('panel-chain-sales')?.classList.contains('active') && typeof csLoad==='function'){ CS.dimLists={}; csLoad(); } }catch(e){}
+}
+async function unmLoad(){
+  const info=document.getElementById('unm-info'); info.textContent='⏳ جاري التحميل...';
+  try{
+    const from=document.getElementById('unm-from').value||null, to=document.getElementById('unm-to').value||null;
+    const [rows, brs] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/rpc/chain_unmatched_sites`,{method:'POST',headers:unmH(),body:JSON.stringify({p_from:from,p_to:to})}).then(r=>r.json()),
+      UNM.loaded ? Promise.resolve(UNM.branches) : fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,grp,route&status=eq.active&order=branch_name.asc&limit=5000`,{headers:unmH()}).then(r=>r.json())
+    ]);
+    if(!Array.isArray(rows)) throw new Error(rows?.message||'خطأ');
+    UNM.rows=rows; UNM.branches=Array.isArray(brs)?brs:[]; UNM.loaded=true;
+    document.getElementById('unm-dl').innerHTML = UNM.branches.map(b=>`<option value="${unmEsc(b.branch_name)}"></option>`).join('');
+    unmRender();
+  }catch(e){ info.textContent='❌ تعذر التحميل: '+e.message; }
+}
+function unmRender(){
+  const q=(document.getElementById('unm-q').value||'').trim();
+  const hideWh=document.getElementById('unm-hide-wh').checked, skip=unmSkipped();
+  let rows=UNM.rows.filter(r=>!skip.has(r.site));
+  if(hideWh) rows=rows.filter(r=>!/(^|\s)(مخازن|مخزن|مستودع)/.test(String(r.site).trim()));
+  if(q) rows=rows.filter(r=>(r.site+' '+(r.customer||'')).includes(q));
+  const tot=rows.reduce((a,r)=>a+(+r.vs||0),0);
+  document.getElementById('unm-info').textContent = `${rows.length} فرع غير مصنّف — إجمالي مبيعات ${Math.round(tot).toLocaleString('en-US')} ج`;
+  const grpOpts = sel => Object.entries(UNM_GRPS).map(([k,v])=>`<option value="${k}"${k===sel?' selected':''}>${v}</option>`).join('');
+  document.getElementById('unm-body').innerHTML = rows.slice(0,300).map((r,i)=>{
+    const sg = Array.isArray(r.sugg)?r.sugg:[]; const top=sg[0];
+    const sgBtns = sg.map(s=>`<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:1px 6px;margin:1px" title="${unmEsc(UNM_GRPS[s.grp]||s.grp||'')} — ${unmEsc(s.route||'')}" onclick="unmPick(${i},'${unmEsc(s.branch).replace(/'/g,"\\'")}')">${unmEsc(s.branch)} (${Math.round(s.sim*100)}%)</button>`).join('');
+    return `<tr data-i="${i}" style="border-top:1px solid #eee">
+      <td style="padding:6px;font-weight:700">${unmEsc(String(r.site).trim())}</td>
+      <td style="padding:6px;color:#666">${unmEsc(r.customer||'')}</td>
+      <td style="padding:6px;text-align:center">${Math.round(+r.vs||0).toLocaleString('en-US')}</td>
+      <td style="padding:6px">${sgBtns?`<div>${sgBtns}</div>`:''}
+        <div style="display:flex;gap:4px"><input list="unm-dl" id="unm-b-${i}" placeholder="اختر/ابحث عن فرع" style="flex:1;min-width:140px"/>
+        <button class="btn btn-blue btn-sm" onclick="unmLink(${i})">ربط</button></div></td>
+      <td style="padding:6px"><div style="display:flex;gap:4px;flex-wrap:wrap">
+        <select id="unm-g-${i}">${grpOpts(top?top.grp:'')}</select>
+        <input id="unm-r-${i}" placeholder="خط السير" value="${unmEsc(top?top.route||'':'')}" style="flex:1;min-width:110px"/>
+        <button class="btn btn-green btn-sm" onclick="unmAdd(${i})">إضافة</button></div></td>
+      <td style="padding:6px"><button class="btn btn-ghost btn-sm" title="إخفاء (مش فرع بيع)" onclick="unmSkip(${i})">✕</button></td></tr>`;
+  }).join('') || '<tr><td colspan="6" style="padding:20px;text-align:center;color:#2e7d32">✅ كل الفروع مصنّفة</td></tr>';
+  UNM.view=rows.slice(0,300);
+}
+function unmPick(i,name){ const el=document.getElementById('unm-b-'+i); if(el) el.value=name; }
+function unmSkip(i){ const r=UNM.view[i]; if(!r) return; const s=unmSkipped(); s.add(r.site); localStorage.setItem('unm_skip',JSON.stringify([...s])); unmRender(); }
+async function unmLink(i){
+  const r=UNM.view[i]; if(!r) return;
+  const bn=(document.getElementById('unm-b-'+i).value||'').trim();
+  if(!UNM.branches.some(b=>b.branch_name===bn)){ alert('اختار فرع موجود من القائمة'); return; }
+  const res=await fetch(`${SUPABASE_URL}/rest/v1/branch_name_aliases`,{method:'POST',headers:{...unmH(),Prefer:'return=minimal'},body:JSON.stringify({alias_name:String(r.site).trim(),branch_name:bn,source:'Grid'})});
+  if(!res.ok){ alert('تعذر الحفظ: '+(await res.text())); return; }
+  UNM.rows=UNM.rows.filter(x=>x.site!==r.site); unmRender();
+}
+async function unmAdd(i){
+  const r=UNM.view[i]; if(!r) return;
+  const grp=document.getElementById('unm-g-'+i).value, route=(document.getElementById('unm-r-'+i).value||'').trim();
+  if(!grp||!route){ alert('اختار المجموعة واكتب خط السير'); return; }
+  const name=String(r.site).trim();
+  const res=await fetch(`${SUPABASE_URL}/rest/v1/branches`,{method:'POST',headers:{...unmH(),Prefer:'return=minimal'},body:JSON.stringify({branch_name:name,route,grp,client_type:'B',status:'active'})});
+  if(!res.ok){ alert('تعذر الحفظ: '+(await res.text())); return; }
+  UNM.branches.push({branch_name:name,grp,route});
+  UNM.rows=UNM.rows.filter(x=>x.site!==r.site); unmRender();
 }
 
 // رفع بيانات فواتير MT/جريد — نافذة فوق الصفحة (نفس محرك الرفع، بدون تابات التحليل)
@@ -42509,6 +42619,15 @@ async function hmBranchIndex(H){
     const t = idx.get(hmNorm(dst)); const sk = hmNorm(src);
     if(t && !idx.has(sk)) idx.set(sk, t);
   });
+  // مطابقة تقريبية من قاعدة البيانات (روابط خطوط السير/الأسماء البديلة/تشابه الاسم) لأسماء فواتير جريد المختلفة إملائيًا
+  try{
+    const sm = await fetch(`${SUPABASE_URL}/rest/v1/rpc/chain_site_map`,{method:'POST',headers:{...H,'Content-Type':'application/json'},body:'{}'}).then(r=>r.json());
+    (Array.isArray(sm)?sm:[]).forEach(r=>{
+      if(!r.site || !r.branch_name || !r.grp) return;
+      const sk = hmNorm(String(r.site).trim()); if(!sk || idx.has(sk)) return;
+      idx.set(sk, {name:String(r.branch_name).trim(), grp: r.grp==='private_cairo' ? 'private_chains_cairo' : r.grp});
+    });
+  }catch(e){}
   // احتياطي: فروع دليل خطوط سير المناديب اللي مش في جدول الفروع
   rr.forEach(r=>{
     const nm = String(r.branch_name||'').trim(); const k = hmNorm(nm);
