@@ -57722,6 +57722,7 @@ function svmDetail(id){
     ${row('المسافة من الفرع',r.dist!=null?r.dist+' متر':'—')}${row('وقت الدخول',svmEsc(t))}
     ${row('موقع المشرف',svmMapLink(r.vlat,r.vlng,'عرض على الخريطة'))}${row('موقع الفرع',svmMapLink(r.blat,r.blng,'عرض على الخريطة'))}
     ${row(SVM_RC()[0],rate(r.rc))}${row(SVM_RC()[1],rate(r.rd))}${row(SVM_RC()[2],rate(r.rl))}
+    ${r.sx&&r.sx.movedFrom?row('تم نقل الزيارة','<span style="color:#E65100;font-weight:700">من '+svmEsc(r.sx.movedFrom)+' إلى '+svmEsc(r.date)+'</span>'+(r.sx.moveReason?'<br><span style="font-size:11px">السبب: '+svmEsc(r.sx.moveReason)+(r.sx.movedBy?' — '+svmEsc(r.sx.movedBy):'')+'</span>':'')):''}
     ${r.sx?`${row('نوع الزيارة المسجّلة', r.sx.supType?svmEsc(r.sx.supType)+(r.sx.logOther?` <span style="color:#E65100;font-size:11px">(مسجّلة باسم ${svmEsc(r.sx.logBy||'')})</span>`:''):(r.sx.manual?'تأشير يدوي في الخطة':'—'))}
     ${row('آخر زيارة مندوب', r.sx.repDate?svmEsc(r.sx.repDate)+' ('+svsAgo(r.sx.repDate)+') — '+svmEsc(r.sx.repName||'—'):'—')}
     ${row('آخر تقرير منسق', r.sx.coordDate?svmEsc(r.sx.coordDate)+' ('+svsAgo(r.sx.coordDate)+')'+(r.sx.coordName?' — '+svmEsc(r.sx.coordName):''):'—')}
@@ -57765,9 +57766,9 @@ async function svsBuildRows(from,to){
   const addD = (d,n)=>{ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()+n); return svmIso(x); };
   const [plans, items, logs, rates, dels, vis, rets] = await Promise.all([
     svmGetAll(`${B}sales_plans_plus?select=id,staff_name,sector,week_start&week_start=gte.${addD(from,-7)}&week_start=lte.${to}`),
-    svmGetAll(`${B}sales_plan_items?select=id,plan_id,client_name,area,visit_date,visit_status,notes&visit_date=gte.${from}&visit_date=lte.${to}&order=visit_date.desc,id.desc`),
+    svmGetAll(`${B}sales_plan_items?select=id,plan_id,client_name,area,visit_date,visit_status,notes,original_visit_date,change_reason,moved_by&visit_date=gte.${from}&visit_date=lte.${to}&order=visit_date.desc,id.desc`),
     svmGetAll(`${B}field_support_logs?select=supervisor_name,branch_name,visit_date,created_at,support_type,rep_name,lat,lng&branch_name=not.is.null&created_at=gte.${addD(from,-1)}&created_at=lte.${addD(to,2)}&order=created_at.asc`),
-    svmGetAll(`${B}sales_visit_ratings?select=*&visit_date=gte.${from}&visit_date=lte.${to}&order=created_at.desc`).catch(()=>[]),
+    svmGetAll(`${B}sales_visit_ratings?select=*&visit_date=gte.${addD(from,-1)}&visit_date=lte.${addD(to,7)}&order=created_at.desc`).catch(()=>[]),
     svmGetAll(`${B}sales_deliveries?select=branch_name,rep_name,delivery_date&deleted_at=is.null&delivery_date=gte.${addD(to,-120)}&order=delivery_date.desc,id.desc`).catch(()=>[]),
     svmGetAll(`${B}visits?select=branch,date,name&branch=not.is.null&order=date.desc`).catch(()=>[]),
     svmGetAll(`${B}returns?select=branch,pulled&order=id.desc`).catch(()=>[])
@@ -57792,7 +57793,19 @@ async function svsBuildRows(from,to){
   const today = svmIso(new Date());
   return items.filter(i=>planBy[i.plan_id] && i.client_name).map(i=>{
     const p = planBy[i.plan_id], b = SVM_BRANCH_CACHE[i.client_name]||{};
-    const lgOwn = (logKey[i.client_name+'|'+i.visit_date]||[]).filter(l=>sameSup(l.supervisor_name,p.staff_name)).sort((x,y)=>(y.lat!=null)-(x.lat!=null))[0] || null;
+    let lgOwn = (logKey[i.client_name+'|'+i.visit_date]||[]).filter(l=>sameSup(l.supervisor_name,p.staff_name)).sort((x,y)=>(y.lat!=null)-(x.lat!=null))[0] || null;
+    // لو المشرف نفّذ الزيارة في يوم تاني من نفس أسبوع الخطة (قدّم/أخّر الزيارة) نحسبها له ونوضّح اليوم الفعلي
+    let execDate = i.visit_date;
+    if(!lgOwn && p.week_start){
+      const wEnd = addD(p.week_start, 6);
+      let best=null;
+      Object.keys(logKey).forEach(k=>{
+        const ix=k.lastIndexOf('|'); if(k.slice(0,ix)!==i.client_name) return;
+        const d=k.slice(ix+1); if(d<p.week_start || d>wEnd) return;
+        logKey[k].forEach(l=>{ if(sameSup(l.supervisor_name,p.staff_name) && l.lat!=null && (!best || Math.abs(new Date(d)-new Date(i.visit_date)) < Math.abs(new Date(best.d)-new Date(i.visit_date)))) best={l,d}; });
+      });
+      if(best){ lgOwn=best.l; execDate=best.d; }
+    }
     const lg = lgOwn || logAny[i.client_name+'|'+i.visit_date] || null;
     const rp = lastRep[i.client_name], cd = lastCoord[i.client_name];
     const manual = i.visit_status==='done';
@@ -57802,10 +57815,10 @@ async function svsBuildRows(from,to){
     const status = done ? 'done' : (i.visit_date < today ? 'missed' : 'pending');
     const dist = (hasLoc && b.lat!=null && b.lng!=null) ? Math.round(svsHav(+lg.lat,+lg.lng,+b.lat,+b.lng)) : null;
     let geoLbl='—', geoClr='#888';
-    if(hasLoc){ geoLbl='موثّقة بالموقع'; geoClr = (dist!=null && dist>200) ? '#B8860B' : '#1A7A4A'; }
+    if(hasLoc){ geoLbl = execDate!==i.visit_date ? 'موثّقة بالموقع — نُفّذت يوم '+execDate+' (المخطط '+i.visit_date+')' : 'موثّقة بالموقع'; geoClr = (dist!=null && dist>200) ? '#B8860B' : '#1A7A4A'; }
     else if(lg){ geoLbl='سجل بدون موقع'; geoClr='#B8860B'; }
     else if(manual){ geoLbl='تأشير يدوي بدون موقع (غير محتسبة)'; geoClr='#B71C1C'; }
-    const rt = rateKey[p.staff_name+'|'+i.client_name+'|'+i.visit_date] || rateAny[i.client_name+'|'+i.visit_date] || null;
+    const rt = rateKey[p.staff_name+'|'+i.client_name+'|'+execDate] || rateAny[i.client_name+'|'+execDate] || rateKey[p.staff_name+'|'+i.client_name+'|'+i.visit_date] || rateAny[i.client_name+'|'+i.visit_date] || null;
     const rc = rt?rt.rate_display||'':'', rd = rt?rt.rate_handling||'':'', rl = rt?rt.rate_stock||'':'';
     const reviewed = !!(rc && rd && rl);
     const needs = reviewed && (rc==='needs'||rd==='needs'||rl==='needs');
@@ -57815,7 +57828,7 @@ async function svsBuildRows(from,to){
       checkIn:lg&&lg.created_at?lg.created_at:'', vlat:lg?lg.lat:null, vlng:lg?lg.lng:null, blat:b.lat, blng:b.lng,
       reviewed, isNew:(i.visit_date||'')>=SVM_GEO_START, rc, rd, rl, notes:(rt&&rt.notes)||i.notes||'',
       verified: done && hasLoc && reviewed, needs, coord:'',
-      sx:{manual, logOther:!!(lg&&!lgOwn), logBy:lg?lg.supervisor_name:'', supType:lg?lg.support_type:'', repName:rp?rp.rep_name:'', repDate:rp?rp.delivery_date:'', coordDate:cd?cd.date:'', coordName:cd?cd.name:'', pend:pend[i.client_name]||0}
+      sx:{movedFrom:i.original_visit_date||'', moveReason:i.change_reason||'', movedBy:i.moved_by||'', manual, logOther:!!(lg&&!lgOwn), logBy:lg?lg.supervisor_name:'', supType:lg?lg.support_type:'', repName:rp?rp.rep_name:'', repDate:rp?rp.delivery_date:'', coordDate:cd?cd.date:'', coordName:cd?cd.name:'', pend:pend[i.client_name]||0}
     };
   });
 }

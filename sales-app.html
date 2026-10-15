@@ -11606,6 +11606,10 @@ function teRenderItems(){
           style="flex:1;padding:8px;background:#FFEBEE;color:#B71C1C;border:1px solid #FFCDD2;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
           ⏭️ فائت
         </button>
+        <button onclick="sppMoveOpen('${it.id}','${it.visit_date||''}','${_tePlanId}','today')"
+          style="flex:1;padding:8px;background:#FFF3E0;color:#E65100;border:1px solid #FFCC80;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">
+          📅 نقل اليوم
+        </button>
       </div>` : `
       <div style="display:flex;align-items:center;gap:8px">
         <span style="font-size:12px;font-weight:700;color:${isDone?'#1A7A4A':'#B71C1C'}">${isDone?'✅ تم التنفيذ':'⏭️ فائت'}</span>
@@ -11618,6 +11622,51 @@ function teRenderItems(){
       ${it.notes?`<div style="font-size:11px;color:#8B6F47;margin-top:6px;background:rgba(0,0,0,.04);border-radius:6px;padding:5px 8px">📝 ${it.notes}</div>`:''}`}
     </div>`;
   }).join('');
+}
+
+
+// ── نقل / تعديل يوم زيارة في خطة مشرف المبيعات (مع السبب + حفظ التاريخ الأصلي) ──
+function sppMoveOpen(itemId, curDate, planId, ctx){
+  document.getElementById('modal-spp-move')?.remove();
+  const nextD = (()=>{ const d=new Date((curDate||new Date().toISOString().slice(0,10))+'T00:00:00'); d.setDate(d.getDate()+1);
+    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); })();
+  const m = document.createElement('div');
+  m.id='modal-spp-move';
+  m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px';
+  m.innerHTML = `<div dir="rtl" style="background:#fff;border-radius:14px;max-width:380px;width:100%;padding:18px;font-family:Cairo,sans-serif">
+    <div style="font-size:15px;font-weight:800;color:#1A3A5C;margin-bottom:10px">📅 نقل / تعديل يوم الزيارة</div>
+    <div style="font-size:11px;color:#8B6F47;margin-bottom:6px">اليوم الحالي: <b>${curDate||'—'}</b></div>
+    <label style="font-size:11px;font-weight:700">اليوم الجديد</label>
+    <input type="date" id="spm-date" value="${nextD}" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid #ddd;border-radius:8px;margin:4px 0 10px;font-family:inherit"/>
+    <label style="font-size:11px;font-weight:700">السبب (إلزامي)</label>
+    <input type="text" id="spm-reason" placeholder="مثال: ظرف طارئ / طلب العميل" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid #ddd;border-radius:8px;margin:4px 0 12px;font-family:inherit"/>
+    <div style="display:flex;gap:8px">
+      <button onclick="sppMoveSave('${itemId}','${curDate||''}','${planId}','${ctx}')" style="flex:1;padding:10px;background:#E65100;color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-family:inherit">حفظ النقل</button>
+      <button onclick="document.getElementById('modal-spp-move').remove()" style="padding:10px 16px;background:#eee;border:none;border-radius:8px;cursor:pointer;font-family:inherit">إلغاء</button>
+    </div></div>`;
+  m.onclick = e=>{ if(e.target===m) m.remove(); };
+  document.body.appendChild(m);
+}
+async function sppMoveSave(itemId, curDate, planId, ctx){
+  const nd = document.getElementById('spm-date')?.value||'';
+  const reason = (document.getElementById('spm-reason')?.value||'').trim();
+  if(!nd){ showToast('⚠️ اختار اليوم الجديد','err'); return; }
+  if(nd===curDate){ showToast('⚠️ اليوم الجديد نفس اليوم الحالي','err'); return; }
+  if(!reason){ showToast('⚠️ سبب النقل إلزامي','err'); return; }
+  const H={'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=representation'};
+  const cur = await fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items?id=eq.${itemId}&select=original_visit_date,visit_date`,{headers:H}).then(r=>r.json()).catch(()=>[]);
+  const orig = (cur&&cur[0]&&cur[0].original_visit_date) || curDate || (cur&&cur[0]&&cur[0].visit_date) || null;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items?id=eq.${itemId}`,{method:'PATCH',headers:H,body:JSON.stringify({
+    visit_date:nd, day_name:(typeof sppGetDayName==='function'?sppGetDayName(nd):null), original_visit_date:orig,
+    change_reason:reason, moved_by:(cu&&(cu.name||cu.full_name))||null, moved_at:new Date().toISOString()
+  })});
+  const out = res.ok ? await res.json().catch(()=>[]) : [];
+  if(!res.ok || !out.length){ showToast('❌ تعذر حفظ النقل','err'); return; }
+  document.getElementById('modal-spp-move')?.remove();
+  showToast('✅ تم نقل الزيارة إلى '+nd);
+  if(ctx==='today'){ try{ sppTodayExec(planId); }catch(e){} }
+  else { try{ sppViewDetail(planId); }catch(e){} }
+  try{ sppAppLoad(); }catch(e){}
 }
 
 async function teMarkItem(itemId, status, idx){
@@ -11785,6 +11834,11 @@ async function sppViewDetail(id){
                 style="padding:6px 10px;background:#1A3A5C;color:#fff;border:none;border-radius:8px;font-size:10px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif;white-space:nowrap">
                 💾 حفظ
               </button>
+            </div>
+            <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
+              <button onclick="sppMoveOpen('${it.id}','${it.visit_date||''}','${id}','detail')"
+                style="padding:5px 10px;background:#FFF3E0;color:#E65100;border:1px solid #FFCC80;border-radius:8px;font-size:10px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">📅 نقل / تعديل اليوم</button>
+              ${it.original_visit_date?`<span style="font-size:10px;color:#E65100">🔁 نُقلت من ${it.original_visit_date}${it.change_reason?' — '+String(it.change_reason).replace(/</g,'&lt;'):''}</span>`:''}
             </div>
             ${it.notes?`<div style="font-size:10px;color:#8B6F47;margin-top:4px;padding:4px 6px;background:#FFF8E1;border-radius:4px">📝 ${it.notes}</div>`:''}
           </div>`;
