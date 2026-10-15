@@ -13683,10 +13683,15 @@ const FCM_COLS = [
   {k:'ct',  t:'العدد (كرتونة)', w:100},
   {k:'per', t:'سعر القطعة خلال الفترة', w:125},
   {k:'cur', t:'سعر القطعة حاليًا', w:125},
-  {k:'cc',  t:'سعر الكرتونة حاليًا', w:135}
+  {k:'cc',  t:'سعر الكرتونة حاليًا', w:135},
+  {k:'vs',  t:'قيمة المبيعات', w:115},
+  {k:'cr',  t:'مرتجع (كرتونة)', w:100},
+  {k:'vr',  t:'قيمة المرتجع', w:110},
+  {k:'vn',  t:'الصافي بعد المرتجع', w:125}
 ];
+const FCM_DEF_COLS = ['bc','cat','fac','name','qp','ct','per','cur','cc','vs','vr','vn'];
 const FCM = {inited:false, meta:[], rows:[], loaded:false, from:'', to:'', q:'', aux:null,
-  sel:{grp:new Set(), route:new Set(), fac:new Set(), item:new Set(), cols:new Set(FCM_COLS.map(c=>c.k))}};
+  sel:{grp:new Set(), route:new Set(), fac:new Set(), item:new Set(), cols:new Set(FCM_DEF_COLS)}};
 
 function fcmEsc(t){ return String(t==null?'':t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function fcmN(n,d){ if(n==null||isNaN(n)) return '—'; return Number(n).toLocaleString('en-US',{minimumFractionDigits:d||0,maximumFractionDigits:d||0}); }
@@ -13795,7 +13800,7 @@ function fcmPick(key){
   list.addEventListener('change',e=>{ const i=e.target.dataset.i; if(i==null) return; const v=opts[+i].v; e.target.checked?sel.add(v):sel.delete(v); });
   const qi=m.querySelector('#fcm-pk-q'); if(qi) qi.oninput=()=>draw(qi.value);
   m.querySelector('#fcm-pk-all').onclick=()=>{ opts.forEach(o=>sel.add(o.v)); draw(qi?qi.value:''); };
-  m.querySelector('#fcm-pk-none').onclick=()=>{ sel.clear(); if(key==='cols') FCM_COLS.forEach(c=>{ if(!c.fixed && ['bc','cat','fac','qp','ct','per','cur','cc'].includes(c.k)) sel.add(c.k); }); draw(qi?qi.value:''); };
+  m.querySelector('#fcm-pk-none').onclick=()=>{ sel.clear(); if(key==='cols') FCM_COLS.forEach(c=>{ if(!c.fixed && FCM_DEF_COLS.includes(c.k)) sel.add(c.k); }); draw(qi?qi.value:''); };
   const close=()=>m.remove();
   m.querySelector('#fcm-pk-x').onclick=close;
   m.addEventListener('click',e=>{ if(e.target===m) close(); });
@@ -13807,6 +13812,7 @@ function fcmPick(key){
     }
     fcmUpdateLabels(); close();
     if(key==='fac'||key==='item'||key==='cols') fcmRender();
+    if(key==='grp'||key==='route') fcmLoad(); // المجموعة وخط السير بيغيروا البيانات نفسها → إعادة تحميل تلقائي
   };
 }
 
@@ -13848,7 +13854,7 @@ function fcmPriceColor(r){
   return '#2C1F0A';
 }
 
-function fcmEnrich(rows, aux){
+function fcmEnrich(rows, aux, rets){
   const out=[];
   (Array.isArray(rows)?rows:[]).forEach(r=>{
     const canon=aux.alias[r.item]||r.item;
@@ -13858,13 +13864,28 @@ function fcmEnrich(rows, aux){
     out.push({ ou:(r.order_unit||''), name:(canon&&canon!==r.item?canon:r.item), ppc, key:fcmNk(canon||r.item),
       barcode:r.barcode||aux.code[fcmNk(canon)]||aux.code[fcmNk(r.item)]||'', cat:fcmCategoryOf(r.item,canon),
       qp:+r.qty_piece||0, cartons:+r.cartons||0, period:(+r.period_piece_price>0?+r.period_piece_price:null),
-      cur, totalValue:+r.total_value||0, curCarton:(cur&&ppc>0)?cur*ppc:null, fromTab:tabP>0 });
+      cur, totalValue:+r.total_value||0, curCarton:(cur&&ppc>0)?cur*ppc:null, fromTab:tabP>0, qr:0, vr:0, cr:0 });
+  });
+  // مرتجعات الأصناف اللي ملهاش مبيعات في الفترة بتظهر كصف برضه
+  const have=new Set(out.map(o=>o.key));
+  (Array.isArray(rets)?rets:[]).forEach(x=>{
+    const canon=aux.alias[x.item]||x.item, k=fcmNk(canon);
+    if(have.has(k)) return; have.add(k);
+    const tabP=aux.price[k]||aux.price[fcmNk(x.item)]||0, ppc=+x.ppc||0;
+    out.push({ ou:'', name:canon, ppc, key:k, barcode:aux.code[k]||aux.code[fcmNk(x.item)]||'', cat:fcmCategoryOf(x.item,canon),
+      qp:0, cartons:0, period:null, cur:tabP>0?tabP:null, totalValue:0, curCarton:(tabP>0&&ppc>0)?tabP*ppc:null, fromTab:tabP>0, qr:0, vr:0, cr:0 });
+  });
+  const byKey={}; out.forEach(o=>{ byKey[o.key]=o; });
+  (Array.isArray(rets)?rets:[]).forEach(x=>{
+    const canon=aux.alias[x.item]||x.item, o=byKey[fcmNk(canon)]; if(!o) return;
+    const q=+x.qty_ret||0; o.qr+=q; o.vr+=(+x.val_ret||0);
+    const pp=o.ppc||+x.ppc||0; if(pp>1) o.cr+=q/pp;
   });
   const mg={};
   out.forEach(r=>{
     const m=mg[r.key]; if(!m){ mg[r.key]=r; return; }
     const pcsA=m.qp+0, pcsB=r.qp+0;
-    m.qp+=r.qp; m.cartons+=r.cartons; m.totalValue+=r.totalValue;
+    m.qp+=r.qp; m.cartons+=r.cartons; m.totalValue+=r.totalValue; m.qr+=r.qr; m.vr+=r.vr; m.cr+=r.cr;
     if(!m.ppc&&r.ppc) m.ppc=r.ppc; if(!m.ou&&r.ou) m.ou=r.ou; if(!m.barcode&&r.barcode) m.barcode=r.barcode;
     const pcs=pcsA+pcsB; m.period=(pcs>0&&m.totalValue>0)?m.totalValue/pcs:(m.period||r.period);
     if(m.cur==null&&r.cur!=null) m.cur=r.cur;
@@ -13885,8 +13906,14 @@ async function fcmLoad(){
   try{
     const grps = FCM.sel.grp.size ? [...FCM.sel.grp] : allowed;
     const routes = FCM.sel.route.size ? [...FCM.sel.route] : null;
-    const [rows,aux] = await Promise.all([ fcmRpc('fc_group_report',{p_from:from,p_to:to,p_groups:grps,p_routes:routes,p_items:null}), fcmGetAux() ]);
-    FCM.rows = fcmEnrich(rows,aux); FCM.from=from; FCM.to=to; FCM.loaded=true;
+    FCM.retOk=true;
+    const [rows,aux,rets] = await Promise.all([
+      fcmRpc('fc_group_report',{p_from:from,p_to:to,p_groups:grps,p_routes:routes,p_items:null}),
+      fcmGetAux(),
+      fcmRpc('fc_group_returns',{p_from:from,p_to:to,p_groups:grps,p_routes:routes}).catch(e=>{ console.error('[fc returns]',e); FCM.retOk=false; return []; })
+    ]);
+    if(!FCM.retOk) showToast('تعذر تحميل المرتجعات — جرّب فترة أقصر');
+    FCM.rows = fcmEnrich(rows,aux,rets); FCM.from=from; FCM.to=to; FCM.loaded=true;
     // نشيل اختيارات المصنع/الصنف اللي مبقتش موجودة في النتيجة الجديدة
     const fv=new Set(fcmOptions('fac').map(o=>o.v)), iv=new Set(fcmOptions('item').map(o=>o.v));
     [...FCM.sel.fac].forEach(v=>{ if(!fv.has(v)) FCM.sel.fac.delete(v); });
@@ -13918,12 +13945,16 @@ function fcmRender(){
   const rows=fcmFiltered(), K=FCM.sel.cols;
   const totP=rows.reduce((a,r)=>a+r.qp,0), totC=rows.reduce((a,r)=>a+r.cartons,0), totV=rows.reduce((a,r)=>a+(r.totalValue||0),0);
   const up=rows.filter(r=>r.cur!=null&&r.period!=null&&r.cur>r.period*1.0001).length;
+  const totR=rows.reduce((a,r)=>a+(r.vr||0),0), totRC=rows.reduce((a,r)=>a+(r.cr||0),0), net=totV-totR, pct=totV>0?totR/totV*100:null;
   const card=(l,v,c)=>`<div style="background:#fff;border:1px solid #E8D9C0;border-top:3px solid ${c};border-radius:12px;padding:9px 10px"><div style="font-size:10.5px;color:#8B6F47">${l}</div><div style="font-size:18px;font-weight:900;color:${c};margin-top:1px">${v}</div></div>`;
-  st.innerHTML = card('عدد الأصناف',fcmN(rows.length),FCM_C.maroon)
-    + (K.has('ct')?card('إجمالي الكراتين',fcmN(Math.round(totC)),'#1A7A4A'):'')
-    + (K.has('qp')?card('إجمالي القطع',fcmN(totP),'#854F0B'):'')
-    + (K.has('per')?card('قيمة الفترة (ج)',fcmN(totV),'#1565C0'):'')
-    + (K.has('cur')?card('سعرها الحالي أعلى',fcmN(up),'#B71C1C'):'');
+  st.innerHTML = card('مبيعات الفترة (ج)',fcmN(totV),'#1565C0')
+    + card('مرتجع الفترة (ج)',fcmN(totR),'#B71C1C')
+    + card('الصافي بعد المرتجع (ج)',fcmN(net),net<0?'#B71C1C':'#1A7A4A')
+    + card('نسبة المرتجع',pct==null?'—':fcmN(pct,2)+'%',pct!=null&&pct>5?'#B71C1C':'#E65100')
+    + card('عدد الأصناف',fcmN(rows.length),FCM_C.maroon)
+    + (K.has('ct')?card('كراتين المبيعات',fcmN(Math.round(totC)),'#1A7A4A'):'')
+    + card('كراتين المرتجع',fcmN(Math.round(totRC)),'#B71C1C')
+    + (K.has('cur')?card('سعرها الحالي أعلى',fcmN(up),'#854F0B'):'');
   if(!rows.length){ list.innerHTML='<div class="empty">لا توجد توريدات في الفترة والفلاتر المختارة</div>'; return; }
   const kv=(l,v,c)=>`<div style="background:#FAF6EE;border-radius:8px;padding:5px 7px;text-align:center"><div style="font-size:9.5px;color:#8B6F47">${l}</div><div style="font-size:12.5px;font-weight:800;${c?'color:'+c:''}">${v}</div></div>`;
   let html='', lastCat=null;
@@ -13937,6 +13968,10 @@ function fcmRender(){
     if(K.has('cur')) stats.push(kv('سعر القطعة حاليًا',fcmN(r.cur,2),fcmPriceColor(r)));
     if(K.has('cc')) stats.push(kv('سعر الكرتونة',fcmN(r.curCarton,2)));
     if(K.has('ou')) stats.push(kv('وحدة الطلب',fcmEsc(r.ou||'كرتونة')));
+    if(K.has('vs')) stats.push(kv('قيمة المبيعات',fcmN(r.totalValue)));
+    if(K.has('cr')) stats.push(kv('مرتجع (كرتونة)',fcmN(r.cr,1),'#B71C1C'));
+    if(K.has('vr')) stats.push(kv('قيمة المرتجع',fcmN(r.vr),'#B71C1C'));
+    if(K.has('vn')){ const nv=(r.totalValue||0)-(r.vr||0); stats.push(kv('الصافي بعد المرتجع',fcmN(nv),nv<0?'#B71C1C':'#1A7A4A')); }
     html+=`<div style="background:#fff;border:1px solid #EADFCB;border-radius:14px;padding:10px 11px;margin-bottom:8px;box-shadow:0 1px 4px rgba(115,30,46,.06)">
       <div style="font-weight:800;color:${FCM_C.maroon};font-size:13px;line-height:1.5">${fcmEsc(r.name)}</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin:3px 0 7px;font-size:10.5px;color:#7A6A4A">
@@ -13954,6 +13989,7 @@ function fcmColText(k,r){
     case 'bc': return r.barcode||''; case 'cat': return r.cat||''; case 'fac': return fcmFacOf(r.name); case 'name': return r.name;
     case 'ou': return r.ou||'كرتونة'; case 'qp': return Math.round(r.qp); case 'ct': return Math.round(r.cartons||0);
     case 'per': return r.period!=null?+r.period.toFixed(2):'—'; case 'cur': return r.cur!=null?+r.cur.toFixed(2):'—'; case 'cc': return r.curCarton!=null?+r.curCarton.toFixed(2):'—';
+    case 'vs': return Math.round(r.totalValue||0); case 'cr': return +(r.cr||0).toFixed(1); case 'vr': return Math.round(r.vr||0); case 'vn': return Math.round((r.totalValue||0)-(r.vr||0));
   } return '';
 }
 function fcmLogoSrc(){ const el=document.querySelector('#s-main .topbar img'); return el?el.getAttribute('src'):''; }
@@ -13989,9 +14025,9 @@ async function fcmExportExcel(btn){
     ws.mergeCells(`A3:${cl(N)}3`);
     const sub=ws.getCell('A3'); sub.value='مقارنة أسعار التوريد — فواتير MT'; sub.font={bold:true,size:12,color:{argb:'FF2C1F0A'},name:'Cairo'};
     sub.alignment={horizontal:'center',vertical:'middle'}; sub.fill={type:'pattern',pattern:'solid',fgColor:{argb:GOLD}}; ws.getRow(3).height=22;
-    const totV=rows.reduce((a,r)=>a+(r.totalValue||0),0);
+    const totV=rows.reduce((a,r)=>a+(r.totalValue||0),0), totR=rows.reduce((a,r)=>a+(r.vr||0),0);
     ws.mergeCells(`A4:${cl(N)}4`);
-    const inf=ws.getCell('A4'); inf.value=`${fcmFilterInfo()}  |  تاريخ التصدير: ${new Date().toLocaleDateString('en-GB')}  |  عدد الأصناف: ${rows.length}  |  قيمة الفترة: ${fcmN(totV)} ج`;
+    const inf=ws.getCell('A4'); inf.value=`${fcmFilterInfo()}  |  تاريخ التصدير: ${new Date().toLocaleDateString('en-GB')}  |  عدد الأصناف: ${rows.length}  |  المبيعات: ${fcmN(totV)} ج  |  المرتجع: ${fcmN(totR)} ج  |  الصافي: ${fcmN(totV-totR)} ج`;
     inf.font={size:10,color:{argb:'FF4B3C1A'},name:'Cairo'}; inf.alignment={horizontal:'center',vertical:'middle',wrapText:true}; inf.fill={type:'pattern',pattern:'solid',fgColor:{argb:CREAM}}; ws.getRow(4).height=34;
     ws.getRow(5).height=6;
     // اللوجو
@@ -14019,7 +14055,10 @@ async function fcmExportExcel(btn){
         if(colDef&&colDef.k==='cur') c.font={name:'Cairo',size:10,bold:true,color:{argb:'FF'+fcmPriceColor(r).replace('#','')}};
         c.alignment={horizontal:(colDef&&colDef.left)?'right':'center',vertical:'middle'};
         c.border={top:{style:'thin',color:{argb:'FFE8DCC4'}},bottom:{style:'thin',color:{argb:'FFE8DCC4'}},left:{style:'thin',color:{argb:'FFE8DCC4'}},right:{style:'thin',color:{argb:'FFE8DCC4'}}};
-        if(colDef&&['qp','ct'].includes(colDef.k)&&typeof v==='number') c.numFmt='#,##0';
+        if(colDef&&['qp','ct','vs','vr','vn'].includes(colDef.k)&&typeof v==='number') c.numFmt='#,##0';
+        if(colDef&&colDef.k==='cr'&&typeof v==='number') c.numFmt='#,##0.0';
+        if(colDef&&colDef.k==='vr') c.font={name:'Cairo',size:10,color:{argb:'FFB71C1C'}};
+        if(colDef&&colDef.k==='vn') c.font={name:'Cairo',size:10,bold:true,color:{argb:(typeof v==='number'&&v<0)?'FFB71C1C':'FF1A7A4A'}};
         if(colDef&&['per','cur','cc'].includes(colDef.k)&&typeof v==='number') c.numFmt='#,##0.00';
       });
     });
@@ -14034,6 +14073,7 @@ const FCM_PW=1123, FCM_PH=794;
 function fcmPages(){
   const rows=fcmFiltered(), K=FCM.sel.cols, FIRST=14, REST=18;
   const totP=rows.reduce((a,r)=>a+r.qp,0), totC=rows.reduce((a,r)=>a+r.cartons,0), totV=rows.reduce((a,r)=>a+(r.totalValue||0),0);
+  const totR=rows.reduce((a,r)=>a+(r.vr||0),0), net=totV-totR, pct=totV>0?totR/totV*100:null;
   const up=rows.filter(r=>r.cur!=null&&r.period!=null&&r.cur>r.period*1.0001).length;
   const chunks=[rows.slice(0,FIRST)]; let idx=FIRST; while(idx<rows.length){ chunks.push(rows.slice(idx,idx+REST)); idx+=REST; }
   const sc=fcmCols(), sumW=sc.reduce((a,c)=>a+c.w,0), cols=sc.map(c=>[c.t,Math.floor(c.w/sumW*1070),c]);
@@ -14056,6 +14096,10 @@ function fcmPages(){
           case 'per': return `<td style="${cell};text-align:center">${fcmN(r.period,2)}</td>`;
           case 'cur': return `<td style="${cell};text-align:center;font-weight:700;color:${fcmPriceColor(r)}">${fcmN(r.cur,2)}</td>`;
           case 'cc': return `<td style="${cell};text-align:center;font-weight:700">${fcmN(r.curCarton,2)}</td>`;
+          case 'vs': return `<td style="${cell};text-align:center">${fcmN(r.totalValue)}</td>`;
+          case 'cr': return `<td style="${cell};text-align:center;color:#B71C1C">${fcmN(r.cr,1)}</td>`;
+          case 'vr': return `<td style="${cell};text-align:center;color:#B71C1C">${fcmN(r.vr)}</td>`;
+          case 'vn': { const nv=(r.totalValue||0)-(r.vr||0); return `<td style="${cell};text-align:center;font-weight:800;color:${nv<0?'#B71C1C':'#1A7A4A'}">${fcmN(nv)}</td>`; }
         } return '<td></td>'; }).join('')}</tr>`).join('')}
       </tbody></table>`;
     return `<div style="width:${FCM_PW}px;height:${FCM_PH}px;background:#fff;direction:rtl;font-family:Cairo,Arial,sans-serif;position:relative;overflow:hidden;box-sizing:border-box">
@@ -14068,7 +14112,7 @@ function fcmPages(){
         <div style="font-size:10.5px;color:#EDE5D8;max-width:560px">${fcmEsc(info)}</div></div></div>
       <div style="height:5px;background:${FCM_C.gold}"></div>
       <div style="padding:12px 24px 0">
-        ${pi===0?`<div style="display:flex;gap:8px;margin-bottom:10px">${card('عدد الأصناف',fcmN(rows.length),FCM_C.maroon)}${K.has('qp')?card('إجمالي القطع',fcmN(totP),'#854F0B'):''}${K.has('ct')?card('إجمالي الكراتين',fcmN(Math.round(totC)),'#1A7A4A'):''}${K.has('per')?card('قيمة الفترة (ج)',fcmN(totV),'#1565C0'):''}${K.has('cur')?card('سعرها الحالي أعلى',fcmN(up),'#B71C1C'):''}</div>`:''}
+        ${pi===0?`<div style="display:flex;gap:8px;margin-bottom:10px">${card('عدد الأصناف',fcmN(rows.length),FCM_C.maroon)}${card('مبيعات الفترة (ج)',fcmN(totV),'#1565C0')}${card('مرتجع الفترة (ج)',fcmN(totR),'#B71C1C')}${card('الصافي بعد المرتجع (ج)',fcmN(net),net<0?'#B71C1C':'#1A7A4A')}${card('نسبة المرتجع',pct==null?'—':fcmN(pct,2)+'%','#E65100')}${K.has('ct')?card('إجمالي الكراتين',fcmN(Math.round(totC)),'#854F0B'):''}</div>`:''}
         ${body}</div>
       <div style="position:absolute;bottom:0;left:0;right:0;height:30px;background:${FCM_C.cream};border-top:2px solid ${FCM_C.gold};display:flex;align-items:center;justify-content:space-between;padding:0 24px;font-size:10px;color:#7A6A4A">
         <div>Al Tahhan Golden Dates © ${new Date().getFullYear()} — السعر الحالي من تاب الأسعار (قبل الضريبة)</div><div>صفحة ${pi+1} من ${chunks.length}</div></div></div>`;
