@@ -8250,7 +8250,7 @@ h2,h3{color:#2C1F0A}
           <div style="background:linear-gradient(135deg,#1E3A5F,#065F46);border-radius:12px;padding:16px 20px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between">
             <div>
               <div style="font-size:16px;font-weight:800;color:#EDE5D8">🔍 لوحة SWOT — تحليل الوضع الميداني</div>
-              <div style="font-size:11px;color:#A7F3D0;margin-top:4px">بناءً على بيانات تقارير المنسقين الحقيقية في الأسواق</div>
+              <div style="font-size:11px;color:#A7F3D0;margin-top:4px">بناءً على فواتير MT (بيع ومرتجع) + تقارير المنسقين الحقيقية في الأسواق</div>
             </div>
             <button onclick="swotRun()" id="swot-run-btn"
               style="padding:9px 20px;background:#10B981;color:#fff;border:none;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;font-weight:800;cursor:pointer;display:flex;align-items:center;gap:6px">
@@ -8269,7 +8269,7 @@ h2,h3{color:#2C1F0A}
               <input type="date" id="swot-to" onchange="swotOnPeriodChange()"/>
             </div>
             <button onclick="swotClearPeriod()" style="padding:5px 12px;background:var(--surface-2);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;font-family:Cairo,sans-serif;font-size:11px;cursor:pointer">مسح الفترة (كل البيانات)</button>
-            <span style="font-size:10px;color:#9CA3AF">الفلترة بالفترة بتطبق على فواتير التوريد والمرتجعات فقط — المخزون الحالي وتنبيهات الصلاحية دايمًا لحظية</span>
+            <span style="font-size:10px;color:#9CA3AF">الفلترة بالفترة بتطبق على مبيعات ومرتجعات MT فقط — المخزون الحالي وتنبيهات الصلاحية دايمًا لحظية</span>
           </div>
 
           <!-- Stats bar -->
@@ -8306,7 +8306,7 @@ h2,h3{color:#2C1F0A}
             </div>
             <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;flex:1;min-width:120px;text-align:center">
               <div id="swot-stat-sales" style="font-size:20px;font-weight:800;color:#0891B2">—</div>
-              <div style="font-size:10px;color:#6B7280;margin-top:2px">قيمة التوريد (فواتير)</div>
+              <div style="font-size:10px;color:#6B7280;margin-top:2px">قيمة المبيعات (MT)</div>
             </div>
             <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;flex:1;min-width:120px;text-align:center">
               <div id="swot-stat-returns" style="font-size:20px;font-weight:800;color:#DC2626">—</div>
@@ -56174,113 +56174,131 @@ function advisorChatPrint(msgId){
 let _swotData = null;
 let _swotStatsLoading = false;
 
+async function swotFetchData(){
+  const from = document.getElementById('swot-from')?.value||'';
+  const to   = document.getElementById('swot-to')?.value||'';
+  if(_swotData && _swotData.periodFrom===from && _swotData.periodTo===to) return _swotData;
+  const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json','Content-Type':'application/json'};
+  const get = async (url,lbl)=>{
+    try{
+      const clean = url.replace(/([?&])limit=\d+&?/, '$1').replace(/[?&]$/, '');
+      const d = await fetchAllRows(clean, H);
+      return Array.isArray(d) ? d : [];
+    }catch(e){ console.error('[SWOT]',lbl,e); return []; }
+  };
+  const [mt, products, expiry, aliases] = await Promise.all([
+    fetch(SUPABASE_URL+'/rest/v1/rpc/swot_mt_stats',{method:'POST',headers:H,body:JSON.stringify({p_from:from||null,p_to:to||null})})
+      .then(r=> r.ok ? r.json() : Promise.reject(new Error('swot_mt_stats HTTP '+r.status))),
+    get(SUPABASE_URL+'/rest/v1/products?select=snf,cat,fea,branch,shelf_qty,stock_qty,date_shelf&order=created_at.desc','products'),
+    get(SUPABASE_URL+'/rest/v1/market_expiry?select=snf,cat,branch,date_shelf,total_qty&order=total_qty.desc&limit=300','market_expiry'),
+    get(SUPABASE_URL+'/rest/v1/item_name_aliases?select=alias_name,canonical_name','aliases'),
+  ]);
+
+  const nk = s => sciNormalizeItemKey(s||'');
+  const aliasMap = {};
+  aliases.forEach(a=>{ aliasMap[nk(a.alias_name)] = nk(a.canonical_name); });
+
+  // مبيعات MT لكل صنف (بالكرتونة) — بنوحّد الاسم عبر الأسماء البديلة عشان يتطابق مع أسماء تقارير المنسقين
+  const items = mt.items || [];
+  const salesByKey = {};
+  items.forEach(i=>{ const k=nk(i.n); const c=aliasMap[k]||k; salesByKey[c]=(salesByKey[c]||0)+(i.sq||0); });
+
+  const invMap={}, seen=new Set();
+  products.forEach(p=>{
+    const key=p.snf+'|'+p.branch; if(seen.has(key)) return; seen.add(key);
+    const snf=p.snf||'';
+    if(!invMap[snf]) invMap[snf]={sh:0,st:0,cat:p.cat||'',fea:p.fea||'',date:p.date_shelf||''};
+    invMap[snf].sh+=p.shelf_qty||0; invMap[snf].st+=p.stock_qty||0;
+  });
+  const allSnfs = Object.keys(invMap);
+  const unmatched = allSnfs.filter(s=>!(nk(s) in salesByKey)).length;
+
+  const snfSales={}, snfReturns={}, snfReturnVal={};
+  items.forEach(i=>{
+    if(i.sq>0) snfSales[i.n]=Math.round(i.sq*10)/10;
+    if(i.rq>0){ snfReturns[i.n]=Math.round(i.rq*10)/10; snfReturnVal[i.n]=i.rv||0; }
+  });
+  const fastMovers = items.filter(i=>i.sq>15).sort((a,b)=>b.sq-a.sq).map(i=>i.n);
+  const slowMovers = allSnfs.filter(s=>(invMap[s].sh+invMap[s].st)>25 && (salesByKey[nk(s)]||0)<5)
+                            .sort((a,b)=>(invMap[b].sh+invMap[b].st)-(invMap[a].sh+invMap[a].st));
+  const now = new Date();
+  const expiryAlerts = expiry.filter(e=>e.date_shelf&&e.total_qty>0&&(new Date(e.date_shelf)-now)/864e5<90);
+  const totalSales = Number(mt.sales_total)||0;
+  const totalReturns = Number(mt.ret_total)||0;
+  const returnRate = totalSales>0 ? ((totalReturns/totalSales)*100).toFixed(1) : 0;
+  const customers = (mt.customers||[]).filter(c=>c.sv>0);
+
+  _swotData = {
+    products, expiry, invMap, snfSales, snfReturns, snfReturnVal, allSnfs, fastMovers, slowMovers, expiryAlerts,
+    totalSales, totalReturns, returnRate, unmatched,
+    deliveries:[], returns_:[], salesInv:mt.sales_inv||0, retInv:mt.ret_inv||0,
+    clients: customers.map(c=>({name:c.n, sv:c.sv, rv:c.rv})),
+    custReturns: mt.cust_returns||[], custItemReturns: mt.cust_item_returns||[],
+    periodFrom:from, periodTo:to
+  };
+  return _swotData;
+}
+
+function swotApplyStats(d){
+  const setStat = (id,v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
+  setStat('swot-stat-products', d.allSnfs.length);
+  setStat('swot-stat-slow',     d.slowMovers.length);
+  setStat('swot-stat-expiry',   d.expiryAlerts.length);
+  setStat('swot-stat-fast',     d.fastMovers.length);
+  setStat('swot-stat-clients',  d.clients.length);
+  setStat('swot-stat-sales',    d.totalSales.toLocaleString('en-US',{maximumFractionDigits:0})+' ج');
+  setStat('swot-stat-returns',  d.totalReturns.toLocaleString('en-US',{maximumFractionDigits:0})+' ج');
+  setStat('swot-stat-returnrate', d.returnRate+'%');
+
+  const ts = new Date().toLocaleString('ar-EG');
+  const periodTxt = (d.periodFrom||d.periodTo) ? ' — الفترة: '+(d.periodFrom||'البداية')+' إلى '+(d.periodTo||'الآن') : ' — كل البيانات المتاحة';
+  const timeEl = document.getElementById('swot-stats-time');
+  if(timeEl) timeEl.textContent = 'آخر تحديث: '+ts+periodTxt;
+  const upEl = document.getElementById('swot-updated-at');
+  if(upEl) upEl.textContent = 'آخر تحديث البيانات: '+ts+periodTxt;
+
+  const now = new Date();
+  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const fmt = n => Math.round(n||0).toLocaleString('en-US');
+  const fNames  = d.fastMovers.slice(0,8).map(esc).join('، ');
+  const slNames = d.slowMovers.slice(0,8).map(esc).join('، ');
+  const expNames = d.expiryAlerts.slice(0,8).map(e=>esc(e.snf)+'('+Math.round((new Date(e.date_shelf)-now)/864e5)+'ي)').join('، ');
+  const topRet = Object.entries(d.snfReturns).sort((a,b)=>(d.snfReturnVal[b[0]]||0)-(d.snfReturnVal[a[0]]||0)).slice(0,8);
+  const retNames = topRet.map(([n,q])=>esc(n)+' ('+q+' كرتونة / '+fmt(d.snfReturnVal[n])+' ج)').join('، ');
+  const custRet = d.custReturns.slice(0,8).map(c=>esc(c.n)+' ('+fmt(c.rv)+' ج)').join('، ');
+  const custItem = d.custItemReturns.slice(0,10).map(r=>esc(r.n)+' ← '+esc(r.i)+' ('+r.rq+' كرتونة / '+fmt(r.rv)+' ج)').join('<br>');
+  const topCust = d.clients.slice(0,8).map(c=>esc(c.name)+' ('+fmt(c.sv)+' ج)').join('، ');
+  const detailEl = document.getElementById('swot-stats-detail');
+  if(detailEl){
+    detailEl.style.display='';
+    detailEl.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:11px">
+        <div><span style="color:#065F46;font-weight:700">📦 سريع الدوران (مبيعات MT):</span><br>${fNames||'—'}</div>
+        <div><span style="color:#D97706;font-weight:700">🐢 راكد:</span><br>${slNames||'—'}</div>
+        <div><span style="color:#DC2626;font-weight:700">⚠️ قرب الانتهاء (90 يوم):</span><br>${expNames||'—'}</div>
+        <div><span style="color:#7C3AED;font-weight:700">🏪 أكبر العملاء مبيعًا:</span><br>${topCust||'—'}</div>
+        <div style="grid-column:1/-1"><span style="color:#DC2626;font-weight:700">↩️ الأصناف الأكثر ارتجاعاً (بالقيمة):</span><br>${retNames||'—'}</div>
+        <div style="grid-column:1/-1"><span style="color:#DC2626;font-weight:700">↩️ أكثر العملاء ارتجاعاً:</span><br>${custRet||'—'}</div>
+        <div style="grid-column:1/-1"><span style="color:#DC2626;font-weight:700">↩️ أكثر الأصناف ارتجاعاً داخل كل عميل (عميل ← صنف):</span><br>${custItem||'—'}</div>
+        ${d.unmatched?`<div style="grid-column:1/-1;color:#9CA3AF">ℹ️ ${d.unmatched} صنف من تقارير المنسقين مالهوش مبيعات MT بنفس الاسم — ممكن يظهر في "الراكد" بالغلط لحد ما الأسماء تتوحّد.</div>`:''}
+      </div>`;
+  }
+}
+
 async function swotLoadStats(){
   if(_swotStatsLoading) return;
   _swotStatsLoading = true;
-
   const setStat = (id,v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
+  const ids = ['swot-stat-products','swot-stat-slow','swot-stat-expiry','swot-stat-fast','swot-stat-clients','swot-stat-sales','swot-stat-returns','swot-stat-returnrate'];
   const loadingEl = document.getElementById('swot-stats-loading');
-  const timeEl = document.getElementById('swot-stats-time');
   if(loadingEl) loadingEl.style.display='';
-  ['swot-stat-products','swot-stat-slow','swot-stat-expiry','swot-stat-fast','swot-stat-clients','swot-stat-sales','swot-stat-returns','swot-stat-returnrate']
-    .forEach(id=>setStat(id,'⏳'));
-
-  const H={'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
-  async function sf(url,lbl){
-    try{
-      const cleanUrl = url.replace(/([?&])limit=\d+&?/, '$1').replace(/[?&]$/, '');
-      const d = await fetchAllRows(cleanUrl, H);
-      if(!Array.isArray(d)){ console.error('[SWOT stats]',lbl,'not array',d); return []; }
-      console.log('[SWOT stats] ✅',lbl,d.length,'سجل');
-      return d;
-    }catch(e){ console.error('[SWOT stats]',lbl,e); return []; }
-  }
-
-  // ── فلتر الفترة: بيتطبق على فواتير التوريد والمرتجعات بس (delivery_date/return_date) ──
-  const swotFrom = document.getElementById('swot-from')?.value||'';
-  const swotTo   = document.getElementById('swot-to')?.value||'';
-  let delvUrl = SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,total_net,items&deleted_at=is.null&order=delivery_date.desc';
-  if(swotFrom) delvUrl += '&delivery_date=gte.'+swotFrom;
-  if(swotTo)   delvUrl += '&delivery_date=lte.'+swotTo;
-  let retUrl = SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,total_net,items&deleted_at=is.null&order=return_date.desc';
-  if(swotFrom) retUrl += '&return_date=gte.'+swotFrom;
-  if(swotTo)   retUrl += '&return_date=lte.'+swotTo;
-
+  ids.forEach(id=>setStat(id,'⏳'));
   try{
-    const [products,expiry,deliveries,returns_,clients] = await Promise.all([
-      sf(SUPABASE_URL+'/rest/v1/products?select=snf,cat,fea,branch,shelf_qty,stock_qty,date_shelf&order=created_at.desc','products'),
-      sf(SUPABASE_URL+'/rest/v1/market_expiry?select=snf,cat,branch,date_shelf,total_qty&order=total_qty.desc&limit=300','market_expiry'),
-      sf(delvUrl,'sales_deliveries'),
-      sf(retUrl,'sales_returns'),
-      sf(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type&limit=100','sales_clients'),
-    ]);
-
-    const invMap={}, seen=new Set();
-    products.forEach(p=>{
-      const key=p.snf+'|'+p.branch; if(seen.has(key)) return; seen.add(key);
-      if(!invMap[p.snf]) invMap[p.snf]={sh:0,st:0,cat:p.cat||''};
-      invMap[p.snf].sh+=p.shelf_qty||0; invMap[p.snf].st+=p.stock_qty||0;
-    });
-
-    const snfSales={};
-    deliveries.forEach(d=>(Array.isArray(d.items)?d.items:[]).forEach(it=>{
-      const n=it.name||it.snf||''; if(n) snfSales[n]=(snfSales[n]||0)+(it.qty||0);
-    }));
-
-    // ── أصناف المرتجعات — نفس منطق أصناف التوريد بس من sales_returns.items ──
-    const snfReturns={};
-    returns_.forEach(r=>(Array.isArray(r.items)?r.items:[]).forEach(it=>{
-      const n=it.name||it.snf||''; if(n) snfReturns[n]=(snfReturns[n]||0)+(it.qty||0);
-    }));
-
-    const allSnfs=Object.keys(invMap);
-    const now=new Date();
-    const fastMovers=allSnfs.filter(s=>(snfSales[s]||0)>15);
-    const slowMovers=allSnfs.filter(s=>(invMap[s].sh+invMap[s].st)>25&&(snfSales[s]||0)<5);
-    const expiryAlerts=expiry.filter(e=>e.date_shelf&&e.total_qty>0&&(new Date(e.date_shelf)-now)/864e5<90);
-    const totalSales=deliveries.reduce((s,d)=>s+(d.total_net||0),0);
-    const totalReturns=returns_.reduce((s,r)=>s+(r.total_net||0),0);
-    const returnRate=totalSales>0?((totalReturns/totalSales)*100).toFixed(1):0;
-    const topReturned=Object.entries(snfReturns).sort((a,b)=>b[1]-a[1]).slice(0,8);
-
-    _swotData={products,expiry,deliveries,returns_,clients,invMap,snfSales,snfReturns,allSnfs,fastMovers,slowMovers,expiryAlerts,totalSales,totalReturns,returnRate,periodFrom:swotFrom,periodTo:swotTo};
-
-    setStat('swot-stat-products', allSnfs.length);
-    setStat('swot-stat-slow',     slowMovers.length);
-    setStat('swot-stat-expiry',   expiryAlerts.length);
-    setStat('swot-stat-fast',     fastMovers.length);
-    setStat('swot-stat-clients',  clients.length);
-    setStat('swot-stat-sales',    totalSales.toLocaleString('en-US',{maximumFractionDigits:0})+' ج');
-    setStat('swot-stat-returns',  totalReturns.toLocaleString('en-US',{maximumFractionDigits:0})+' ج');
-    setStat('swot-stat-returnrate', returnRate+'%');
-
-    const ts = new Date().toLocaleString('ar-EG');
-    const periodTxt = (swotFrom||swotTo) ? ' — الفترة: '+(swotFrom||'البداية')+' إلى '+(swotTo||'الآن') : ' — كل البيانات المتاحة';
-    if(timeEl) timeEl.textContent = 'آخر تحديث: '+ts+periodTxt;
-    const upEl = document.getElementById('swot-updated-at');
-    if(upEl) upEl.textContent = 'آخر تحديث البيانات: '+ts+periodTxt;
-
-    // تفاصيل الكروت
-    const detailEl = document.getElementById('swot-stats-detail');
-    if(detailEl && _swotData){
-      const fNames = fastMovers.slice(0,8).join('، ');
-      const slNames = slowMovers.slice(0,8).join('، ');
-      const expNames = expiryAlerts.slice(0,8).map(e=>e.snf+'('+Math.round((new Date(e.date_shelf)-now)/864e5)+'ي)').join('، ');
-      const retNames = topReturned.map(([n,q])=>n+'('+q+')').join('، ');
-      detailEl.style.display='';
-      detailEl.innerHTML = `
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:11px">
-          <div><span style="color:#065F46;font-weight:700">📦 سريع الدوران:</span><br>${fNames||'—'}</div>
-          <div><span style="color:#D97706;font-weight:700">🐢 راكد:</span><br>${slNames||'—'}</div>
-          <div><span style="color:#DC2626;font-weight:700">⚠️ قرب الانتهاء (90 يوم):</span><br>${expNames||'—'}</div>
-          <div><span style="color:#7C3AED;font-weight:700">🏪 العملاء:</span><br>${clients.slice(0,8).map(c=>c.name).join('، ')||'—'}</div>
-          <div style="grid-column:1/-1"><span style="color:#DC2626;font-weight:700">↩️ الأصناف الأكثر ارتجاعاً:</span><br>${retNames||'—'}</div>
-        </div>`;
-    }
+    const d = await swotFetchData();
+    swotApplyStats(d);
   }catch(e){
     console.error('[SWOT stats] خطأ عام:',e);
-    ['swot-stat-products','swot-stat-slow','swot-stat-expiry','swot-stat-fast','swot-stat-clients','swot-stat-sales','swot-stat-returns','swot-stat-returnrate']
-      .forEach(id=>setStat(id,'!'));
+    ids.forEach(id=>setStat(id,'!'));
   }finally{
     if(loadingEl) loadingEl.style.display='none';
     _swotStatsLoading=false;
@@ -56352,6 +56370,7 @@ function swotPrintStats(){
   <div class="section"><h3 style="color:#D97706">🐢 الأصناف الراكدة</h3><p>${slNames}</p></div>
   <div class="section"><h3 style="color:#DC2626">⚠️ تنبيهات انتهاء الصلاحية (خلال 90 يوم)</h3><p>${expNames}</p></div>
   <div class="section"><h3 style="color:#DC2626">↩️ الأصناف الأكثر ارتجاعاً</h3><p>${retNames}</p></div>
+  <div class="section"><h3 style="color:#DC2626">↩️ أكثر الأصناف ارتجاعاً داخل كل عميل</h3><p>${d&&d.custItemReturns?d.custItemReturns.slice(0,20).map(r=>r.n+' ← '+r.i+' ('+Math.round(r.rv).toLocaleString('en-US')+' ج)').join('<br>'):'—'}</p></div>
   <div class="section"><h3 style="color:#7C3AED">🏪 قائمة العملاء / السلاسل</h3><p>${clNames}</p></div>
   <${'script'}>window.onload=()=>{setTimeout(()=>window.print(),400);};</${'script'}>
   </body></html>`;
@@ -56384,101 +56403,25 @@ async function swotRun(){
     if(el) el.innerHTML='<div style="text-align:center;padding:20px;color:#6B7280;font-size:11px">🧠 جاري التحليل...</div>';
   });
 
-  const H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY,'Accept':'application/json'};
-
-  async function sf(url,lbl){
-    try{
-      const cleanUrl = url.replace(/([?&])limit=\d+&?/, '$1').replace(/[?&]$/, '');
-      const d = await fetchAllRows(cleanUrl, H);
-      if(!Array.isArray(d)){ console.error('[SWOT]',lbl,'not array',d); return []; }
-      console.log('[SWOT] ok',lbl,d.length);
-      return d;
-    }catch(e){ console.error('[SWOT]',lbl,e); return []; }
-  }
-
-  const swotFrom = document.getElementById('swot-from')?.value||'';
-  const swotTo   = document.getElementById('swot-to')?.value||'';
-
   try {
-    // استخدام البيانات المحملة مسبقاً إن وُجدت (ولنفس الفترة المختارة)
-    let products, expiry, deliveries, returns_, clients;
-    if(_swotData && _swotData.periodFrom===swotFrom && _swotData.periodTo===swotTo){
-      ({products,expiry,deliveries,returns_,clients} = _swotData);
-    } else {
-      // ملحوظة: نفس بيانات فواتير التوريد والمرتجعات المعروضة في تاب "فواتير المناديب"، مفلترة بالفترة المختارة
-      let delvUrl = SUPABASE_URL+'/rest/v1/sales_deliveries?select=client_name,branch_name,total_net,items&deleted_at=is.null&order=delivery_date.desc';
-      if(swotFrom) delvUrl += '&delivery_date=gte.'+swotFrom;
-      if(swotTo)   delvUrl += '&delivery_date=lte.'+swotTo;
-      let retUrl = SUPABASE_URL+'/rest/v1/sales_returns?select=client_name,total_net,items&deleted_at=is.null&order=return_date.desc';
-      if(swotFrom) retUrl += '&return_date=gte.'+swotFrom;
-      if(swotTo)   retUrl += '&return_date=lte.'+swotTo;
-      [products, expiry, deliveries, returns_, clients] = await Promise.all([
-        sf(SUPABASE_URL+'/rest/v1/products?select=snf,cat,fea,branch,shelf_qty,stock_qty,date_shelf,created_at&order=created_at.desc','products'),
-        sf(SUPABASE_URL+'/rest/v1/market_expiry?select=snf,cat,branch,date_shelf,total_qty&order=total_qty.desc&limit=300','market_expiry'),
-        sf(delvUrl,'sales_deliveries'),
-        sf(retUrl,'sales_returns'),
-        sf(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type&limit=100','sales_clients'),
-      ]);
-    }
+    const d = await swotFetchData();
+    swotApplyStats(d);
+    const now = new Date();
+    const fmt = n => Math.round(n||0).toLocaleString('en-US');
+    const topRet = Object.entries(d.snfReturns).sort((a,b)=>(d.snfReturnVal[b[0]]||0)-(d.snfReturnVal[a[0]]||0)).slice(0,10);
 
-    const invMap={}, seen=new Set();
-    products.forEach(p=>{
-      const key=p.snf+'|'+p.branch; if(seen.has(key)) return; seen.add(key);
-      const snf=p.snf||'';
-      if(!invMap[snf]) invMap[snf]={sh:0,st:0,cat:p.cat||'',fea:p.fea||'',date:p.date_shelf||''};
-      invMap[snf].sh+=p.shelf_qty||0; invMap[snf].st+=p.stock_qty||0;
-    });
-    const allSnfs=Object.keys(invMap);
-
-    const snfSales={};
-    deliveries.forEach(d=>{
-      (Array.isArray(d.items)?d.items:[]).forEach(it=>{
-        const n=it.name||it.snf||''; if(!n) return;
-        snfSales[n]=(snfSales[n]||0)+(it.qty||0);
-      });
-    });
-
-    // ── أصناف المرتجعات — لمعرفة ايه اللي اترجع فعليًا من فواتير المناديب ──
-    const snfReturns={};
-    returns_.forEach(r=>{
-      (Array.isArray(r.items)?r.items:[]).forEach(it=>{
-        const n=it.name||it.snf||''; if(!n) return;
-        snfReturns[n]=(snfReturns[n]||0)+(it.qty||0);
-      });
-    });
-    const topReturned=Object.entries(snfReturns).sort((a,b)=>b[1]-a[1]).slice(0,10);
-
-    const fastMovers=allSnfs.filter(s=>(snfSales[s]||0)>15).sort((a,b)=>(snfSales[b]||0)-(snfSales[a]||0)).slice(0,10);
-    const slowMovers=allSnfs.filter(s=>(invMap[s].sh+invMap[s].st)>25&&(snfSales[s]||0)<5).sort((a,b)=>(invMap[b].sh+invMap[b].st)-(invMap[a].sh+invMap[a].st)).slice(0,10);
-    const now=new Date();
-    const expiryAlerts=expiry.filter(e=>e.date_shelf&&e.total_qty>0&&(new Date(e.date_shelf)-now)/864e5<90);
-    const totalSales=deliveries.reduce((s,d)=>s+(d.total_net||0),0);
-    const totalReturns=returns_.reduce((s,r)=>s+(r.total_net||0),0);
-    const returnRate=totalSales>0?((totalReturns/totalSales)*100).toFixed(1):0;
-
-    const setStat=(id,v)=>{ const el=document.getElementById(id); if(el) el.textContent=v; };
-    setStat('swot-stat-products', allSnfs.length);
-    setStat('swot-stat-slow', slowMovers.length);
-    setStat('swot-stat-expiry', expiryAlerts.length);
-    setStat('swot-stat-fast', fastMovers.length);
-    setStat('swot-stat-clients', clients.length);
-    setStat('swot-stat-sales', totalSales.toLocaleString('en-US',{maximumFractionDigits:0})+' ج');
-    setStat('swot-stat-returns', totalReturns.toLocaleString('en-US',{maximumFractionDigits:0})+' ج');
-    setStat('swot-stat-returnrate', returnRate+'%');
-
-    // كاش البيانات المحسوبة (يفيد زرار "طباعة تحليل SWOT الكامل" وزرار "طباعة الكروت PDF" بعد التشغيل)
-    _swotData={products,expiry,deliveries,returns_,clients,invMap,snfSales,snfReturns,allSnfs,fastMovers,slowMovers,expiryAlerts,totalSales,totalReturns,returnRate,periodFrom:swotFrom,periodTo:swotTo};
-
-    const periodTxt = (swotFrom||swotTo) ? (swotFrom||'البداية')+' إلى '+(swotTo||'الآن') : 'كل البيانات المتاحة';
-    const dataCtx = `بيانات تقارير المنسقين الميدانيين + فواتير التوريد والمرتجعات (تاب فواتير المناديب) — الفترة: ${periodTxt}:
-• إجمالي الأصناف: ${allSnfs.length} | عدد فواتير التوريد: ${deliveries.length} | عدد فواتير المرتجع: ${returns_.length}
-• قيمة التوريد: ${totalSales.toFixed(0)} جنيه | قيمة المرتجعات: ${totalReturns.toFixed(0)} جنيه | نسبة المرتجعات: ${returnRate}%
-• عدد السلاسل: ${clients.length}
-الأصناف الأسرع دوراناً (توريد فعلي): ${fastMovers.map(s=>s+'('+snfSales[s]+')').join('، ')||'لا بيانات'}
-الأصناف الراكدة: ${slowMovers.map(s=>s+'|'+(invMap[s].cat)+' رصيد:'+(invMap[s].sh+invMap[s].st)).join(' | ')||'لا بيانات'}
-الأصناف الأكثر ارتجاعاً (من فواتير المرتجعات): ${topReturned.map(([n,q])=>n+'('+q+')').join('، ')||'لا مرتجعات'}
-تنبيهات انتهاء الصلاحية (أقل من 90 يوم): ${expiryAlerts.slice(0,8).map(e=>{ const d=Math.max(0,Math.floor((new Date(e.date_shelf)-now)/864e5)); return e.snf+'('+d+' يوم)'; }).join('، ')||'لا تنبيهات'}
-السلاسل: ${clients.map(c=>c.name).join('، ')||'لا بيانات'}`;
+    const periodTxt = (d.periodFrom||d.periodTo) ? (d.periodFrom||'البداية')+' إلى '+(d.periodTo||'الآن') : 'كل البيانات المتاحة';
+    const dataCtx = `بيانات فواتير MT (بيع ومرتجع، من ملفات الجريد/MT) + تقارير المنسقين الميدانيين (المخزون والصلاحيات) — الفترة: ${periodTxt}:
+• أصناف مرصودة في الأسواق: ${d.allSnfs.length} | عدد فواتير البيع: ${d.salesInv} | عدد فواتير المرتجع: ${d.retInv}
+• قيمة المبيعات: ${fmt(d.totalSales)} جنيه | قيمة المرتجعات: ${fmt(d.totalReturns)} جنيه | نسبة المرتجعات: ${d.returnRate}%
+• عدد العملاء: ${d.clients.length}
+الأصناف الأسرع دوراناً (كراتين مباعة): ${d.fastMovers.slice(0,10).map(s=>s+'('+d.snfSales[s]+')').join('، ')||'لا بيانات'}
+الأصناف الراكدة: ${d.slowMovers.slice(0,10).map(s=>s+'|'+(d.invMap[s].cat)+' رصيد:'+(d.invMap[s].sh+d.invMap[s].st)).join(' | ')||'لا بيانات'}
+الأصناف الأكثر ارتجاعاً: ${topRet.map(([n,q])=>n+'('+q+' كرتونة، '+fmt(d.snfReturnVal[n])+' ج)').join('، ')||'لا مرتجعات'}
+أكثر العملاء ارتجاعاً: ${d.custReturns.slice(0,8).map(c=>c.n+'('+fmt(c.rv)+' ج)').join('، ')||'لا بيانات'}
+أكثر صنف مرتجع داخل العميل: ${d.custItemReturns.slice(0,8).map(r=>r.n+' ← '+r.i+' ('+fmt(r.rv)+' ج)').join('، ')||'لا بيانات'}
+أكبر العملاء مبيعاً: ${d.clients.slice(0,10).map(c=>c.name+'('+fmt(c.sv)+' ج)').join('، ')||'لا بيانات'}
+تنبيهات انتهاء الصلاحية (أقل من 90 يوم): ${d.expiryAlerts.slice(0,8).map(e=>{ const dd=Math.max(0,Math.floor((new Date(e.date_shelf)-now)/864e5)); return e.snf+'('+dd+' يوم)'; }).join('، ')||'لا تنبيهات'}`;
 
     const swotPrompt = `${dataCtx}
 
@@ -56541,7 +56484,7 @@ SWOT_ACTION_END`;
     if(actEl) actEl.innerHTML=actRaw?`<strong>${actRaw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</strong>`:'<span style="color:#9CA3AF">—</span>';
 
     const upEl=document.getElementById('swot-updated-at');
-    if(upEl) upEl.textContent='آخر تحديث: '+new Date().toLocaleString('ar-EG')+' — '+allSnfs.length+' صنف · '+deliveries.length+' فاتورة توريد · '+returns_.length+' فاتورة مرتجع · '+expiryAlerts.length+' تنبيه';
+    if(upEl) upEl.textContent='آخر تحديث: '+new Date().toLocaleString('ar-EG')+' — '+d.allSnfs.length+' صنف · '+d.salesInv+' فاتورة بيع · '+d.retInv+' فاتورة مرتجع · '+d.expiryAlerts.length+' تنبيه';
 
   } catch(e){
     ['s','w','o','t'].forEach(k=>{
