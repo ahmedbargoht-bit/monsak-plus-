@@ -32773,10 +32773,12 @@ async function sciBuildBarcodeIndex(){
     // جدول تحليل فواتير عملاء MT كان محمي بسر دخول خاص (x-app-secret) - اتشالت الحماية دي بالكامل
     // بناءً على طلب المالك، فبقى الجدول متاح للقراءة/الكتابة مباشرة من غير أي سر.
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?select=item_name,item_code,image_link`, {headers:H});
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?select=item_name,item_code,image_link,fea`, {headers:H});
     const rows = res.ok ? await res.json() : [];
+    _sciCatIdx = {};
     (Array.isArray(rows)?rows:[]).forEach(r=>{
       const name = (r.item_name||'').trim();
+      if(name && r.fea) _sciCatIdx[name] = r.fea;
       if(name && r.item_code) idx[name] = String(r.item_code);
       if(name && r.image_link) linkIdx[name] = String(r.image_link);
     });
@@ -33542,7 +33544,7 @@ async function sciOnClientChange(){
     // مع إننا بنعرض الاسم الخام زي ما هو في القايمة عشان يفضل واضح إنه هو نفس الصنف اللي اتباع فعلاً.
     const canonicalName = sciCanonicalItemName(name);
     const meta = pdbIdx[canonicalName] || pdbIdx[name] || {};
-    return {name, priceKey: canonicalName, barcode: barcodeIdx[canonicalName] || barcodeIdx[name] || '', imgLink: (_sciImageLinkIdx && (_sciImageLinkIdx[canonicalName]||_sciImageLinkIdx[name])) || '', fea: meta.fea||'', cat: meta.cat||''};
+    return {name, priceKey: canonicalName, barcode: barcodeIdx[canonicalName] || barcodeIdx[name] || '', imgLink: (_sciImageLinkIdx && (_sciImageLinkIdx[canonicalName]||_sciImageLinkIdx[name])) || '', fea: meta.fea || _sciCatIdx[canonicalName] || _sciCatIdx[name] || '', cat: meta.cat||''};
   }).sort((a,b)=>{
     if(!a.cat && b.cat) return 1;
     if(a.cat && !b.cat) return -1;
@@ -33633,25 +33635,68 @@ function sciRenderTable(){
 }
 
 // ── تعديل اسم صنف في كل النظام (كتالوج/فواتير MT/مصنع/عقود/مخفي/أسماء بديلة) — الأسعار لا تتغير ──
+let _sciCatIdx = {};
 async function sciRenameItem(oldName){
-  const newName = (prompt('الاسم الجديد للصنف (هيتعدل في كل النظام، والأسعار تفضل زي ما هي):', oldName)||'').trim();
-  if(!newName || newName===oldName) return;
-  if(!confirm(`تأكيد تغيير:\n"${oldName}"\nإلى:\n"${newName}"\n\nلو الاسم الجديد موجود هيتدمج الصنفين.`)) return;
-  try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rename_item`, {
-      method:'POST',
-      headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
-      body: JSON.stringify({p_old:oldName, p_new:newName})
-    });
-    if(!res.ok) throw new Error('HTTP '+res.status);
-    const j = await res.json();
-    alert(`تم التعديل ✅ (فواتير MT المتأثرة: ${j.invoices||0}${j.merged?' — اندمج مع صنف موجود':''})`);
-    try{ if(typeof sciLoadItemAliasMap==='function') await sciLoadItemAliasMap(true); }catch(_){}
-    await sciOnClientChange();
-  }catch(e){
-    console.error('[sciRenameItem]', e);
-    alert('حصل خطأ أثناء التعديل، حاول تاني');
-  }
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
+  let cat = [];
+  try{ const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_mt_item_names`,{method:'POST',headers:H,body:'{}'}); cat = r.ok ? await r.json() : []; }catch(_){}
+  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  const row = _sciAllRows.find(x=>x.name===oldName) || {};
+  const curFea = row.fea || _sciCatIdx[oldName] || '';
+  const old = document.getElementById('sci-rn-modal'); if(old) old.remove();
+  const m = document.createElement('div');
+  m.id = 'sci-rn-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99999;display:flex;align-items:center;justify-content:center;font-family:Cairo,sans-serif';
+  const fs = 'width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:13px;margin-top:4px;box-sizing:border-box';
+  m.innerHTML = `<div style="background:#fff;border-radius:14px;padding:20px;width:min(520px,92vw);direction:rtl;max-height:90vh;overflow:auto">
+    <div style="font-weight:800;font-size:15px;margin-bottom:4px">تعديل الصنف</div>
+    <div style="font-size:12px;color:#777;margin-bottom:12px">${esc(oldName)}</div>
+    <label style="font-size:12px;font-weight:700">الفئة</label>
+    <select id="sci-rn-fea" style="${fs}">
+      <option value="">— بدون تغيير —</option>
+      <option value="الطحان"${curFea==='الطحان'?' selected':''}>الطحان</option>
+      <option value="تمراتي"${curFea==='تمراتي'?' selected':''}>تمراتي</option>
+    </select>
+    <label style="font-size:12px;font-weight:700;display:block;margin-top:12px">اسم الصنف في فواتير MT (الاسم ده هيتطبق على النظام)</label>
+    <select id="sci-rn-target" style="${fs}">
+      <option value="">— بدون تغيير الاسم —</option>
+      ${cat.map(c=>`<option value="${esc(c.item)}"${c.item===oldName?' disabled':''}>${esc(c.item)}</option>`).join('')}
+    </select>
+    <div style="font-size:11px;color:#8B6A1F;margin-top:8px">اسم فواتير MT هو المرجع: اسم الصنف في النظام (كتالوج/مصنع/عقود/مخفي) بيتغير ليطابقه، وفواتير MT مش بتتغير. الأسعار مش بتتأثر.</div>
+    <div style="display:flex;gap:8px;justify-content:flex-start;margin-top:14px">
+      <button id="sci-rn-ok" style="background:#731E2E;color:#fff;border:none;border-radius:8px;padding:8px 22px;font-family:inherit;font-weight:700;cursor:pointer">حفظ</button>
+      <button id="sci-rn-cancel" style="background:#eee;border:none;border-radius:8px;padding:8px 18px;font-family:inherit;cursor:pointer">إلغاء</button>
+    </div></div>`;
+  document.body.appendChild(m);
+  const close = ()=>m.remove();
+  m.querySelector('#sci-rn-cancel').onclick = close;
+  m.addEventListener('click',e=>{ if(e.target===m) close(); });
+  m.querySelector('#sci-rn-ok').onclick = async ()=>{
+    const feaNew = m.querySelector('#sci-rn-fea').value;
+    const target = m.querySelector('#sci-rn-target').value;
+    const newName = (target || oldName).trim();
+    if(newName!==oldName && !confirm(`تأكيد: اسم الصنف في النظام\n"${oldName}"\nهيتغير ليطابق فواتير MT:\n"${newName}"`)) return;
+    try{
+      let merged=false, inv=0;
+      if(newName!==oldName){
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/apply_mt_name`, {method:'POST', headers:H, body:JSON.stringify({p_old:oldName, p_mt:newName})});
+        if(!res.ok) throw new Error('HTTP '+res.status);
+        const j = await res.json(); merged=!!j.merged; inv=j.invoices||0;
+      }
+      if(feaNew){
+        const r2 = await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?item_name=eq.${encodeURIComponent(newName)}`, {method:'PATCH', headers:H, body:JSON.stringify({fea:feaNew, updated_at:new Date().toISOString()})});
+        if(!r2.ok) throw new Error('cat HTTP '+r2.status);
+        _sciCatIdx[newName] = feaNew;
+      }
+      close();
+      alert(`تم التعديل ✅${inv?` (فواتير MT المتأثرة: ${inv})`:''}${merged?' — اندمج مع صنف موجود':''}`);
+      try{ _sciBarcodeIdx = null; if(typeof sciLoadItemAliasMap==='function') await sciLoadItemAliasMap(true); }catch(_){}
+      await sciOnClientChange();
+    }catch(e){
+      console.error('[sciRenameItem]', e);
+      alert('حصل خطأ أثناء التعديل، حاول تاني');
+    }
+  };
 }
 
 // ── إخفاء صنف — إما خاص بالعميل الحالي بس (scope='client')، أو عام من كل العملاء (scope='global') ──
