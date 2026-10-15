@@ -7878,7 +7878,7 @@ h2,h3{color:#2C1F0A}
           <div id="aitab-plans" style="display:none">
           <div class="panel-header">
             <h2><i class="ti ti-brain" style="color:#7C3AED"></i> تحليل AI — خطط الفريق</h2>
-            <p>تحليل ذكي لأداء مشرفي التنسيق وخططهم الأسبوعية بواسطة Groq AI</p>
+            <p>تحليل ذكي لأداء مشرفي التنسيق والبيع من بيانات تاب "متابعة زيارات المشرفين" (الخطة + توثيق الموقع + التقييم) بواسطة Groq AI</p>
           </div>
 
           <!-- إعداد API Key -->
@@ -54232,111 +54232,76 @@ async function runAIAnalysis(){
   try{
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
 
+    // 1) البيانات من نفس مصدر تاب "متابعة زيارات المشرفين" (svmBuildCoordRows للتنسيق + svsBuildRows للبيع)
     const teamFilter = document.getElementById('ai-team-filter')?.value || 'all';
-
-    // 1) جلب الخطط حسب الفريق المختار
-    // أ) خطط التنسيق: جدول plans
-    let rawCoord = [], rawSalesPlus = [];
+    if(!SVM_BRANCH_CACHE){
+      const bs = await svmGetAll(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,grp,lat,lng&order=branch_name.asc`);
+      SVM_BRANCH_CACHE = {}; bs.forEach(b=>{ SVM_BRANCH_CACHE[b.branch_name]=b; });
+    }
+    let svmRows = [];
     if(teamFilter === 'all' || teamFilter === 'coord'){
-      let coordUrl = `${SUPABASE_URL}/rest/v1/plans?select=*&week_start=gte.${ws}&week_start=lte.${we}&order=supervisor_name.asc&limit=500`;
-      if(supVal!=='all') coordUrl += `&supervisor_name=eq.${encodeURIComponent(supVal)}`;
-      rawCoord = await fetch(coordUrl,{headers:H}).then(r=>r.json()).catch(()=>[]);
+      (await svmBuildCoordRows(ws,we)).forEach(r=>svmRows.push(Object.assign({},r,{_team:'coord'})));
     }
-    // ب) خطط المبيعات: جدول sales_plans_plus
     if(teamFilter === 'all' || teamFilter === 'sales'){
-      let salesPlusUrl = `${SUPABASE_URL}/rest/v1/sales_plans_plus?select=*&week_start=gte.${ws}&week_start=lte.${we}&order=staff_name.asc&limit=500`;
-      if(supVal!=='all') salesPlusUrl += `&staff_name=eq.${encodeURIComponent(supVal)}`;
-      rawSalesPlus = await fetch(salesPlusUrl,{headers:H}).then(r=>r.json()).catch(()=>[]);
+      (await svsBuildRows(ws,we)).forEach(r=>svmRows.push(Object.assign({},r,{_team:'sales'})));
     }
+    if(supVal!=='all') svmRows = svmRows.filter(r=>r.sup===supVal);
 
-    // توحيد شكل الخطط
-    const coordPlans = (Array.isArray(rawCoord)?rawCoord:[]).map(p=>({
-      id:'coord_'+p.id, _origId:p.id, _src:'coord',
-      supervisor_name:p.supervisor_name, plan_type:'تنسيق',
-      week_start:p.week_start, week_end:p.week_end, status:p.status||'draft'
-    }));
-    const salesPlusPlans = (Array.isArray(rawSalesPlus)?rawSalesPlus:[]).map(p=>({
-      id:'salesplus_'+p.id, _origId:p.id, _src:'salesplus',
-      supervisor_name:p.staff_name||p.supervisor_name, plan_type:'مبيعات',
-      week_start:p.week_start, week_end:p.week_end||p.week_start, status:p.status||'draft'
-    }));
-
-    let plans = [...coordPlans, ...salesPlusPlans];
+    // خطة واحدة (مجمّعة) لكل مشرف في كل فريق
+    const planMap = {};
+    svmRows.forEach(r=>{
+      const key = r._team+'|'+r.sup;
+      if(!planMap[key]) planMap[key] = {id:key, supervisor_name:r.sup, plan_type:r._team==='sales'?'مبيعات':'تنسيق', week_start:ws, week_end:we, status:'approved'};
+    });
+    let plans = Object.values(planMap).sort((a,b)=>a.supervisor_name.localeCompare(b.supervisor_name,'ar'));
+    const coordPlans = plans.filter(p=>p.plan_type==='تنسيق');
+    const salesPlusPlans = plans.filter(p=>p.plan_type==='مبيعات');
+    const items = svmRows.map(r=>({plan_id:r._team+'|'+r.sup, day_date:r.date, status:r.status, task_type:'visit', branch_name:r.branch, rep_name:r.coord||'', notes:r.notes, _r:r}));
+    const visits = svmRows.filter(r=>r.done && r.geoOK);
 
     if(!plans.length){
       area.innerHTML = `<div style="text-align:center;padding:60px;color:var(--text2)">
         <div style="font-size:40px;margin-bottom:12px">📭</div>
-        <div style="font-size:14px;font-weight:700">لا توجد خطط لهذا الأسبوع</div>
+        <div style="font-size:14px;font-weight:700">لا توجد زيارات مخططة في هذه الفترة (من تاب متابعة زيارات المشرفين)</div>
       </div>`;
       btn.disabled=false; btn.innerHTML='<i class="ti ti-sparkles"></i> تحليل بالـ AI';
       return;
     }
 
-    // 2) جلب بنود الخطط من النظامين بالتوازي
-    const coordIds = coordPlans.map(p=>p._origId).filter(Boolean);
-    const splusIds = salesPlusPlans.map(p=>p._origId).filter(Boolean);
-
-    const [rawBranches, rawSPI] = await Promise.all([
-      coordIds.length
-        ? fetch(`${SUPABASE_URL}/rest/v1/plan_branches?select=*&plan_id=in.(${coordIds.join(',')})&order=visit_date.asc&limit=3000`,{headers:H}).then(r=>r.json()).catch(()=>[])
-        : Promise.resolve([]),
-      splusIds.length
-        ? fetch(`${SUPABASE_URL}/rest/v1/sales_plan_items?select=*&plan_id=in.(${splusIds.join(',')})&order=visit_date.asc&limit=3000`,{headers:H}).then(r=>r.json()).catch(()=>[])
-        : Promise.resolve([])
-    ]);
-
-    // توحيد شكل البنود
-    const fromBranches = (Array.isArray(rawBranches)?rawBranches:[]).map(b=>({
-      plan_id:'coord_'+b.plan_id, day_date:b.visit_date,
-      status:b.visit_status||'pending', task_type:'visit',
-      branch_name:b.branch_name||'—', rep_name:b.area_supervisor||'—', notes:b.notes||''
-    }));
-    const fromSPI = (Array.isArray(rawSPI)?rawSPI:[]).map(b=>({
-      plan_id:'salesplus_'+b.plan_id, day_date:b.visit_date,
-      status:b.visit_status||'pending', task_type:'visit',
-      branch_name:b.branch_name||b.customer_name||'—', rep_name:b.rep_name||'—', notes:b.notes||''
-    }));
-
-    let items = [...fromBranches, ...fromSPI];
-
-    // 3) جلب الزيارات الفعلية في نفس الأسبوع
-    let visits = await fetch(`${SUPABASE_URL}/rest/v1/visits?select=rep_name,branch_name,date,created_at&date=gte.${ws}&date=lte.${we}&limit=2000`,{headers:H}).then(r=>r.json()).catch(()=>[]);
-    if(!Array.isArray(visits)) visits=[];
-
-    // 4) بناء ملخص لكل مشرف — بلوك مستقل لكل واحد عشان نقدر نقسّمهم على دفعات صغيرة بعدين
+    // 2) ملخص لكل مشرف — بلوك مستقل لكل واحد عشان نقدر نقسّمهم على دفعات صغيرة بعدين
+    const RC_LBL = {coord:['تقرير المنسق','العرض','النظافة'], sales:['العرض','التعامل','المخزون']};
+    const rowState = r=>{
+      if(r.status==='missed'||r.status==='skipped') return 'فائتة';
+      if(!r.done) return 'مجدولة';
+      const lb = RC_LBL[r._team]||RC_LBL.coord, m=[];
+      if(!r.geoOK) m.push('الموقع');
+      if(!r.rc) m.push(lb[0]); if(!r.rd) m.push(lb[1]); if(!r.rl) m.push(lb[2]);
+      return m.length ? 'منجزة وناقصة (ناقص: '+m.join('، ')+')' : 'منجزة ومكتملة';
+    };
     const summaryBlocks = plans.map(plan=>{
-      const planItems   = items.filter(i=>i.plan_id===plan.id);
-      const doneItems   = planItems.filter(i=>i.status==='done');
-      const pendItems   = planItems.filter(i=>i.status!=='done');
-      const donePct     = planItems.length ? Math.round(doneItems.length/planItems.length*100) : 0;
-
-      // الزيارات الفعلية لهذا المشرف
-      const repVisits   = visits.filter(v=>v.rep_name===plan.supervisor_name);
-
-      const byDay = {};
-      planItems.forEach(i=>{ if(!byDay[i.day_date]) byDay[i.day_date]=[]; byDay[i.day_date].push(i); });
-
-      const daysDetail = Object.entries(byDay).map(([date,dayItems])=>{
-        const done = dayItems.filter(i=>i.status==='done');
-        const notDone = dayItems.filter(i=>i.status!=='done');
-        return `  - ${date}: ${done.length} منجز / ${notDone.length} لم ينجز — [${dayItems.map(i=>(TASK_LABELS_AI[i.task_type]||'زيارة')+': '+(i.branch_name||i.rep_name||i.challenge_text||'—')+(i.status==='done'?'✓':'✗')).join('، ')}]`;
-      }).join('\n');
-
-      const actualVisitBranches = repVisits.map(v=>v.branch_name||v.branch||'—').join('، ')||'لا توجد زيارات مسجلة';
-
-      const planTypeLabel = plan.plan_type==='sales'||!plan.plan_type ? 'مشرف مبيعات' : 'مشرف تنسيق';
+      const planRows = items.filter(i=>i.plan_id===plan.id).map(i=>i._r).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+      const f = svmFollowStats(planRows.map(svmRowToItem));
+      const donePct = f.pct;
+      const reasonCnt = {};
+      f.failures.forEach(x=>{ reasonCnt[x.reason]=(reasonCnt[x.reason]||0)+1; });
+      const reasonsTxt = Object.entries(reasonCnt).sort((a,b)=>b[1]-a[1]).map(([k,v])=>k+' ('+v+')').join('، ')||'لا يوجد';
+      const needsRows = planRows.filter(r=>r.needs);
+      const shownRows = planRows.slice(0,15);
+      const daysDetail = shownRows.map(r=>`  - ${r.date}: ${r.branch} — ${rowState(r)}${r.geoOK&&r.dist!=null?' — بعد '+r.dist+' م عن الفرع':''}`).join('\n')
+        + (planRows.length>shownRows.length ? `\n  ... و${planRows.length-shownRows.length} زيارة أخرى` : '');
+      const planTypeLabel = plan.plan_type==='مبيعات' ? 'مشرف مبيعات' : 'مشرف تنسيق';
       return {
         name: plan.supervisor_name,
         donePct,
         text: `=== ${planTypeLabel}: ${plan.supervisor_name} ===
-نوع الخطة: ${planTypeLabel}
-حالة الخطة: ${plan.status==='approved'?'معتمدة':'مسودة/غير معتمدة'}
-الفترة: ${plan.week_start} إلى ${plan.week_end}
-إجمالي المهام: ${planItems.length} | منجز: ${doneItems.length} | لم ينجز: ${pendItems.length} | نسبة الإنجاز: ${donePct}%
-تفاصيل الأيام:
-${daysDetail||'  (لا تفاصيل)'}
-الزيارات الفعلية المسجلة في النظام: ${actualVisitBranches}
-المهام غير المنجزة: ${pendItems.map(i=>'زيارة: '+(i.branch_name||'—')).join('، ')||'لا يوجد'}`
+مصدر البيانات: تاب متابعة زيارات المشرفين (الخطة + توثيق الموقع + التقييم)
+الفترة: ${ws} إلى ${we}
+الزيارات المخططة المستحقة: ${f.planned} | منجزة: ${f.done} | موثّقة بالموقع ومكتملة التقييم (تُحتسب): ${f.qualified} | منجزة وناقصة التوثيق: ${f.done-f.qualified} | فائتة: ${f.missed} | لم تُنفَّذ: ${f.notDone}
+نسبة المتابعة (المعيار): ${donePct}%
+أسباب عدم الاحتساب: ${reasonsTxt}
+بنود تحتاج تحسين (من تقييم المشرف): ${needsRows.length ? needsRows.map(r=>r.branch).slice(0,8).join('، ') : 'لا يوجد'}
+تفاصيل الزيارات:
+${daysDetail||'  (لا تفاصيل)'}`
       };
     });
 
@@ -57666,18 +57631,7 @@ function svmInit(){
   svmLoad();
 }
 
-async function svmLoad(){
-  if(SVM_BUSY) return;
-  SVM_BUSY = true;
-  const body = document.getElementById('svm-body');
-  if(body) body.innerHTML = '<div style="text-align:center;padding:30px;color:#999">جاري التحميل...</div>';
-  try{
-    const from = document.getElementById('svm-from').value, to = document.getElementById('svm-to').value;
-    if(!SVM_BRANCH_CACHE){
-      const bs = await svmGetAll(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,grp,lat,lng&order=branch_name.asc`);
-      SVM_BRANCH_CACHE = {}; bs.forEach(b=>{ SVM_BRANCH_CACHE[b.branch_name]=b; });
-    }
-    if(SVM_SIDE==='sales'){ SVM_ROWS = await svsBuildRows(from,to); } else {
+async function svmBuildCoordRows(from,to){
     let q = `${SUPABASE_URL}/rest/v1/plan_branches?select=*&order=visit_date.desc,id.desc`;
     if(from) q += `&visit_date=gte.${from}`;
     if(to) q += `&visit_date=lte.${to}`;
@@ -57688,7 +57642,7 @@ async function svmLoad(){
       const r = await fetch(`${SUPABASE_URL}/rest/v1/plans?select=id,supervisor_name,plan_type,status,week_start&id=in.(${pids.slice(i,i+100).join(',')})`,{headers:svmHdr()});
       if(r.ok) (await r.json()).forEach(p=>{ plans[p.id]=p; });
     }
-    SVM_ROWS = pbs.map(x=>{
+    return pbs.map(x=>{
       const p = plans[x.plan_id]||{}, b = SVM_BRANCH_CACHE[x.branch_name]||{};
       const done = x.visit_status==='done';
       const geoOK = !!x.check_in_at && x.geo_status==='inside';
@@ -57709,6 +57663,21 @@ async function svmLoad(){
         verified: done && geoOK && reviewed, needs, coord:x.rep_name||''
       };
     });
+}
+
+async function svmLoad(){
+  if(SVM_BUSY) return;
+  SVM_BUSY = true;
+  const body = document.getElementById('svm-body');
+  if(body) body.innerHTML = '<div style="text-align:center;padding:30px;color:#999">جاري التحميل...</div>';
+  try{
+    const from = document.getElementById('svm-from').value, to = document.getElementById('svm-to').value;
+    if(!SVM_BRANCH_CACHE){
+      const bs = await svmGetAll(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,grp,lat,lng&order=branch_name.asc`);
+      SVM_BRANCH_CACHE = {}; bs.forEach(b=>{ SVM_BRANCH_CACHE[b.branch_name]=b; });
+    }
+    if(SVM_SIDE==='sales'){ SVM_ROWS = await svsBuildRows(from,to); } else {
+    SVM_ROWS = await svmBuildCoordRows(from,to);
     }
     // قوائم الفلاتر
     const gs = [...new Set(SVM_ROWS.map(r=>r.grp).filter(Boolean))].sort();
