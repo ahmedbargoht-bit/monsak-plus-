@@ -1552,6 +1552,20 @@ function sciBuildPdbLocationIndex(){
 
 // النواة: بتحمّل أصناف عميل الفرع المختار لايف من فواتير التوريد الفعلية، وتبني نسخة مقلّمة من
 // PDB (بنفس الشكل الهرمي بالظبط) تحتوي بس على أصناف العميل ده.
+// الأسماء البديلة للأصناف (item_name_aliases): {مفتاح الاسم الخام الموحّد → الاسم المعتمد في القاعدة}
+window._sciItemAliasNorm = null; window._sciItemAliasNormT = 0;
+async function sciLoadItemAliasNormMap(){
+  if(window._sciItemAliasNorm && Date.now()-window._sciItemAliasNormT < 10*60*1000) return window._sciItemAliasNorm;
+  const map = window._sciItemAliasNorm || {};
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const {rows, ok} = await sciFetchAllRows(`${SUPABASE_URL}/rest/v1/item_name_aliases?select=alias_name,canonical_name`, H);
+    if(ok){ Object.keys(map).forEach(k=>delete map[k]); rows.forEach(r=>{ if(r.alias_name && r.canonical_name) map[sciNormalizeItemKey(r.alias_name)] = r.canonical_name; }); }
+  }catch(e){ console.warn('sciLoadItemAliasNormMap error:', e); }
+  window._sciItemAliasNorm = map; window._sciItemAliasNormT = Date.now();
+  return map;
+}
+
 async function sciLoadClientCatalogForBranch(branchName){
   const state = window._sciClientState;
   state.branch = branchName||''; state.client = null; state.items = [];
@@ -1569,52 +1583,47 @@ async function sciLoadClientCatalogForBranch(branchName){
     const client = window._sciBranchClientMap[branchName];
     if(!client){ state.locked = true; state.loading = false; return state; }
     state.client = client;
-    const branches = [...(window._sciClientBranchesMap[client]||[])];
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const orFilter = 'or=(' + branches.map(b=>`branch_name.eq.${pgOrVal(b)}`).join(',') + ')';
-    const {rows, ok:deliveriesOk} = await sciFetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?${orFilter}&deleted_at=is.null&select=items`, H);
+    // المصدر الوحيد لأصناف العميل: فواتير MT على مستوى العميل كله (مش الفرع) — فأي فرع للعميل بيشوف نفس
+    // الأصناف حتى لو بضاعته بتيجي من مخازن مركزية. الأسماء المكتوبة بأكتر من شكل بتتوحّد: بالتوحيد
+    // الإملائي (ي/ى، ة/ه، أ/ا...) وبالأسماء البديلة المسجلة (item_name_aliases) → الاسم المعتمد في القاعدة.
+    const seen = {};
+    let deliveriesOk = false;
+    try{
+      const aliasesMap = await sciLoadClientAliasesMap();
+      const aliases = aliasesMap[client] || [];
+      const keys = [...new Set([sciNormalizeCustomerKey(client), ...aliases.map(sciNormalizeCustomerKey)].filter(Boolean))];
+      const itemAlias = await sciLoadItemAliasNormMap();
+      const _li = sciBuildPdbLocationIndex();
+      const pdbByKey = {}; Object.keys(_li).forEach(n=>{ pdbByKey[sciNormalizeItemKey(n)] = n; });
+      const mtRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_mt_items_for_customer_keys`, {
+        method:'POST', headers:{...H,'Content-Type':'application/json'}, body: JSON.stringify({p_keys: keys})
+      });
+      const mtRows = mtRes.ok ? await mtRes.json().catch(()=>null) : null;
+      if(Array.isArray(mtRows)){
+        deliveriesOk = true;
+        const byKey = {};
+        mtRows.forEach(r=>{
+          const raw = (r.item||'').trim(); if(!raw) return;
+          const canon = itemAlias[sciNormalizeItemKey(raw)];       // الاسم المعتمد لو الاسم ده بديل لصنف تاني
+          const shown = canon || raw;
+          const ik = sciNormalizeItemKey(shown);
+          const cnt = +r.cnt || 0;
+          const e = byKey[ik] || (byKey[ik] = {name:shown, best:-1});
+          if(cnt > e.best){ e.best = cnt; e.name = shown; }          // لو مفيش اسم معتمد: الإملاء الأكتر تكرارًا
+        });
+        Object.entries(byKey).forEach(([ik,v])=>{ seen[pdbByKey[ik] || v.name] = true; });  // نفضّل اسم القاعدة لو موجود
+      }
+    }catch(e){ console.warn('sciLoadClientCatalogForBranch MT error:', e); }
 
     if(deliveriesOk){
-      const seen = {};
-      rows.forEach(r=>{
-        (Array.isArray(r.items)?r.items:[]).forEach(it=>{
-          const name = (it && it.name ? String(it.name) : '').trim();
-          if(name) seen[name] = true;
-        });
-      });
-      // دمج أصناف العميل من فواتير MT الحقيقية (tamr_sales_items) — تغطية لأي صنف اتباع للعميل
-      // فعليًا (زي "تمراتي"، أو أصناف باعها العميل قبل ما المناديب يبدأوا يسجلوا تسليم بنفسهم)
-      // ومسجل مش لسه في تطبيق التسليم. المطابقة بمفتاح موحّد (يتجاهل فروق إملائية زي "ة/ه"
-      // و"ي/ى")، وباستخدام RPC مبني على إندكس (customer_norm) عشان يبقى سريع من غير ما يسحب
-      // جدول الـ100 ألف صف كامل زي ما لوحة التحكم بتعمل.
-      try{
-        const aliasesMap = await sciLoadClientAliasesMap();
-        const aliases = aliasesMap[client] || [];
-        const keys = [...new Set([sciNormalizeCustomerKey(client), ...aliases.map(sciNormalizeCustomerKey)].filter(Boolean))];
-        if(keys.length){
-          const mtRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_mt_items_for_customer_keys`, {
-            method:'POST', headers:{...H,'Content-Type':'application/json'},
-            body: JSON.stringify({p_keys: keys})
-          });
-          const mtRows = mtRes.ok ? await mtRes.json().catch(()=>[]) : [];
-          // لو نفس الصنف متسجل بأكتر من إملاء في فواتير MT (زي "برحي"/"برحى")، بنختار الإملاء
-          // الأكتر تكرارًا كاسم معتمد بدل ما يتكرر الصنف مرتين في القايمة.
-          const byKey = {};
-          (Array.isArray(mtRows)?mtRows:[]).forEach(r=>{
-            const name = (r.item||'').trim(); if(!name) return;
-            const ik = sciNormalizeItemKey(name);
-            const cnt = +r.cnt || 0;
-            if(!byKey[ik] || cnt > byKey[ik].cnt) byKey[ik] = {name, cnt};
-          });
-          Object.values(byKey).forEach(v=>{ seen[v.name] = true; });
-        }
-      }catch(e){ console.warn('sciLoadClientCatalogForBranch MT merge error:', e); }
       // استبعاد الأصناف اللي الأدمن أخفاها من "أصناف العملاء" — عام (كل العملاء) أو خاص بالعميل ده بس
       try{
         const hOr = 'or=(' + `client_name.eq.${pgOrVal(client)},client_name.eq.${pgOrVal('__GLOBAL__')}` + ')';
         const hres = await fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?select=item_name&${hOr}&limit=5000`, {headers:H, cache:'no-store'});
         const hrows = hres.ok ? await hres.json().catch(()=>[]) : [];
-        (Array.isArray(hrows)?hrows:[]).forEach(r=>{ if(r.item_name) delete seen[r.item_name]; });
+        const hk = new Set((Array.isArray(hrows)?hrows:[]).map(r=>sciNormalizeItemKey(r.item_name)).filter(Boolean));
+        Object.keys(seen).forEach(n=>{ if(hk.has(sciNormalizeItemKey(n))) delete seen[n]; });
       }catch(e){ console.warn('sciLoadClientCatalogForBranch hidden filter error:', e); }
       const locIdx = sciBuildPdbLocationIndex();
       const itemNames = Object.keys(seen);
@@ -1659,7 +1668,8 @@ async function sciLoadClientCatalogForBranch(branchName){
 // متاحة، وإلا القاعدة الكاملة (fallback شفاف تلقائي)
 function effPDB(){
   const st = window._sciClientState;
-  if(st && st.prunedPDB && Object.keys(st.prunedPDB).length) return st.prunedPDB;
+  // بعد اختيار الفرع: أصناف العميل فقط (من فواتير MT) — مفيش رجوع للقاعدة الكاملة أبدًا
+  if(st && st.branch) return st.prunedPDB || {};
   return PDB;
 }
 
@@ -1685,16 +1695,16 @@ function sciUpdateClientHintBanner(elId){
   if(!st.branch){ el.style.display='none'; return; }
   if(st.locked){
     el.style.cssText='display:block;background:#FFF3E0;border:1.5px solid #FFCC80;color:#8B5A00;border-radius:8px;padding:8px 10px;font-size:11px;font-weight:600;margin-bottom:8px';
-    el.textContent = '⚠️ الفرع ده لسه مش مربوط بعميل موثق — هتشوف قاعدة الأصناف كاملة لحد ما يتظبط الربط من لوحة التحكم.';
+    el.textContent = '⚠️ الفرع ده لسه مش مربوط بعميل — مفيش أصناف هتظهر لحد ما الإدارة تربطه بالعميل من لوحة التحكم.';
   } else if(st.networkError){
     el.style.cssText='display:block;background:#FFEBEE;border:1.5px solid #EF9A9A;color:#B71C1C;border-radius:8px;padding:8px 10px;font-size:11px;font-weight:600;margin-bottom:8px';
-    el.textContent = '📶 تعذر تحميل أصناف العميل بسبب مشكلة في الاتصال — هتشوف قاعدة الأصناف كاملة مؤقتًا لحد ما النت يرجع.';
+    el.textContent = '📶 تعذر تحميل أصناف العميل بسبب مشكلة في الاتصال — اتأكد من النت وافتح التاب تاني.';
   } else if(st.fromCache){
     el.style.cssText='display:block;background:#FFF8E1;border:1.5px solid #FFE082;color:#8B6A00;border-radius:8px;padding:8px 10px;font-size:11px;font-weight:600;margin-bottom:8px';
     el.textContent = `📴 مفيش اتصال دلوقتي — بتشوف آخر نسخة محفوظة من أصناف "${st.client}" (${sciRelTime(st.cacheDate)}). أي صنف جديد هيظهر أول ما النت يرجع.`;
   } else if(st.empty){
     el.style.cssText='display:block;background:#E3F2FD;border:1.5px solid #90CAF9;color:#0D47A1;border-radius:8px;padding:8px 10px;font-size:11px;font-weight:600;margin-bottom:8px';
-    el.textContent = `ℹ️ عميل "${st.client}" لسه مفيهوش أي فواتير مسجلة — هتشوف قاعدة الأصناف كاملة مؤقتًا.`;
+    el.textContent = `ℹ️ عميل "${st.client}" مفيهوش فواتير MT مسجلة — مفيش أصناف هتظهر لحد ما تتسجل له فواتير.`;
   } else {
     el.style.display='none';
   }
@@ -4139,15 +4149,6 @@ function sciRenderProductsPicker(){
 
   const hasClientItems = !st.locked && !st.empty && st.items && st.items.length>0;
 
-  if(window._sciManualFullCatalog){
-    pickerEl.style.display='none';
-    hierEl.style.display='block';
-    if(hierToggleWrap) hierToggleWrap.innerHTML = hasClientItems
-      ? `<button type="button" onclick="pToggleFullCatalog(false)" style="background:none;border:none;color:#8B5A2B;font-size:11px;font-weight:700;cursor:pointer;text-decoration:underline;padding:2px">↩ رجوع لأصناف العميل</button>`
-      : '';
-    return;
-  }
-
   if(hasClientItems){
     pickerEl.style.display='block';
     hierEl.style.display='none';
@@ -4156,18 +4157,15 @@ function sciRenderProductsPicker(){
     const countEl = document.getElementById('p-client-count');
     if(countEl) countEl.textContent = `📦 عدد أصناف العميل الفعّالة: ${st.items.length} صنف`;
     const toggleWrap = document.getElementById('p-client-toggle-wrap');
-    if(toggleWrap) toggleWrap.innerHTML = `<button type="button" onclick="pToggleFullCatalog(true)" style="background:none;border:none;color:#8B5A2B;font-size:11px;font-weight:700;cursor:pointer;text-decoration:underline;padding:2px">تصفح كل قاعدة الأصناف بدل أصناف العميل</button>`;
+    if(toggleWrap) toggleWrap.innerHTML = '';
   } else {
     pickerEl.style.display='none';
-    hierEl.style.display='block';
+    hierEl.style.display='none';     // مفيش تصفح للقاعدة الكاملة — البانر بيوضح السبب
     if(hierToggleWrap) hierToggleWrap.innerHTML='';
   }
 }
 
-function pToggleFullCatalog(showFull){
-  window._sciManualFullCatalog = !!showFull;
-  sciRenderProductsPicker();
-}
+function pToggleFullCatalog(){ /* اتلغى: أصناف العميل فقط */ window._sciManualFullCatalog = false; sciRenderProductsPicker(); }
 
 function pRenderClientPickerList(){
   const st = window._sciClientState||{};
