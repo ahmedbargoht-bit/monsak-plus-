@@ -19359,16 +19359,17 @@ async function hsLoad(){
   hsRenderHeatmap(visits, missing);
   hsRenderShelfBars(products);
   hsRenderAging(products);
-  // توريدات آخر 30 يوم (لتحديد الرواكد: رصيد كبير + توريد/حركة قليلة) — كاش دقيقتين
-  if(!window._hsDelCache || (Date.now() - (window._hsDelCache._t||0)) > 2*60*1000){
+  // توريدات آخر 180 يوم (الرواكد بتتحسب على آخر 30 يوم، والباقي لمعرفة أصناف كل عميل) — كاش دقيقتين
+  if(!window._hsDelCache || window._hsDelCache._d!==180 || (Date.now() - (window._hsDelCache._t||0)) > 2*60*1000){
     try{
       const H2 = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-      const d30 = new Date(Date.now()-30*864e5).toISOString().slice(0,10);
-      const dd = await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=branch_name,delivery_date,items&delivery_date=gte.${d30}&deleted_at=is.null&order=delivery_date.desc`, H2).catch(()=>[]);
-      dd._t = Date.now();
+      const d180 = new Date(Date.now()-180*864e5).toISOString().slice(0,10);
+      const dd = await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=branch_name,delivery_date,items&delivery_date=gte.${d180}&deleted_at=is.null&order=delivery_date.desc`, H2).catch(()=>[]);
+      dd._t = Date.now(); dd._d = 180;
       window._hsDelCache = dd;
     }catch(e){ window._hsDelCache = window._hsDelCache||[]; }
   }
+  try{ await hsLoadCarriedCtx(visits, window._hsDelCache||[]); }catch(e){ console.warn('hsLoadCarriedCtx', e); }
   hsRenderRepsTable(visits, missing, products, window._hsDelCache||[]);
 }
 
@@ -19568,6 +19569,46 @@ function hsRenderAging(products){
   }).join('')||'<div style="font-size:11px;color:var(--text2)">لا توجد منتجات قريبة الصلاحية</div>';
 }
 
+// أصناف كل عميل (علشان نفرّق بين "راكد" فعلًا وبين رصيد متسجل لصنف مش بيتورد للعميل أصلًا):
+// الصنف "بتاع العميل" لو ظهر في فواتير MT للعميل أو في توريدات فروعه (آخر 180 يوم)، بعد توحيد الاسم
+// (ي/ى، ة/ه) وتحويله للاسم المعتمد عبر item_name_aliases.
+async function hsLoadCarriedCtx(visits, deliveries){
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const nk = s=>sciNormalizeItemKey(s||'');
+  const ctx = window._hsCtx = window._hsCtx || {bcm:null, aliasNorm:null, cAliases:{}, mt:{}, del:{}, t:0};
+  if(!ctx.bcm || Date.now()-ctx.t > 10*60*1000){
+    const rows = await fetchAllRows(`${SUPABASE_URL}/rest/v1/branch_client_map?select=client_name,branch_name`, H).catch(()=>null);
+    if(Array.isArray(rows)){ ctx.bcm = {}; rows.forEach(m=>{ if(m.branch_name&&m.client_name) ctx.bcm[m.branch_name]=m.client_name; }); }
+    const am = await sciLoadItemAliasMap();
+    ctx.aliasNorm = {}; Object.entries(am||{}).forEach(([a,c])=>{ ctx.aliasNorm[nk(a)] = nk(c); });
+    const sc = await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_clients?select=name,mt_customer_names&deleted_at=is.null`, H).catch(()=>[]);
+    ctx.cAliases = {}; (sc||[]).forEach(r=>{ if(r.name) ctx.cAliases[r.name] = Array.isArray(r.mt_customer_names)?r.mt_customer_names:[]; });
+    ctx.mt = {}; ctx.t = Date.now();
+  }
+  if(!ctx.bcm) return;
+  const ck = n=> ctx.aliasNorm[nk(n)] || nk(n);
+  // آخر فرع زاره كل منسق (نفس منطق hsRenderRepsTable)
+  const last = {};
+  (visits||[]).forEach(v=>{ if(v.name && v.branch && (!last[v.name] || (v.created_at||'')>last[v.name].d)) last[v.name]={d:v.created_at||'', b:v.branch}; });
+  const clients = [...new Set(Object.values(last).map(x=>ctx.bcm[x.b]).filter(Boolean))].filter(c=>!(c in ctx.mt));
+  await Promise.all(clients.map(async c=>{
+    try{
+      const keys = [...new Set([c, ...(ctx.cAliases[c]||[])].map(sciNormalizeCustomerKey).filter(Boolean))];
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_mt_items_for_customer_keys`, {method:'POST', headers:{...H,'Content-Type':'application/json'}, body:JSON.stringify({p_keys:keys})});
+      const rows = res.ok ? await res.json().catch(()=>null) : null;
+      if(!Array.isArray(rows)){ ctx.mt[c] = null; return; }
+      const set = new Set(); rows.forEach(r=>{ if(r.item) set.add(ck(r.item)); });
+      ctx.mt[c] = set;
+    }catch(e){ ctx.mt[c] = null; }
+  }));
+  ctx.del = {};
+  (deliveries||[]).forEach(d=>{
+    const c = ctx.bcm[d.branch_name]; if(!c || !Array.isArray(d.items)) return;
+    const set = ctx.del[c] = ctx.del[c] || new Set();
+    d.items.forEach(it=>{ const k=ck(it.name||it.snf); if(k) set.add(k); });
+  });
+}
+
 function hsRenderRepsTable(visits, missing, products, deliveries){
   const repMap={};
   const visitsByRep={}; // اسم المنسق → كل تواريخ/فروع زياراته (نستخدمها بعدين لتحديد آخر 3 زيارات لنفس الفرع)
@@ -19610,21 +19651,33 @@ function hsRenderRepsTable(visits, missing, products, deliveries){
   });
   // الرواكد: صنف على الرف/المخزن رصيده (رف+مخزن) أكتر من 25 ومتورّدش للفرع أقل من 5 في آخر 30 يوم
   const _nk = s=> (typeof sciNormalizeItemKey==='function') ? sciNormalizeItemKey(s||'') : String(s||'').trim();
+  const ctx = window._hsCtx;
+  const ck = n=> (ctx&&ctx.aliasNorm && ctx.aliasNorm[_nk(n)]) || _nk(n);
+  const d30 = new Date(Date.now()-30*864e5).toISOString().slice(0,10);
   const delByBranch = {};
   (deliveries||[]).forEach(d=>{
-    if(!d.branch_name || !Array.isArray(d.items)) return;
+    if(!d.branch_name || !Array.isArray(d.items) || (d.delivery_date||'')<d30) return;
     const m = (delByBranch[d.branch_name] = delByBranch[d.branch_name] || {});
-    d.items.forEach(it=>{ const k=_nk(it.name||it.snf); if(k) m[k] = (m[k]||0) + (+it.qty||0); });
+    d.items.forEach(it=>{ const k=ck(it.name||it.snf); if(k) m[k] = (m[k]||0) + (+it.qty||0); });
   });
   Object.values(repMap).forEach(r=>{
     const dm = delByBranch[r.branch];
+    const client = ctx && ctx.bcm ? ctx.bcm[r.branch] : null;
+    const mtSet = client && ctx.mt ? ctx.mt[client] : null;       // null = غير معروف (فرع غير مربوط/فشل التحميل)
+    const delSet = client && ctx.del ? ctx.del[client] : null;
+    r.client = client||'';
     r.itemList = Object.entries(r.items||{}).map(([snf,p])=>{
       const shelf = +p.shelf_qty||0, stock = +p.stock_qty||0, bal = shelf+stock;
-      const supplied = dm ? (dm[_nk(snf)]||0) : null;
-      const dead = dm ? (bal>25 && supplied<5) : false;
-      return {snf, cat:p.cat||'', shelf, stock, bal, supplied, dead, date:(p.created_at||'').slice(0,10)};
+      const k = ck(snf);
+      const supplied = dm ? (dm[k]||0) : null;
+      // الصنف بتاع العميل؟ true/false، أو null لو مش قادرين نحدد
+      const carried = (mtSet ? (mtSet.has(k) || !!(delSet && delSet.has(k))) : null);
+      const suspect = carried===false && bal>0;                    // رصيد مسجل لصنف مش بيتورد للعميل أصلًا
+      const dead = !suspect && dm ? (bal>25 && supplied<5) : false;
+      return {snf, cat:p.cat||'', shelf, stock, bal, supplied, dead, suspect, carried, date:(p.created_at||'').slice(0,10)};
     }).sort((a,b)=>b.bal-a.bal);
     r.dead = dm ? r.itemList.filter(i=>i.dead).length : null;
+    r.suspect = r.itemList.filter(i=>i.suspect).length;
   });
   const rows=Object.values(repMap).map(r=>({...r, sku:r.skuSet.size})).sort((a,b)=>b.visits-a.visits);
   window._hsRepRows = rows;
@@ -19637,7 +19690,7 @@ function hsRenderRepsTable(visits, missing, products, deliveries){
       <td style="font-size:11px">${lastV}</td>
       <td style="text-align:center"><span class="badge b-blue" style="cursor:pointer" title="اضغط لعرض الأصناف" onclick="hsShowRepItems(${idx},'sku')">${r.sku}</span></td>
       <td style="text-align:center"><span class="badge ${r.missing>0?'b-red':'b-green'}">${r.missing}</span></td>
-      <td style="text-align:center">${r.dead==null?'<span class="badge b-gray" title="مفيش توريدات للفرع في آخر 30 يوم">—</span>':`<span class="badge ${r.dead>0?'b-orange':'b-gray'}" style="cursor:pointer" title="اضغط لعرض الرواكد" onclick="hsShowRepItems(${idx},'dead')">${r.dead}</span>`}</td>
+      <td style="text-align:center">${r.dead==null?'<span class="badge b-gray" title="مفيش توريدات للفرع في آخر 30 يوم">—</span>':`<span class="badge ${r.dead>0?'b-orange':'b-gray'}" style="cursor:pointer" title="اضغط لعرض الرواكد" onclick="hsShowRepItems(${idx},'dead')">${r.dead}</span>`}${r.suspect>0?` <span class="badge b-red" style="cursor:pointer" title="أرصدة مسجلة لأصناف مش بتتورد للعميل — اضغط للمراجعة" onclick="hsShowRepItems(${idx},'suspect')">⚠ ${r.suspect}</span>`:''}</td>
       <td>${status}</td>
     </tr>`;
   }).join('')||'<tr><td colspan="7"style="text-align:center;padding:1rem;color:var(--text2)">لا توجد بيانات</td></tr>';
@@ -19646,10 +19699,10 @@ function hsRenderRepsTable(visits, missing, products, deliveries){
 function hsShowRepItems(idx, mode){
   const r = (window._hsRepRows||[])[idx]; if(!r) return;
   const esc = s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  const list = (r.itemList||[]).filter(i=> mode==='dead' ? i.dead : true);
-  const title = mode==='dead' ? 'الأصناف الراكدة' : 'أصناف الرف';
+  const list = (r.itemList||[]).filter(i=> mode==='dead' ? i.dead : mode==='suspect' ? i.suspect : true);
+  const title = mode==='dead' ? 'الأصناف الراكدة' : mode==='suspect' ? 'أرصدة لأصناف غير مورَّدة للعميل' : 'أصناف الرف';
   const rowsHtml = list.map(i=>`<tr>
-    <td style="font-weight:700">${esc(i.snf)}${i.dead?' <span class="badge b-orange">راكد</span>':''}</td>
+    <td style="font-weight:700">${esc(i.snf)}${i.dead?' <span class="badge b-orange">راكد</span>':''}${i.suspect?' <span class="badge b-red" title="الصنف ده ماظهرش في فواتير العميل ولا في توريدات فروعه">غير مورَّد للعميل</span>':''}</td>
     <td style="font-size:11px">${esc(i.cat)||'—'}</td>
     <td style="text-align:center">${i.shelf}</td>
     <td style="text-align:center">${i.stock}</td>
@@ -19666,7 +19719,7 @@ function hsShowRepItems(idx, mode){
   m.innerHTML = `<div style="background:var(--card,#fff);border-radius:14px;max-width:820px;width:100%;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.3)" dir="rtl">
     <div style="padding:14px 18px;border-bottom:1px solid var(--border,#e5e7eb);display:flex;align-items:center;justify-content:space-between;gap:10px">
       <div><div style="font-weight:800;font-size:15px">${title} — ${esc(r.name)}</div>
-      <div style="font-size:11px;color:var(--text2)">${esc(r.branch)} • ${list.length} صنف • من آخر 3 زيارات للفرع${mode==='dead'?' • راكد = رصيد (رف+مخزن) أكتر من 25 وتوريد آخر 30 يوم أقل من 5':''}</div></div>
+      <div style="font-size:11px;color:var(--text2)">${esc(r.branch)} • ${list.length} صنف • من آخر 3 زيارات للفرع${mode==='dead'?' • راكد = صنف بيتورد للعميل، رصيده (رف+مخزن) أكتر من 25 وتوريد آخر 30 يوم أقل من 5':''}${mode==='suspect'?' • صنف مسجل له رصيد بس ماظهرش في فواتير العميل'+(r.client?' ('+esc(r.client)+')':'')+' ولا في توريد فروعه — غالبًا خطأ تسجيل، راجع المنسق':''}</div></div>
       <button class="btn" onclick="document.getElementById('hs-items-modal').remove()" style="padding:4px 12px">إغلاق</button>
     </div>
     <div style="overflow:auto;padding:0 6px 10px">
