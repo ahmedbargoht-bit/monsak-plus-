@@ -1586,44 +1586,24 @@ async function sciLoadClientCatalogForBranch(branchName){
     // المصدر الوحيد لأصناف العميل: فواتير MT على مستوى العميل كله (مش الفرع) — فأي فرع للعميل بيشوف نفس
     // الأصناف حتى لو بضاعته بتيجي من مخازن مركزية. الأسماء المكتوبة بأكتر من شكل بتتوحّد: بالتوحيد
     // الإملائي (ي/ى، ة/ه، أ/ا...) وبالأسماء البديلة المسجلة (item_name_aliases) → الاسم المعتمد في القاعدة.
+    // المصدر الموحد: جدول client_items (بيتبني تلقائيًا من فواتير MT 2026 بعد توحيد الأسماء وربط العميل)،
+    // والـ RPC بيستبعد الأصناف اللي الأدمن أخفاها (للعميل أو للكل).
     const seen = {};
     let deliveriesOk = false;
     try{
-      const aliasesMap = await sciLoadClientAliasesMap();
-      const aliases = aliasesMap[client] || [];
-      const keys = [...new Set([sciNormalizeCustomerKey(client), ...aliases.map(sciNormalizeCustomerKey)].filter(Boolean))];
-      const itemAlias = await sciLoadItemAliasNormMap();
-      const _li = sciBuildPdbLocationIndex();
-      const pdbByKey = {}; Object.keys(_li).forEach(n=>{ pdbByKey[sciNormalizeItemKey(n)] = n; });
-      const mtRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_mt_items_for_customer_keys`, {
-        method:'POST', headers:{...H,'Content-Type':'application/json'}, body: JSON.stringify({p_keys: keys})
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_client_items`, {
+        method:'POST', headers:{...H,'Content-Type':'application/json'}, body: JSON.stringify({p_client: client})
       });
-      const mtRows = mtRes.ok ? await mtRes.json().catch(()=>null) : null;
-      if(Array.isArray(mtRows)){
+      const rows = res.ok ? await res.json().catch(()=>null) : null;
+      if(Array.isArray(rows)){
         deliveriesOk = true;
-        const byKey = {};
-        mtRows.forEach(r=>{
-          const raw = (r.item||'').trim(); if(!raw) return;
-          const canon = itemAlias[sciNormalizeItemKey(raw)];       // الاسم المعتمد لو الاسم ده بديل لصنف تاني
-          const shown = canon || raw;
-          const ik = sciNormalizeItemKey(shown);
-          const cnt = +r.cnt || 0;
-          const e = byKey[ik] || (byKey[ik] = {name:shown, best:-1});
-          if(cnt > e.best){ e.best = cnt; e.name = shown; }          // لو مفيش اسم معتمد: الإملاء الأكتر تكرارًا
-        });
-        Object.entries(byKey).forEach(([ik,v])=>{ seen[pdbByKey[ik] || v.name] = true; });  // نفضّل اسم القاعدة لو موجود
+        const _li = sciBuildPdbLocationIndex();
+        const pdbByKey = {}; Object.keys(_li).forEach(n=>{ pdbByKey[sciNormalizeItemKey(n)] = n; });
+        rows.forEach(r=>{ const nm=(r.item||'').trim(); if(nm) seen[pdbByKey[sciNormalizeItemKey(nm)] || nm] = true; });
       }
-    }catch(e){ console.warn('sciLoadClientCatalogForBranch MT error:', e); }
+    }catch(e){ console.warn('sciLoadClientCatalogForBranch client_items error:', e); }
 
     if(deliveriesOk){
-      // استبعاد الأصناف اللي الأدمن أخفاها من "أصناف العملاء" — عام (كل العملاء) أو خاص بالعميل ده بس
-      try{
-        const hOr = 'or=(' + `client_name.eq.${pgOrVal(client)},client_name.eq.${pgOrVal('__GLOBAL__')}` + ')';
-        const hres = await fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?select=item_name&${hOr}&limit=5000`, {headers:H, cache:'no-store'});
-        const hrows = hres.ok ? await hres.json().catch(()=>[]) : [];
-        const hk = new Set((Array.isArray(hrows)?hrows:[]).map(r=>sciNormalizeItemKey(r.item_name)).filter(Boolean));
-        Object.keys(seen).forEach(n=>{ if(hk.has(sciNormalizeItemKey(n))) delete seen[n]; });
-      }catch(e){ console.warn('sciLoadClientCatalogForBranch hidden filter error:', e); }
       const locIdx = sciBuildPdbLocationIndex();
       const itemNames = Object.keys(seen);
       state.itemNames = new Set(itemNames);
