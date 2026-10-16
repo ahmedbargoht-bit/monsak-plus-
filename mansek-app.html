@@ -1565,11 +1565,23 @@ async function sciLoadItemAliasNormMap(){
   return map;
 }
 
+// الغلاف: بيحمّل في حالة شغل منفصلة ومابيعمّلهاش "الحالة الحالية" إلا لو ده آخر طلب (يتجاهل الردود المتأخرة).
+// لو نفس الفرع (تحديث عند فتح تاب) بنسيب القوايم الحالية ظاهرة لحد ما الجديد يوصل بدل ما تفضى لحظات.
+// لو فرع مختلف: بنصفّر فورًا (مفيش أصناف فرع قديم تفضل ظاهرة).
+window._sciLoadSeq = 0;
 async function sciLoadClientCatalogForBranch(branchName){
-  const state = window._sciClientState;
-  state.branch = branchName||''; state.client = null; state.items = [];
-  state.itemNames = null; state.prunedPDB = null; state.locked = false; state.empty = false;
-  state.networkError = false; state.fromCache = false; state.cacheDate = null;
+  const seq = ++window._sciLoadSeq;
+  const work = {branch:branchName||'', client:null, items:[], itemNames:null, prunedPDB:null, locked:false, empty:false, loading:!!branchName, networkError:false, fromCache:false, cacheDate:null};
+  const cur = window._sciClientState || {};
+  if(cur.branch !== (branchName||'')) window._sciClientState = work;
+  await _sciLoadCatalogInto(work, branchName);
+  work.loading = false;
+  if(seq !== window._sciLoadSeq) return window._sciClientState;   // طلب أحدث بدأ بعدنا — نتجاهل نتيجتنا
+  window._sciClientState = work;
+  return work;
+}
+
+async function _sciLoadCatalogInto(state, branchName){
   if(!branchName) return state;
   state.loading = true;
   try{
@@ -3120,8 +3132,12 @@ function showTab(tab){
     srInitFea();
     sciRefreshLiveCatalogForTab('supply');
     renderSentSupplyReqs();
-    // polling كل 30 ثانية للطلبيات
-    setInterval(()=>{ loadRepOrders(); }, 30000);
+    // polling كل 30 ثانية للطلبيات — مؤقت واحد بس (قبل كده كان بيتضاعف مع كل فتح للتاب)
+    if(window._ordersPolling) clearInterval(window._ordersPolling);
+    window._ordersPolling = setInterval(()=>{
+      if(document.getElementById('tab-supply-req')?.classList.contains('active')) loadRepOrders();
+      else { clearInterval(window._ordersPolling); window._ordersPolling = null; }
+    }, 30000);
     if(window._supplyPolling) clearInterval(window._supplyPolling);
     window._supplyPolling = setInterval(()=>{
       if(document.getElementById('tab-supply-req')?.classList.contains('active'))
@@ -4060,7 +4076,7 @@ function pEntryColors(type){
     ? {bg:'#EBF4FF', bdr:'#9CC3EA', txt:'#1A4A6B', ttl:'#1A5276', ico:'📦', name:'الرف'}
     : {bg:'#EAFAF1', bdr:'#8FD3AB', txt:'#145A32', ttl:'#145A32', ico:'🏪', name:'المخزن'};
 }
-function pEntryRowHtml(type, removable){
+function pEntryRowHtml(type, removable, i){
   const c = pEntryColors(type);
   const inpBase = `width:100%;min-width:0;box-sizing:border-box;height:44px;border:1.5px solid ${c.bdr};border-radius:8px;background:#fff;color:${c.txt};font-family:Cairo,sans-serif`;
   return `<div class="prow-${type}" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr)${removable?' 40px':''};gap:8px;align-items:end">
@@ -4070,16 +4086,16 @@ function pEntryRowHtml(type, removable){
     </label>
     <label style="display:block;min-width:0">
       <span style="display:block;font-size:11px;font-weight:700;color:${c.ttl};margin-bottom:3px">تاريخ الإنتاج (شهر / سنة)</span>
-      <input type="month" style="${inpBase};padding:0 8px;font-size:14px;font-weight:700;direction:ltr;text-align:center"/>
+      <input type="month" oninput="pUpdateRemain(${i},'${type}')" onchange="pUpdateRemain(${i},'${type}')" style="${inpBase};padding:0 8px;font-size:14px;font-weight:700;direction:ltr;text-align:center"/>
     </label>
-    ${removable?`<button type="button" onclick="this.closest('.prow-${type}').remove()" aria-label="حذف" style="height:44px;background:#FEE2E2;color:#B91C1C;border:1.5px solid #FCA5A5;border-radius:8px;cursor:pointer;font-size:16px;font-weight:800;padding:0">✕</button>`:''}
+    ${removable?`<button type="button" onclick="this.closest('.prow-${type}').remove();pUpdateRemain(${i},'${type}')" aria-label="حذف" style="height:44px;background:#FEE2E2;color:#B91C1C;border:1.5px solid #FCA5A5;border-radius:8px;cursor:pointer;font-size:16px;font-weight:800;padding:0">✕</button>`:''}
   </div>`;
 }
 function pEntrySection(i, type){
   const c = pEntryColors(type);
   return `<div style="background:${c.bg};border:1.5px solid ${c.bdr};border-radius:10px;padding:10px;margin-bottom:8px">
     <div style="font-size:13px;font-weight:800;color:${c.ttl};margin-bottom:8px">${c.ico} ${c.name}</div>
-    <div id="prows-${type}-${i}" style="display:flex;flex-direction:column;gap:10px">${pEntryRowHtml(type,false)}</div>
+    <div id="prows-${type}-${i}" style="display:flex;flex-direction:column;gap:10px">${pEntryRowHtml(type,false,i)}</div>
     <button type="button" onclick="pAddRow(${i},'${type}')"
       style="margin-top:10px;width:100%;height:38px;background:#fff;color:${c.ttl};border:1.5px dashed ${c.bdr};border-radius:8px;font-size:13px;font-family:Cairo,sans-serif;cursor:pointer;font-weight:700">
       + إضافة تاريخ آخر
@@ -4198,7 +4214,7 @@ function pAddRow(i, type){
   const container = document.getElementById(`prows-${type}-${i}`);
   if(!container) return;
   const tmp = document.createElement('div');
-  tmp.innerHTML = pEntryRowHtml(type, true);
+  tmp.innerHTML = pEntryRowHtml(type, true, i);
   const row = tmp.firstElementChild;
   container.appendChild(row);
   row.querySelector('input[type="number"]')?.focus();
@@ -4224,6 +4240,25 @@ function pGetRows(i, type){
     });
   }
   return result;
+}
+
+// مؤشر الصلاحية الحي: بياخد أقدم تاريخ إنتاج مكتوب في صفوف الرف/المخزن (الأسوأ) ويحسب المتبقي
+function pUpdateRemain(i, type){
+  const remEl = document.getElementById(`premain-${type}-${i}`);
+  const container = document.getElementById(`prows-${type}-${i}`);
+  if(!remEl || !container) return;
+  const dates = [...container.querySelectorAll('input[type="month"]')].map(d=>d.value).filter(Boolean).sort();
+  if(!dates.length){ remEl.textContent=''; remEl.style.background=''; remEl.style.padding='0'; return; }
+  const monthsInfo = (window._pCurrentMonths||[])[i] || {};
+  const months = type==='stock' ? (monthsInfo.monthsStock??10) : (monthsInfo.monthsShelf??10);
+  const exp = new Date(dates[0]+'-01'); exp.setMonth(exp.getMonth()+Number(months));
+  const today = new Date(); today.setDate(1); today.setHours(0,0,0,0);
+  const diff = (exp.getFullYear()-today.getFullYear())*12+(exp.getMonth()-today.getMonth());
+  remEl.style.padding='4px 6px';
+  if(diff<=0){ remEl.textContent='🔴 منتهية الصلاحية!'; remEl.style.background='#FFEBEE'; remEl.style.color='#B71C1C'; }
+  else if(diff<=3){ remEl.textContent=`🟠 باقي ${diff} شهر على الانتهاء`; remEl.style.background='#FFF3E0'; remEl.style.color='#E65100'; }
+  else if(diff<=6){ remEl.textContent=`🟡 باقي ${diff} شهر`; remEl.style.background='#FFFDE7'; remEl.style.color='#F57F17'; }
+  else { remEl.textContent=`🟢 باقي ${diff} شهر`; remEl.style.background='#E8F5E9'; remEl.style.color='#1B5E20'; }
 }
 
 function pCalcRemain(i, type){
@@ -4271,10 +4306,40 @@ function pClearProductRow(i){
     container.querySelectorAll('input[type="month"]').forEach(inp => inp.value='');
     const rows = container.querySelectorAll(`.prow-${type}`);
     rows.forEach((row, idx) => { if(idx > 0) row.remove(); });
+    const rem = document.getElementById(`premain-${type}-${i}`);
+    if(rem){ rem.textContent=''; rem.style.background=''; rem.style.padding='0'; }
   });
 }
 
 function _sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+// فحص قبل الإرسال: أي كمية أكبر من صفر لازم معاها تاريخ إنتاج (شهر/سنة)، وأي تاريخ لازم معاه كمية.
+// بيعلّم الخانة الغلط بالأحمر وبيرجّع قايمة المشاكل (فاضية = كله تمام).
+function pValidateEntries(){
+  const names = window._pCurrentList||[];
+  const problems = [];
+  let firstBad = null;
+  const bad = (el)=>{ if(el){ el.style.borderColor='#DC2626'; el.style.background='#FEF2F2'; if(!firstBad) firstBad = el; } };
+  const reset = (el)=>{ el.style.background='#fff'; };
+  names.forEach((snf,i)=>{
+    ['shelf','stock'].forEach(type=>{
+      const container = document.getElementById(`prows-${type}-${i}`);
+      if(!container) return;
+      container.querySelectorAll(`.prow-${type}`).forEach(row=>{
+        const q = row.querySelector('input[type="number"]');
+        const d = row.querySelector('input[type="month"]');
+        [q,d].forEach(el=>{ if(el) reset(el); });
+        const qty = parseFloat(q?.value)||0;
+        const hasDate = !!(d?.value);
+        const where = type==='shelf' ? 'الرف' : 'المخزن';
+        if(qty>0 && !hasDate){ problems.push(`${snf} (${where}): اكتب تاريخ الإنتاج`); bad(d); }
+        else if(hasDate && !(q?.value!=='' && q?.value!=null)){ problems.push(`${snf} (${where}): اكتب الكمية للتاريخ ده`); bad(q); }
+      });
+    });
+  });
+  if(firstBad) firstBad.scrollIntoView({behavior:'smooth', block:'center'});
+  return problems;
+}
 
 async function sendAllProducts(){
   if(!attIn){alert('سجّل الحضور أولاً من صفحة إدخال');return;}
@@ -4288,6 +4353,12 @@ async function sendAllProducts(){
   // نفس باج "فرع فاضي" اللي كان بيحصل بعد استعادة الجلسة لو النت اتقطع لحظة فتح التطبيق
   if(!branch){
     alert('⚠️ فرعك مش متحدد — اختر فرعك من القائمة فوق قبل ما تبعت الأصناف');
+    return;
+  }
+  const _problems = pValidateEntries();
+  if(_problems.length){
+    const shown = _problems.slice(0,6).join('\n• ');
+    alert('⚠️ في بيانات ناقصة — صحّحها قبل الإرسال:\n\n• '+shown+(_problems.length>6?`\n• ... و${_problems.length-6} كمان`:''));
     return;
   }
   const btn = document.getElementById('p-send-all-btn');
