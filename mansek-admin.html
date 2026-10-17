@@ -34293,8 +34293,9 @@ async function sciOnClientChange(){
 
   // دمج أصناف تحليل فواتير عملاء MT (كل التاريخ) — تغطية لأي صنف اتباع للعميل قبل ما المناديب يبدأوا
   // يسجلوا بنفسهم في تطبيق التسليم، أو أي نشاط (زي "تمراتي") مش بيتسجل في تطبيق التسليم أصلاً.
+  // (اتعطّل الدمج التلقائي من فواتير MT — قايمة العميل = فواتير المناديب + المضاف يدويًا. أصناف MT بتتضاف من زرار "إضافة أصناف للعميل" → "من فواتير MT")
   try{
-    const mtRows = await sciLoadMt2026();
+    const mtRows = [];
     let mtMatched = [];
     if(isAll){
       mtMatched = mtRows;
@@ -34535,7 +34536,8 @@ async function sciOpenAddItems(){
   let all = [];
   try{ all = await fetchAllRows(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?select=item_name&order=item_name.asc`, H); }catch(e){ console.error('[sciOpenAddItems]', e); }
   const have = new Set((_sciAllRows||[]).map(r=>sciNormalizeItemKey(r.name)));
-  const names = [...new Set((all||[]).map(x=>x.item_name).filter(Boolean))].filter(n=>!have.has(sciNormalizeItemKey(n)));
+  const catNames = [...new Set((all||[]).map(x=>x.item_name).filter(Boolean))].filter(n=>!have.has(sciNormalizeItemKey(n)));
+  let names = catNames;
   const old = document.getElementById('sci-add-modal'); if(old) old.remove();
   const m = document.createElement('div');
   m.id = 'sci-add-modal';
@@ -34543,7 +34545,8 @@ async function sciOpenAddItems(){
   m.innerHTML = `<div style="background:#fff;border-radius:14px;width:560px;max-width:100%;max-height:88vh;display:flex;flex-direction:column;direction:rtl;font-family:Cairo,sans-serif">
     <div style="padding:14px 18px;border-bottom:1px solid #EEE"><div style="font-weight:800;color:#731E2E;font-size:15px">إضافة أصناف للعميل</div>
       <div style="font-size:12px;color:#777;margin-top:3px">${esc(client)} — الأصناف المختارة تظهر تلقائي في تطبيق المنسق لكل فروعه</div></div>
-    <div style="padding:10px 18px"><input id="sci-add-q" type="text" placeholder="🔍 ابحث (مثال: كيس 90)" style="width:100%;padding:8px 10px;border:1px solid #DDD;border-radius:8px;font-family:inherit;font-size:13px"/>
+    <div style="padding:10px 18px 0"><select id="sci-add-src" style="width:100%;padding:8px 10px;border:1px solid #DDD;border-radius:8px;font-family:inherit;font-size:13px;margin-bottom:8px"><option value="cat">المصدر: كتالوج الأصناف الكامل</option><option value="mt">المصدر: أصناف العميل ده من فواتير MT (غير الموجودة عنده)</option></select></div>
+    <div style="padding:0 18px 10px"><input id="sci-add-q" type="text" placeholder="🔍 ابحث (مثال: كيس 90)" style="width:100%;padding:8px 10px;border:1px solid #DDD;border-radius:8px;font-family:inherit;font-size:13px"/>
       <div style="font-size:11px;color:#888;margin-top:6px"><span id="sci-add-cnt">0</span> صنف مختار — المعروض: <span id="sci-add-shown">${names.length}</span></div></div>
     <div id="sci-add-list" style="flex:1;overflow:auto;padding:0 18px;min-height:200px"></div>
     <div style="padding:12px 18px;border-top:1px solid #EEE;display:flex;gap:8px;justify-content:flex-end">
@@ -34562,6 +34565,29 @@ async function sciOpenAddItems(){
   };
   listEl.addEventListener('change', e=>{ const cb=e.target; if(cb && cb.dataset && cb.dataset.n!==undefined){ if(cb.checked) sel.add(cb.dataset.n); else sel.delete(cb.dataset.n); m.querySelector('#sci-add-cnt').textContent = sel.size; } });
   m.querySelector('#sci-add-q').oninput = draw;
+  let mtNamesCache = null;
+  m.querySelector('#sci-add-src').onchange = async (e)=>{
+    if(e.target.value==='cat'){ names = catNames; draw(); return; }
+    listEl.innerHTML = '<div style="text-align:center;padding:24px;color:#888">جاري تحميل أصناف العميل من فواتير MT...</div>';
+    try{
+      if(!mtNamesCache){
+        const mtRows = await sciLoadMt2026();
+        const aliasKeys = splClientMtAliases(client).map(sciNormalizeCustomerKey).filter(Boolean);
+        const okKeys = new Set([sciNormalizeCustomerKey(client), ...aliasKeys].filter(Boolean));
+        await sciLoadItemAliasMap();
+        const set = new Set();
+        mtRows.filter(r=>okKeys.has(r.__custKey)).forEach(r=>{
+          const nm = (r.item||'').trim(); if(!nm) return;
+          const sp = (_sciItemCanonicalMap && _sciItemCanonicalMap[sciNormalizeItemKey(nm)]) || nm;
+          set.add(sciCanonicalItemName(sp));
+        });
+        mtNamesCache = [...set].filter(n=>!have.has(sciNormalizeItemKey(n))).sort((a,b)=>a.localeCompare(b,'ar'));
+      }
+      names = mtNamesCache;
+      if(!names.length) showToast('كل أصناف MT للعميل ده موجودة في قايمته بالفعل');
+    }catch(err){ console.error('[sciOpenAddItems mt]', err); names = []; showToast('تعذر تحميل أصناف MT','err'); }
+    draw();
+  };
   m.querySelector('#sci-add-all').onclick = ()=>{ const q=sciNormalizeItemKey(m.querySelector('#sci-add-q').value||''); names.filter(n=>!q||sciNormalizeItemKey(n).includes(q)).slice(0,400).forEach(n=>sel.add(n)); draw(); };
   const close = ()=>m.remove();
   m.querySelector('#sci-add-cancel').onclick = close;
