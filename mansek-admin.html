@@ -3780,6 +3780,7 @@ h2,h3{color:#2C1F0A}
               <button class="btn btn-ghost btn-sm" onclick="csExportPDF()"><i class="ti ti-file-type-pdf" style="color:#731E2E"></i> تصدير PDF</button>
               <button class="btn btn-ghost btn-sm" onclick="csShare('pdf')"><i class="ti ti-brand-whatsapp" style="color:#25D366"></i> مشاركة PDF</button>
               <button class="btn btn-ghost btn-sm" id="cs-ppt-btn" onclick="csExportPPT()" title="عرض تقديمي بالتحليل ومقارنة السنتين"><i class="ti ti-presentation" style="color:#C55B48"></i> عرض تقديمي PPT</button>
+              <button class="btn btn-ghost btn-sm" id="cs-ppt2-btn" onclick="csExportPPT2()" title="عرض تقديمي مختصر بالرسوم البيانية للفترة (من/إلى) المختارة"><i class="ti ti-presentation-analytics" style="color:#731E2E"></i> عرض تقديمي للفترة</button>
               <button class="btn btn-ghost btn-sm" onclick="csShare('xlsx')"><i class="ti ti-brand-whatsapp" style="color:#25D366"></i> مشاركة Excel</button>
             </div>
           </div>
@@ -24462,6 +24463,176 @@ async function csExportPPT(){
     await pres.writeFile({fileName:`تحليل_مبيعات_عملاء_السلاسل_${D.y1.replace('/','-')}_مقابل_${D.y2.replace('/','-')}.pptx`});
     showToast('✅ تم تنزيل العرض التقديمي');
   }catch(e){ console.error('[csExportPPT]',e); const m='تعذر إنشاء العرض التقديمي: '+(e&&e.message||e); showToast(m,'err'); try{ alert(m); }catch(_){} }
+  finally{ if(btn){ btn.disabled=false; btn.innerHTML=old; } }
+}
+
+// ══ عرض تقديمي للفترة المختارة (من/إلى) — تحليل مختصر بالرسوم البيانية ══
+async function csPptData2(){
+  const from=document.getElementById('cs-from').value, to=document.getElementById('cs-to').value;
+  if(!from||!to||from>to) throw new Error('اختار الفترة (من / إلى) الأول');
+  const items=csEffItems()||[], custs=[...CS.selCust], brs=csBranchArg();
+  const pC=custs.length?custs:null, pI=items.length?items:null;
+  const gl=await csRpc('chain_dim_list',{p_dim:'grp'});
+  const keys=(gl||[]).map(r=>r.value);
+  const res=await Promise.all([
+    items.length?csRpc('chain_summary_items',{p_from:from,p_to:to,p_items:items,p_branches:brs}):csRpc('chain_clients_summary',{p_from:from,p_to:to,p_branches:brs}),
+    csRpc('chain_top_items',{p_from:from,p_to:to,p_customers:pC,p_items:pI,p_branches:brs})
+  ].concat(keys.map(k=>csRpc('chain_dim_report',{p_dim:'grp',p_keys:[k],p_from:from,p_to:to,p_items:pI,p_customers:pC}).catch(()=>[]))));
+  const cr=(res[0]||[]).filter(r=>!custs.length||custs.includes(r.customer));
+  const cust=cr.map(r=>({n:r.customer,s:+r.sales||0,r:+r.returns||0}));
+  const it=(res[1]||[]).map(r=>({n:r.item,q:+r.qty_sold||0,v:+r.val_sold||0,qr:+r.qty_ret||0,vr:+r.val_ret||0}));
+  const seen={}; let sites=[];
+  res.slice(2).forEach(rows=>(rows||[]).forEach(r=>{ if(r.kind!=='site') return; const k=r.name+'|'+(r.customer||''); if(seen[k]) return; seen[k]=1;
+    sites.push({n:r.name,c:r.customer||'',grp:r.grp||'غير مصنّف',route:r.route||'غير مصنّف',s:+r.vs||0,r:+r.vr||0}); }));
+  if(brs){ const bs=new Set(brs); const f=sites.filter(x=>bs.has(x.n)); if(f.length) sites=f; }
+  const agg=(key)=>{ const m={}; sites.forEach(x=>{ const k=x[key]; const o=m[k]=m[k]||{n:k,s:0,r:0,cnt:0}; o.s+=x.s; o.r+=x.r; o.cnt++; }); return Object.values(m); };
+  const tot={s:0,r:0}; cust.forEach(c=>{ tot.s+=c.s; tot.r+=c.r; });
+  const ft=[]; ft.push('الفروع: '+(brs?brs.length+' فرع':'كل الفروع')); ft.push('العملاء: '+(custs.length?custs.length+' عميل':'كل العملاء')); ft.push('المصانع: '+(CS.selFac.size?[...CS.selFac].join('، '):'كل المصانع')); ft.push('الأصناف: '+(items.length?items.length+' صنف':'كل الأصناف'));
+  return {logo:(typeof SINV_LOGO!=='undefined'?SINV_LOGO:''), author:'AHMED BARGOHT', from, to, tot, cust, items:it, sites, groups:agg('grp'), routes:agg('route'), filtersTxt:ft.join(' | ')};
+}
+function csBuildDeck2(PptxGenJS, D){
+  const C={maroon:'731E2E',gold:'C8A96E',goldL:'F0C880',olive:'4E5A2B',brown:'4B3C1A',cream:'FAF6EE',cream2:'F3EADA',red:'C55B48',green:'0F6E56',bad:'B71C1C',ink:'2C1F0A',mute:'8B6F47'};
+  const PAL=['731E2E','C8A96E','4E5A2B','C55B48','8B6F47','0F6E56','B9A27A'];
+  const F='Arial', W=13.33, H=7.5;
+  const pres=new PptxGenJS();
+  pres.layout='LAYOUT_WIDE'; pres.rtlMode=true; pres.author=D.author; pres.company='الطحان جولدن داتس'; pres.title='مبيعات عملاء السلاسل '+D.from+' إلى '+D.to;
+  const fmt=n=>Number(n||0).toLocaleString('en-US',{maximumFractionDigits:0});
+  const fm=n=>{ n=Number(n||0); const a=Math.abs(n); return a>=1e6?(n/1e6).toFixed(2)+' مليون':a>=1e3?(n/1e3).toFixed(0)+' ألف':fmt(n); };
+  const k=n=>Math.round((Number(n)||0)/1000);
+  const pc=(a,b)=>b>0?a/b*100:0;
+  const sh=(x,n)=>{ x=String(x||'').replace(/\s+/g,' ').trim(); return x.length>n?x.slice(0,n)+'…':x; };
+  const logo='image/png;base64,'+String(D.logo||'').replace(/^data:image\/png;base64,/,'');
+  const per='الفترة: '+D.from+' ← '+D.to;
+  let n=0;
+  function frame(title,sub){
+    const s=pres.addSlide(); n++;
+    s.background={color:C.cream};
+    s.addShape('rect',{x:0,y:0,w:W,h:1.05,fill:{color:C.maroon},line:{color:C.maroon,width:0}});
+    s.addShape('rect',{x:0,y:1.05,w:W,h:0.06,fill:{color:C.gold},line:{color:C.gold,width:0}});
+    s.addText(title,{x:3.2,y:0.12,w:W-3.5,h:0.55,fontFace:F,fontSize:26,bold:true,color:'FFFFFF',align:'right',rtlMode:true,isTextBox:true,margin:0});
+    if(sub) s.addText(sub,{x:3.2,y:0.62,w:W-3.5,h:0.35,fontFace:F,fontSize:13,color:C.goldL,align:'right',rtlMode:true,isTextBox:true,margin:0});
+    s.addShape('roundRect',{x:0.3,y:0.1,w:2.3,h:0.85,fill:{color:'F8F6F2'},line:{color:C.gold,width:1},rectRadius:0.08});
+    s.addImage({data:logo,x:0.35,y:0.12,w:2.2,h:0.81,sizing:{type:'contain',w:2.2,h:0.81}});
+    s.addShape('rect',{x:0,y:H-0.42,w:W,h:0.42,fill:{color:C.cream2},line:{color:C.cream2,width:0}});
+    s.addText('إعداد: '+D.author,{x:W-4.6,y:H-0.4,w:4.3,h:0.38,fontFace:F,fontSize:11,bold:true,color:C.maroon,align:'right',isTextBox:true,margin:0});
+    s.addText('مبيعات عملاء السلاسل — '+per,{x:3.2,y:H-0.4,w:W-8,h:0.38,fontFace:F,fontSize:10,color:C.mute,align:'center',isTextBox:true,margin:0});
+    s.addText(String(n),{x:0.3,y:H-0.4,w:0.8,h:0.38,fontFace:F,fontSize:11,color:C.mute,align:'left',isTextBox:true,margin:0});
+    return s;
+  }
+  function side(s,title,lines,col){
+    const x=0.4, y=1.4, w=4.1, h=5.5;
+    s.addShape('roundRect',{x,y,w,h,fill:{color:'FFFFFF'},line:{color:'E5DAC3',width:1},rectRadius:0.1});
+    s.addShape('rect',{x:x+w-0.12,y:y+0.2,w:0.08,h:h-0.4,fill:{color:col||C.maroon},line:{color:col||C.maroon,width:0}});
+    s.addText(title,{x:x+0.2,y:y+0.15,w:w-0.5,h:0.45,fontFace:F,fontSize:16,bold:true,color:col||C.maroon,align:'right',rtlMode:true,isTextBox:true,margin:0});
+    s.addText(lines.map((t,i)=>({text:t,options:{breakLine:i<lines.length-1,bullet:true,paraSpaceAfter:8}})),{x:x+0.2,y:y+0.7,w:w-0.5,h:h-0.9,fontFace:F,fontSize:13,color:C.ink,align:'right',rtlMode:true,valign:'top',isTextBox:true,margin:0});
+  }
+  const hbar=(s,labels,values,name,color,fmtc)=>s.addChart(pres.charts.BAR,[{name,labels,values}],{x:4.7,y:1.35,w:W-5.1,h:5.6,barDir:'bar',barGrouping:'clustered',chartColors:[color],showLegend:false,catAxisLabelFontFace:F,catAxisLabelFontSize:11,catAxisOrientation:'maxMin',valAxisHidden:true,valGridLine:{style:'none'},showValue:true,dataLabelFormatCode:fmtc||'#,##0',dataLabelFontSize:11,dataLabelFontFace:F,showTitle:true,title:name,titleFontFace:F,titleFontSize:13,titleColor:C.mute});
+  const cust=D.cust.map(c=>Object.assign({},c,{net:c.s-c.r})).sort((a,b)=>b.net-a.net);
+  const totNet=D.tot.s-D.tot.r, rp=pc(D.tot.r,D.tot.s);
+  const itAll=D.items.filter(x=>x.v>0||x.q>0);
+  const fast=itAll.slice().sort((a,b)=>b.q-a.q).slice(0,10);
+  const slow=itAll.filter(x=>x.q>0).sort((a,b)=>a.q-b.q).slice(0,10);
+  const top10=cust.slice(0,10), top10Net=top10.reduce((s,c)=>s+c.net,0);
+  const grp=D.groups.map(g=>Object.assign({},g,{net:g.s-g.r,label:(CS_GRP_LBL[g.n]||g.n)})).sort((a,b)=>b.net-a.net);
+  const rts=D.routes.map(g=>Object.assign({},g,{net:g.s-g.r})).sort((a,b)=>b.net-a.net);
+  const sts=D.sites.map(g=>Object.assign({},g,{net:g.s-g.r})).sort((a,b)=>b.net-a.net);
+
+  // 1) الغلاف
+  { const s=pres.addSlide(); n++;
+    s.background={color:C.maroon};
+    s.addShape('rect',{x:0,y:H-1.3,w:W,h:1.3,fill:{color:'5E1824'},line:{color:'5E1824',width:0}});
+    s.addShape('rect',{x:0,y:H-1.34,w:W,h:0.06,fill:{color:C.gold},line:{color:C.gold,width:0}});
+    s.addShape('roundRect',{x:W/2-2.6,y:0.5,w:5.2,h:2.3,fill:{color:'F8F6F2'},line:{color:C.gold,width:2},rectRadius:0.15});
+    s.addImage({data:logo,x:W/2-2.5,y:0.55,w:5.0,h:2.2,sizing:{type:'contain',w:5.0,h:2.2}});
+    s.addText('تحليل مبيعات عملاء السلاسل',{x:0.5,y:3.1,w:W-1,h:0.9,fontFace:F,fontSize:42,bold:true,color:'FFFFFF',align:'center',rtlMode:true,isTextBox:true,margin:0});
+    s.addText(per,{x:0.5,y:4.05,w:W-1,h:0.6,fontFace:F,fontSize:22,color:C.goldL,align:'center',rtlMode:true,isTextBox:true,margin:0});
+    if(D.filtersTxt) s.addText(D.filtersTxt,{x:0.5,y:4.75,w:W-1,h:0.4,fontFace:F,fontSize:12,color:C.gold,align:'center',rtlMode:true,isTextBox:true,margin:0});
+    s.addText('إعداد: '+D.author,{x:0.5,y:H-1.05,w:W-1,h:0.6,fontFace:F,fontSize:22,bold:true,color:C.goldL,align:'center',isTextBox:true,margin:0});
+    s.addText('الطحان جولدن داتس',{x:0.5,y:H-0.55,w:W-1,h:0.35,fontFace:F,fontSize:13,color:'F3EADA',align:'center',rtlMode:true,isTextBox:true,margin:0});
+  }
+  // 2) الملخص التنفيذي
+  { const s=frame('الملخص التنفيذي',per);
+    const cards=[['المبيعات',fm(D.tot.s),C.olive],['المرتجع',fm(D.tot.r),C.bad],['الصافي',fm(totNet),C.maroon],['نسبة المرتجع',rp.toFixed(2)+'%',rp>5?C.bad:C.red],['عدد العملاء',String(cust.filter(c=>c.s>0).length),C.mute]];
+    const cw=(W-0.8-0.2*4)/5;
+    cards.forEach((c,i)=>{ const x=W-0.4-(i+1)*cw-i*0.2;
+      s.addShape('roundRect',{x,y:1.4,w:cw,h:1.5,fill:{color:'FFFFFF'},line:{color:'E5DAC3',width:1},rectRadius:0.1});
+      s.addShape('rect',{x:x+cw-0.1,y:1.55,w:0.07,h:1.2,fill:{color:c[2]},line:{color:c[2],width:0}});
+      s.addText(c[0],{x:x+0.1,y:1.5,w:cw-0.35,h:0.4,fontFace:F,fontSize:14,bold:true,color:c[2],align:'right',rtlMode:true,isTextBox:true,margin:0});
+      s.addText(c[1],{x:x+0.1,y:1.95,w:cw-0.35,h:0.7,fontFace:F,fontSize:24,bold:true,color:C.ink,align:'right',rtlMode:true,isTextBox:true,margin:0});
+    });
+    const L=[];
+    if(top10.length) L.push('أعلى 10 عملاء يمثلون '+pc(top10Net,totNet).toFixed(0)+'% من الصافي، والأول: '+sh(top10[0].n,40)+' ('+fm(top10[0].net)+').');
+    if(fast[0]) L.push('أسرع الأصناف دورانًا: '+sh(fast[0].n,45)+' ('+fmt(fast[0].q)+' قطعة).');
+    if(slow[0]) L.push('أبطأ صنف حركة: '+sh(slow[0].n,45)+' ('+fmt(slow[0].q)+' قطعة فقط).');
+    if(grp[0]) L.push('أقوى مجموعة: '+grp[0].label+' بصافي '+fm(grp[0].net)+'.');
+    if(rts[0]) L.push('أقوى خط سير: '+sh(rts[0].n,35)+' بصافي '+fm(rts[0].net)+'.');
+    const hr=sts.filter(x=>x.s>=20000).map(x=>Object.assign({},x,{p:pc(x.r,x.s)})).sort((a,b)=>b.p-a.p)[0];
+    if(hr) L.push('أعلى نسبة مرتجع بين الفروع: '+sh(hr.n,35)+' ('+hr.p.toFixed(1)+'%).');
+    s.addShape('roundRect',{x:0.4,y:3.15,w:W-0.8,h:3.75,fill:{color:'FFFFFF'},line:{color:'E5DAC3',width:1},rectRadius:0.1});
+    s.addText('أهم الملاحظات',{x:0.6,y:3.25,w:W-1.2,h:0.45,fontFace:F,fontSize:17,bold:true,color:C.maroon,align:'right',rtlMode:true,isTextBox:true,margin:0});
+    s.addText(L.map((t,i)=>({text:t,options:{breakLine:i<L.length-1,bullet:true,paraSpaceAfter:8}})),{x:0.6,y:3.8,w:W-1.2,h:3.0,fontFace:F,fontSize:15,color:C.ink,align:'right',rtlMode:true,valign:'top',isTextBox:true,margin:0});
+  }
+  // 3) أعلى 10 عملاء
+  if(top10.length){ const s=frame('أعلى 10 عملاء','حسب الصافي (مبيعات − مرتجع) — بالألف جنيه');
+    hbar(s,top10.map(c=>sh(c.n,32)),top10.map(c=>k(c.net)),'صافي (ألف جنيه)',C.maroon);
+    const hrt=top10.map(c=>Object.assign({},c,{p:pc(c.r,c.s)})).sort((a,b)=>b.p-a.p)[0];
+    side(s,'قراءة سريعة',['أعلى 10 عملاء = '+pc(top10Net,totNet).toFixed(0)+'% من إجمالي الصافي.','العميل الأول: '+sh(top10[0].n,38)+' بنسبة '+pc(top10[0].net,totNet).toFixed(0)+'%.','أعلى مرتجع بينهم: '+sh(hrt.n,34)+' ('+hrt.p.toFixed(1)+'%).','إجمالي صافي الـ10: '+fm(top10Net)+'.']); }
+  // 4) سريعة الدوران
+  if(fast.length){ const s=frame('الأصناف سريعة الدوران','أعلى 10 أصناف بيعًا بالكمية (قطعة) خلال الفترة');
+    hbar(s,fast.map(x=>sh(x.n,34)),fast.map(x=>Math.round(x.q)),'الكمية المباعة (قطعة)',C.olive);
+    const fv=fast.reduce((a,x)=>a+x.v,0);
+    side(s,'قراءة سريعة',['الصنف الأسرع: '+sh(fast[0].n,40)+' ('+fmt(fast[0].q)+' قطعة).','قيمة مبيعات هذه الأصناف العشرة: '+fm(fv)+' ('+pc(fv,D.tot.s).toFixed(0)+'% من المبيعات).','يُنصح بضمان توفرها دائمًا وعدم تعرضها للنقص.'],C.olive); }
+  // 5) بطيئة الدوران
+  if(slow.length){ const s=frame('الأصناف بطيئة الدوران','أقل 10 أصناف بيعًا بالكمية (من الأصناف اللي اتباعت فعلًا في الفترة)');
+    hbar(s,slow.map(x=>sh(x.n,34)),slow.map(x=>Math.round(x.q)),'الكمية المباعة (قطعة)',C.red);
+    side(s,'قراءة سريعة',['أبطأ صنف: '+sh(slow[0].n,40)+' ('+fmt(slow[0].q)+' قطعة).','هذه أصناف مبيعاتها ضعيفة في الفترة ويُراجع سبب ضعفها (تسعير، ترويج، أو توزيع).','التحليل من فواتير الفترة فقط ولا يشمل رصيد المخزون.'],C.red); }
+  // 6) مبيعات العملاء
+  { const s=frame('مبيعات العملاء','توزيع الصافي ونسبة المرتجع');
+    const t6=cust.filter(c=>c.net>0).slice(0,6); const rest=cust.filter(c=>c.net>0).slice(6).reduce((a,c)=>a+c.net,0);
+    const lab=t6.map(c=>sh(c.n,26)).concat(rest>0?['باقي العملاء']:[]), val=t6.map(c=>Math.round(c.net)).concat(rest>0?[Math.round(rest)]:[]);
+    if(val.length) s.addChart(pres.charts.DOUGHNUT,[{name:'الصافي',labels:lab,values:val}],{x:6.9,y:1.4,w:6.0,h:5.5,holeSize:52,chartColors:PAL.slice(0,val.length),showLegend:true,legendPos:'b',legendFontFace:F,legendFontSize:10,showPercent:true,showValue:false,dataLabelColor:'FFFFFF',dataLabelFontSize:11,dataLabelFontFace:F,showTitle:true,title:'توزيع الصافي',titleFontFace:F,titleFontSize:13,titleColor:C.mute});
+    const rr=cust.filter(c=>c.s>0).sort((a,b)=>b.s-a.s).slice(0,8).map(c=>({n:sh(c.n,24),p:+pc(c.r,c.s).toFixed(1)}));
+    if(rr.length) s.addChart(pres.charts.BAR,[{name:'نسبة المرتجع %',labels:rr.map(x=>x.n),values:rr.map(x=>x.p)}],{x:0.4,y:1.4,w:6.3,h:5.5,barDir:'bar',chartColors:[C.bad],showLegend:false,catAxisLabelFontFace:F,catAxisLabelFontSize:10,catAxisOrientation:'maxMin',valAxisHidden:true,valGridLine:{style:'none'},showValue:true,dataLabelFormatCode:'0.0"%"',dataLabelFontSize:10,dataLabelFontFace:F,showTitle:true,title:'نسبة المرتجع لأكبر 8 عملاء بالمبيعات',titleFontFace:F,titleFontSize:13,titleColor:C.mute}); }
+  // 7) المجموعات
+  if(grp.length){ const s=frame('المجموعات','المبيعات والصافي لكل مجموعة — بالألف جنيه');
+    const g=grp.slice(0,10);
+    s.addChart(pres.charts.BAR,[{name:'المبيعات',labels:g.map(x=>x.label),values:g.map(x=>k(x.s))},{name:'الصافي',labels:g.map(x=>x.label),values:g.map(x=>k(x.net))}],{x:4.7,y:1.35,w:W-5.1,h:5.6,barDir:'col',barGrouping:'clustered',chartColors:[C.gold,C.maroon],showLegend:true,legendPos:'t',legendFontFace:F,legendFontSize:11,catAxisLabelFontFace:F,catAxisLabelFontSize:10,valAxisHidden:true,valGridLine:{style:'none'},showValue:true,dataLabelFormatCode:'#,##0',dataLabelFontSize:10,dataLabelFontFace:F});
+    const gt=grp.reduce((a,x)=>a+x.net,0);
+    side(s,'قراءة سريعة',['أقوى مجموعة: '+grp[0].label+' ('+pc(grp[0].net,gt).toFixed(0)+'% من الصافي).','عدد المجموعات النشطة: '+grp.filter(x=>x.s>0).length+'.','أقل مجموعة: '+grp[grp.length-1].label+' ('+fm(grp[grp.length-1].net)+').']); }
+  // 8) خطوط السير
+  if(rts.length){ const s=frame('خطوط السير','أعلى 10 خطوط سير بالصافي — بالألف جنيه');
+    const r=rts.slice(0,10);
+    hbar(s,r.map(x=>sh(x.n,30)),r.map(x=>k(x.net)),'صافي (ألف جنيه)',C.olive);
+    const rt=rts.reduce((a,x)=>a+x.net,0), r10=r.reduce((a,x)=>a+x.net,0);
+    side(s,'قراءة سريعة',['أقوى خط سير: '+sh(rts[0].n,34)+' ('+fm(rts[0].net)+').','أعلى 10 خطوط = '+pc(r10,rt).toFixed(0)+'% من الصافي.','عدد خطوط السير النشطة: '+rts.filter(x=>x.s>0).length+'.'],C.olive); }
+  // 9) فروع العملاء
+  if(sts.length){ const s=frame('فروع العملاء','أعلى 10 فروع بالصافي — بالألف جنيه');
+    const b=sts.slice(0,10);
+    hbar(s,b.map(x=>sh(x.n+(x.c?' — '+sh(x.c,14):''),36)),b.map(x=>k(x.net)),'صافي (ألف جنيه)',C.maroon);
+    const hr=sts.filter(x=>x.s>=20000).map(x=>Object.assign({},x,{p:pc(x.r,x.s)})).sort((a,b)=>b.p-a.p).slice(0,3);
+    side(s,'قراءة سريعة',['عدد الفروع النشطة: '+sts.filter(x=>x.s>0).length+'.','أعلى فرع: '+sh(b[0].n,34)+' ('+fm(b[0].net)+').'].concat(hr.length?['أعلى نسبة مرتجع (مبيعات ≥ 20 ألف):'].concat(hr.map(x=>sh(x.n,28)+' — '+x.p.toFixed(1)+'%')):[])); }
+  // ختام
+  { const s=pres.addSlide(); n++;
+    s.background={color:C.maroon};
+    s.addShape('roundRect',{x:W/2-2.6,y:1.2,w:5.2,h:2.3,fill:{color:'F8F6F2'},line:{color:C.gold,width:2},rectRadius:0.15});
+    s.addImage({data:logo,x:W/2-2.5,y:1.25,w:5.0,h:2.2,sizing:{type:'contain',w:5.0,h:2.2}});
+    s.addText('شكرًا لكم',{x:0.5,y:3.9,w:W-1,h:0.9,fontFace:F,fontSize:44,bold:true,color:'FFFFFF',align:'center',rtlMode:true,isTextBox:true,margin:0});
+    s.addText('إعداد: '+D.author,{x:0.5,y:5.0,w:W-1,h:0.6,fontFace:F,fontSize:22,bold:true,color:C.goldL,align:'center',isTextBox:true,margin:0});
+  }
+  return pres;
+}
+async function csExportPPT2(){
+  const btn=document.getElementById('cs-ppt2-btn'); const old=btn?btn.innerHTML:'';
+  try{
+    if(btn){ btn.disabled=true; btn.innerHTML='<i class="ti ti-loader-2"></i> جاري التجهيز...'; }
+    showToast('جاري تجهيز العرض التقديمي للفترة...');
+    await csLoadPptxLib();
+    const D=await csPptData2();
+    if(!D.cust.length){ showToast('مفيش بيانات في الفترة دي'); return; }
+    const pres=csBuildDeck2(window.PptxGenJS,D);
+    await pres.writeFile({fileName:`عرض_مبيعات_عملاء_السلاسل_${D.from}_الى_${D.to}.pptx`});
+    showToast('✅ تم تنزيل العرض التقديمي');
+  }catch(e){ console.error('[csExportPPT2]',e); const m='تعذر إنشاء العرض التقديمي: '+(e&&e.message||e); showToast(m,'err'); try{ alert(m); }catch(_){} }
   finally{ if(btn){ btn.disabled=false; btn.innerHTML=old; } }
 }
 
