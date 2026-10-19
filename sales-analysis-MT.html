@@ -67,6 +67,12 @@ html, body {
   width: max-content; max-width: 96vw; max-height: 75vh; overflow-y: auto; overflow-x: auto;
   margin: 0; padding: 16px 18px;
 }
+/* وضع "رفع بيانات فقط" (?upload=1) — بيتفتح من لوحة التحكم: كارت الرفع ظاهر دايمًا + أداتين صيانة (دمج الأصناف / ربط خطوط السير) */
+body.upload-only #uploadToggleBtn, body.upload-only .maintabbar, body.upload-only .tabgroup-cap { display: none !important; }
+body.upload-only #uploadCard { display: block !important; position: static; width: auto; max-height: none; margin: 0 0 14px; }
+body.upload-only .tabbtn:not([data-tab="panel-itemmerge"]):not([data-tab="panel-linkroutes"]) { display: none !important; }
+body.upload-only .tabgroup { display: flex !important; }
+body.upload-only .tabgroup:not(:has(.tabbtn[data-tab="panel-itemmerge"], .tabbtn[data-tab="panel-linkroutes"])) { display: none !important; }
 .upload-grid { display: flex; flex-wrap: nowrap; gap: 8px; }
 .upload-grid > div { width: 200px; flex-shrink: 0; }
 @media (max-width: 900px) { .upload-grid { flex-wrap: wrap; } .upload-grid > div { width: 220px; } }
@@ -3492,10 +3498,68 @@ table.datatable details summary:hover { text-decoration: underline; }
   }
 
   /* ---------------- Processing ---------------- */
+  /* ---------------- كشف العملاء/الفروع/الأصناف الجديدة عند رفع الفواتير ---------------- */
+  // بنقارن اللي في الملفات المرفوعة باللي كان محفوظ في السحابة قبل الرفعة دي (RPC واحد: mt_known_names).
+  async function fetchKnownMtNames() {
+    try {
+      if (!sb) return null;
+      const { data, error } = await sb.rpc('mt_known_names');
+      if (error || !data) return null;
+      return data;
+    } catch (e) { return null; }
+  }
+  function normMtName(s) {
+    return String(s == null ? '' : s).replace(/\s+/g, ' ').trim()
+      .replace(/[أإآ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه').toLowerCase();
+  }
+  function detectNewMtEntities(newInvoices, newItemRows, known) {
+    if (!known) return null;
+    const kc = new Set((known.customers || []).map(normMtName));
+    const ks = new Set((known.sites || []).map(normMtName));
+    const ki = new Set((known.items || []).map(normMtName));
+    // أول رفع على الإطلاق (السحابة فاضية) - مفيش معنى لكلمة "جديد"
+    if (!kc.size && !ks.size && !ki.size) return null;
+    state.itemCatalog.forEach((v, k) => ki.add(normMtName(k)));
+    const customers = new Map(), sites = new Map(), items = new Map();
+    (newInvoices || []).forEach(inv => {
+      const c = inv['العميل'], s = inv['فرع_العميل'];
+      if (c && !kc.has(normMtName(c)) && !customers.has(normMtName(c))) customers.set(normMtName(c), String(c).trim());
+      if (s && !ks.has(normMtName(s)) && !sites.has(normMtName(s))) sites.set(normMtName(s), { name: String(s).trim(), customer: c ? String(c).trim() : '' });
+    });
+    (newItemRows || []).forEach(r => {
+      const it = r.item;
+      if (it && !ki.has(normMtName(it)) && !items.has(normMtName(it))) items.set(normMtName(it), String(it).trim());
+    });
+    if (!customers.size && !sites.size && !items.size) return null;
+    return { customers: [...customers.values()], sites: [...sites.values()], items: [...items.values()] };
+  }
+  function showNewMtEntitiesModal(f) {
+    const old = document.getElementById('mtNewEntitiesModal'); if (old) old.remove();
+    const esc = s => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+    const sec = (title, color, arr, fmt) => !arr.length ? '' :
+      `<div style="margin:10px 0 0"><div style="font-weight:800;color:${color};font-size:14px;margin-bottom:4px">${title} (${arr.length})</div>
+       <div style="max-height:130px;overflow:auto;background:#FAF7F2;border:1px solid #E2D9CC;border-radius:8px;padding:6px 10px;font-size:12.5px;line-height:1.9">
+       ${arr.slice(0, 60).map(x => '• ' + fmt(x)).join('<br>')}${arr.length > 60 ? '<br>… و' + (arr.length - 60) + ' كمان' : ''}</div></div>`;
+    const m = document.createElement('div');
+    m.id = 'mtNewEntitiesModal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99999;display:flex;align-items:center;justify-content:center;direction:rtl;font-family:Cairo,Tajawal,sans-serif';
+    m.innerHTML = `<div style="background:#fff;border-radius:14px;max-width:560px;width:92%;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
+      <div style="font-size:17px;font-weight:800;color:#731E2E;margin-bottom:6px">⚠️ فواتير MT فيها بيانات جديدة</div>
+      <div style="font-size:13px;color:#555;line-height:1.7">الرفعة دي فيها عملاء/فروع/أصناف أول مرة تظهر في النظام. راجعهم وضيفهم أو اربطهم في لوحة التحكم ← تاب <b>الفروع والعملاء</b>.</div>
+      ${sec('عملاء جدد', '#185FA5', f.customers, x => esc(x))}
+      ${sec('فروع جديدة', '#993C1D', f.sites, x => esc(x.name) + (x.customer ? ' <span style="color:#888">— ' + esc(x.customer) + '</span>' : ''))}
+      ${sec('أصناف جديدة', '#0F6E56', f.items, x => esc(x))}
+      <div style="text-align:left;margin-top:14px"><button id="mtNewEntitiesClose" style="background:#731E2E;color:#fff;border:none;border-radius:9px;padding:8px 22px;font-weight:700;cursor:pointer;font-family:inherit">تمام</button></div>
+    </div>`;
+    document.body.appendChild(m);
+    document.getElementById('mtNewEntitiesClose').onclick = () => m.remove();
+  }
+
   processBtn.addEventListener('click', async () => {
     processBtn.disabled = true;
     statusLog.innerHTML = '';
     logStatus('جاري القراءة والتحليل...');
+    const knownNamesP = fetchKnownMtNames(); // بيشتغل بالتوازي مع القراءة (لازم قبل الحفظ في السحابة عشان نعرف إيه الجديد)
     try {
 
     // ملحوظة معمارية: كل قراءة/تحليل ملف تحت بتنادي mtParseFile بدل XLSX.read المباشر - ده
@@ -3608,6 +3672,12 @@ table.datatable details summary:hover { text-decoration: underline; }
     renderIndirectFileList();
     customerInvFiles = [];
     renderCustomerInvFileList();
+
+    try {
+      const knownNames = await knownNamesP;
+      const fresh = detectNewMtEntities(newInvoices, newItemRows, knownNames);
+      if (fresh) { logStatus(`تنبيه: الرفعة دي فيها ${fresh.customers.length} عميل جديد و${fresh.sites.length} فرع جديد و${fresh.items.length} صنف جديد`, 'err'); if (window.parent && window.parent !== window) { try { window.parent.postMessage({ type: 'mt-new-entities', data: fresh }, '*'); } catch (eP) { showNewMtEntitiesModal(fresh); } } else showNewMtEntitiesModal(fresh); }
+    } catch (eNew) { console.warn('new-entities check failed', eNew); }
 
     syncToCloud(newInvoices, newItemRows, newReturns, newIndirectDiscounts, null, null, newCustomerInvoicesRaw);
     } catch (fatalErr) {
@@ -4493,6 +4563,13 @@ table.datatable details summary:hover { text-decoration: underline; }
     });
   });
   updatePrintBtnLabel();
+
+  // وضع رفع البيانات فقط (من لوحة التحكم: sales-analysis-MT.html?upload=1)
+  if (/[?&]upload=1\b/.test(location.search)) {
+    document.body.classList.add('upload-only');
+    const firstTool = document.querySelector('.tabbtn[data-tab="panel-itemmerge"]');
+    if (firstTool) firstTool.click();
+  }
 
   function renderPrintFilterSummary() {
     const el = document.getElementById('printFilterSummary');
