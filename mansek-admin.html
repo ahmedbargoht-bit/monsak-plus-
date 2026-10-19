@@ -54993,13 +54993,22 @@ async function ipaRenderResults(){
 
   const pBranch = _ipaState.branch || null;
   const pRoute = _ipaState.route || null;
-  const [refRows, actualRows, priceRows] = await Promise.all([
+  // سعر الكرتونة مثبّت على سعر الصنف في "أصناف العملاء" (جدول sales_prices = سعر القطعة/العلبة) × عدد القطع في الكرتونة
+  const fetchSalesPrices = async ()=>{
+    try{
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/sales_prices?select=snf_name,price&limit=5000`, {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+      return r.ok ? await r.json() : [];
+    }catch(e){ return []; }
+  };
+  const [refRows, actualRows, spRows] = await Promise.all([
     ipaRpc('mt_item_plan_period_agg', {p_year:_ipaState.refYear, p_month:_ipaState.refMonth, p_branch:pBranch, p_route:pRoute}),
     ipaRpc('mt_item_plan_period_agg', {p_year:_ipaState.targetYear, p_month:_ipaState.targetMonth, p_branch:pBranch, p_route:pRoute}),
-    ipaRpc('mt_item_last_carton_price', {p_branch:pBranch, p_route:pRoute})
+    fetchSalesPrices()
   ]);
 
-  const priceMap = new Map((priceRows||[]).map(r=>[r.item, r]));
+  const _ipaKey = s => (typeof sciNormalizeItemKey==='function' ? sciNormalizeItemKey(s) : String(s||'').trim());
+  const unitPriceMap = new Map();
+  (spRows||[]).forEach(x=>{ const k=_ipaKey(x.snf_name), v=Number(x.price)||0; if(k && v>0 && !unitPriceMap.has(k)) unitPriceMap.set(k, v); });
   const actualMap = new Map((actualRows||[]).map(r=>[r.item, r]));
   const refTotal = (refRows||[]).reduce((s,r)=>s+(Number(r.value)||0), 0);
 
@@ -55014,24 +55023,18 @@ async function ipaRenderResults(){
     const cartonsRef = Number(r.cartons)||0;
     const share = refTotal ? value/refTotal : 0;
     const targetValue = targetAmount ? targetAmount*share : null;
-    const pr = priceMap.get(r.item);
-    let currentCartonPrice = null;
-    if(pr){
-      const pc = Number(pr.price_carton)||0;
-      if(pc>0) currentCartonPrice = pc;
-      else {
-        const pp = Number(pr.price_piece)||0;
-        const ppc = Number(r.pieces_per_carton)||0;
-        if(pp>0 && ppc>0) currentCartonPrice = pp*ppc;
-      }
-    }
+    // سعر الكرتونة = سعر الصنف (أصناف العملاء) × عدد القطع في الكرتونة (كتالوج الأصناف). لو أي واحد ناقص: مفيش كراتين هدف للصنف ده.
+    const unitPrice = unitPriceMap.get(_ipaKey(r.item)) || null;
+    const ppc = Number(r.pieces_per_carton)||0;
+    const currentCartonPrice = (unitPrice && ppc>0) ? unitPrice*ppc : null;
+    const priceIssue = !unitPrice ? 'مالوش سعر في أصناف العملاء' : (ppc>0 ? '' : 'مالوش عدد قطع في الكرتونة في كتالوج الأصناف');
     const targetCartons = (targetValue!=null && currentCartonPrice) ? targetValue/currentCartonPrice : null;
     const a = actualMap.get(r.item);
     const actualValue = a ? Number(a.value)||0 : 0;
     const actualCartons = a ? Number(a.cartons)||0 : 0;
     const achievedValuePct = (targetValue!=null && targetValue>0) ? actualValue/targetValue : null;
     const achievedCartonsPct = (targetCartons!=null && targetCartons>0) ? actualCartons/targetCartons : null;
-    return { item:r.item, category:r.category, refValue:value, refCartons:cartonsRef, share, currentCartonPrice, targetValue, targetCartons, actualValue, actualCartons, achievedValuePct, achievedCartonsPct };
+    return { item:r.item, category:r.category, refValue:value, refCartons:cartonsRef, share, currentCartonPrice, priceIssue, targetValue, targetCartons, actualValue, actualCartons, achievedValuePct, achievedCartonsPct };
   }).sort((a,b)=>b.refValue-a.refValue);
 
   const hasActual = (actualRows||[]).length>0;
@@ -55055,7 +55058,7 @@ async function ipaRenderResults(){
     +'<th style="padding:8px 10px;text-align:center;font-size:11px;color:var(--text-secondary);font-weight:700;border-bottom:1px solid var(--border)">% من المسحوبات المرجعية</th>'
     +'<th style="padding:8px 10px;text-align:center;font-size:11px;color:var(--text-secondary);font-weight:700;border-bottom:1px solid var(--border)">مسحوبات الفترة المرجعية</th>'
     +'<th style="padding:8px 10px;text-align:center;font-size:11px;color:var(--text-secondary);font-weight:700;border-bottom:1px solid var(--border)">كراتين الفترة المرجعية</th>'
-    +'<th style="padding:8px 10px;text-align:center;font-size:11px;color:var(--text-secondary);font-weight:700;border-bottom:1px solid var(--border)">آخر سعر كرتونة فعلي</th>';
+    +'<th style="padding:8px 10px;text-align:center;font-size:11px;color:var(--text-secondary);font-weight:700;border-bottom:1px solid var(--border)">سعر الكرتونة (من أصناف العملاء)</th>';
   if(showTarget) headCols += '<th style="padding:8px 10px;text-align:center;font-size:11px;color:#D97706;font-weight:700;border-bottom:1px solid var(--border)">الهدف (قيمة)</th><th style="padding:8px 10px;text-align:center;font-size:11px;color:#D97706;font-weight:700;border-bottom:1px solid var(--border)">الهدف (كراتين)</th>';
   if(hasActual) headCols += '<th style="padding:8px 10px;text-align:center;font-size:11px;color:var(--text-secondary);font-weight:700;border-bottom:1px solid var(--border)">المحقق الفعلي (قيمة)</th><th style="padding:8px 10px;text-align:center;font-size:11px;color:var(--text-secondary);font-weight:700;border-bottom:1px solid var(--border)">المحقق الفعلي (كراتين)</th>';
   if(hasActual && showTarget) headCols += '<th style="padding:8px 10px;text-align:center;font-size:11px;color:var(--text-secondary);font-weight:700;border-bottom:1px solid var(--border)">نسبة التحقيق (قيمة)</th><th style="padding:8px 10px;text-align:center;font-size:11px;color:var(--text-secondary);font-weight:700;border-bottom:1px solid var(--border)">نسبة التحقيق (كراتين)</th>';
@@ -55066,7 +55069,7 @@ async function ipaRenderResults(){
       +`<td style="padding:7px 10px;text-align:center;font-size:11px;color:var(--text-primary);border-bottom:1px solid var(--border)">${ipaPct(r.share)}</td>`
       +`<td style="padding:7px 10px;text-align:center;font-size:11px;color:var(--text-primary);border-bottom:1px solid var(--border)">${ipaFmt(r.refValue)}</td>`
       +`<td style="padding:7px 10px;text-align:center;font-size:11px;color:var(--text-primary);border-bottom:1px solid var(--border)">${ipaFmt1(r.refCartons)}</td>`
-      +`<td style="padding:7px 10px;text-align:center;font-size:11px;color:var(--text-primary);border-bottom:1px solid var(--border)">${r.currentCartonPrice!=null?ipaFmt(r.currentCartonPrice):'-'}</td>`;
+      +`<td style="padding:7px 10px;text-align:center;font-size:11px;color:var(--text-primary);border-bottom:1px solid var(--border)">${r.currentCartonPrice!=null?ipaFmt(r.currentCartonPrice):`<span title="${ipaEsc(r.priceIssue||'')}" style="color:#DC2626;font-weight:700;cursor:help">— ⚠️</span>`}</td>`;
     if(showTarget) cells += `<td style="padding:7px 10px;text-align:center;font-size:11.5px;font-weight:700;color:#D97706;border-bottom:1px solid var(--border)">${r.targetValue!=null?ipaFmt(r.targetValue):'-'}</td><td style="padding:7px 10px;text-align:center;font-size:11.5px;font-weight:700;color:#D97706;border-bottom:1px solid var(--border)">${r.targetCartons!=null?ipaFmt1(r.targetCartons):'-'}</td>`;
     if(hasActual) cells += `<td style="padding:7px 10px;text-align:center;font-size:11px;color:var(--text-primary);border-bottom:1px solid var(--border)">${ipaFmt(r.actualValue)}</td><td style="padding:7px 10px;text-align:center;font-size:11px;color:var(--text-primary);border-bottom:1px solid var(--border)">${ipaFmt1(r.actualCartons)}</td>`;
     if(hasActual && showTarget) cells += `<td style="padding:7px 10px;text-align:center;font-size:11.5px;font-weight:700;color:${ipaAchColor(r.achievedValuePct)};border-bottom:1px solid var(--border)">${r.achievedValuePct!=null?ipaPct(r.achievedValuePct):'-'}</td><td style="padding:7px 10px;text-align:center;font-size:11.5px;font-weight:700;color:${ipaAchColor(r.achievedCartonsPct)};border-bottom:1px solid var(--border)">${r.achievedCartonsPct!=null?ipaPct(r.achievedCartonsPct):'-'}</td>`;
@@ -55074,6 +55077,7 @@ async function ipaRenderResults(){
   }).join('');
 
   box.innerHTML = `
+    ${results.some(r=>r.currentCartonPrice==null) ? `<div style="background:#FEE2E2;color:#991B1B;border-radius:8px;padding:9px 14px;font-size:11px;margin-bottom:12px">⚠️ ${results.filter(r=>r.currentCartonPrice==null).length} صنف مالوش سعر كرتونة (سعر الصنف في "أصناف العملاء" و/أو عدد القطع في الكرتونة ناقص) — هدفهم بالقيمة ظاهر لكن كراتين الهدف مش بتتحسب. مرّر على علامة ⚠️ جنب الصنف عشان تعرف الناقص.</div>` : ''}
     ${!targetAmount ? `<div style="background:#FEF3C7;color:#92400E;border-radius:8px;padding:9px 14px;font-size:11px;margin-bottom:12px">لسه ماكتبتش قيمة الهدف - الجدول تحت بيوري توزيع المسحوبات في الفترة المرجعية بس (معاينة قبل ما تحدد الهدف).</div>` : ''}
     ${!hasActual ? `<div style="background:#FEF3C7;color:#92400E;border-radius:8px;padding:9px 14px;font-size:11px;margin-bottom:12px">مفيش فواتير محمّلة لشهر الهدف (${ipaMonths()[_ipaState.targetMonth-1]} ${_ipaState.targetYear}) لسه - أول ما تتوفر هيبان عمود "المحقق الفعلي" هنا تلقائيًا.</div>` : ''}
     <div style="display:grid;grid-template-columns:repeat(${kpisArr.length},1fr);gap:10px;margin-bottom:14px">${kpisArr.join('')}</div>
@@ -55110,7 +55114,7 @@ async function ipaExportExcel(){
     { h:'% من المسحوبات المرجعية', type:'pct', get:r=>r.share },
     { h:'مسحوبات الفترة المرجعية', type:'money', get:r=>r.refValue },
     { h:'كراتين الفترة المرجعية', type:'num1', get:r=>r.refCartons },
-    { h:'آخر سعر كرتونة فعلي', type:'money', get:r=>r.currentCartonPrice },
+    { h:'سعر الكرتونة (من أصناف العملاء)', type:'money', get:r=>r.currentCartonPrice },
   ];
   if(showTarget){
     colDefs.push({ h:'الهدف (قيمة)', type:'money', highlight:true, get:r=>r.targetValue });
