@@ -949,6 +949,7 @@ table.datatable details summary:hover { text-decoration: underline; }
         نوع_العميل: cell(row, 'نوع العميل'),
         المنطقة: cell(row, 'المنطقة'),
         الحى: cell(row, 'الحى'),
+        وقت_الإضافة: (cell(row, 'تاريخ ووقت الاضافة') instanceof Date) ? cell(row, 'تاريخ ووقت الاضافة') : null,
         المحافظة: cell(row, 'المحافظة'),
         الصنف: trimCell('الصنف'),
         كود_الصنف: cell(row, 'كود الصنف'),
@@ -1054,15 +1055,17 @@ table.datatable details summary:hover { text-decoration: underline; }
       const key = invoiceNo + '||' + (dateOnly ? dateOnly.getTime() : 'بدون_تاريخ');
       const customer = (cell(row, 'إسم العميل') || '').toString().trim();
       const branchRaw = (cell(row, 'الفرع') || '').toString().trim();
+      const addedRaw = cell(row, 'تاريخ ووقت الاضافة');
       const lineTotal = Number(cell(row, 'إجمالى الصنف')) || 0;
       if (!agg.has(key)) {
-        agg.set(key, { invoiceNo, invoiceDate: dateOnly, customer: customer || null, branchRaw: branchRaw || null, total: 0, lines: 0 });
+        agg.set(key, { invoiceNo, invoiceDate: dateOnly, customer: customer || null, branchRaw: branchRaw || null, addedAt: (addedRaw instanceof Date ? addedRaw : null), total: 0, lines: 0 });
       }
       const g = agg.get(key);
       g.total += lineTotal;
       g.lines += 1;
       if (!g.customer && customer) g.customer = customer;
       if (!g.branchRaw && branchRaw) g.branchRaw = branchRaw;
+      if (!g.addedAt && addedRaw instanceof Date) g.addedAt = addedRaw;
     }
     return { invoices: Array.from(agg.values()), errors: [] };
   }
@@ -1856,6 +1859,12 @@ table.datatable details summary:hover { text-decoration: underline; }
     const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0');
     return `${y}-${m}-${day}`;
   }
+  // تاريخ + وقت (بدون تحويل توقيت) بصيغة ISO محلية — لعمود "تاريخ ووقت الاضافة" في تقارير جريد
+  function isoTs(d) {
+    if (!(d instanceof Date) || isNaN(d)) return null;
+    const p = (x, n) => String(x).padStart(n || 2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
   function chunk(arr, n) { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; }
 
   // بيشغّل مجموعة "مهام" (دوال بترجع Promise) بالتوازي لكن بحد أقصى معين في نفس اللحظة
@@ -2045,7 +2054,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       rep: r.rep, user_name: r.user, sale_type: r.saleType, tax_type: r.taxType,
       customer_site: r.site, customer: r.customer, route: r.route, region: r.region, sector: r.sector,
       item: r.item, warehouse: r.warehouse, qty_carton: r.qtyCarton, qty_piece: r.qtyPiece,
-      price_carton: r.priceCarton, price_piece: r.pricePiece, total: r.total
+      price_carton: r.priceCarton, price_piece: r.pricePiece, total: r.total, entry_time: r.entryTime != null ? String(r.entryTime) : null
     };
   }
   function dbRowToInvoice(row) {
@@ -2077,7 +2086,7 @@ table.datatable details summary:hover { text-decoration: underline; }
     return {
       file_name: r.fileName || null, invoice_no: r.invoiceNo != null ? String(r.invoiceNo) : null,
       invoice_date: isoDate(r.invoiceDate), customer: r.customer || null, branch_raw: r.branchRaw || null,
-      total: r.total || 0, lines: r.lines || 0
+      total: r.total || 0, lines: r.lines || 0, added_at: isoTs(r.addedAt)
     };
   }
   function dbRowToCustomerInvoiceRaw(row) {
@@ -2095,7 +2104,8 @@ table.datatable details summary:hover { text-decoration: underline; }
       customer_code: r['كود_العميل'], activity: r.__activity, region: r['المنطقة'], district: r['الحى'], governorate: r['المحافظة'],
       item: r['الصنف'], item_code: r['كود_الصنف'], unit: r['الوحدة'],
       price_carton: r['سعر_ص'], price_piece: r['سعر_ف'], qty_carton: r['كمية_ص'], qty_piece: r['كمية_ف'],
-      total: r['الإجمالي'], warehouse: r['المخزن']
+      total: r['الإجمالي'], warehouse: r['المخزن'],
+      added_at: isoTs(r['وقت_الإضافة'])
     };
   }
   function dbRowToReturn(row) {
@@ -3911,7 +3921,7 @@ table.datatable details summary:hover { text-decoration: underline; }
           fileName: inv.__fileName, invoiceNo: inv['رقم_الفاتورة'], lineNo: idx,
           activity: inv.__activity, branch: inv['الفرع'], year: inv.__year, quarter: inv.__quarter,
           month: inv.__monthKey, monthNum: inv.__month, date: inv.__date, dateKey: inv.__dateKey, rep: inv['المندوب'], user: inv['المستخدم'],
-          saleType: inv['نوع_البيع'], taxType: inv['نوع_الفاتورة'],
+          saleType: inv['نوع_البيع'], taxType: inv['نوع_الفاتورة'], entryTime: inv['الوقت'] != null ? String(inv['الوقت']) : null,
           site: inv['فرع_العميل'], customer: inv['العميل'],
           route: inv.__route ? inv.__route.خط_سير : null,
           region: inv.__route ? inv.__route.المنطقة : null,
