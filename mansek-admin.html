@@ -40380,12 +40380,13 @@ async function fbaInit(){
   if(FBA.metaBusy) return; FBA.metaBusy = true;
   try{
     const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const mm = await csRpc('fba_mt_meta',{});
+    // القوائم من فواتير البيع نفسها: فرع الشركة ← المجموعة ← خط السير ← العميل ← فرع العميل
+    const mm = await csRpc('fba_branch_meta',{});
     const seen=new Map();
     (mm||[]).forEach(r=>{
       const br=String(r.branch||'').trim(); if(!br) return;
-      const k=[r.grp,r.route,r.client,br].join('|');
-      if(!seen.has(k)) seen.set(k,{grp:r.grp||'', route:String(r.route||'').trim(), client:String(r.client||'').trim(), branch:br});
+      const k=[r.cb,r.grp,r.route,r.client,br].join('|');
+      if(!seen.has(k)) seen.set(k,{cb:r.cb||'', grp:r.grp||'', route:String(r.route||'').trim(), client:String(r.client||'').trim(), branch:br});
     });
     FBA.meta=[...seen.values()];
     try{ const cbs = await csRpc('fba_company_branches',{}); FBA.cbList = Array.isArray(cbs)?cbs.filter(Boolean):[]; }catch(e){ FBA.cbList=[]; }
@@ -40397,10 +40398,11 @@ async function fbaInit(){
 // قائمة الخيارات: [{v,t}] — كل قائمة بتتفلتر بالقوائم اللي قبلها
 function fbaOptionList(key){
   const M = FBA.meta||[], S = FBA.sel;
-  const okG = r=>!S.grp.size||S.grp.has(r.grp), okR = r=>!S.route.size||S.route.has(r.route), okC = r=>!S.client.size||S.client.has(r.client);
+  const okB = r=>!S.cbr.size||S.cbr.has(r.cb);
+  const okG = r=>okB(r)&&(!S.grp.size||S.grp.has(r.grp)), okR = r=>!S.route.size||S.route.has(r.route), okC = r=>!S.client.size||S.client.has(r.client);
   const srt = arr=>arr.sort((a,b)=>a.t.localeCompare(b.t,'ar'));
-  if(key==='cbr') return (FBA.cbList||[]).map(v=>({v,t:v}));
-  if(key==='grp') return srt([...new Set(M.map(r=>r.grp).filter(Boolean))].map(v=>({v,t:hmGrpLabel(v)})));
+  if(key==='cbr'){ const have=new Set(M.map(r=>r.cb).filter(Boolean)); const ord=(FBA.cbList||[]).filter(v=>have.has(v)); have.forEach(v=>{ if(!ord.includes(v)) ord.push(v); }); return ord.map(v=>({v,t:v})); }
+  if(key==='grp') return srt([...new Set(M.filter(okB).map(r=>r.grp).filter(Boolean))].map(v=>({v,t:hmGrpLabel(v)})));
   if(key==='route') return srt([...new Set(M.filter(okG).map(r=>r.route).filter(Boolean))].map(v=>({v,t:v})));
   if(key==='client') return srt([...new Set(M.filter(r=>okG(r)&&okR(r)).map(r=>r.client).filter(Boolean))].map(v=>({v,t:v})));
   if(key==='branch') return srt([...new Set(M.filter(r=>okG(r)&&okR(r)&&okC(r)).map(r=>r.branch))].map(v=>({v,t:v})));
@@ -40409,7 +40411,7 @@ function fbaOptionList(key){
   return srt([...names].map(v=>({v,t:v})));
 }
 function fbaPrune(key){ const valid=new Set(fbaOptionList(key).map(o=>o.v)); [...FBA.sel[key]].forEach(v=>{ if(!valid.has(v)) FBA.sel[key].delete(v); }); }
-function fbaCascade(key){ const order=['grp','route','client','branch']; order.slice(order.indexOf(key)+1).forEach(k=>{ fbaPrune(k); fbaRenderOpts(k); }); }
+function fbaCascade(key){ const order=['cbr','grp','route','client','branch']; order.slice(order.indexOf(key)+1).forEach(k=>{ fbaPrune(k); fbaRenderOpts(k); }); }
 function fbaBuildMs(key){
   const box=document.getElementById('fba-ms-'+key); if(!box || box.dataset.built) return; box.dataset.built='1';
   box.innerHTML=`<label style="font-size:11px;font-weight:700;color:#5C3D2E;display:block;margin-bottom:4px">${FBA.lbl[key]}</label>
@@ -40445,10 +40447,10 @@ function fbaSearchMs(key,v){ FBA.q[key]=(v||'').trim(); fbaRenderOpts(key); }
 function fbaMsToggle(key,i,on){
   const o=FBA.opts[key][i]; if(!o) return;
   if(on) FBA.sel[key].add(o.v); else FBA.sel[key].delete(o.v);
-  if(key!=='item' && key!=='cbr') fbaCascade(key);
+  if(key!=='item') fbaCascade(key);
   fbaUpdateLbl(key);
 }
-function fbaMsAll(key){ FBA.sel[key].clear(); if(key!=='item' && key!=='cbr') fbaCascade(key); fbaRenderOpts(key); }
+function fbaMsAll(key){ FBA.sel[key].clear(); if(key!=='item') fbaCascade(key); fbaRenderOpts(key); }
 
 async function fbaLoad(){
   const from=document.getElementById('fba-from').value, to=document.getElementById('fba-to').value;
@@ -40504,11 +40506,11 @@ async function fbaLoad(){
     const took=[...agg.values()].filter(b=>b.sq>0||b.sv>0||b.rv>0);
     took.forEach(b=>{ b.net=b.sv-b.rv; b.list=[...b.items.values()].filter(x=>x.sq>0||x.sv>0||x.rq>0||x.rv>0).sort((a,c)=>(c.sv-c.rv)-(a.sv-a.rv)); b.nItems=b.list.filter(x=>x.sq>0||x.sv>0).length; });
     took.sort((a,b)=>(a.unk?1:0)-(b.unk?1:0) || b.net-a.net);
-    const tookSet=new Set(took.filter(b=>!b.unk).map(b=>b.branch));
+    const tookSet=new Set(took.filter(b=>!b.unk).map(b=>b.cb+'|'+b.branch));
     // الفروع اللي ما أخدتش = فروع الفواتير (حسب فلاتر المجموعة/الخط/العميل/الفرع) ومش في اللي أخدت
     const notMap=new Map();
-    (FBA.meta||[]).filter(r=>(!S.grp.size||S.grp.has(r.grp))&&(!S.route.size||S.route.has(r.route))&&(!S.client.size||S.client.has(r.client))&&(!S.branch.size||S.branch.has(r.branch)))
-      .forEach(r=>{ if(!tookSet.has(r.branch) && !notMap.has(r.branch)) notMap.set(r.branch,{branch:r.branch,client:r.client,grp:r.grp,route:r.route}); });
+    (FBA.meta||[]).filter(r=>(!S.cbr.size||S.cbr.has(r.cb))&&(!S.grp.size||S.grp.has(r.grp))&&(!S.route.size||S.route.has(r.route))&&(!S.client.size||S.client.has(r.client))&&(!S.branch.size||S.branch.has(r.branch)))
+      .forEach(r=>{ const k=r.cb+'|'+r.branch; if(!tookSet.has(k) && !notMap.has(k)) notMap.set(k,{branch:r.branch,client:r.client,cb:r.cb,grp:r.grp,route:r.route}); });
     FBA.took=took; FBA.notTook=[...notMap.values()].sort((a,b)=>a.branch.localeCompare(b.branch,'ar'));
     FBA.loaded=true; FBA.from=from; FBA.to=to; FBA.itemsFilter=[...S.item];
     if(!took.length) showToast('مفيش فواتير MT مسجلة في الفترة والفلاتر دي');
