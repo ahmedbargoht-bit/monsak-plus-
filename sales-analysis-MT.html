@@ -419,6 +419,17 @@ table.datatable details summary:hover { text-decoration: underline; }
         <input type="file" id="customerInvInput" accept=".xlsx,.xls" multiple hidden>
         <div class="filelist" id="customerInvFileList"></div>
       </div>
+      <div>
+        <div class="dropzone" id="siteRetDropzone">
+          <div class="dz-head">
+            <div class="dz-icon"><i class="ti ti-building-store"></i></div>
+            <div class="dz-title">مرتجع كبار العملاء بالفرع</div>
+          </div>
+          <div class="dz-sub">تقرير "مرتجع المبيعات لفرع عميل معين" (ملف لكل فرع عميل، أكثر من ملف) - بيتحفظ فورًا وبيحدد فرع العميل لفواتير المرتجع دي بالظبط</div>
+        </div>
+        <input type="file" id="siteRetInput" accept=".xlsx,.xls" multiple hidden>
+        <div class="filelist" id="siteRetFileList"></div>
+      </div>
     </div>
     <div style="margin-top:16px; display:flex; align-items:center; gap:14px;">
       <button class="btn" id="processBtn" disabled><i class="ti ti-settings"></i> معالجة البيانات وعرض التحليل</button>
@@ -901,7 +912,7 @@ table.datatable details summary:hover { text-decoration: underline; }
   // spelling drift (spaces, ة/ه, ى/ي, أ/إ/آ) between the two source systems.
   function normalizeCustomerKey(s) {
     if (!s) return '';
-    return String(s).trim().replace(/\s+/g, ' ')
+    return String(s).replace(/ـ/g, '').trim().replace(/\s+/g, ' ')
       .replace(/[أإآ]/g, 'ا')
       .replace(/ة/g, 'ه')
       .replace(/ى/g, 'ي');
@@ -3504,6 +3515,134 @@ table.datatable details summary:hover { text-decoration: underline; }
     setupDropzone(customerInvDz, customerInvInput, (files) => {
       files.filter(f => /\.(xlsx|xls)$/i.test(f.name)).forEach(f => customerInvFiles.push(f));
       renderCustomerInvFileList();
+    });
+  }
+
+  /* ---------------- مرتجع كبار العملاء بالفرع (return_site_overrides) ----------------
+     تقرير "تقرير بمرتجع المبيعات لفرع عميل معين خلال فترة - <العميل> - <فرع العميل>"
+     كل فاتورة مرتجع فيه معروف فرع العميل بتاعها. بنحفظ (فرع الشركة + رقم الفاتورة → فرع العميل)
+     في جدول return_site_overrides، والقيمة نفسها بتفضل من ملف المرتجع العام (مفيش تكرار).
+     الرفع هنا فوري ومستقل عن زرار "معالجة البيانات". */
+  const siteRetDz = document.getElementById('siteRetDropzone');
+  const siteRetInput = document.getElementById('siteRetInput');
+  const siteRetList = document.getElementById('siteRetFileList');
+  const SITE_RET_PREFIX = 'تقرير بمرتجع المبيعات لفرع عميل معين خلال فترة';
+
+  function srBlank(v) { return v === null || v === undefined || (typeof v === 'string' && v.trim() === ''); }
+  function srCellBefore(row, label) {
+    for (let c = 0; c < row.length; c++) {
+      const v = row[c];
+      if (typeof v === 'string' && v.trim() === label) {
+        for (let k = c - 1; k >= 0; k--) { if (!srBlank(row[k])) return row[k]; }
+        return null;
+      }
+    }
+    return undefined;
+  }
+  function srIsoDate(v) {
+    if (v instanceof Date) {
+      const d = new Date(v.getTime() + 3600000);
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    }
+    const m = String(v || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : null;
+  }
+
+  function parseSiteReturnsSheet(rows, fileName) {
+    const out = { site: null, customer: null, invoices: [], errors: [] };
+    let title = '';
+    for (const row of rows.slice(0, 3)) {
+      const t = (row || []).find(v => typeof v === 'string' && v.indexOf(SITE_RET_PREFIX) >= 0);
+      if (t) { title = t.trim(); break; }
+    }
+    if (!title) { out.errors.push('مش لاقي عنوان التقرير "' + SITE_RET_PREFIX + '"'); return out; }
+    const rest = title.slice(title.indexOf(SITE_RET_PREFIX) + SITE_RET_PREFIX.length).replace(/^\s*-\s*/, '');
+    let branch = null, cur = null;
+    for (const row of rows.slice(1)) {
+      if (!row) continue;
+      const cells = row.filter(v => !srBlank(v));
+      if (cells.length === 1 && typeof cells[0] === 'string') { branch = cells[0].trim(); continue; }
+      const invNo = srCellBefore(row, 'فاتورة مرتجع مبيعات رقم');
+      if (invNo !== undefined) {
+        const customer = String(srCellBefore(row, '/ العميل') || '').trim();
+        cur = { branch, invoice_no: invNo != null ? String(invNo).trim() : null, customer,
+                invoice_date: srIsoDate(srCellBefore(row, ': التاريخ')), rep: String(srCellBefore(row, '/ المندوب') || '').trim() || null, total: null };
+        if (!out.customer && customer) out.customer = customer;
+        out.invoices.push(cur);
+        continue;
+      }
+      const gross = srCellBefore(row, ': إجمالى الفاتورة');
+      if (gross !== undefined && cur) { cur.total = Number(gross) || 0; cur = null; }
+    }
+    // فرع العميل = العنوان بعد اسم العميل
+    if (out.customer && rest.indexOf(out.customer) === 0) out.site = rest.slice(out.customer.length).replace(/^\s*-\s*/, '').trim();
+    else {
+      const parts = rest.split(' - ');
+      out.site = parts.length > 1 ? parts.slice(1).join(' - ').trim() : rest.trim();
+    }
+    out.invoices = out.invoices.filter(i => {
+      if (!i.branch || !i.invoice_no) { out.errors.push('فاتورة بدون فرع شركة أو رقم'); return false; }
+      return true;
+    });
+    if (!out.site) out.errors.push('مش قادر أحدد فرع العميل من العنوان');
+    return out;
+  }
+
+  function srRenderRow(name, html, cls) {
+    const row = document.createElement('div');
+    row.className = 'fitem';
+    row.innerHTML = `<span class="fname">${name}</span><span style="font-size:11px" class="${cls || ''}">${html}</span>`;
+    siteRetList.appendChild(row);
+    return row;
+  }
+
+  async function uploadSiteReturnFiles(files) {
+    if (!sb) { logStatus('مفيش اتصال بالسحابة - مرتجع كبار العملاء ما اترفعش', 'err'); return; }
+    let totalInv = 0, okFiles = 0;
+    for (const f of files) {
+      const row = srRenderRow(f.name, '⏳ جاري القراءة...');
+      try {
+        const buf = await f.arrayBuffer();
+        const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true });
+        const r = parseSiteReturnsSheet(rows, f.name);
+        if (!r.site || !r.invoices.length) {
+          row.lastElementChild.textContent = '✕ ' + (r.errors[0] || 'مفيش فواتير مرتجع في الملف');
+          row.lastElementChild.style.color = '#B71C1C';
+          continue;
+        }
+        const recs = r.invoices.map(i => ({ branch: i.branch, invoice_no: i.invoice_no, customer: i.customer, site: r.site,
+          invoice_date: i.invoice_date, total: i.total, rep: i.rep, file_name: f.name, uploaded_at: new Date().toISOString() }));
+        for (const c of chunk(recs, 500)) {
+          const { error } = await sb.from('return_site_overrides').upsert(c, { onConflict: 'branch,invoice_no' });
+          if (error) throw error;
+        }
+        totalInv += recs.length; okFiles++;
+        const val = recs.reduce((a, x) => a + (x.total || 0), 0);
+        row.lastElementChild.textContent = `✓ ${r.site} — ${recs.length} فاتورة (${Math.round(val).toLocaleString('en-US')} ج)`;
+        row.lastElementChild.style.color = '#15803D';
+      } catch (e) {
+        console.error('[siteRet]', e);
+        row.lastElementChild.textContent = '✕ تعذر الحفظ: ' + (e.message || e);
+        row.lastElementChild.style.color = '#B71C1C';
+      }
+    }
+    if (!okFiles) return;
+    logStatus(`تم حفظ مرتجع كبار العملاء: ${totalInv} فاتورة من ${okFiles} ملف ✓ — جاري تحديث توزيع المرتجع على الفروع...`);
+    try {
+      const { data, error } = await sb.rpc('fba_refresh_ret_site');
+      if (error) throw error;
+      logStatus('تم تحديث توزيع المرتجع على فروع العملاء ✓', 'ok');
+    } catch (e) {
+      logStatus('اتحفظ المرتجع، والتوزيع هيتحدّث تلقائيًا خلال ساعة', '');
+    }
+  }
+
+  if (siteRetDz && siteRetInput) {
+    setupDropzone(siteRetDz, siteRetInput, (files) => {
+      const xs = files.filter(f => /\.(xlsx|xls)$/i.test(f.name));
+      if (xs.length) uploadSiteReturnFiles(xs);
     });
   }
 
