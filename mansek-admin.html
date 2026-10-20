@@ -55886,7 +55886,7 @@ async function runAIAnalysis(){
     const teamFilter = document.getElementById('ai-team-filter')?.value || 'all';
     if(!SVM_BRANCH_CACHE){
       const bs = await svmGetAll(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,grp,lat,lng&order=branch_name.asc`);
-      SVM_BRANCH_CACHE = {}; bs.forEach(b=>{ SVM_BRANCH_CACHE[b.branch_name]=b; });
+      SVM_BRANCH_CACHE = {}; bs.forEach(b=>{ SVM_BRANCH_CACHE[b.branch_name]=b; SVM_BRANCH_CACHE[svmK(b.branch_name)]=b; });
     }
     let svmRows = [];
     if(teamFilter === 'all' || teamFilter === 'coord'){
@@ -58764,9 +58764,12 @@ function SVM_TITLE(){ return 'متابعة زيارات المشرفين' + (SVM
 function svmEsc(t){ return String(t==null?'':t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function svmIso(d){ const z=new Date(d.getTime()-d.getTimezoneOffset()*60000); return z.toISOString().slice(0,10); }
 function svmHdr(){ return {apikey:SUPABASE_KEY, Authorization:'Bearer '+SUPABASE_KEY}; }
+// توحيد اسم الفرع للمطابقة (مسافات زيادة في أول/آخر الاسم أو في النص بتخلي الفرع "مش لاقي" نفسه)
+function svmK(s){ return String(s==null?'':s).replace(/\s+/g,' ').trim(); }
+function svmBr(name){ const C=SVM_BRANCH_CACHE||{}; return C[name] || C[svmK(name)] || {}; }
 async function svmGetAll(url){
   const out=[]; const step=1000;
-  for(let off=0; off<20000; off+=step){
+  for(let off=0; off<500000; off+=step){
     const r = await fetch(url+(url.includes('?')?'&':'?')+'limit='+step+'&offset='+off,{headers:svmHdr()});
     if(!r.ok) throw new Error('HTTP '+r.status);
     const j = await r.json();
@@ -58821,7 +58824,7 @@ async function svmBuildCoordRows(from,to){
       if(r.ok) (await r.json()).forEach(p=>{ plans[p.id]=p; });
     }
     return pbs.map(x=>{
-      const p = plans[x.plan_id]||{}, b = SVM_BRANCH_CACHE[x.branch_name]||{};
+      const p = plans[x.plan_id]||{}, b = svmBr(x.branch_name);
       const done = x.visit_status==='done';
       const geoOK = !!x.check_in_at && x.geo_status==='inside';
       const reviewed = !!x.reviewed_at && !!x.review_coord_report && !!x.review_display && !!x.review_clean;
@@ -58852,7 +58855,7 @@ async function svmLoad(){
     const from = document.getElementById('svm-from').value, to = document.getElementById('svm-to').value;
     if(!SVM_BRANCH_CACHE){
       const bs = await svmGetAll(`${SUPABASE_URL}/rest/v1/branches?select=branch_name,route,grp,lat,lng&order=branch_name.asc`);
-      SVM_BRANCH_CACHE = {}; bs.forEach(b=>{ SVM_BRANCH_CACHE[b.branch_name]=b; });
+      SVM_BRANCH_CACHE = {}; bs.forEach(b=>{ SVM_BRANCH_CACHE[b.branch_name]=b; SVM_BRANCH_CACHE[svmK(b.branch_name)]=b; });
     }
     if(SVM_SIDE==='sales'){ SVM_ROWS = await svsBuildRows(from,to); } else {
     SVM_ROWS = await svmBuildCoordRows(from,to);
@@ -59021,6 +59024,13 @@ async function svsBuildRows(from,to){
     svmGetAll(`${B}visits?select=branch,date,name&branch=not.is.null&order=date.desc`).catch(()=>[]),
     svmGetAll(`${B}returns?select=branch,pulled&order=id.desc`).catch(()=>[])
   ]);
+  // توحيد أسماء الفروع في كل المصادر قبل المطابقة
+  items.forEach(x=>{ x.client_name=svmK(x.client_name); });
+  logs.forEach(x=>{ x.branch_name=svmK(x.branch_name); });
+  rates.forEach(x=>{ x.branch_name=svmK(x.branch_name); });
+  dels.forEach(x=>{ x.branch_name=svmK(x.branch_name); });
+  vis.forEach(x=>{ x.branch=svmK(x.branch); });
+  rets.forEach(x=>{ x.branch=svmK(x.branch); });
   const lastRep = {}; dels.forEach(d=>{ if(d.branch_name && !lastRep[d.branch_name]) lastRep[d.branch_name]=d; });
   const lastCoord = {}; vis.forEach(v=>{ if(v.branch && !lastCoord[v.branch]) lastCoord[v.branch]=v; });
   const pend = {}; rets.forEach(r=>{ if(r.branch && r.pulled!==true) pend[r.branch]=(pend[r.branch]||0)+1; });
@@ -59030,7 +59040,7 @@ async function svsBuildRows(from,to){
     let d = l.visit_date || '';
     const mm = /^(\d{2})-(\d{2})-(\d{4})$/.exec(d);
     if(mm) d = mm[3]+'-'+mm[2]+'-'+mm[1];
-    else if(!/^\d{4}-\d{2}-\d{2}/.test(d)) d = new Date(new Date(l.created_at).getTime()+2*3600000).toISOString().slice(0,10);
+    else if(!/^\d{4}-\d{2}-\d{2}/.test(d)) d = new Date(l.created_at).toLocaleDateString('en-CA',{timeZone:'Africa/Cairo'});
     d = d.slice(0,10);
     (logKey[l.branch_name+'|'+d] = logKey[l.branch_name+'|'+d] || []).push(l);
     if(!logAny[l.branch_name+'|'+d] || (l.lat!=null && logAny[l.branch_name+'|'+d].lat==null)) logAny[l.branch_name+'|'+d] = l;
@@ -59040,7 +59050,7 @@ async function svsBuildRows(from,to){
   rates.forEach(r=>{ const k=r.branch_name+'|'+r.visit_date; if(!rateAny[k]) rateAny[k]=r; if(!rateKey[r.supervisor_name+'|'+k]) rateKey[r.supervisor_name+'|'+k]=r; });
   const today = svmIso(new Date());
   return items.filter(i=>planBy[i.plan_id] && i.client_name).map(i=>{
-    const p = planBy[i.plan_id], b = SVM_BRANCH_CACHE[i.client_name]||{};
+    const p = planBy[i.plan_id], b = svmBr(i.client_name);
     let lgOwn = (logKey[i.client_name+'|'+i.visit_date]||[]).filter(l=>sameSup(l.supervisor_name,p.staff_name)).sort((x,y)=>(y.lat!=null)-(x.lat!=null))[0] || null;
     // لو المشرف نفّذ الزيارة في يوم تاني من نفس أسبوع الخطة (قدّم/أخّر الزيارة) نحسبها له ونوضّح اليوم الفعلي
     let execDate = i.visit_date;

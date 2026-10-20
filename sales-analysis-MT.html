@@ -1063,9 +1063,10 @@ table.datatable details summary:hover { text-decoration: underline; }
       const invoiceNo = String(invoiceNoRaw);
       const dateVal = cell(row, 'تاريخ الفاتورة');
       const dateOnly = dateVal instanceof Date ? normalizeDateOnly(dateVal) : null;
-      const key = invoiceNo + '||' + (dateOnly ? dateOnly.getTime() : 'بدون_تاريخ');
       const customer = (cell(row, 'إسم العميل') || '').toString().trim();
       const branchRaw = (cell(row, 'الفرع') || '').toString().trim();
+      // الفرع جزء من المفتاح: نفس رقم الفاتورة ونفس التاريخ ممكن يتكرر في فرعين مختلفين (ترقيم كل فرع لوحده)
+      const key = branchRaw + '||' + invoiceNo + '||' + (dateOnly ? dateOnly.getTime() : 'بدون_تاريخ');
       const addedRaw = cell(row, 'تاريخ ووقت الاضافة');
       const lineTotal = Number(cell(row, 'إجمالى الصنف')) || 0;
       if (!agg.has(key)) {
@@ -2789,6 +2790,11 @@ table.datatable details summary:hover { text-decoration: underline; }
       const tasks = [];
       const errors = [];
       function addTasks(table, rows, onConflict) {
+        // نفس الفاتورة ممكن تيجي في تقريرين (مثلاً "سلاسل الطحان" و"سلاسل تمرتى") — بنشيل التكرار بالمفتاح قبل الرفع
+        const cols = onConflict.split(',');
+        const seen = new Map();
+        rows.forEach(r => seen.set(cols.map(c => r[c] == null ? '' : String(r[c])).join('||'), r));
+        rows = Array.from(seen.values());
         for (const c of chunk(rows, 500)) {
           tasks.push(async () => {
             const { error } = await sb.from(table).upsert(c, { onConflict });
@@ -2796,11 +2802,11 @@ table.datatable details summary:hover { text-decoration: underline; }
           });
         }
       }
-      addTasks('tamr_sales_invoices', invRows, 'file_name,branch,invoice_no');
-      addTasks('tamr_sales_items', itemRowsDb, 'file_name,branch,invoice_no,line_no');
+      addTasks('tamr_sales_invoices', invRows, 'branch,invoice_no,invoice_date');
+      addTasks('tamr_sales_items', itemRowsDb, 'branch,invoice_no,invoice_date,line_no');
       addTasks('tamr_sales_returns', retRows, 'file_name,invoice_no,line_no');
       addTasks('tamr_sales_indirect_discounts', indRows, 'file_name,customer,line_no');
-      addTasks('tamr_customer_invoices_raw', custInvRows, 'invoice_no,invoice_date');
+      addTasks('tamr_customer_invoices_raw', custInvRows, 'branch_raw,invoice_no,invoice_date');
 
       await runWithConcurrency(tasks, 3);
       if (errors.length) throw errors[0].error;
