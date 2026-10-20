@@ -3838,7 +3838,11 @@ h2,h3{color:#2C1F0A}
 
           <div class="stats-grid" id="ss-stats" style="margin-bottom:16px"></div>
 
-          <div style="display:flex;gap:8px;margin-bottom:16px">
+          <div style="display:flex;gap:8px;margin-bottom:16px;align-items:center;flex-wrap:wrap">
+            <div id="ss-grp-wrap" style="position:relative">
+              <button class="btn btn-ghost btn-sm" id="ss-grp-btn" onclick="ssGrpToggle(event)" style="border:1.5px solid #C8A96E"><i class="ti ti-filter"></i> <span id="ss-grp-lbl">كل المجموعات</span> <i class="ti ti-chevron-down"></i></button>
+              <div id="ss-grp-box" style="display:none;position:absolute;top:100%;right:0;z-index:50;background:#fff;border:1.5px solid var(--border);border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.15);padding:10px;min-width:240px;margin-top:4px"></div>
+            </div>
             <button class="btn btn-sm ss-side-btn active" data-side="sales" onclick="ssSetSide('sales')" style="border:1.5px solid #1A7A4A;color:#1A7A4A;background:#F0FDF4">
               <i class="ti ti-truck-delivery"></i> قسم البيع
             </button>
@@ -23936,6 +23940,33 @@ const ROLE_COLORS_MAP = {
 // ══════════════════════════════════════════════════════════════
 let SS_DATA = null;
 let SS_SIDE = 'sales';
+let SS_GRPSEL = new Set();   // مجموعات مختارة للعرض/الطباعة (فاضي = الكل)
+function ssGrpKeys(){ const k=['giza','cairo','south','tajmuat','hyper','alex','private_chains_cairo','private_chains_giza']; return k.filter(x=>GROUPS[x]); }
+function ssGrpToggle(ev){ if(ev) ev.stopPropagation(); const b=document.getElementById('ss-grp-box'); const open=b.style.display==='none'; if(open) ssGrpBoxRender(); b.style.display=open?'block':'none'; }
+function ssGrpBoxRender(){
+  const b=document.getElementById('ss-grp-box'); if(!b) return;
+  b.innerHTML=`<div style="display:flex;gap:6px;margin-bottom:8px"><button class="btn btn-ghost btn-sm" onclick="ssGrpAll()">الكل</button><button class="btn btn-ghost btn-sm" onclick="ssGrpClear()">مسح</button></div>`+
+    ssGrpKeys().map(g=>`<label style="display:flex;gap:8px;align-items:center;padding:5px 2px;font-size:13px;cursor:pointer"><input type="checkbox" ${SS_GRPSEL.has(g)?'checked':''} onchange="ssGrpCheck('${g}',this.checked)"/> ${ssEsc(GROUPS[g].label)}</label>`).join('');
+}
+function ssGrpLblRefresh(){ const l=document.getElementById('ss-grp-lbl'); if(!l) return; const n=SS_GRPSEL.size; l.textContent = !n ? 'كل المجموعات' : (n<=2 ? [...SS_GRPSEL].map(g=>ssGroupLabel(g).replace(/^[^؀-ۿA-Za-z0-9]+/,'')).join('، ') : n+' مجموعات'); }
+function ssGrpCheck(g,on){ on?SS_GRPSEL.add(g):SS_GRPSEL.delete(g); ssGrpLblRefresh(); ssRender(); }
+function ssGrpAll(){ SS_GRPSEL=new Set(); ssGrpLblRefresh(); ssGrpBoxRender(); ssRender(); }
+function ssGrpClear(){ SS_GRPSEL=new Set(); ssGrpLblRefresh(); ssGrpBoxRender(); ssRender(); }
+document.addEventListener('click',e=>{ const b=document.getElementById('ss-grp-box'), w=document.getElementById('ss-grp-wrap'); if(b && b.style.display!=='none' && w && !w.contains(e.target)) b.style.display='none'; });
+// نسخة من البيانات مفلترة بالمجموعات المختارة (بتتطبق على العرض وPDF وExcel وPowerPoint)
+function ssView(){
+  if(!SS_DATA) return SS_DATA;
+  if(!SS_GRPSEL.size) return SS_DATA;
+  const sel=SS_GRPSEL, D=SS_DATA, inter=a=>(a||[]).filter(g=>sel.has(g));
+  const grpSupMap={}; Object.keys(D.grpSupMap||{}).forEach(g=>{ if(sel.has(g)) grpSupMap[g]=D.grpSupMap[g]; });
+  return Object.assign({},D,{
+    salesReps:(D.salesReps||[]).filter(r=>sel.has(r.grp)||(Array.isArray(r.grps)&&r.grps.some(g=>sel.has(g)))),
+    coordinators:(D.coordinators||[]).filter(c=>sel.has(c.group)),
+    staff:(D.staff||[]).filter(x=>x.level==='dm'||x.level==='sup' ? inter(x.groups).length>0 : true).map(x=>(x.level==='dm'||x.level==='sup')?Object.assign({},x,{groups:inter(x.groups)}):x),
+    grpSupMap
+  });
+}
+function ssGrpFilterLabel(){ return SS_GRPSEL.size ? [...SS_GRPSEL].map(g=>ssGroupLabel(g).replace(/^[^؀-ۿA-Za-z0-9]+/,'')).join('، ') : ''; }
 
 function ssNorm(s){ return (s||'').trim().replace(/\s+/g,' '); }
 function ssSupMatch(repSupField, supName){
@@ -25007,7 +25038,7 @@ function ssRender(){
   const body = document.getElementById('ss-body');
   const statsEl = document.getElementById('ss-stats');
   if(!body || !SS_DATA) return;
-  const {salesReps, coordinators, staff, grpSupMap, coordBranchMap, routeBranchMap} = SS_DATA;
+  const {salesReps, coordinators, staff, grpSupMap, coordBranchMap, routeBranchMap} = ssView();
   const isSales = SS_SIDE === 'sales';
   const _dsn = ssNorm;
 
@@ -25176,7 +25207,7 @@ function ssManagerCardHtml(managerName, groupsLabel, subCount, subLabel, leafCou
 // ── تجميع صفوف مسطّحة (مدير/مشرف/فرد/خط سير) لاستخدامها في تصدير PDF وExcel — بنفس منطق ssRender بالضبط ──
 function ssBuildFlatRows(){
   if(!SS_DATA) return [];
-  const {salesReps, coordinators, staff, grpSupMap, coordBranchMap, routeBranchMap} = SS_DATA;
+  const {salesReps, coordinators, staff, grpSupMap, coordBranchMap, routeBranchMap} = ssView();
   const isSales = SS_SIDE === 'sales';
   const _dsn = ssNorm;
 
@@ -25266,7 +25297,7 @@ function ssBuildFlatRows(){
 function ssBuildExportHeaderHTML(isSales, totalRows){
   const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
   return `<div style="background:#2C1F0A;color:#EDE5D8;text-align:center;padding:14px;border-radius:10px 10px 0 0;display:flex;align-items:center;justify-content:space-between;gap:12px">
-      <img src="${SPT_LOGO_BASE64}" alt="Al Tahhan Logo" style="height:54px;width:54px;object-fit:contain;border-radius:6px;background:#fff;padding:4px;display:block"/>
+      <img src="${AT_LOGO_B64}" alt="Al Tahhan Logo" style="height:54px;width:auto;max-width:120px;object-fit:contain;border-radius:6px;background:#fff;padding:4px;display:block"/>
       <div>
         <div style="font-size:19px;font-weight:900">الطحان جولدن داتس</div>
         <div style="font-size:10px;color:#C8A96E;margin-top:2px">Al Tahhan Golden Dates</div>
@@ -25277,6 +25308,7 @@ function ssBuildExportHeaderHTML(isSales, totalRows){
     <div style="background:#F5F0E8;padding:12px 18px;border-radius:0 0 8px 8px;margin-bottom:14px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px">
       <div>تاريخ الإصدار: <b style="color:#731E2E">${now}</b></div>
       <div>إجمالي الصفوف: <b style="color:#731E2E">${totalRows}</b></div>
+      ${ssGrpFilterLabel()?`<div style="width:100%">المجموعات: <b style="color:#731E2E">${ssEsc(ssGrpFilterLabel())}</b></div>`:''}
     </div>`;
 }
 function ssTableHeadHTML(isSales){
@@ -25980,8 +26012,9 @@ async function ssPptCollect(){
   const bcm = {}; (bcmRows||[]).forEach(r=>{ if(r.branch_name) bcm[r.branch_name] = r.client_name; });
   const coordRoutes = []; const coveredSet = new Set();
   const cinfo = {};   // client -> {coords:Set, routes:Set}
-  if(SS_DATA && Array.isArray(SS_DATA.coordinators)){
-    SS_DATA.coordinators.forEach(c=>{
+  const SSV = ssView();
+  if(SSV && Array.isArray(SSV.coordinators)){
+    SSV.coordinators.forEach(c=>{
       const isFixed = (c.type||'').startsWith('ثابت');
       const brsList = isFixed ? [ (SS_DATA.coordBranchMap||{})[c.name] || c.fixed_branch ].filter(Boolean) : ((SS_DATA.routeBranchMap||{})[c.route] || []);
       const route = (ssCoordRouteLabel(c,SS_DATA.coordBranchMap||{})||'تحت التعيين');
@@ -26079,7 +26112,7 @@ function ssExportExcel(){
   const nc = COLS.length;
   const aoa=[
     ['الطحان جولدن داتس — Al Tahhan Golden Dates',...Array(nc-1).fill('')],
-    [`قوة القطاع — ${isSales?'قسم البيع':'قسم التنسيق'}`,...Array(nc-1).fill('')],
+    [`قوة القطاع — ${isSales?'قسم البيع':'قسم التنسيق'}${ssGrpFilterLabel()?' — '+ssGrpFilterLabel():''}`,...Array(nc-1).fill('')],
     [`تاريخ التصدير: ${now}  |  إجمالي الصفوف: ${rows.length}`,...Array(nc-1).fill('')],
     Array(nc).fill(''),
     COLS,
