@@ -25343,73 +25343,116 @@ function ssWaitImages(el){
   }));
 }
 
+// ── هيكل هرمي (مدير ← مشرف ← أفراد) من الصفوف المسطحة — لتصدير PDF بنفس ترتيب التاب ──
+function ssBuildTree(rows){
+  const mgrs=[], mMap={};
+  rows.forEach(r=>{
+    let m=mMap[r.manager]; if(!m){ m=mMap[r.manager]={name:r.manager, groups:r.managerGroups, sups:[], sMap:{}}; mgrs.push(m); }
+    const sk=r.supervisor+'||'+r.supGroups;
+    let sp=m.sMap[sk]; if(!sp){ sp=m.sMap[sk]={name:r.supervisor, groups:r.supGroups, people:[]}; m.sups.push(sp); }
+    if(r.person) sp.people.push(r);
+  });
+  const rcount=list=>{ const set=new Set(); list.forEach(r=>{ if(r.route && r.route!=='تحت التعيين') String(r.route).split('، ').forEach(x=>x.trim()&&set.add(x.trim())); }); return set.size; };
+  mgrs.forEach(m=>{
+    m.sups.forEach(sp=>{ sp.routes=rcount(sp.people); sp.branches=sp.people.reduce((a,r)=>a+(+r.branches||0),0); sp.vacant=sp.people.filter(r=>r.person==='تحت التعيين').length; sp.count=sp.people.filter(r=>r.person!=='تحت التعيين').length; });
+    m.routes=rcount([].concat(...m.sups.map(x=>x.people))); m.branches=m.sups.reduce((a,x)=>a+x.branches,0); m.count=m.sups.reduce((a,x)=>a+x.count,0);
+  });
+  return mgrs;
+}
+function ssPdfChip(t,bg,fg){ return `<span style="display:inline-block;background:${bg};color:${fg};border-radius:20px;padding:3px 10px;font-size:10.5px;font-weight:700;margin-inline-start:6px;white-space:nowrap">${t}</span>`; }
+function ssPdfMgrHTML(m,isSales,cont){
+  const leaf=isSales?'مندوب':'منسق';
+  return `<div style="background:#2C1F0A;border-radius:8px;padding:10px 14px;margin-top:14px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+    <div><div style="font-size:10px;color:#C8A96E">${cont?'المدير (تابع)':'المدير'}</div><div style="font-size:16px;font-weight:900;color:#fff">${ssEsc(m.name)}</div>${m.groups?`<div style="font-size:10px;color:#EDE5D8;margin-top:2px">${ssEsc(m.groups)}</div>`:''}</div>
+    <div>${ssPdfChip(m.sups.length+' مشرف','#C8A96E','#2C1F0A')}${ssPdfChip(m.count+' '+leaf,'#EDE5D8','#2C1F0A')}${ssPdfChip(m.routes+' خط سير','#EDE5D8','#2C1F0A')}${ssPdfChip(m.branches+' فرع','#C55B48','#fff')}</div>
+  </div>`;
+}
+function ssPdfSupHTML(sp,isSales,cont){
+  const leaf=isSales?'مندوب':'منسق';
+  return `<div style="background:#F5F0E8;border:1px solid #E0D8CC;border-right:5px solid #731E2E;border-radius:6px;padding:8px 12px;margin-top:10px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+    <div><span style="font-size:10px;color:#8a7a5a">${cont?'المشرف (تابع):':'المشرف:'}</span> <b style="font-size:13px;color:#2C1F0A">${ssEsc(sp.name)}</b>${sp.groups?`<div style="font-size:10px;color:#8a7a5a;margin-top:2px">${ssEsc(sp.groups)}</div>`:''}</div>
+    <div>${ssPdfChip(sp.routes+' خط سير','#fff','#1A7A4A')}${ssPdfChip(sp.count+' '+leaf,'#fff','#005CBF')}${ssPdfChip(sp.branches+' فرع','#731E2E','#fff')}</div>
+  </div>
+  <div style="display:flex;background:#731E2E;color:#fff;font-size:11px;font-weight:700;margin-top:4px;border-radius:4px 4px 0 0">
+    <div style="width:34px;padding:6px;text-align:center">#</div><div style="flex:3;padding:6px">اسم ${leaf}</div><div style="flex:4;padding:6px">خط السير</div><div style="width:74px;padding:6px;text-align:center">عدد الفروع</div>
+  </div>`;
+}
+function ssPdfRowHTML(r,i,k){
+  const vac=r.person==='تحت التعيين';
+  return `<div style="display:flex;align-items:stretch;font-size:11px;background:${k%2?'#FCF9F4':'#fff'};border:1px solid #E0D8CC;border-top:0">
+    <div style="width:34px;padding:6px;text-align:center;color:#8a7a5a">${i+1}</div>
+    <div style="flex:3;padding:6px;font-weight:700;color:${vac?'#B36A00':'#2C1F0A'}">${ssEsc(r.person)}</div>
+    <div style="flex:4;padding:6px;color:${r.route&&r.route!=='تحت التعيين'?'#1A7A4A':'#B36A00'};font-weight:600">${ssEsc(r.route)||'—'}</div>
+    <div style="width:74px;padding:6px;text-align:center;color:#C55B48;font-weight:800">${r.branches||0}</div>
+  </div>`;
+}
 async function ssGenerateExportPDF(){
   if(!(await ensurePdfLibs())){ showToast('مكتبة PDF لسه بتتحمّل، حاول تاني بعد لحظة','err'); return null; }
   const rows = ssBuildFlatRows();
   const isSales = SS_SIDE === 'sales';
+  const tree = ssBuildTree(rows);
   const { jsPDF } = window.jspdf;
   const pdf = new jsPDF({unit:'mm', format:'a4'});
   const pageW = pdf.internal.pageSize.getWidth();
   const pageH = pdf.internal.pageSize.getHeight();
-  const HOLDER_W = 780; // px — عرض ثابت للعنصر الوهمي، بيتحول لـ pageW مم عند الالتقاط
-  const pxPerMM = HOLDER_W / pageW;
-  const pageCapacityPx = pageH * pxPerMM;
+  const HOLDER_W = 780;
+  const pageCapacityPx = pageH * (HOLDER_W / pageW);
+  const totalPeople = rows.filter(r=>r.person && r.person!=='تحت التعيين').length;
 
-  // عنصر قياس مؤقت: نبني فيه الهيدر + الجدول بكل صفوفه عشان نقيس ارتفاع كل جزء فعليًا قبل التقسيم
-  const measure = document.createElement('div');
-  measure.style.cssText = `position:fixed;top:0;left:-99999px;width:${HOLDER_W}px;background:#fff;z-index:-1;direction:rtl;font-family:Cairo,Arial,sans-serif`;
-  measure.innerHTML = `<div id="ss-m-header">${ssBuildExportHeaderHTML(isSales, rows.length)}</div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px">${ssTableHeadHTML(isSales)}
-      <tbody>${rows.map((r,i)=>ssTableRowHTML(r,i)).join('')}</tbody>
-    </table>`;
-  document.body.appendChild(measure);
-  const headerHeightPx = measure.querySelector('#ss-m-header').offsetHeight;
-  const theadHeightPx = measure.querySelector('thead').offsetHeight;
-  const rowEls = Array.from(measure.querySelectorAll('tbody tr'));
-  const rowHeights = rowEls.map(tr=>tr.getBoundingClientRect().height);
-  measure.remove();
-
-  const SAFETY = 14; // هامش أمان بالبكسل عشان الحدود/الظلال متتقصش
-  const firstPageCap = pageCapacityPx - headerHeightPx - theadHeightPx - SAFETY;
-  const nextPageCap = pageCapacityPx - theadHeightPx - SAFETY;
-
-  // تقسيم الصفوف لمجموعات (صفحات) بدون قطع أي صف نص
-  const pages = [];
-  let cur = [], curH = 0, cap = firstPageCap;
-  rows.forEach((r,i)=>{
-    const h = rowHeights[i] || 30;
-    if(cur.length && (curH + h) > cap){
-      pages.push(cur);
-      cur = []; curH = 0; cap = nextPageCap;
-    }
-    cur.push(i); curH += h;
+  // عناصر الصفحة: كل عنصر {html, kind, mi, si} — kind: mgr | sup | row
+  const items=[];
+  tree.forEach((m,mi)=>{
+    items.push({kind:'mgr',mi,html:ssPdfMgrHTML(m,isSales,false)});
+    m.sups.forEach((sp,si)=>{
+      items.push({kind:'sup',mi,si,html:ssPdfSupHTML(sp,isSales,false)});
+      if(!sp.people.length) items.push({kind:'row',mi,si,html:ssPdfRowHTML({person:'تحت التعيين',route:'',branches:0},0,0)});
+      sp.people.forEach((r,ri)=> items.push({kind:'row',mi,si,html:ssPdfRowHTML(r,ri,ri)}));
+    });
   });
+  if(!items.length) items.push({kind:'row',html:'<div style="padding:20px;text-align:center;color:#aaa">مفيش بيانات</div>'});
+
+  const mk=(html)=>{ const d=document.createElement('div'); d.style.cssText=`position:fixed;top:0;left:-99999px;width:${HOLDER_W}px;background:#fff;z-index:-1;direction:rtl;font-family:Cairo,Arial,sans-serif;padding:0 14px;box-sizing:border-box`; d.innerHTML=html; document.body.appendChild(d); return d; };
+  const headerHTML = ssBuildExportHeaderHTML(isSales, totalPeople);
+  const hm = mk(headerHTML); const headerH = hm.offsetHeight + 8; hm.remove();
+  // قياس كل عنصر على حدة
+  const meas = mk(items.map((it,i)=>`<div data-i="${i}">${it.html}</div>`).join(''));
+  const hs = Array.from(meas.querySelectorAll('[data-i]')).map(el=>el.getBoundingClientRect().height);
+  meas.remove();
+  items.forEach((it,i)=>it.h=hs[i]||28);
+
+  const SAFETY=40, FOOT=34;
+  const pages=[]; let cur=[], used=headerH, cap=pageCapacityPx-SAFETY-FOOT;
+  const flush=()=>{ pages.push(cur); cur=[]; used=0; };
+  for(let i=0;i<items.length;i++){
+    const it=items[i];
+    // العناوين ما تتفصلش عن أول صف تحتها
+    let need=it.h;
+    if(it.kind==='mgr'){ need+= (items[i+1]?items[i+1].h:0) + (items[i+2]?items[i+2].h:0); }
+    else if(it.kind==='sup'){ need+= (items[i+1]?items[i+1].h:0); }
+    if(cur.length && used+need>cap){ flush(); }
+    // تكملة عنوان المدير/المشرف لو الصفحة بدأت بصف
+    if(!cur.length && it.kind==='row' && it.mi!=null){
+      const m=tree[it.mi], sp=m.sups[it.si];
+      const ch=[{html:ssPdfSupHTML(sp,isSales,true), h:70}];
+      cur.push(...ch); used+=70;
+    }
+    cur.push(it); used+=it.h;
+  }
   if(cur.length || !pages.length) pages.push(cur);
 
-  for(let p=0; p<pages.length; p++){
-    const idxs = pages[p];
-    const isFirst = p===0;
-    const holder = document.createElement('div');
-    holder.style.cssText = `position:fixed;top:0;left:-99999px;width:${HOLDER_W}px;background:#fff;z-index:-1;direction:rtl;font-family:Cairo,Arial,sans-serif`;
-    const bodyRows = idxs.map(i=>ssTableRowHTML(rows[i], i)).join('') || `<tr><td colspan="6" style="padding:14px;text-align:center;color:#aaa">مفيش بيانات</td></tr>`;
-    holder.innerHTML = `${isFirst ? ssBuildExportHeaderHTML(isSales, rows.length) : `<div style="height:10px"></div>`}
-      <table style="width:100%;border-collapse:collapse;font-size:11px">${ssTableHeadHTML(isSales)}
-        <tbody>${bodyRows}</tbody>
-      </table>
-      ${p===pages.length-1 ? ssFooterHTML() : ''}`;
-    document.body.appendChild(holder);
+  const now = new Date().toLocaleDateString('ar-EG');
+  for(let p=0;p<pages.length;p++){
+    const holder = mk(`${p===0?headerHTML:'<div style="height:10px"></div>'}
+      ${pages[p].map(x=>x.html).join('')}
+      <div style="margin-top:14px;padding-top:6px;border-top:1px solid #E0D8CC;display:flex;justify-content:space-between;font-size:9.5px;color:#8a7a5a"><span>الطحان جولدن داتس — قوة القطاع</span><span>صفحة ${p+1} من ${pages.length}</span></div>`);
     try{
       if(document.fonts && document.fonts.ready) await document.fonts.ready;
       await ssWaitImages(holder);
       const canvas = await html2canvas(holder, {scale:2, useCORS:true, backgroundColor:'#ffffff'});
-      const imgW = pageW;
-      const imgH = canvas.height * imgW / canvas.width;
-      const imgData = canvas.toDataURL('image/jpeg', 0.95);
+      const imgW = pageW, imgH = canvas.height * imgW / canvas.width;
       if(p>0) pdf.addPage();
-      pdf.addImage(imgData, 'JPEG', 0, 0, imgW, Math.min(imgH, pageH));
-    } finally {
-      holder.remove();
-    }
+      pdf.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, imgW, Math.min(imgH, pageH));
+    } finally { holder.remove(); }
   }
   return pdf;
 }
