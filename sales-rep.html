@@ -1993,7 +1993,7 @@ async function loadGoalTab(){
       o.value = val; o.textContent = lbl;
       sel.appendChild(o);
     }
-    sel.selectedIndex = 0; // الشهر القادم (يوليو) افتراضي
+    sel.selectedIndex = 1; // الشهر الحالي افتراضي (أول اختيار في القايمة هو الشهر الجاي — اللي لسه مفيهوش مبيعات)
   }
 
   const now2 = new Date();
@@ -2001,6 +2001,7 @@ async function loadGoalTab(){
   const month = sel.value || defaultMonth;
   const [yr, mo] = month.split('-').map(Number);
   const monthStart = month + '-01';
+  const nextMonthStart = localYMStr(new Date(yr, mo, 1)) + '-01';
   const repEnc = encodeURIComponent(currentRep.name);
 
   body.innerHTML = '<div class="loading"><div class="spin"></div><span>جاري التحميل...</span></div>';
@@ -2008,8 +2009,16 @@ async function loadGoalTab(){
   try{
     const [tgtRes, salesRes, retRes] = await Promise.all([
       fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${month}&select=rep_name,target_amount,work_days&limit=500`,{headers:SB_HEADERS}),
-      sbFetchAll('sales_deliveries', `?rep_name=eq.${repEnc}&deleted_at=is.null&select=total_net,delivery_date`),
-      sbFetchAll('sales_returns', `?rep_name=eq.${repEnc}&deleted_at=is.null&select=total_net,return_date`),
+      // الشهر بس (مش كل فواتير المندوب من أول ما اشتغل) — من الجدول الحالي + الأرشيف
+      // (الفواتير الأقدم من 90 يوم بتتنقل للأرشيف، فشهر زي يوليو كان بيطلع ناقص)
+      Promise.all([
+        sbFetchAll('sales_deliveries', `?rep_name=eq.${repEnc}&deleted_at=is.null&delivery_date=gte.${monthStart}&delivery_date=lt.${nextMonthStart}&select=total_net,delivery_date`),
+        sbFetchAll('sales_deliveries_archive', `?rep_name=eq.${repEnc}&deleted_at=is.null&delivery_date=gte.${monthStart}&delivery_date=lt.${nextMonthStart}&select=total_net,delivery_date`)
+      ]).then(([a,b])=>[...(a||[]),...(b||[])]),
+      Promise.all([
+        sbFetchAll('sales_returns', `?rep_name=eq.${repEnc}&deleted_at=is.null&return_date=gte.${monthStart}&return_date=lt.${nextMonthStart}&select=total_net,return_date`),
+        sbFetchAll('sales_returns_archive', `?rep_name=eq.${repEnc}&deleted_at=is.null&return_date=gte.${monthStart}&return_date=lt.${nextMonthStart}&select=total_net,return_date`)
+      ]).then(([a,b])=>[...(a||[]),...(b||[])]),
     ]);
 
     const allTgt      = tgtRes.ok   ? await tgtRes.json()   : [];
@@ -2031,8 +2040,8 @@ async function loadGoalTab(){
 
     const target   = +(tgtData[0]?.target_amount) || 0;
     const workDays = +(tgtData[0]?.work_days)     || 26;
-    const totalSales = salesData.reduce((s,r)=>s+(r.total_net||0),0);
-    const totalRet   = retData.reduce((s,r)=>s+(r.total_net||0),0);
+    const totalSales = salesData.reduce((s,r)=>s+(+r.total_net||0),0);
+    const totalRet   = retData.reduce((s,r)=>s+(+r.total_net||0),0);
     let net          = totalSales - totalRet;
 
     // لو فيه تعديل يدوي على "المحقق" من لوحة التحكم (شاشة الأهداف)، الرقم ده بيبقى أساس الصافي لحد range_to
@@ -3202,6 +3211,20 @@ function updateSubBar(){
 }
 
 // ══════════════ INVOICE ══════════════
+// خصم القسم محسوب صنف بصنف حسب فئة كل صنف (مثلاً سعودي 15% ومصري 10% لنفس العميل).
+// قبل كده كان بياخد نسبة أول صنف في القسم ويطبقها على الكل — فلو الفاتورة فيها فئتين بنسبتين مختلفتين كانت بتطلع غلط.
+// القطعي (isPromo) مستثنى من الخصم زي ما هو. pct = النسبة الفعلية (لو كل الأصناف بنفس النسبة بتطلع هي هي).
+function grpDisc(gItems, isReturn){
+  let dA=0, base=0; const rates=new Set();
+  (gItems||[]).forEach(i=>{
+    if(i.isPromo) return;
+    const r = isReturn ? getRetDiscount(i.name||'') : getDiscount(i.name||'');
+    dA += (+i.total||0)*r/100; base += (+i.total||0); rates.add(r);
+  });
+  const pct = rates.size===1 ? [...rates][0] : (base>0 ? Math.round(dA/base*10000)/100 : 0);
+  return {dA, pct};
+}
+
 function getDiscount(itemName){
   const pdb=pdbData||{};
   let disc=0;
@@ -3276,12 +3299,12 @@ function renderInvoice(){
 
   groups.filter(g=>g.items.length).forEach(g=>{
     // خصم لكل قسم بناءً على أول صنف فيه (لضمان صحة الفئة)
-    const disc=getDiscount(g.items[0].name);
+    const _gd=grpDisc(g.items,false); const disc=_gd.pct;
     // فقط القطعي (isPromo) مستثنى من الخصم — الأسعار الخاصة (isClientPL) تخضع للخصم عادي
     const normalSub=g.items.filter(i=>!i.isPromo).reduce((s,i)=>s+i.total,0);
     const plSub=g.items.filter(i=>i.isPromo).reduce((s,i)=>s+i.total,0);
     const sub=normalSub+plSub;
-    const dA=normalSub*disc/100;
+    const dA=_gd.dA;
     const after=sub-dA;
     const taxA=after*g.tax/100;const net=after+taxA;
     grandBefore+=sub;grandDisc+=dA;grandTax+=taxA;grandTotal+=net;
@@ -3383,12 +3406,12 @@ async function sendInvoice(mode){
     for(const g of groups.filter(g=>g.items.length)){
       if(invoiceState._sentTax.has(g.tax)) continue; // القسم ده اترسل خلاص في محاولة سابقة
       // خصم لكل قسم: مرتجع → getRetDiscount، بيع → getDiscount بأول صنف في القسم
-      const disc=isReturn?getRetDiscount(g.items[0]?.name||''):getDiscount(g.items[0]?.name||'');
+      const _gd=grpDisc(g.items,isReturn); const disc=_gd.pct;
       // فقط القطعي (isPromo) مستثنى من الخصم — الأسعار الخاصة (isClientPL) تخضع للخصم عادي
       const normalSub=g.items.filter(i=>!i.isPromo).reduce((s,i)=>s+i.total,0);
       const plSub=g.items.filter(i=>i.isPromo).reduce((s,i)=>s+i.total,0);
       const sub=normalSub+plSub;
-      const dA=normalSub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
+      const dA=_gd.dA;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
 
       // حماية إضافية: لو رقم الفاتورة العشوائي اتصادف نفس رقم فاتورة تانية (نادر جداً بعد توسيع
       // النطاق في getInvoiceNumber، لكن مش مستحيل)، قاعدة البيانات هترفض الإدخال بسبب
@@ -3474,13 +3497,13 @@ function exportPDF(mode){
   const discDisplay=isReturn?getRetDiscount(items[0]?.name||''):getDiscount(items[0]?.name||'');
   groups.filter(g=>g.items.length).forEach(g=>{
     // خصم لكل قسم بناءً على أول صنف فيه
-    const disc=isReturn?getRetDiscount(g.items[0]?.name||''):getDiscount(g.items[0]?.name||'');
+    const _gd=grpDisc(g.items,isReturn); const disc=_gd.pct;
     // فقط القطعي (isPromo) مستثنى من الخصم — الأسعار الخاصة (isClientPL) تخضع للخصم عادي
     const normalSub=g.items.filter(i=>!i.isPromo).reduce((s,i)=>s+i.total,0);
     const plSub=g.items.filter(i=>i.isPromo).reduce((s,i)=>s+i.total,0);
     const invNo=getInvoiceNumber(g.prefix);
     const sub=normalSub+plSub;
-    const dA=normalSub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
+    const dA=_gd.dA;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
     grandBefore+=sub;grandDisc+=dA;grandTax+=taxA;grandTotal+=net;
     const rows=g.items.map((item,i)=>`<tr style="${i%2?'background:#FFF8F4':''}"><td>${i+1}</td><td style="text-align:right">${item.name}${item.promoNote?`<div style="font-size:10px;color:#E65100">${item.promoNote}</div>`:''}</td><td>${item.qty}</td><td>${item.isPromo?`<span style="color:#E65100;font-weight:700">${item.price} ج 🔖</span>`:`${item.price} ج`}</td><td style="font-weight:700">${item.total.toLocaleString('en-US')} ج</td></tr>`).join('');
     sections+=`<div style="margin-bottom:24px;page-break-inside:avoid">
@@ -3836,13 +3859,13 @@ function renderReturnInvoice(){
   let html='';let grandTotal=0,grandBefore=0,grandDisc=0,grandTax=0,footerDisc=0;
   groups.filter(g=>g.items.length).forEach(g=>{
     // خصم لكل مجموعة بناءً على أول صنف فيها (مصري 10% / سعودي 15%)
-    const disc=getRetDiscount(g.items[0]?.name||'');
+    const _gd=grpDisc(g.items,true); const disc=_gd.pct;
     if(disc>footerDisc) footerDisc=disc;
     // فقط القطعي (isPromo) مستثنى من الخصم — الأسعار الخاصة (isClientPL) تخضع للخصم عادي
     const normalSub=g.items.filter(i=>!i.isPromo).reduce((s,i)=>s+i.total,0);
     const plSub=g.items.filter(i=>i.isPromo).reduce((s,i)=>s+i.total,0);
     const sub=normalSub+plSub;
-    const dA=normalSub*disc/100;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
+    const dA=_gd.dA;const after=sub-dA;const taxA=after*g.tax/100;const net=after+taxA;
     grandBefore+=sub;grandDisc+=dA;grandTax+=taxA;grandTotal+=net;
     html+=`<div class="inv-sec"><div class="inv-sec-hd"><span>${g.label}</span><span class="tax-tag ${g.cls}">${g.tax===0?'بدون ضريبة':g.tax+'%'}</span></div><div class="inv-th"><span class="th-n">الصنف</span><span class="th-q">عدد</span><span class="th-p">سعر</span><span class="th-t">إجمالي</span><span class="th-e"></span></div>`;
     g.items.forEach(item=>{
@@ -4002,7 +4025,7 @@ async function bnRepSendReply(msgId, fromName){
   await fetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${msgId}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
-    body: JSON.stringify({ reply_text: reply, reply_by: cu.name, reply_at: new Date().toISOString(), is_read: true })
+    body: JSON.stringify({ reply_text: reply, reply_by: currentRep.name, reply_at: new Date().toISOString(), is_read: true })
   });
 
   // أرسل إشعار لمشرف المبيعات بأن المندوب رد
