@@ -6440,11 +6440,11 @@ h2,h3{color:#2C1F0A}
                     <tr style="background:#4B3C1A;color:#EDE5D8">
                       <th style="padding:9px 14px;text-align:right">الصنف</th>
                       <th style="padding:9px 10px;text-align:center">كمية المبيعات (فواتير التسليم للعميل)</th>
-                      <th style="padding:9px 10px;text-align:center">قيمة المبيعات</th>
+                      <th style="padding:9px 10px;text-align:center">قيمة المبيعات (قبل الخصم والضريبة)</th>
                       <th style="padding:9px 10px;text-align:center">كمية المرتجع من العميل</th>
-                      <th style="padding:9px 10px;text-align:center">قيمة المرتجع</th>
+                      <th style="padding:9px 10px;text-align:center">قيمة المرتجع (قبل الخصم والضريبة)</th>
                       <th style="padding:9px 10px;text-align:center">صافي المبيعات (كمية)</th>
-                      <th style="padding:9px 10px;text-align:center">صافي المبيعات (قيمة)</th>
+                      <th style="padding:9px 10px;text-align:center">صافي المبيعات (قيمة قبل الخصم والضريبة)</th>
                     </tr>
                   </thead>
                   <tbody id="sinv-items-tbody">
@@ -37440,7 +37440,7 @@ function sinvItemsLoad(){
       const name = it.name; if(!name) return;
       const a = get(name);
       a.delQty += (+it.qty||0);
-      a.delVal += (+it.total!=null ? +it.total : (+it.qty||0)*(+it.price||0));
+      a.delVal += (it.total!=null ? (+it.total||0) : (+it.qty||0)*(+it.price||0));
     });
   });
   rets.forEach(r=>{
@@ -37448,7 +37448,7 @@ function sinvItemsLoad(){
       const name = it.name; if(!name) return;
       const a = get(name);
       a.retQty += (+it.qty||0);
-      a.retVal += (+it.total!=null ? +it.total : (+it.qty||0)*(+it.price||0));
+      a.retVal += (it.total!=null ? (+it.total||0) : (+it.qty||0)*(+it.price||0));
     });
   });
   const names = Object.keys(agg).sort((a,b)=>agg[b].delVal-agg[a].delVal);
@@ -37505,11 +37505,13 @@ async function sinvBackdateToggleGlobal(checked){
   try{
     const check = await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.sinv_backdate_enabled&select=id`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     const rows = check.ok ? await check.json() : [];
+    let wr;
     if(rows.length){
-      await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.sinv_backdate_enabled`,{method:'PATCH',headers:H,body:JSON.stringify({value:String(checked)})});
+      wr = await fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.sinv_backdate_enabled`,{method:'PATCH',headers:H,body:JSON.stringify({value:String(checked)})});
     } else {
-      await fetch(`${SUPABASE_URL}/rest/v1/products_db`,{method:'POST',headers:H,body:JSON.stringify({key:'sinv_backdate_enabled',value:String(checked)})});
+      wr = await fetch(`${SUPABASE_URL}/rest/v1/products_db`,{method:'POST',headers:H,body:JSON.stringify({key:'sinv_backdate_enabled',value:String(checked)})});
     }
+    if(!wr.ok) throw new Error('HTTP '+wr.status);
     showToast(checked?'✅ تم تفعيل اختيار تاريخ سابق لكل المناديب':'⏸ تم إيقافه لكل المناديب');
     sinvBackdateRenderReps();
   }catch(e){
@@ -37541,7 +37543,8 @@ async function sinvBackdateSetRep(id, val){
   const value = val==='default' ? null : (val==='true');
   const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
   try{
-    await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({allow_backdate_invoice:value})});
+    const wr = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({allow_backdate_invoice:value})});
+    if(!wr.ok) throw new Error('HTTP '+wr.status);
     const rep = _sinvBackdateReps.find(r=>r.id===id);
     if(rep) rep.allow_backdate_invoice = value;
     showToast('✅ تم الحفظ');
@@ -37629,15 +37632,36 @@ let _sinvData=[];
 // ── جلب كل الصفوف بدون أي سقف (pagination) — عشان "فواتير المناديب" ويومية المندوب
 // ما ينفعش يفوتهم صف واحد حتى لو عدد الفواتير زاد جدًا مستقبلاً. بيلف على الداتا صفحة
 // صفحة (limit=1000 لكل صفحة) لحد ما يوصل لصفحة أقل من الحجم المطلوب (يعني خلصت الداتا).
-async function fetchAllRows(baseUrl, headers, pageSize){
+// جداول فيها عمود id فريد — بنضيفه كترتيب احتياطي عشان التقسيم لصفحات (offset) يبقى ثابت 100%:
+// من غير ترتيب فريد، الصف ممكن يتكرر في صفحتين أو يتنط من الاتنين لما الجدول يعدّي 1000 صف.
+const _FAR_ID_TABLES = new Set('assignments,attendance,attendance_edits,branch_client_map,branch_locations,checkout_exceptions,client_category_discounts,client_items_manual,company_letters,competitor_categories,competitor_companies,competitor_logs,contract_clients,contract_items,coord_route_assignments,coordinator_weekly_ratings,daily_sales_entries,date_benefit_products,field_support_logs,forecast_month_plans,fuel_branches,fuel_products,gm_field_visits,groups,holidays,inventory_checks,invoice_audit_log,item_name_aliases,item_review,letters_notes,location,market_expiry,messages,missing,mt_item_plans,orders,plan_approvals,plan_branches,plan_deviations,plans,point_logs,product_snapshots,products,products_archive,products_db,promo_banner,reminders,rep_achieved_overrides,rep_balance_adjustments,rep_balance_resets,rep_car_inventory,rep_damaged_handovers,rep_extra_items,rep_invoice_moves,rep_route_schedule,rep_stock_requests,rep_stock_transfers,rep_targets,returns,routes,sales_achievements,sales_clients,sales_deliveries,sales_deliveries_archive,sales_plan_items,sales_plans_plus,sales_prices,sales_promotions,sales_returns,sales_returns_archive,sales_route_assignments,sales_staff,sales_targets,sales_visit_ratings,sci_hidden_items,special_campaign_acks,special_campaigns,special_target_records,special_targets,staff,supervisor_execution,supply_requests,tamr_customer_invoices_raw,tamr_sales_indirect_discounts,tamr_sales_invoices,tamr_sales_invoices_archive,tamr_sales_item_catalog,tamr_sales_item_merges,tamr_sales_items,tamr_sales_items_archive,tamr_sales_returns,tamr_sales_returns_archive,users,visit_results,visits,weekly_plan_items,weekly_plans'.split(','));
+function _farStableOrder(url){
+  const m = url.match(/\/rest\/v1\/([a-z_0-9]+)/); if(!m || !_FAR_ID_TABLES.has(m[1])) return url;
+  const om = url.match(/([?&])order=([^&]*)/);
+  if(om){ if(/(^|,)id\./.test(om[2])) return url; return url.replace(om[0], `${om[1]}order=${om[2]},id.asc`); }
+  return url + (url.includes('?') ? '&' : '?') + 'order=id.asc';
+}
+// strict=true: لو أي صفحة فشلت (بعد إعادة المحاولة) نرمي خطأ بدل ما نرجّع داتا ناقصة من غير ما حد ياخد باله
+async function fetchAllRows(baseUrl, headers, pageSize, strict){
   pageSize = pageSize || 1000;
+  baseUrl = _farStableOrder(baseUrl);
   let all = [];
   let offset = 0;
   const sep = baseUrl.includes('?') ? '&' : '?';
   while(true){
     const pageUrl = `${baseUrl}${sep}limit=${pageSize}&offset=${offset}`;
-    const res = await fetch(pageUrl, {headers});
-    if(!res.ok) break;
+    let res = null;
+    for(let attempt=0; attempt<3; attempt++){
+      try{ res = await fetch(pageUrl, {headers}); }catch(e){ res = null; }
+      if(res && res.ok) break;
+      if(res && res.status>=400 && res.status<500 && res.status!==408 && res.status!==429) break; // خطأ في الطلب نفسه — مفيش فايدة من التكرار
+      await new Promise(r=>setTimeout(r, 700*(attempt+1)));
+    }
+    if(!res || !res.ok){
+      if(strict) throw new Error('تعذّر تحميل كل البيانات ('+(res?('HTTP '+res.status):'اتصال')+') — اضغط عرض تاني');
+      console.error('[fetchAllRows] بيانات ناقصة:', baseUrl, offset);
+      break;
+    }
     const page = await res.json();
     if(!Array.isArray(page) || !page.length) break;
     all = all.concat(page);
@@ -38086,6 +38110,14 @@ async function tdTransferTargets(){
   }
 }
 
+// الفاتورة تتحسب على العميل لو فرعها مربوط بالعميل دلوقتي، أو لو اسم العميل مكتوب على الفاتورة نفسها
+// (فروع اتشالت من الربط بعد ما اتباع لها كانت بتختفي من فلتر العميل)
+function sinvRowMatchesClient(r, client){
+  const set=_sinvClientBranches[client];
+  const br=(r.branch_name||'').trim();
+  if(set && (set.has(br) || set.has(r.branch_name))) return true;
+  return (r.client_name||'').trim()===client.trim();
+}
 async function sinvLoad(){
   const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
   const reps = sinvGetSelectedReps();
@@ -38107,12 +38139,11 @@ async function sinvLoad(){
   // فرع واحد محدد → فلتر مباشر وآمن في الرابط (eq. مش زي in.() مش بتتأثر بالأقواس في اسم الفرع)
   if(branch) url+=`&branch_name=eq.${encodeURIComponent(branch)}`;
   try{
-    _sinvData=await fetchAllRows(url,H);
+    _sinvData=await fetchAllRows(url,H,1000,true);
     // عميل محدد من غير فرع بعينه → فلترة في الجافاسكريبت على كل فروع العميل
     // (متعمدين مش بنبعتها كـ in.() في الرابط عشان بعض أسماء الفروع فيها أقواس بتبوّظ الفلتر)
-    if(!branch && client && _sinvClientBranches[client]){
-      const branchSet=_sinvClientBranches[client];
-      _sinvData=_sinvData.filter(r=>branchSet.has((r.branch_name||'').trim()));
+    if(!branch && client){
+      _sinvData=_sinvData.filter(r=>sinvRowMatchesClient(r, client));
     }
     // فلتر "الصنف" (لو محدد أصناف) - _sinvData بتفضل كاملة (مرجع للمرتجعات المرتبطة في نافذة
     // التفاصيل)، والعرض (الجدول + الإحصائيات) بيبقى على displayDel بس
@@ -38252,10 +38283,9 @@ async function sinvRetLoad(){
   if(to)   url+=`&return_date=lte.${to}`;
   if(branch) url+=`&branch_name=eq.${encodeURIComponent(branch)}`;
   try{
-    _sinvRetData=await fetchAllRows(url,H);
-    if(!branch && client && _sinvClientBranches[client]){
-      const branchSet=_sinvClientBranches[client];
-      _sinvRetData=_sinvRetData.filter(r=>branchSet.has((r.branch_name||'').trim()));
+    _sinvRetData=await fetchAllRows(url,H,1000,true);
+    if(!branch && client){
+      _sinvRetData=_sinvRetData.filter(r=>sinvRowMatchesClient(r, client));
     }
     const _sinvItemFilterRet = sinvFilterRowsByItems(_sinvRetData);
     const itemAggRet = _sinvItemFilterRet.itemAgg;
@@ -38656,13 +38686,21 @@ function sinvBuildItemBranchReport(rows){
     const rowDate = r.return_date || r.delivery_date || '';
     if(rowDate) byGroup[groupKey].dates.add(rowDate);
     const disc = Number(r.discount_pct)||0;
+    // الأصناف المتسجلة في الفاتورة مفيهاش علامة "قطعي" ولا نسبة ضريبة — بنحدد القطعي من مبلغ الخصم
+    // المتسجل فعلاً، والضريبة من نوع الفاتورة (كل فاتورة نوع ضريبة واحد)
+    const det = sinvDetectPromoFlags(r, items, []);
+    const before = Number(r.total_before_discount)||0;
+    const afterInv = r.total_after_discount!=null ? Number(r.total_after_discount) : ((Number(r.total_net)||0)-(Number(r.total_tax)||0));
+    const invTaxPct = {no_tax:0,tax_14:14,tax_5:5}[r.invoice_type]||0;
     hits.forEach(it=>{
       const name = (it.name||'').trim();
       const q = Number(it.qty)||0;
       const base = it.total!=null ? (Number(it.total)||0) : q*(Number(it.price)||0);
-      const taxPct = Number(it.tax_pct)||0;
-      const afterDisc = it.isPromo ? base : base*(1-disc/100);
-      const net = afterDisc*(1+taxPct/100);
+      const idx = items.indexOf(it);
+      const afterDisc = det.verified
+        ? (det.flags[idx] ? base : base*(1-disc/100))
+        : (before>0 ? base*afterInv/before : base); // لو مش قادر يحدد: توزيع نسبي من إجمالي الفاتورة
+      const net = afterDisc*(1+invTaxPct/100);
       byGroup[groupKey].qtyByItem[name] = (byGroup[groupKey].qtyByItem[name]||0) + q;
       byGroup[groupKey].totalQty += q;
       byGroup[groupKey].net += net;
@@ -38778,7 +38816,7 @@ async function sinvLoadPromosForClient(clientName){
   if(_sinvPromoCache[clientName]) return _sinvPromoCache[clientName];
   try{
     const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const rows=await fetch(`${SUPABASE_URL}/rest/v1/sales_promotions?client_name=eq.${encodeURIComponent(clientName)}&deleted_at=is.null&select=snf_name,date_from,date_to`,{headers:H}).then(r=>r.json()).catch(()=>[]);
+    const rows=await fetch(`${SUPABASE_URL}/rest/v1/sales_promotions?client_name=eq.${encodeURIComponent(clientName)}&promo_type=in.(final,percent)&select=snf_name,date_from,date_to,deleted_at`,{headers:H}).then(r=>r.json()).catch(()=>[]);
     _sinvPromoCache[clientName]=Array.isArray(rows)?rows:[];
   }catch(e){ _sinvPromoCache[clientName]=[]; }
   return _sinvPromoCache[clientName];
@@ -38866,7 +38904,33 @@ async function sinvShowInvoice(id, tab){
 // ══ تعديل فاتورة/مرتجع مندوب (تصحيح كمية/سعر صنف، خصم، ضريبة) ══
 let _sinvEditItems = []; // نسخة قابلة للتعديل من أصناف الفاتورة الحالية
 
-function sinvOpenEdit(){
+// بيحدد أنهي أصناف في الفاتورة كانت "قطعي" (مستثناة من الخصم) — نفس منطق تطبيق المندوب.
+// بنبدأ بالعروض القطعية للعميل في تاريخ الفاتورة، وبنتأكد إن النتيجة بتطلع نفس مبلغ الخصم المتسجل فعلاً؛
+// لو مش مطابقة بندور على مجموعة الأصناف اللي مجموعها = الجزء اللي اتخصم عليه فعلاً.
+function sinvDetectPromoFlags(r, items, promos){
+  const invDate = r.delivery_date||r.return_date||'';
+  const isPromoName = (name)=> (promos||[]).some(p=>p.snf_name===name && (!invDate || (p.date_from<=invDate && p.date_to>=invDate)));
+  const flags = items.map(it=>isPromoName(it.name));
+  const before = +r.total_before_discount||0;
+  const after  = r.total_after_discount!=null ? +r.total_after_discount : ((+r.total_net||0)-(+r.total_tax||0));
+  const D = before - after, p = +r.discount_pct||0;
+  if(!(p>0 && D>0.005)) return {flags, verified: D<=0.005};
+  const B = D*100/p; // الجزء اللي اتخصم عليه فعلاً
+  const tot = it=>(+it.qty||0)*(+it.price||0);
+  const sumFlags = f=>items.reduce((s,it,i)=>s+(f[i]?0:tot(it)),0);
+  if(Math.abs(sumFlags(flags)-B) <= 0.05) return {flags, verified:true};
+  // دوّر على مجموعة الأصناف المخصوم عليها (عدد الأصناف في الفاتورة صغير)
+  const n = items.length;
+  if(n <= 20){
+    for(let mask=0; mask<(1<<n); mask++){
+      let sub=0; for(let i=0;i<n;i++) if(mask&(1<<i)) sub+=tot(items[i]);
+      if(Math.abs(sub-B) <= 0.05){ return {flags: items.map((_,i)=>!(mask&(1<<i))), verified:true}; }
+    }
+  }
+  return {flags, verified:false};
+}
+
+async function sinvOpenEdit(){
   if(!_sinvDetailCurrent){ showToast('⚠️ افتح تفاصيل الفاتورة أولاً'); return; }
   const {id, tab} = _sinvDetailCurrent;
   const src = tab==='ret' ? _sinvRetData : _sinvData;
@@ -38874,7 +38938,12 @@ function sinvOpenEdit(){
   if(!r){ showToast('⚠️ لم يتم تحميل بيانات الفاتورة'); return; }
   const isRet = tab==='ret';
 
-  _sinvEditItems = (Array.isArray(r.items)?r.items:[]).map(it=>({name:it.name||'', qty:Number(it.qty)||0, price:Number(it.price)||0}));
+  // بنحتفظ بباقي حقول الصنف (زي صالح/تالف في المرتجع) عشان الحفظ ميمسحهاش
+  _sinvEditItems = (Array.isArray(r.items)?r.items:[]).map(it=>({...it, name:it.name||'', qty:Number(it.qty)||0, price:Number(it.price)||0}));
+  const promos = await sinvLoadPromosForClient(r.client_name||'');
+  const det = sinvDetectPromoFlags(r, _sinvEditItems, promos);
+  _sinvEditItems.forEach((it,i)=>{ it._promo = !!det.flags[i]; });
+  window._sinvEditVerified = det.verified;
 
   document.getElementById('sinv-edit-title').textContent = (isRet?'تعديل مرتجع: ':'تعديل فاتورة: ')+(r.invoice_number||'—');
   document.getElementById('sinv-edit-meta').innerHTML = `
@@ -38900,7 +38969,7 @@ function sinvEditRenderItems(){
   const tbody = document.getElementById('sinv-edit-items');
   tbody.innerHTML = _sinvEditItems.map((it,i)=>`
     <tr style="${i%2?'background:#FFF8F4':''}">
-      <td style="padding:6px 10px;font-size:12px;font-weight:600">${it.name||'—'}</td>
+      <td style="padding:6px 10px;font-size:12px;font-weight:600">${it.name||'—'}${it._promo?'<div style="font-size:9px;color:#E65100;font-weight:700;margin-top:2px">🔖 سعر قطعي — مش بيتخصم عليه</div>':''}</td>
       <td style="padding:6px 8px;text-align:center"><input type="number" step="1" min="0" value="${it.qty}" oninput="sinvEditItemChange(${i},'qty',this.value)" style="width:100%;padding:5px 6px;border:1.5px solid var(--border);border-radius:6px;text-align:center;font-family:Cairo,sans-serif;font-size:12px"/></td>
       <td style="padding:6px 8px;text-align:center"><input type="number" step="0.01" min="0" value="${it.price}" oninput="sinvEditItemChange(${i},'price',this.value)" style="width:100%;padding:5px 6px;border:1.5px solid var(--border);border-radius:6px;text-align:center;font-family:Cairo,sans-serif;font-size:12px"/></td>
       <td style="padding:6px 8px;text-align:center;font-weight:700;font-size:12px" id="sinv-edit-item-total-${i}">${(it.qty*it.price).toFixed(2)} ج</td>
@@ -38920,14 +38989,17 @@ function sinvEditRecalc(){
   const taxPct = {no_tax:0,tax_14:14,tax_5:5}[document.getElementById('sinv-edit-type').value] || 0;
   const disc = parseFloat(document.getElementById('sinv-edit-disc').value)||0;
   const sub = _sinvEditItems.reduce((s,it)=>s+(it.qty*it.price),0);
-  const dA = sub*disc/100;
+  // الخصم على الأصناف العادية بس — القطعي مستثنى (نفس تطبيق المندوب)
+  const discBase = _sinvEditItems.reduce((s,it)=>s+(it._promo?0:it.qty*it.price),0);
+  const dA = discBase*disc/100;
   const after = sub-dA;
   const taxA = after*taxPct/100;
   const net = after+taxA;
   document.getElementById('sinv-edit-totals').innerHTML = `
     <div style="display:flex;justify-content:space-between;opacity:.85;margin-bottom:3px"><span>الإجمالي قبل الخصم</span><span>${sub.toFixed(2)} ج</span></div>
-    <div style="display:flex;justify-content:space-between;opacity:.85;margin-bottom:3px"><span>خصم ${disc}%</span><span>− ${dA.toFixed(2)} ج</span></div>
+    <div style="display:flex;justify-content:space-between;opacity:.85;margin-bottom:3px"><span>خصم ${disc}%${discBase<sub-0.005?' (على الأصناف العادية بس)':''}</span><span>− ${dA.toFixed(2)} ج</span></div>
     <div style="display:flex;justify-content:space-between;font-weight:800;margin-bottom:3px;font-size:13px"><span>✅ الصافي (بدون ضريبة)</span><span>${after.toFixed(2)} ج</span></div>
+    ${window._sinvEditVerified===false?'<div style="background:#FEF3C7;color:#92400E;border-radius:6px;padding:6px 8px;margin:6px 0;font-size:11px">⚠️ مش قادر أحدد بالظبط أنهي أصناف كانت قطعي في الفاتورة دي — راجع الصافي قبل الحفظ</div>':''}
     ${taxPct>0?`<div style="display:flex;justify-content:space-between;opacity:.8;margin-bottom:3px"><span>ضريبة ${taxPct}%</span><span>+ ${taxA.toFixed(2)} ج</span></div>`:''}
     <div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;border-top:1px solid rgba(255,255,255,.3);padding-top:8px;margin-top:6px;opacity:.9"><span>الإجمالي</span><span>${net.toFixed(2)} ج</span></div>`;
   return {sub, dA, after, taxA, net, taxPct, disc};
@@ -38940,10 +39012,20 @@ async function sinvEditSave(){
   const table = isRet ? 'sales_returns' : 'sales_deliveries';
   const {sub, after, taxA, net, disc} = sinvEditRecalc();
   const invoiceType = document.getElementById('sinv-edit-type').value;
+  const {dA} = sinvEditRecalc();
   const payload = {
-    items: _sinvEditItems.map(it=>({name:it.name, qty:it.qty, price:it.price, total:parseFloat((it.qty*it.price).toFixed(2))})),
+    items: _sinvEditItems.map(it=>{
+      const o = {...it}; delete o._promo;
+      o.qty = it.qty; o.price = it.price; o.total = parseFloat((it.qty*it.price).toFixed(2));
+      // المرتجع: لو الكمية اتغيرت، صالح + تالف ميزيدوش عن الكمية
+      if(isRet && (o.valid_qty!=null || o.damaged_qty!=null)){
+        const dq = Math.min(+o.damaged_qty||0, o.qty);
+        o.damaged_qty = dq; o.valid_qty = Math.max(0, o.qty - dq);
+      }
+      return o;
+    }),
     invoice_type: invoiceType,
-    discount_pct: disc,
+    discount_pct: dA>0 ? disc : 0,
     total_before_discount: parseFloat(sub.toFixed(2)),
     total_after_discount: parseFloat(after.toFixed(2)),
     total_tax: parseFloat(taxA.toFixed(2)),
@@ -39035,7 +39117,8 @@ function sinvShowClient(clientName, branchName, repName){
         <td style="padding:5px 8px;text-align:center;font-size:10px;font-weight:700">${(it.total||0).toFixed(2)} ج</td>
       </tr>`).join(''):`<tr><td colspan="5" style="text-align:center;padding:12px;color:#aaa;font-size:10px">لا توجد أصناف</td></tr>`;
     const taxPct={no_tax:0,tax_14:14,tax_5:5}[r.invoice_type]||0;
-    const discAmt=((r.total_before_discount||0)*(r.discount_pct||0)/100);
+    // المبلغ المخصوم فعلاً = قبل الخصم − بعد الخصم (المتسجل) — مش النسبة × الإجمالي، عشان الأصناف القطعية مستثناة من الخصم
+    const discAmt=Math.max(0,(r.total_before_discount||0)-(r.total_after_discount!=null?r.total_after_discount:((r.total_net||0)-(r.total_tax||0))));
     const borderColor=isRet?'#FECACA':'#DDD0BC';
     const headerBg=isRet?'#FFF5F5':'#FFF8F4';
     return `<div style="border:1px solid ${borderColor};border-radius:10px;margin-bottom:12px;overflow:hidden">
@@ -39210,7 +39293,7 @@ async function sinvYawmRender(reps,from,to,groups){
   }
   const sysCellStyle = showSys ? '' : 'display:none';
 
-  if(!dels.length){
+  if(!dels.length && !rets.length){
     tbody.innerHTML=`<tr><td colspan="12" style="text-align:center;padding:40px;color:#aaa">لا توجد فواتير للفترة المحددة</td></tr>`;
     return;
   }
@@ -39223,16 +39306,19 @@ async function sinvYawmRender(reps,from,to,groups){
     byRep[rn].dels.push(d);
   });
 
-  // تجميع المرتجع بالمندوب (بدون ضريبة)
-  const retByRep={};
+  // تجميع المرتجع بالمندوب: الصافي (بعد الخصم، بدون ضريبة) + الإجمالي (قبل الخصم)
+  // المندوب اللي عنده مرتجع بس في الفترة (من غير توريد) لازم يظهر ومرتجعه يتخصم من الإجمالي الكلي
+  const retByRep={}, retGrossByRep={};
   rets.forEach(r=>{
     const rn=r.rep_name||'—';
-    if(!retByRep[rn]) retByRep[rn]=0;
+    if(!retByRep[rn]){ retByRep[rn]=0; retGrossByRep[rn]=0; }
     retByRep[rn]+=(r.total_net||0)-(r.total_tax||0);
+    retGrossByRep[rn]+=(r.total_before_discount||0);
+    if(!byRep[rn]) byRep[rn]={dels:[],grp:r.grp||'—'};
   });
 
   let html='';
-  let gSales=0,gDisc=0,gRet=0,gSys=0;
+  let gSales=0,gDisc=0,gRet=0,gRetGross=0,gSys=0;
   let rowNum=0;
 
   // ترتيب أبجدي
@@ -39247,14 +39333,15 @@ async function sinvYawmRender(reps,from,to,groups){
     const discVal=totalSales-netSales;
     // نسبة الخصم%
     const discPct=totalSales>0?(discVal/totalSales*100):0;
-    // إجمالى المرتجع
+    // صافي المرتجع (بعد الخصم، بدون ضريبة) + إجمالي المرتجع (قبل الخصم)
     const retVal=retByRep[repName]||0;
+    const retGross=retGrossByRep[repName]||0;
     // نسبة المرتجع% = مرتجع ÷ صافى المبيعات
     const retPct=netSales>0?(retVal/netSales*100):0;
     // الصافى النهائي
     const net=netSales-retVal;
 
-    gSales+=totalSales; gDisc+=discVal; gRet+=retVal;
+    gSales+=totalSales; gDisc+=discVal; gRet+=retVal; gRetGross+=retGross;
 
     const sysVal = sysOverrides[repName];
     const hasSys = sysVal!==undefined;
@@ -39268,7 +39355,7 @@ async function sinvYawmRender(reps,from,to,groups){
       <td style="padding:8px 6px;text-align:center;font-size:11px;color:#C05621">${discVal>0?discVal.toFixed(2):'—'}</td>
       <td style="padding:8px 6px;text-align:center;font-size:11px;color:#C05621">${discPct>0?discPct.toFixed(2)+'%':'—'}</td>
       <td style="padding:8px 6px;text-align:center;font-size:12px;font-weight:700;color:#065F46">${netSales.toFixed(2)}</td>
-      <td style="padding:8px 6px;text-align:center;font-size:11px;color:#B91C1C">${retVal>0?retVal.toFixed(2):'—'}</td>
+      <td style="padding:8px 6px;text-align:center;font-size:11px;color:#B91C1C">${retGross>0?retGross.toFixed(2):'—'}</td>
       <td style="padding:8px 6px;text-align:center;font-size:11px;color:#B91C1C">${retPct>0?retPct.toFixed(2)+'%':'—'}</td>
       <td style="padding:8px 6px;text-align:center;font-size:12px;font-weight:700;color:#065F46">${retVal.toFixed(2)}</td>
       <td style="padding:8px 6px;text-align:center;font-size:13px;font-weight:800;color:#731E2E">${net.toFixed(2)}</td>
@@ -39288,7 +39375,7 @@ async function sinvYawmRender(reps,from,to,groups){
     <td style="padding:10px 6px;text-align:center;font-weight:700">${gDisc>0?gDisc.toFixed(2):'—'}</td>
     <td style="padding:10px 6px;text-align:center;font-weight:700">${gDiscPct>0?gDiscPct.toFixed(2)+'%':'—'}</td>
     <td style="padding:10px 6px;text-align:center;font-weight:700;font-size:13px">${gNetSales.toFixed(2)}</td>
-    <td style="padding:10px 6px;text-align:center;font-weight:700">${gRet>0?gRet.toFixed(2):'—'}</td>
+    <td style="padding:10px 6px;text-align:center;font-weight:700">${gRetGross>0?gRetGross.toFixed(2):'—'}</td>
     <td style="padding:10px 6px;text-align:center;font-weight:700">${gRetPct>0?gRetPct.toFixed(2)+'%':'—'}</td>
     <td style="padding:10px 6px;text-align:center;font-weight:700;font-size:13px">${gRet.toFixed(2)}</td>
     <td style="padding:10px 6px;text-align:center;font-weight:800;font-size:15px">${gNet.toFixed(2)}</td>
@@ -39447,7 +39534,8 @@ function sinvPDF(id){
   const typeMap={no_tax:'أصناف لا تخضع للضريبة',tax_14:'أصناف تخضع لضريبة 14%',tax_5:'أصناف تخضع لضريبة 5%'};
   const taxPctMap={no_tax:0,tax_14:14,tax_5:5};
   const tax=taxPctMap[r.invoice_type]||0;
-  const discAmt=((r.total_before_discount||0)*(r.discount_pct||0)/100);
+  // المبلغ المخصوم فعلاً من القيم المتسجلة (الأصناف القطعية مستثناة من الخصم)
+  const discAmt=Math.max(0,(r.total_before_discount||0)-(r.total_after_discount!=null?r.total_after_discount:((r.total_net||0)-(r.total_tax||0))));
   const rows=items.map((item,i)=>`<tr style="${i%2?'background:#FFF8F4':''}"><td style="padding:6px 10px;font-size:11px">${i+1}</td><td style="padding:6px 10px;font-size:11px">${item.name||''}</td><td style="padding:6px 10px;text-align:center;font-size:11px">${item.qty||0}</td><td style="padding:6px 10px;text-align:center;font-size:11px">${item.price||0} ج</td><td style="padding:6px 10px;text-align:center;font-weight:700;font-size:11px">${(item.total||0).toLocaleString('en-US')} ج</td></tr>`).join('');
   const html=`<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Cairo',Arial,sans-serif;direction:rtl;padding:24px;color:#2C1A10}@media print{.no-print{display:none}}</style><link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet"></head><body>
   <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #C55B48;padding-bottom:14px;margin-bottom:16px"><img src="${SINV_LOGO}" style="height:60px" alt="الطحان"/><div style="text-align:left"><div style="font-size:14px;font-weight:800;color:#731E2E">رقم الفاتورة: ${r.invoice_number||'—'}</div><div style="font-size:11px;color:#9C7B6A;margin-top:3px">التاريخ: ${r.delivery_date||''}</div><div style="font-size:11px;color:#9C7B6A">المندوب: ${r.rep_name||''}</div></div></div>
