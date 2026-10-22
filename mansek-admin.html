@@ -4472,7 +4472,7 @@ h2,h3{color:#2C1F0A}
                 <label class="lbl">المقياس</label>
                 <select id="hm-metric">
                   <option value="visits">الزيارات</option>
-                  <option value="invoiceValue">قيمة الفواتير (ج)</option>
+                  <option value="invoiceValue">صافي البيع (ج)</option>
                   <option value="returnValue">قيمة المرتجع (ج)</option>
                   <option value="products">الأصناف</option>
                   <option value="returns">المرتجعات</option>
@@ -44563,10 +44563,12 @@ async function hmLoad(){
   if(cutoff){ const nx = hmAddDayISO(cutoff, 1); if(nx > repsStart) repsStart = nx; }
   const needReps = repsStart <= to;
 
-  const [mt, deliveries, bidx] = await Promise.all([
+  const [mt, deliveries, bidx, repRets] = await Promise.all([
     needMt ? hmFetchMt(from, mtEnd, H).catch(()=>null) : Promise.resolve(null),
     needReps ? fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=id,grp,branch_name,delivery_date,total_net,total_tax,items${grpFilter}&delivery_date=gte.${repsStart}&delivery_date=lte.${to}&deleted_at=is.null&limit=10000`,{headers:H}).then(r=>r.json()).catch(()=>[]) : Promise.resolve([]),
     hmBranchIndex(H).catch(()=>new Map()),
+    // مرتجع المناديب بعد تاريخ القطع — بيدخل في "إجمالي المرتجع" للمجموعة (زي مرتجع MT)
+    needReps ? fetch(`${SUPABASE_URL}/rest/v1/sales_returns?select=id,grp,branch_name,return_date,total_net,total_tax${grpFilter}&return_date=gte.${repsStart}&return_date=lte.${to}&deleted_at=is.null&limit=10000`,{headers:H}).then(r=>r.json()).catch(()=>[]) : Promise.resolve([]),
   ]);
 
   const clientSet = (client!=='all' && client) ? (_hmClientBranches[client] || new Set()) : null;
@@ -44650,10 +44652,21 @@ async function hmLoad(){
     }
   });
 
+  (Array.isArray(repRets) ? repRets : []).forEach(r=>{
+    if(!r.branch_name) return;
+    const bi = bidx.get(hmNorm(r.branch_name));
+    const name = bi ? bi.name : String(r.branch_name).trim();
+    if(!passClient(name) && !passClient(String(r.branch_name).trim())) return;
+    const b = ensureBranch(name, bi ? bi.grp : r.grp);
+    b.returnValue += ((r.total_net||0)-(r.total_tax||0)); b.returns += 1;
+  });
+
   Object.values(branchMap).forEach(b=>{
     b.visits = b.visitDates.size;
     delete b.visitDates;
-    b.invoiceValue = b.gross - b.returnValue;                       // الصافي بعد خصم المرتجع
+    // قيمة الفواتير = صافي البيع (بعد الخصم ومن غير ضريبة) من غير ما يتخصم منها المرتجع —
+    // المرتجع بيتجمع على مستوى المجموعة في كارت "إجمالي المرتجع" و"نسبة المرتجع"، وبيتخصم في كارت "المحقق" بس
+    b.invoiceValue = b.gross;
     b.retValuePct = b.gross>0 ? (b.returnValue/b.gross*100) : 0;
   });
 
@@ -45000,23 +45013,25 @@ function hmGrpCardHTML(grp){
       <div style="font-size:20px;font-weight:900;color:${col};line-height:1.1">${n}</div>
       <div style="font-size:10px;color:#666;margin-top:2px;font-weight:700">${lbl}</div></div>`;
   const cov = c.total.length ? Math.round(c.visited.length / c.total.length * 100) : 0;
-  let sales = 0; const gSales = {};
-  (_hmRawData||[]).forEach(b=>{ const g = b.grp==='private_cairo' ? 'private_chains_cairo' : b.grp; gSales[g] = (gSales[g]||0) + (b.invoiceValue||0); if(g===grp) sales += (b.invoiceValue||0); });
+  let sales = 0, gRet = 0; const gSales = {};
+  (_hmRawData||[]).forEach(b=>{ const g = b.grp==='private_cairo' ? 'private_chains_cairo' : b.grp; gSales[g] = (gSales[g]||0) + (b.invoiceValue||0) - (b.returnValue||0); if(g===grp){ sales += (b.invoiceValue||0); gRet += (b.returnValue||0); } });
+  const retPctG = sales>0 ? gRet/sales*100 : 0;
+  const salesAfterRet = sales - gRet;
   // خصم العملاء: خصم الإقليم بيتوزع على مجموعاته بنسبة مبيعات كل مجموعة
   // خصم القاهرة بيتوزع على (جيزة/جنوب/هايبر/أسواق خاصة/وسط/تجمعات) بنسبة المبيعات، وخصم الإسكندرية على alex — باقي المجموعات من غير خصم
   const rgK = discRegionOfGrp(grp);
   let regSum = 0; Object.keys(gSales).forEach(k=>{ if(discRegionOfGrp(k)===rgK) regSum += Math.max(0,gSales[k]||0); });
   const regDisc = rgK ? (_hmDisc[rgK]||0) : 0;
   const clientOn = (document.getElementById('hm-client')?.value||'all')!=='all'; // التارجت والخصم على مستوى المجموعة كلها — مش منطقي مع فلتر عميل
-  const disc = clientOn ? 0 : _hmGrpDisc ? (_hmGrpDisc[grp]||0) : ((rgK && regDisc>0 && regSum>0 && sales>0) ? regDisc*Math.max(0,sales)/regSum : 0);
-  const discPct = sales>0 ? disc/sales*100 : 0;
-  const netSales = sales - disc;
+  const disc = clientOn ? 0 : _hmGrpDisc ? (_hmGrpDisc[grp]||0) : ((rgK && regDisc>0 && regSum>0 && salesAfterRet>0) ? regDisc*Math.max(0,salesAfterRet)/regSum : 0);
+  const discPct = salesAfterRet>0 ? disc/salesAfterRet*100 : 0;
+  const netSales = salesAfterRet - disc;   // المحقق = البيع − المرتجع − خصومات العملاء (زي صافي السيستم)
   const tgt = clientOn ? 0 : (_hmGrpTarget[grp] || 0);
   const ach = tgt>0 ? Math.round(netSales/tgt*100)+'%' : '—';
   const info = (n, lbl, col, tip) => `<div title="${tip}" style="flex:1;min-width:90px;text-align:center;padding:8px 6px;background:#fff;border:1px solid #E8E8E8;border-radius:8px">
       <div style="font-size:20px;font-weight:900;color:${col};line-height:1.1">${n}</div>
       <div style="font-size:10px;color:#666;margin-top:2px;font-weight:700">${lbl}</div></div>`;
-  return `<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">${cell(c.total.length,'عدد الفروع','#003049','total')}${cell(c.visited.length,'اتزارت','#15803D','visited')}${cell(c.notVisited.length,'لم تُزَر','#B71C1C','not_visited')}${info(cov+'%','نسبة التغطية','#0369A1','اتزارت ÷ عدد الفروع')}${info(ach,'المحقق'+(disc>0?' (بعد الخصم)':''),'#B45309', tgt>0 ? ('المبيعات '+sales.toFixed(0)+(disc>0?' − خصومات '+disc.toFixed(0):'')+' ÷ التارجت '+tgt.toFixed(0)) : clientOn ? 'التارجت على مستوى المجموعة — مش متاح مع فلتر عميل' : 'لا يوجد تارجت للمجموعة')}${disc>0 ? info(discPct.toFixed(1)+'%','خصم العملاء ('+Math.round(disc).toLocaleString('en-US')+' ج)','#B71C1C','خصومات العملاء ÷ مبيعات المجموعة') : ''}</div>`;
+  return `<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">${cell(c.total.length,'عدد الفروع','#003049','total')}${cell(c.visited.length,'اتزارت','#15803D','visited')}${cell(c.notVisited.length,'لم تُزَر','#B71C1C','not_visited')}${info(cov+'%','نسبة التغطية','#0369A1','اتزارت ÷ عدد الفروع')}${info(Math.round(gRet).toLocaleString('en-US'),'إجمالي المرتجع','#B91C1C','مرتجع MT للمجموعة (كل فاتورة على فرعها) + مرتجع المناديب بعد تاريخ القطع')}${info(retPctG.toFixed(1)+'%','نسبة المرتجع','#B45309','إجمالي المرتجع ÷ صافي بيع المجموعة')}${info(ach,'المحقق'+(disc>0?' (بعد الخصم)':''),'#B45309', tgt>0 ? ('المبيعات '+sales.toFixed(0)+' − المرتجع '+gRet.toFixed(0)+(disc>0?' − خصومات '+disc.toFixed(0):'')+' ÷ التارجت '+tgt.toFixed(0)) : clientOn ? 'التارجت على مستوى المجموعة — مش متاح مع فلتر عميل' : 'لا يوجد تارجت للمجموعة')}${disc>0 ? info(discPct.toFixed(1)+'%','خصم العملاء ('+Math.round(disc).toLocaleString('en-US')+' ج)','#B71C1C','خصومات العملاء ÷ مبيعات المجموعة') : ''}</div>`;
 }
 
 function hmRender(data, metric){
@@ -45025,7 +45040,7 @@ function hmRender(data, metric){
     return;
   }
 
-  const metricLabels = {visits:'الزيارات',invoiceValue:'قيمة الفواتير',returnValue:'قيمة المرتجع',products:'الأصناف',returns:'المرتجعات',selItems:'قيمة الأصناف المختارة'};
+  const metricLabels = {visits:'الزيارات',invoiceValue:'صافي البيع',returnValue:'قيمة المرتجع',products:'الأصناف',returns:'المرتجعات',selItems:'قيمة الأصناف المختارة'};
   const moneyMetrics  = {invoiceValue:1, returnValue:1, selItems:1};
   const fmtVal = (v) => moneyMetrics[metric] ? (v||0).toFixed(2)+' ج' : (v||0);
   const vals = data.map(b=>b[metric]||0);

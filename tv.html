@@ -288,7 +288,9 @@ function discRg(g){g=String(g||'').toLowerCase();if(g==='alex'||g==='private_ale
   return ['cairo','tajmuat','giza','south','hyper','private_chains_cairo','private_chains_giza','private_cairo'].indexOf(g)>=0?'cairo':null}
 function hmGroups(){
   var d=S.data.sales;if(!d)return null;
-  /* الخريطة = فواتير MT لحد آخر تاريخ فاتورة دخلت MT (صافي بعد خصم المرتجع) + مبيعات المناديب بعد التاريخ ده */
+  /* الخريطة = صافي البيع لكل فرع (بعد الخصم ومن غير ضريبة): فواتير MT لحد آخر تاريخ فاتورة دخلت MT + مبيعات المناديب بعده.
+     المرتجع مش بيتخصم من الفروع — بيتجمع على مستوى المجموعة في كارت "إجمالي المرتجع" و"نسبة المرتجع"،
+     وبيتخصم في كارت "المحقق" بس (عشان المحقق يطابق صافي السيستم) */
   var idx={};
   (d.br||[]).forEach(function(b){
     var nm=String(b.branch_name||'').trim(),k=hmNorm(nm);
@@ -312,13 +314,14 @@ function hmGroups(){
     var s=resolve(r.customer_site);if(!s)return;
     ens(s.name,s.grp).gross+=Number(r.net)||0;
   });
-  /* مرتجع MT جاهز بالفرع من mt_ret_by_site (محسوب جوه فرع الشركة بتاعه) */
-  var unassigned=0;
+  /* مرتجع MT بالمجموعة: كل فاتورة مرتجع على فرع العميل بتاعها (mt_ret_by_site_v2) ومنه للمجموعة */
+  var unassigned=0,grpRet={};
+  function addRet(g,v){g=g||'other';if(g==='private_cairo')g='private_chains_cairo';grpRet[g]=(grpRet[g]||0)+v}
   mt.ret.forEach(function(r){
     var v=Number(r.ret)||0;
     if(!r.site){unassigned+=v;return}
     var s=resolve(r.site);if(!s){unassigned+=v;return}
-    ens(s.name,s.grp).ret+=v;
+    addRet(s.grp,v);
   });
   /* مبيعات المناديب بعد تاريخ القطع (البيع فقط) */
   var repsFrom=d.monthStart;
@@ -328,13 +331,24 @@ function hmGroups(){
     var h=idx[hmNorm(r.branch_name)];
     ens(h?h.name:r.branch_name,h?h.grp:r.grp).gross+=net(r);
   });
-  var gm={},max=1,total=0;
+  /* مرتجع المناديب بعد تاريخ القطع → على مجموعة الفرع */
+  d.ret.forEach(function(r){
+    if(!r.branch_name||r.return_date<repsFrom)return;
+    var h=idx[hmNorm(r.branch_name)];
+    addRet(h?h.grp:r.grp,net(r));
+  });
+  var gm={},max=1,total=0,totalRet=0;
   Object.keys(m).forEach(function(k){
-    var b=m[k];b.inv=b.gross-b.ret;
+    var b=m[k];b.inv=b.gross;
     var g=b.grp||'other';
-    var o=gm[g]||(gm[g]={g:g,rows:[],total:0});
+    var o=gm[g]||(gm[g]={g:g,rows:[],total:0,ret:0});
     o.rows.push(b);o.total+=b.inv;total+=b.inv;if(b.inv>max)max=b.inv;
   });
+  Object.keys(grpRet).forEach(function(g){
+    var o=gm[g]||(gm[g]={g:g,rows:[],total:0,ret:0});
+    o.ret+=grpRet[g];totalRet+=grpRet[g];
+  });
+  Object.keys(gm).forEach(function(g){var o=gm[g];o.net=o.total-o.ret;o.retPct=o.total>0?o.ret/o.total*100:0});
   var arr=Object.keys(gm).map(function(k){return gm[k]});
   arr.forEach(function(o){o.rows.sort(function(a,b){return b.inv-a.inv})});
   arr.sort(function(a,b){return b.total-a.total});
@@ -362,17 +376,17 @@ function hmGroups(){
   var dsc2=d.disc||{},dReg={cairo:+dsc2.cairo_discount||0,alex:+dsc2.alex_discount||0},regSum={cairo:0,alex:0};
   /* خصم القاهرة على مجموعة cairo بس، وخصم الإسكندرية على مجموعة alex بس — باقي المجموعات من غير خصم */
   var rgG=function(g){return discRg(g==='private_cairo'?'private_chains_cairo':g)};
-  arr.forEach(function(o){var r0=rgG(o.g);if(r0)regSum[r0]+=Math.max(0,o.total)});
+  arr.forEach(function(o){var r0=rgG(o.g);if(r0)regSum[r0]+=Math.max(0,o.net)});
   /* التوزيع الأساسي: مجموع حصص مناديب المجموعة (مبيعات MT الثانوية لعملائهم) */
   var grpShare={};
   if(d.shares){(d.ug||[]).forEach(function(u){var s=d.shares[u.name];if(!s)return;var gk=u.grp==='private_cairo'?'private_chains_cairo':u.grp;grpShare[gk]=(grpShare[gk]||0)+dReg[s.region]*s.share})}
   arr.forEach(function(o){
     var rg=rgG(o.g);
     if(d.shares){o.disc=grpShare[o.g==='private_cairo'?'private_chains_cairo':o.g]||0}
-    else o.disc=(rg&&dReg[rg]>0&&regSum[rg]>0)?dReg[rg]*Math.max(0,o.total)/regSum[rg]:0;
-    o.discPct=o.total>0?o.disc/o.total*100:0;
+    else o.disc=(rg&&dReg[rg]>0&&regSum[rg]>0)?dReg[rg]*Math.max(0,o.net)/regSum[rg]:0;
+    o.discPct=o.net>0?o.disc/o.net*100:0;
   });
-  return {groups:arr,max:max,total:total,from:d.monthStart,cut:cut,unassigned:unassigned};
+  return {groups:arr,max:max,total:total,totalRet:totalRet,from:d.monthStart,cut:cut,unassigned:unassigned};
 }
 function hmColor(v,max){
   if(!v||v<=0)return HM_COLORS[0];
@@ -410,8 +424,8 @@ function renderHm(){
   var c=S.data.sales.c;
   var html='<div class="card" style="height:100%;overflow:hidden">'+
     '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.45rem">'+
-      '<h3 style="margin:0">🗺️ خريطة حرارة الفروع <span class="leg" style="font-weight:400">قيمة الفواتير — من '+esc(data.from)+' إلى اليوم'+(data.cut?' • فواتير MT حتى '+esc(data.cut)+' + مبيعات المناديب بعدها':' • فواتير المناديب')+'</span></h3>'+
-      '<div class="leg" style="margin:0">أعلى قيمة: <b class="y">'+fmt(data.max)+' ج</b> &nbsp;•&nbsp; الإجمالي: <b class="y">'+fmt(data.total)+' ج</b> &nbsp;•&nbsp; كثافة النشاط: منخفض '+
+      '<h3 style="margin:0">🗺️ خريطة حرارة الفروع <span class="leg" style="font-weight:400">صافي البيع بعد الخصم ومن غير ضريبة — من '+esc(data.from)+' إلى اليوم'+(data.cut?' • فواتير MT حتى '+esc(data.cut)+' + مبيعات المناديب بعدها':' • فواتير المناديب')+'</span></h3>'+
+      '<div class="leg" style="margin:0">أعلى قيمة: <b class="y">'+fmt(data.max)+' ج</b> &nbsp;•&nbsp; الإجمالي: <b class="y">'+fmt(data.total)+' ج</b> &nbsp;•&nbsp; المرتجع: <b style="color:#F87171">'+fmt(data.totalRet)+' ج</b> &nbsp;•&nbsp; كثافة النشاط: منخفض '+
         HM_COLORS.map(function(x){return '<i style="background:'+x+';border-radius:2px;width:.8rem;height:.8rem"></i>'}).join('')+' عالي جدًا</div>'+
     '</div>';
   pg.forEach(function(blk){
@@ -419,21 +433,20 @@ function renderHm(){
     html+='<div style="margin-bottom:.35rem"><div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.25rem">'+
       '<span style="width:.7rem;height:.7rem;border-radius:2px;background:'+col+'"></span>'+
       '<b style="font-size:.85rem;color:'+col+'">'+esc(hmGrpLabel(blk.gr.g))+(blk.cont?' (تابع)':'')+'</b>'+
-      '<span class="lbl" style="margin-right:auto">الإجمالي: '+fmt(blk.gr.total)+' ج</span></div>'+
+      '<span class="lbl" style="margin-right:auto">صافي البيع: '+fmt(blk.gr.total)+' ج • المرتجع: '+fmt(blk.gr.ret)+' ج • بعد المرتجع: '+fmt(blk.gr.net)+' ج</span></div>'+
       (blk.gr.cov?(function(cv){
         function cell(n,l,c){return '<div style="flex:1;text-align:center;background:#fff;border:1px solid #e5e7eb;border-radius:.45rem;padding:.2rem .3rem"><div style="font-size:1.15rem;font-weight:800;line-height:1.1;color:'+c+'">'+n+'</div><div style="font-size:.6rem;color:#666;font-weight:700">'+l+'</div></div>';}
         var cp=cv.tot>0?Math.round(cv.vis/cv.tot*100):0;
-        var net2=blk.gr.total-(blk.gr.disc||0);
+        var net2=blk.gr.net-(blk.gr.disc||0);
         var ap=blk.gr.target>0?Math.round(net2/blk.gr.target*100):null;
         var dcell=(blk.gr.disc>0)?cell(blk.gr.discPct.toFixed(1)+'%','خصم العملاء ('+fmt(blk.gr.disc)+' ج)','#B71C1C'):'';
-        return '<div style="display:flex;gap:.4rem;margin-bottom:.3rem">'+cell(cv.tot,'عدد الفروع','#003049')+cell(cv.vis,'اتزارت','#15803D')+cell(cv.not,'لم تُزَر','#B71C1C')+cell(cp+'%','نسبة التغطية','#0369A1')+cell(ap===null?'—':ap+'%','المحقق'+(blk.gr.disc>0?' (بعد الخصم)':''),'#B45309')+dcell+'</div>';
+        return '<div style="display:flex;gap:.4rem;margin-bottom:.3rem">'+cell(cv.tot,'عدد الفروع','#003049')+cell(cv.vis,'اتزارت','#15803D')+cell(cv.not,'لم تُزَر','#B71C1C')+cell(cp+'%','نسبة التغطية','#0369A1')+cell(fmt(blk.gr.ret),'إجمالي المرتجع','#B91C1C')+cell(blk.gr.retPct.toFixed(1)+'%','نسبة المرتجع','#B45309')+cell(ap===null?'—':ap+'%','المحقق'+(blk.gr.disc>0?' (بعد الخصم)':''),'#B45309')+dcell+'</div>';
       })(blk.gr.cov):'')+
       '<div style="display:grid;grid-template-columns:repeat('+L.cols+',1fr);gap:.4rem">';
     blk.rows.forEach(function(b){
       var bg=hmColor(b.inv,data.max),dark=(b.inv/data.max)>0.3;
-      var rp=b.gross>0?Math.round(b.ret/b.gross*100):0;
       html+='<div style="background:'+bg+';color:'+(dark?'#fff':'#1A1A2E')+';border-radius:.45rem;padding:.25rem .35rem;height:3.3rem;overflow:hidden;text-align:center">'+
-        '<div style="font-size:.95rem;font-weight:800;line-height:1.15">'+fmt(b.inv)+(rp>0?' <span style="font-size:.55rem;font-weight:600;opacity:.8">'+rp+'%↩</span>':'')+'</div>'+
+        '<div style="font-size:.95rem;font-weight:800;line-height:1.15">'+fmt(b.inv)+'</div>'+
         '<div style="font-size:.62rem;line-height:1.2;opacity:.92;max-height:1.5rem;overflow:hidden">'+esc(b.branch)+'</div></div>';
     });
     html+='</div></div>';
