@@ -192,13 +192,16 @@ function loadMt(monthStart,today){
     var rng='&invoice_date=gte.'+monthStart+'&invoice_date=lte.'+end+'&order=id.asc';
     return Promise.all([
       getAll('tamr_sales_invoices?select=customer_site,customer,invoice_date,net,gross,discount'+rng),
-      getAll('tamr_sales_returns?select=customer,invoice_date,total'+rng),
+      /* مرتجع MT متوزع على فروع العملاء: كل فاتورة مرتجع على الفرع بتاعها (ret_site_resolved)، واللي مش متحدد بيتوزع
+         جوه نفس فرع الشركة بس بنسبة مبيعات فروع العميل — عشان مرتجع فرع شركة ميتخصمش من فروع عملاء فرع شركة تاني */
+      (DEMO?Promise.resolve([]):fetch(SB_URL+'/rest/v1/rpc/mt_ret_by_site_v2',{method:'POST',headers:{apikey:SB_KEY,Authorization:'Bearer '+SB_KEY,'Content-Type':'application/json'},body:JSON.stringify({p_from:monthStart,p_to:end})})
+        .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})),
       /* عملاء الهدايا والعينات مستبعدين من كل تقارير المبيعات (report_excluded_customers) */
       get('report_excluded_customers?select=customer').catch(function(){return []})
     ]).then(function(x){
       var ex={};(x[2]||[]).forEach(function(e){if(e&&e.customer)ex[e.customer]=1});
       var ok=function(r){return !ex[r.customer]};
-      return {cut:cut,inv:(x[0]||[]).filter(ok),ret:(x[1]||[]).filter(ok)};
+      return {cut:cut,inv:(x[0]||[]).filter(ok),ret:x[1]||[]};
     });
   }).catch(function(){return {cut:null,inv:[],ret:[]}});
 }
@@ -218,7 +221,7 @@ function loadSales(){
   return Promise.all([
     getAll('sales_deliveries?select=rep_name,branch_name,grp,total_net,total_tax,delivery_date&deleted_at=is.null&delivery_date=gte.'+from+'&delivery_date=lte.'+today+'&order=id.asc'),
     getAll('sales_returns?select=rep_name,branch_name,grp,total_net,total_tax,return_date&deleted_at=is.null&return_date=gte.'+from+'&return_date=lte.'+today+'&order=id.asc'),
-    get('rep_targets?select=rep_name,supervisor_name,target_amount&month=eq.'+month+'&limit=1000'),
+    get('rep_targets?select=rep_name,supervisor_name,target_amount,work_days&month=eq.'+month+'&deleted_at=is.null&limit=1000'),
     get('rep_achieved_overrides?select=rep_name,amount,range_to&month=eq.'+month).catch(function(){return []}),
     get('users?select=name,supervisors&role=eq.sales&level=eq.rep&limit=1000').catch(function(){return []}),
     getAll('branches?select=branch_name,grp&status=eq.active&order=id.asc').catch(function(){return []}),
@@ -302,27 +305,20 @@ function hmGroups(){
   var m={};
   function ens(n,g){var k=String(n).trim();var o=m[k]||(m[k]={branch:k,grp:'',gross:0,ret:0,inv:0});if(!o.grp&&g)o.grp=g;return o}
   var mt=d.mt||{cut:null,inv:[],ret:[]},cut=mt.cut;
-  /* مبيعات MT + توزيع المرتجع نسبيًا (مرتجع MT مسجل بالعميل مش بالفرع) */
-  var custSites={};
+  /* مبيعات MT */
   mt.inv.forEach(function(r){
     var g=Number(r.gross)||0,ds=Number(r.discount)||0;
     if(g>0&&Math.abs(g-ds)<0.01)return;            /* استبعاد البضاعة المجانية */
     var s=resolve(r.customer_site);if(!s)return;
-    var net=Number(r.net)||0;
-    ens(s.name,s.grp).gross+=net;
-    var ck=hmNorm(r.customer);
-    if(ck){var cs=custSites[ck]||(custSites[ck]={});cs[s.name]=(cs[s.name]||0)+net}
+    ens(s.name,s.grp).gross+=Number(r.net)||0;
   });
-  var custRet={};
-  mt.ret.forEach(function(r){var ck=hmNorm(r.customer);custRet[ck]=(custRet[ck]||0)+(Number(r.total)||0)});
-  Object.keys(custRet).forEach(function(ck){
-    var sites=custSites[ck];if(!sites)return;
-    var names=Object.keys(sites),sum=0;
-    names.forEach(function(n){sum+=Math.max(0,sites[n])});
-    names.forEach(function(n){
-      var sh=sum>0?Math.max(0,sites[n])/sum:1/names.length;
-      m[n].ret+=custRet[ck]*sh;
-    });
+  /* مرتجع MT جاهز بالفرع من mt_ret_by_site (محسوب جوه فرع الشركة بتاعه) */
+  var unassigned=0;
+  mt.ret.forEach(function(r){
+    var v=Number(r.ret)||0;
+    if(!r.site){unassigned+=v;return}
+    var s=resolve(r.site);if(!s){unassigned+=v;return}
+    ens(s.name,s.grp).ret+=v;
   });
   /* مبيعات المناديب بعد تاريخ القطع (البيع فقط) */
   var repsFrom=d.monthStart;
@@ -376,7 +372,7 @@ function hmGroups(){
     else o.disc=(rg&&dReg[rg]>0&&regSum[rg]>0)?dReg[rg]*Math.max(0,o.total)/regSum[rg]:0;
     o.discPct=o.total>0?o.disc/o.total*100:0;
   });
-  return {groups:arr,max:max,total:total,from:d.monthStart,cut:cut};
+  return {groups:arr,max:max,total:total,from:d.monthStart,cut:cut,unassigned:unassigned};
 }
 function hmColor(v,max){
   if(!v||v<=0)return HM_COLORS[0];
@@ -442,7 +438,7 @@ function renderHm(){
     });
     html+='</div></div>';
   });
-  html+='<div class="hint">'+(pg.length?esc(hmGrpLabel(pg[0].gr.g))+' • '+pg[0].gr.rows.length+' فرع • ':'')+'صفحة '+(S.page+1)+' من '+HM_PAGES+(HM_PAGES>1?' (بتتغيّر تلقائيًا أو بأزرار ↑ ↓)':'')+'</div></div>';
+  html+='<div class="hint">'+(pg.length?esc(hmGrpLabel(pg[0].gr.g))+' • '+pg[0].gr.rows.length+' فرع • ':'')+(data.unassigned>0.5?'مرتجع MT غير محدد الفرع: '+fmt(data.unassigned)+' ج • ':'')+'صفحة '+(S.page+1)+' من '+HM_PAGES+(HM_PAGES>1?' (بتتغيّر تلقائيًا أو بأزرار ↑ ↓)':'')+'</div></div>';
   el.innerHTML=html;
 }
 
@@ -682,7 +678,9 @@ function computeSales(d){
       var sh=dd[rg]*Math.max(0,repNet[n])/rbase[rg];repNet[n]-=sh;discApplied+=sh;
     });
   }
-  var achieved=0;Object.keys(repNet).forEach(function(k){achieved+=repNet[k]});
+  /* المحقق = المناديب اللي ليهم هدف بس (عشان النسبة تبقى صح)، والبيع اللي مالوش هدف (البيع الاداري...) بيظهر لوحده */
+  var hasTgt={};d.tgt.forEach(function(t){if(+t.target_amount>0)hasTgt[t.rep_name]=1});
+  var achieved=0,noTgt=0;Object.keys(repNet).forEach(function(k){if(hasTgt[k])achieved+=repNet[k];else noTgt+=repNet[k]});
   if(totalLevel)achieved-=discApplied;
   var target=0,supT={},supA={},repSup={};
   // المشرف الفعلي من users.supervisors (زي لوحة التحكم) — عمود rep_targets.supervisor_name ممكن يكون قديم
@@ -693,13 +691,15 @@ function computeSales(d){
   });
   Object.keys(repNet).forEach(function(rn){var sup=repSup[rn];if(sup)supA[sup]=(supA[sup]||0)+repNet[rn]});
   var passed=0;for(var k=1;k<=c.d;k++){if(dowOf(c.y,c.m,k)!==5)passed++}
-  var daily=target/WORK_DAYS,required=daily*passed;
+  /* أيام العمل = اللي متحددة للشهر في شاشة الأهداف (rep_targets.work_days)، ولو مش متحددة 26 */
+  var wd=0;d.tgt.forEach(function(t){if(!wd&&+t.work_days>0)wd=+t.work_days});if(!wd)wd=WORK_DAYS;
+  var daily=target/wd,required=daily*passed;
   var todayNet=todaySales-todayRet;
   var sups=Object.keys(supT).map(function(s){return {name:s,target:supT[s],ach:supA[s]||0,pct:supT[s]>0?(supA[s]||0)/supT[s]*100:0}}).sort(function(a,b){return b.pct-a.pct});
   return {discApplied:discApplied,discPct:grossAch>0?discApplied/grossAch*100:0,days:days,todaySales:todaySales,todayRet:todayRet,todayNet:todayNet,achieved:achieved,target:target,passed:passed,
     daily:daily,required:required,pct:target>0?achieved/target*100:0,
-    todayPct:daily>0?todayNet/daily*100:0,monthPct:passed/WORK_DAYS*100,
-    expPct:(passed>0&&target>0)?(achieved/passed*WORK_DAYS)/target*100:0,remaining:target-achieved,sups:sups};
+    todayPct:daily>0?todayNet/daily*100:0,monthPct:Math.min(passed/wd*100,100),wd:wd,noTgt:noTgt,
+    expPct:(passed>0&&target>0)?(achieved/passed*wd)/target*100:0,remaining:target-achieved,sups:sups};
 }
 function drawChart(cv,days){
   if(!cv||!cv.getContext)return;
@@ -738,7 +738,7 @@ function renderSales(){
   }).join(''):'<div class="empty">لا توجد أهداف مسجلة لهذا الشهر</div>';
   el.innerHTML='<div class="sv">'+
    '<div class="card" style="display:flex;gap:1.6rem;align-items:center;margin-bottom:.6rem;padding:.55rem 1rem">'+
-     '<div class="pill" style="background:#731E2E;color:#fff;font-size:.95rem;padding:.3rem .9rem">يوم '+s.passed+' من '+WORK_DAYS+'</div>'+
+     '<div class="pill" style="background:#731E2E;color:#fff;font-size:.95rem;padding:.3rem .9rem">يوم '+Math.min(s.passed,s.wd)+' من '+s.wd+'</div>'+
      prog('تقدم الشهر',s.monthPct,'#B04A5E')+prog('تحقيق الهدف الكلي',s.pct,s.pct>=100?'#4ADE80':s.pct>=70?'#FBBF24':'#F87171')+prog('تحقيق هدف اليوم',s.todayPct,s.todayPct>=100?'#4ADE80':s.todayPct>=70?'#FBBF24':'#F87171')+
    '</div>'+
    '<div class="grid kpis3" style="margin-bottom:.6rem">'+
@@ -748,7 +748,7 @@ function renderSales(){
    '</div>'+
    '<div class="grid kpis6" style="margin-bottom:.6rem">'+
      card('s','#731E2E','الهدف الكلي',fmt(s.target),'w')+
-     card('s','#60A5FA','المحقق حتى الآن'+(s.discApplied>0?'<div style="font-size:.6rem;color:#FBBF24;font-weight:700;margin-top:.1rem">بعد خصومات العملاء '+fmt(s.discApplied)+' ج ('+s.discPct.toFixed(1)+'% من المبيعات)</div>':''),fmt(s.achieved),'b')+
+     card('s','#60A5FA','المحقق حتى الآن'+(Math.abs(s.noTgt)>0.5?'<div style="font-size:.6rem;color:#bfae98;font-weight:700;margin-top:.1rem">+ بيع بدون هدف (اداري) '+fmt(s.noTgt)+' ج — مش داخل في النسبة</div>':'')+(s.discApplied>0?'<div style="font-size:.6rem;color:#FBBF24;font-weight:700;margin-top:.1rem">بعد خصومات العملاء '+fmt(s.discApplied)+' ج ('+s.discPct.toFixed(1)+'% من المبيعات)</div>':''),fmt(s.achieved),'b')+
      card('s','#D97706','المطلوب حتى اليوم',fmt(s.required),'a')+
      card('s','#C4B5FD','المتوقع نهاية الشهر',Math.round(s.expPct)+'%',pctColor(s.expPct))+
      card('s','#F87171','الباقي من الهدف',fmt(Math.max(s.remaining,0)),'r')+

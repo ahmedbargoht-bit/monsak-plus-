@@ -10573,7 +10573,11 @@ function sgRender(){
     const t = targets[r.name];
     if(t) totalGoal += (t.goal||0);
   });
-  const totalSales = Object.values(sales||{}).reduce((s,v)=>s+(v||0),0) - (_sgData.totalLevel ? ((_sgData.discTotals?.cairo||0)+(_sgData.discTotals?.alex||0)) : 0);
+  // المبيعات الفعلية = المناديب اللي ليهم هدف بس (عشان نسبة التحقيق تبقى صح) — البيع اللي مالوش هدف
+  // (البيع الاداري وغيره) بيظهر تحتها لوحده ومش داخل في النسبة. نفس منطق شاشة التلفزيون.
+  const _hasTgt = new Set(Object.keys(targets||{}).filter(n=>(+targets[n]?.goal||0)>0));
+  const totalSales = Object.entries(sales||{}).reduce((s,[n,v])=>s+(_hasTgt.has(n)?(v||0):0),0) - (_sgData.totalLevel ? ((_sgData.discTotals?.cairo||0)+(_sgData.discTotals?.alex||0)) : 0);
+  const noTgtSales = Object.entries(sales||{}).reduce((s,[n,v])=>s+(_hasTgt.has(n)?0:(v||0)),0);
   const totalPct = totalGoal>0 ? Math.round(totalSales/totalGoal*100) : 0;
   const totalDaily = workDays>0 ? Math.round(totalGoal/workDays) : 0;
 
@@ -10587,6 +10591,7 @@ function sgRender(){
     <div style="background:var(--surface-2);border:0.5px solid var(--border);border-radius:8px;padding:10px 14px">
       <div style="font-size:10px;color:var(--text-secondary)">المبيعات الفعلية</div>
       <div style="font-size:17px;font-weight:700;color:#3B6D11;margin-top:3px">${Math.round(totalSales).toLocaleString('en-US')} ج</div>
+      ${Math.abs(noTgtSales)>0.5 ? `<div style="font-size:9px;color:var(--text-secondary);margin-top:2px">+ بيع بدون هدف (اداري) ${Math.round(noTgtSales).toLocaleString('en-US')} ج — مش داخل في النسبة</div>` : ''}
       ${(()=>{ const d=(_sgData.discTotals?.cairo||0)+(_sgData.discTotals?.alex||0); return d>0 ? `<div style="font-size:9px;color:#854F0B;margin-top:2px">قبل الخصم ${Math.round(totalSales+d).toLocaleString('en-US')} − خصومات ${Math.round(d).toLocaleString('en-US')}</div>` : ''; })()}
     </div>
     <div style="background:var(--surface-2);border:0.5px solid var(--border);border-radius:8px;padding:10px 14px">
@@ -11059,7 +11064,11 @@ window.sgExportExcel = function(){
   // إجمالي (نفس حساب كروت "sg-summary" في الشاشة بالظبط)
   let totalGoal=0;
   reps.forEach(rp=>{ const t=targets[rp.name]; if(t) totalGoal += (t.goal||0); });
-  const totalSales = Object.values(sales||{}).reduce((s,v)=>s+(v||0),0) - (_sgData.totalLevel ? ((_sgData.discTotals?.cairo||0)+(_sgData.discTotals?.alex||0)) : 0);
+  // المبيعات الفعلية = المناديب اللي ليهم هدف بس (عشان نسبة التحقيق تبقى صح) — البيع اللي مالوش هدف
+  // (البيع الاداري وغيره) بيظهر تحتها لوحده ومش داخل في النسبة. نفس منطق شاشة التلفزيون.
+  const _hasTgt = new Set(Object.keys(targets||{}).filter(n=>(+targets[n]?.goal||0)>0));
+  const totalSales = Object.entries(sales||{}).reduce((s,[n,v])=>s+(_hasTgt.has(n)?(v||0):0),0) - (_sgData.totalLevel ? ((_sgData.discTotals?.cairo||0)+(_sgData.discTotals?.alex||0)) : 0);
+  const noTgtSales = Object.entries(sales||{}).reduce((s,[n,v])=>s+(_hasTgt.has(n)?0:(v||0)),0);
   const totalPct = totalGoal>0 ? Math.round(totalSales/totalGoal*100) : 0;
   const totalDaily = workDays>0 ? Math.round(totalGoal/workDays) : 0;
   const totalClrPair = totalPct>=80?[GR,'1B5E20']:totalPct>=60?[AMB,'854F0B']:[LR,'A32D2D'];
@@ -44462,7 +44471,10 @@ async function hmFetchMt(from, to, H){
   const [inv, items, rets] = await Promise.all([
     hmFetchAllRows(q('tamr_sales_invoices','customer_site,customer,invoice_date,net,gross,discount,file_name,branch,invoice_no'), H),
     hmFetchAllRows(q('tamr_sales_items','customer_site,customer,invoice_date,item,total,file_name,branch,invoice_no'), H),
-    hmFetchAllRows(q('tamr_sales_returns','customer,invoice_date,total'), H),
+    // مرتجع MT جاهز بالفرع: كل فاتورة مرتجع على فرع العميل بتاعها (ret_site_resolved)، واللي مش متحدد بيتوزع جوه
+    // نفس فرع الشركة بس بنسبة مبيعات فروع العميل — مرتجع فرع شركة ميتخصمش من فروع عملاء فرع شركة تاني
+    fetch(`${SUPABASE_URL}/rest/v1/rpc/mt_ret_by_site_v2`,{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({p_from:from,p_to:to})})
+      .then(r=>{ if(!r.ok) throw new Error('mt_ret_by_site_v2 HTTP '+r.status); return r.json(); }),
   ]);
   return {inv, items, rets};
 }
@@ -44607,27 +44619,14 @@ async function hmLoad(){
       b.products += 1;
       if(selNorm.size && selNorm.has(hmNorm(r.item))) b.selItems += Number(r.total)||0;
     });
-    // مرتجع MT: مسجل بالعميل والحي بس (مفيش اسم فرع) → توزيع نسبي على فروع العميل بحسب صافي مبيعاتها في الفترة
-    const custRet = {};
+    // مرتجع MT بالفرع (mt_ret_by_site_v2): محسوب جوه فرع الشركة بتاعه
     (mt.rets||[]).forEach(r=>{
-      const ck = hmNorm(r.customer); const v = Number(r.total)||0;
-      mtReturnsTotal += v;
-      const o = custRet[ck] || (custRet[ck] = {val:0, lines:0}); o.val += v; o.lines += 1;
-    });
-    Object.keys(custRet).forEach(ck=>{
-      const sites = custSites[ck];
-      const o = custRet[ck];
-      if(!sites){ unassignedReturns += o.val; return; }
-      const names = Object.keys(sites);
-      let sum = 0; names.forEach(n=>{ sum += Math.max(0, sites[n]); });
-      names.forEach(n=>{
-        const share = sum>0 ? Math.max(0, sites[n])/sum : 1/names.length;
-        const bi = bidx.get(hmNorm(n));
-        const s = {name:n, grp: bi ? bi.grp : 'other'};
-        if(!groupOk(s) || !passClient(n)) return;
-        const b = ensureBranch(n, s.grp);
-        b.returnValue += o.val*share; b.returns += Math.round(o.lines*share);
-      });
+      const v = Number(r.ret)||0; mtReturnsTotal += v;
+      if(!r.site){ unassignedReturns += v; return; }
+      const s = resolveSite(r.site); if(!s){ unassignedReturns += v; return; }
+      if(!groupOk(s) || !passClient(s.name)) return;
+      const b = ensureBranch(s.name, s.grp);
+      b.returnValue += v; b.returns += Math.round(Number(r.lines)||0);
     });
   }
 
@@ -44666,7 +44665,7 @@ async function hmLoad(){
   _hmSourceNote = cutoff
     ? `المصدر: فواتير MT حتى ${cutoff}${repsStart<=to?` + مبيعات المناديب من ${repsStart}`:''}`
       + (mt && unmatchedSites.size ? ` — ${unmatchedSites.size} فرع MT غير مطابق لجدول الفروع (تحت "غير مصنّف")` : '')
-      + (unassignedReturns>0 ? ` — مرتجع MT غير موزّع (عميل بدون مبيعات في الفترة): ${fmtN(unassignedReturns)} ج` : '')
+      + (unassignedReturns>0 ? ` — مرتجع MT غير محدد الفرع (عميل بدون مبيعات في فرع الشركة ده في الفترة): ${fmtN(unassignedReturns)} ج` : '')
     : 'مفيش فواتير MT — المصدر فواتير المناديب';
 
   try{ await hmComputeGrpCards(from, to, client); }catch(e){ _hmGrpCards = {}; }
