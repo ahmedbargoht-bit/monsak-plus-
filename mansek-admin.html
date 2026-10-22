@@ -24582,8 +24582,15 @@ async function csExportPPT(){
   finally{ if(btn){ btn.disabled=false; btn.innerHTML=old; } }
 }
 
-// ══ مقارنة المبيعات بين سنتين (2025 مقابل 2026) — نفس الفلاتر (الفروع/العملاء/المصانع/الأصناف) ونفس الأيام من السنة اللي فاتت ══
-const CC={D:null,months:[],tab:'cust',sort:{k:'g',dir:-1},q:'',m1:null,m2:null,yr:null,req:0};
+// ══ مقارنة المبيعات بين سنتين (2025 مقابل 2026) — فلاتر متتابعة خاصة بيها:
+//    فرع الشركة ← المجموعة ← خط السير ← العميل ← فرع العميل ← الأصناف (كل قايمة بتعرض اللي تابع للي فوقها بس)
+//    المصدر: chain_cmp_agg (ملخّص يومي من فواتير جريد بعد الخصم ومن غير المجاني + المرتجع) — نفس أيام السنة اللي فاتت بالظبط
+const CC={D:null,months:[],tab:'cust',sort:{k:'g',dir:-1},q:'',m1:null,m2:null,yr:null,req:0,
+  sel:{br:new Set(),grp:new Set(),route:new Set(),cust:new Set(),site:new Set(),item:new Set()},
+  dims:[],dimsKey:'',itemOpts:[],itemKey:'',open:null,msq:{}};
+const CC_LEVELS=[['br','فروع الشركة','b'],['grp','المجموعات','g'],['route','خطوط السير','r'],['cust','العملاء','c'],['site','فروع العملاء','s'],['item','الأصناف',null]];
+const CC_MON=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+function ccEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function ccPct(a,b){ return a? (b-a)/Math.abs(a)*100 : (b?null:0); }
 function ccChg(a,b,inv){ const p=ccPct(a,b); if(p==null) return '<span style="color:#1A7A4A;font-weight:700">جديد</span>';
   const up=p>=0, good=inv?!up:up; return `<span style="color:${Math.abs(p)<0.05?'#8B6F47':(good?'#1A7A4A':'#B71C1C')};font-weight:700;direction:ltr;display:inline-block">${up?'▲':'▼'} ${Math.abs(p).toFixed(1)}%</span>`; }
@@ -24609,65 +24616,144 @@ function ccSelChanged(){
   if(CC.m1>CC.m2){ const x=CC.m1; CC.m1=CC.m2; CC.m2=x; }
   ccInitSel(); ccLoad();
 }
+function ccArr(k){ return CC.sel[k].size?[...CC.sel[k]]:null; }
+
+// ── القوائم المتتابعة ──
+function ccOpts(level){ // الاختيارات المتاحة للقايمة دي = اللي تابع للاختيارات اللي فوقها بس
+  if(level==='item') return CC.itemOpts.slice();
+  const idx=CC_LEVELS.findIndex(l=>l[0]===level), fld=CC_LEVELS[idx][2], up=CC_LEVELS.slice(0,idx).filter(l=>l[2]&&CC.sel[l[0]].size);
+  const set=new Set(); CC.dims.forEach(r=>{ if(up.every(l=>CC.sel[l[0]].has(r[l[2]]))) set.add(r[fld]); });
+  return [...set].filter(v=>v!=null&&v!=='').sort((a,b)=>String(a).localeCompare(String(b),'ar'));
+}
+function ccPrune(fromIdx){ // بعد تغيير قايمة: شيل من القوائم اللي تحتها أي اختيار مابقاش تابع
+  CC_LEVELS.slice(fromIdx+1).forEach(([k])=>{ if(k==='item') return; const ok=new Set(ccOpts(k)); [...CC.sel[k]].forEach(v=>{ if(!ok.has(v)) CC.sel[k].delete(v); }); });
+}
+async function ccFetchItemOpts(){
+  const [f2,t2]=ccRange(), f1=csShiftYear(f2,-1), t1=csShiftYear(t2,-1);
+  const body=(f,t)=>({p_from:f,p_to:t,p_branches:ccArr('br'),p_grps:ccArr('grp'),p_routes:ccArr('route'),p_customers:ccArr('cust'),p_sites:ccArr('site')});
+  const key=JSON.stringify(body(f2,t2));
+  if(key===CC.itemKey) return; CC.itemKey=key;
+  const [a,b]=await Promise.all([csRpc('chain_cmp_items',body(f1,t1)),csRpc('chain_cmp_items',body(f2,t2))]);
+  const m={}; (a||[]).concat(b||[]).forEach(r=>{ m[r.item]=(m[r.item]||0)+(+r.vs||0); });
+  CC.itemOpts=Object.keys(m).sort((x,y)=>m[y]-m[x]);
+  const ok=new Set(CC.itemOpts); [...CC.sel.item].forEach(v=>{ if(!ok.has(v)) CC.sel.item.delete(v); });
+}
+function ccMsBar(){
+  return CC_LEVELS.map(([k,l])=>{ const n=CC.sel[k].size;
+    return `<div style="position:relative"><label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:3px">${l}</label>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="ccMsToggle('${k}',event)" style="min-width:170px;justify-content:space-between;${n?'border:1.5px solid #731E2E;color:#731E2E;font-weight:700':''}">
+        <span>${n?(n===1?ccEsc([...CC.sel[k]][0]).slice(0,26):n+' مختار'):'الكل'}</span><i class="ti ti-chevron-down"></i></button>
+      ${CC.open===k?ccMsBox(k):''}</div>`; }).join('')
+    +(CC_LEVELS.some(([k])=>CC.sel[k].size)?`<div><label style="display:block;margin-bottom:3px;font-size:11px">&nbsp;</label><button type="button" class="btn btn-ghost btn-sm" onclick="ccClearAll()" style="color:#B71C1C"><i class="ti ti-filter-off"></i> مسح الفلاتر</button></div>`:'');
+}
+function ccMsBox(k){
+  const q=(CC.msq[k]||'').trim(), all=ccOpts(k), list=q?all.filter(v=>String(v).includes(q)):all;
+  return `<div onclick="event.stopPropagation()" style="position:absolute;z-index:9100;top:100%;right:0;width:330px;background:#fff;border:1.5px solid #D4C4A8;border-radius:10px;padding:8px;box-shadow:0 6px 20px rgba(0,0,0,.18)">
+    <input id="cc-msq" placeholder="بحث..." value="${ccEsc(CC.msq[k]||'')}" oninput="CC.msq['${k}']=this.value;ccMsRefresh('${k}')" style="width:100%;padding:6px 8px;border:1px solid #D4C4A8;border-radius:7px;font-family:inherit;margin-bottom:6px;box-sizing:border-box"/>
+    <div style="display:flex;gap:6px;margin-bottom:6px"><button type="button" class="btn btn-ghost btn-sm" onclick="ccMsAll('${k}',1)">تحديد الظاهر</button><button type="button" class="btn btn-ghost btn-sm" onclick="ccMsAll('${k}',0)">مسح</button>
+      <span style="margin-right:auto;font-size:11px;color:#8B6F47;align-self:center">${all.length} اختيار</span></div>
+    <div id="cc-mslist" style="max-height:300px;overflow:auto">${list.length?list.slice(0,600).map(v=>`<label style="display:flex;gap:6px;align-items:flex-start;padding:4px 2px;font-size:12px;cursor:pointer;border-bottom:1px solid #F3EBDD"><input type="checkbox" ${CC.sel[k].has(v)?'checked':''} onchange="ccMsPick('${k}',this.dataset.v,this.checked)" data-v="${ccEsc(v)}"/> <span>${ccEsc(v)}</span></label>`).join(''):'<div style="padding:10px;color:#8B6F47;font-size:12px">مفيش اختيارات</div>'}</div>
+    <div style="text-align:left;margin-top:6px"><button type="button" class="btn btn-sm" style="background:#731E2E;color:#fff;border:none" onclick="ccMsClose()">تم</button></div></div>`;
+}
+function ccMsRefresh(k){ const bar=document.getElementById('cc-filters'); if(!bar) return; const L=document.getElementById('cc-mslist'), st=L?L.scrollTop:0;
+  bar.innerHTML=ccMsBar(); const L2=document.getElementById('cc-mslist'); if(L2) L2.scrollTop=st;
+  const e=document.getElementById('cc-msq'); if(e){ e.focus({preventScroll:true}); e.setSelectionRange(e.value.length,e.value.length); } }
+function ccMsToggle(k,ev){ if(ev) ev.stopPropagation(); CC.open=CC.open===k?null:k; if(CC.open) CC.msq[k]=''; document.getElementById('cc-filters').innerHTML=ccMsBar(); const e=document.getElementById('cc-msq'); if(e) e.focus(); }
+function ccMsPick(k,v,on){ if(on) CC.sel[k].add(v); else CC.sel[k].delete(v); CC.dirty=true; ccAfterPick(k,false); }
+function ccMsAll(k,on){ const q=(CC.msq[k]||'').trim(), list=ccOpts(k).filter(v=>!q||String(v).includes(q)); list.forEach(v=>on?CC.sel[k].add(v):CC.sel[k].delete(v)); CC.dirty=true; ccAfterPick(k,false); }
+function ccAfterPick(k,close){ const idx=CC_LEVELS.findIndex(l=>l[0]===k); ccPrune(idx); if(close) CC.open=null; ccMsRefresh(k); }
+function ccMsClose(){ if(!CC.open) return; CC.open=null; document.getElementById('cc-filters').innerHTML=ccMsBar(); if(CC.dirty){ CC.dirty=false; ccLoad(); } }
+function ccClearAll(){ CC_LEVELS.forEach(([k])=>CC.sel[k].clear()); CC.open=null; CC.dirty=false; ccLoad(); }
+
 function ccOpen(){
   let m=document.getElementById('cc-modal');
   if(!m){ m=document.createElement('div'); m.id='cc-modal';
     m.style.cssText='position:fixed;inset:0;z-index:9000;background:rgba(30,20,10,.55);display:flex;align-items:center;justify-content:center;padding:12px';
-    m.innerHTML=`<div style="background:#FBF8F2;width:min(1280px,98vw);height:94vh;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.35);direction:rtl">
+    const SS="padding:6px 8px;border-radius:8px;border:none;font-family:inherit;font-weight:700;width:auto;min-width:0;height:auto;display:inline-block";
+    const LS="font-size:11px;color:#E8D3A2;font-weight:700;display:flex;flex-direction:column;gap:2px";
+    m.innerHTML=`<div style="background:#FBF8F2;width:min(1320px,98vw);height:94vh;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.35);direction:rtl">
       <div style="background:#731E2E;color:#fff;padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <i class="ti ti-scale" style="font-size:22px;color:#E8D3A2"></i>
         <div style="flex:1;min-width:200px"><div id="cc-title" style="font-size:17px;font-weight:800">مقارنة المبيعات</div><div id="cc-sub" style="font-size:11px;color:#E8D3A2"></div></div>
         <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-          <label style="font-size:11px;color:#E8D3A2;font-weight:700;display:flex;flex-direction:column;gap:2px">من شهر<select id="cc-m1" onchange="ccSelChanged()" style="padding:6px 8px;border-radius:8px;border:none;font-family:inherit;font-weight:700;width:auto;min-width:0;height:auto;display:inline-block"></select></label>
-          <label style="font-size:11px;color:#E8D3A2;font-weight:700;display:flex;flex-direction:column;gap:2px">إلى شهر<select id="cc-m2" onchange="ccSelChanged()" style="padding:6px 8px;border-radius:8px;border:none;font-family:inherit;font-weight:700;width:auto;min-width:0;height:auto;display:inline-block"></select></label>
-          <label style="font-size:11px;color:#E8D3A2;font-weight:700;display:flex;flex-direction:column;gap:2px">السنة<select id="cc-y" onchange="ccSelChanged()" style="padding:6px 8px;border-radius:8px;border:none;font-family:inherit;font-weight:700;width:auto;min-width:0;height:auto;display:inline-block"></select></label>
+          <label style="${LS}">من شهر<select id="cc-m1" onchange="ccSelChanged()" style="${SS}"></select></label>
+          <label style="${LS}">إلى شهر<select id="cc-m2" onchange="ccSelChanged()" style="${SS}"></select></label>
+          <label style="${LS}">السنة<select id="cc-y" onchange="ccSelChanged()" style="${SS}"></select></label>
         </div>
+        <button class="btn btn-ghost btn-sm" style="background:#fff" onclick="ccPrint()"><i class="ti ti-printer" style="color:#731E2E"></i> طباعة PDF</button>
         <button class="btn btn-ghost btn-sm" style="background:#fff" onclick="ccExcel()"><i class="ti ti-file-spreadsheet" style="color:#1A7A4A"></i> Excel</button>
         <button class="btn btn-ghost btn-sm" style="background:#fff" onclick="document.getElementById('cc-modal').style.display='none'"><i class="ti ti-x"></i> إغلاق</button>
       </div>
+      <div id="cc-filters" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;padding:10px 14px;background:#F3EBDD;border-bottom:1px solid #E8DCC4"></div>
       <div id="cc-body" style="flex:1;overflow:auto;padding:14px"></div></div>`;
-    m.addEventListener('click',e=>{ if(e.target===m) m.style.display='none'; });
+    m.addEventListener('click',e=>{ if(e.target===m){ m.style.display='none'; return; } if(CC.open) ccMsClose(); });
     document.body.appendChild(m); }
-  m.style.display='flex'; ccInitSel(); ccLoad();
+  m.style.display='flex'; ccInitSel(); document.getElementById('cc-filters').innerHTML=ccMsBar(); ccLoad();
 }
 async function ccLoad(){
   const my=++CC.req; const body=document.getElementById('cc-body');
   const [from2,to2]=ccRange();
   if(!from2||!to2||from2>to2){ body.innerHTML='<div style="padding:40px;text-align:center;color:#B71C1C;font-weight:700">اختار الفترة (من شهر / إلى شهر)</div>'; return; }
+  const from1=csShiftYear(from2,-1), to1=csShiftYear(to2,-1);
   body.innerHTML='<div style="text-align:center;padding:60px;color:#8B6F47"><div class="spinner" style="margin:0 auto 12px"></div>جاري تجهيز المقارنة ('+from2+' → '+to2+')...</div>';
   try{
-    const D=await csPptData(from2,to2);
-    // الشهور: كل شهر جوه الفترة (متقصوص على حدود الفترة) — ونفس الأيام من السنة اللي فاتت
-    const items=csEffItems()||[], custs=[...CS.selCust], brs=csBranchArg();
+    // القوائم: كل التركيبات (فرع شركة/مجموعة/خط سير/عميل/فرع عميل) اللي ليها حركة في الفترتين
+    const dk=from1+to1+from2+to2;
+    if(dk!==CC.dimsKey){
+      const [a,b]=await Promise.all([csRpc('chain_cmp_dims',{p_from:from1,p_to:to1}),csRpc('chain_cmp_dims',{p_from:from2,p_to:to2})]);
+      if(my!==CC.req) return;
+      const seen={}; CC.dims=[]; (a||[]).concat(b||[]).forEach(r=>{ const k=r.branch+'|'+r.grp+'|'+r.route+'|'+r.customer+'|'+r.site; if(seen[k]) return; seen[k]=1; CC.dims.push({b:r.branch,g:r.grp,r:r.route,c:r.customer,s:r.site}); });
+      CC.dimsKey=dk; CC.itemKey='';
+      ccPrune(-1);
+    }
+    await ccFetchItemOpts(); if(my!==CC.req) return;
+    document.getElementById('cc-filters').innerHTML=ccMsBar();
+    const body2=(f,t)=>({p_from:f,p_to:t,p_branches:ccArr('br'),p_grps:ccArr('grp'),p_routes:ccArr('route'),p_customers:ccArr('cust'),p_sites:ccArr('site'),p_items:ccArr('item')});
+    const [A,B]=await Promise.all([csRpc('chain_cmp_agg',body2(from1,to1)),csRpc('chain_cmp_agg',body2(from2,to2))]);
+    if(my!==CC.req) return; // المستخدم غيّر الاختيار وإحنا بنحمّل — نعرض آخر اختيار بس
+    const pick=(rows,kind)=>(rows||[]).filter(r=>r.kind===kind);
+    const merge=(kind,keyFn)=>{ const m={};
+      pick(A,kind).forEach(r=>{ const k=keyFn(r); const o=m[k]=m[k]||{n:r.key,sub:r.sub,s1:0,r1:0,s2:0,r2:0,q1:0,q2:0,qr1:0,qr2:0}; o.s1+=+r.vs||0; o.r1+=+r.vr||0; o.q1+=+r.qs||0; o.qr1+=+r.qr||0; });
+      pick(B,kind).forEach(r=>{ const k=keyFn(r); const o=m[k]=m[k]||{n:r.key,sub:r.sub,s1:0,r1:0,s2:0,r2:0,q1:0,q2:0,qr1:0,qr2:0}; o.s2+=+r.vs||0; o.r2+=+r.vr||0; o.q2+=+r.qs||0; o.qr2+=+r.qr||0; if(r.sub) o.sub=r.sub; });
+      return Object.values(m); };
+    const t1=pick(A,'tot')[0]||{}, t2=pick(B,'tot')[0]||{};
+    const yl=(f,t)=>f.slice(0,4)===t.slice(0,4)?t.slice(0,4):(f.slice(0,4)+'/'+t.slice(0,4));
+    const D={y1:yl(from1,to1),y2:yl(from2,to2),from1,to1,from2,to2,
+      tot:{s1:+t1.vs||0,r1:+t1.vr||0,s2:+t2.vs||0,r2:+t2.vr||0},
+      cust:merge('cust',r=>r.key), br:merge('branch',r=>r.key), grp:merge('grp',r=>r.key), route:merge('route',r=>r.key),
+      site:merge('site',r=>r.key+'|'+(r.sub||'')), item:merge('item',r=>r.key)};
+    D.filtersTxt=CC_LEVELS.map(([k,l])=>l+': '+(CC.sel[k].size?(CC.sel[k].size<=3?[...CC.sel[k]].join('، '):CC.sel[k].size+' مختار'):'الكل')).join(' | ');
+    // الشهور — كل شهر في 2026 قصاد نفس الشهر (ونفس الأيام) في 2025
+    const mA={}, mB={}; pick(A,'mon').forEach(r=>mA[r.key]=r); pick(B,'mon').forEach(r=>mB[r.key]=r);
     const ms=[]; let d=new Date(from2.slice(0,7)+'-01T00:00:00Z');
-    while(d.toISOString().slice(0,10)<=to2){ const s=d.toISOString().slice(0,10); const e=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,0)).toISOString().slice(0,10);
-      ms.push({f:s<from2?from2:s,t:e>to2?to2:e,lab:s.slice(0,7)}); d=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1)); }
-    const sumC=async(f,t)=>{ const rows=items.length?await csRpc('chain_summary_items',{p_from:f,p_to:t,p_items:items,p_branches:brs}):await csRpc('chain_clients_summary',{p_from:f,p_to:t,p_branches:brs});
-      let s=0,r=0; (rows||[]).forEach(x=>{ if(custs.length&&!custs.includes(x.customer)) return; s+=+x.sales||0; r+=+x.returns||0; }); return {s,r}; };
-    CC.months=await Promise.all(ms.map(async m=>{ const [a,b]=await Promise.all([sumC(csShiftYear(m.f,-1),csShiftYear(m.t,-1)),sumC(m.f,m.t)]); return Object.assign(m,{s1:a.s,r1:a.r,s2:b.s,r2:b.r}); }));
-    if(my!==CC.req) return; // المستخدم غيّر الفترة وإحنا بنحمّل — نعرض آخر اختيار بس
-    CC.D=D; ccRender();
-  }catch(e){ if(my!==CC.req) return; console.error('[ccLoad]',e); body.innerHTML='<div style="padding:40px;text-align:center;color:#B71C1C;font-weight:700">تعذر تحميل المقارنة: '+(e&&e.message||e)+'</div>'; }
+    while(d.toISOString().slice(0,10)<=to2){ const s=d.toISOString().slice(0,10), e=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,0)).toISOString().slice(0,10);
+      const lab=s.slice(0,7), lab1=(+lab.slice(0,4)-1)+lab.slice(4), a=mA[lab1]||{}, b=mB[lab]||{};
+      ms.push({f:s<from2?from2:s,t:e>to2?to2:e,lab,s1:+a.vs||0,r1:+a.vr||0,s2:+b.vs||0,r2:+b.vr||0});
+      d=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1)); }
+    CC.months=ms; CC.D=D; ccRender();
+  }catch(e){ if(my!==CC.req) return; console.error('[ccLoad]',e); body.innerHTML='<div style="padding:40px;text-align:center;color:#B71C1C;font-weight:700">تعذر تحميل المقارنة: '+ccEsc(e&&e.message||e)+'</div>'; }
 }
-const CC_MON=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
-function ccRows(){
-  const D=CC.D; let src;
-  if(CC.tab==='cust') src=D.cust.map(c=>({n:c.n,a:c.s1-c.r1,b:c.s2-c.r2,s1:c.s1,s2:c.s2,r1:c.r1,r2:c.r2}));
-  else if(CC.tab==='br') src=D.br.map(c=>({n:c.n,a:c.s1-c.r1,b:c.s2-c.r2,s1:c.s1,s2:c.s2,r1:c.r1,r2:c.r2}));
-  else src=D.items.map(c=>({n:c.n,a:c.v1-c.vr1,b:c.v2-c.vr2,s1:c.v1,s2:c.v2,r1:c.vr1,r2:c.vr2,q1:c.q1-c.qr1,q2:c.q2-c.qr2}));
-  src=src.filter(r=>Math.abs(r.a)>0.5||Math.abs(r.b)>0.5);
+const CC_TABS=[['cust','العملاء','ti-building-store','العميل'],['br','فروع الشركة','ti-building','فرع الشركة'],['grp','المجموعات','ti-users-group','المجموعة'],['route','خطوط السير','ti-route','خط السير'],['site','فروع العملاء','ti-map-pin','فرع العميل'],['item','الأصناف','ti-package','الصنف']];
+function ccRowsOf(tab,noFilter){
+  const src=(CC.D[tab]||[]).map(c=>({n:c.n,sub:c.sub,a:c.s1-c.r1,b:c.s2-c.r2,s1:c.s1,s2:c.s2,r1:c.r1,r2:c.r2,q1:c.q1-c.qr1,q2:c.q2-c.qr2}))
+    .filter(r=>Math.abs(r.a)>0.5||Math.abs(r.b)>0.5);
   src.forEach(r=>{ r.d=r.b-r.a; r.g=ccPct(r.a,r.b); r.rp1=r.s1?r.r1/r.s1*100:0; r.rp2=r.s2?r.r2/r.s2*100:0; });
-  const q=CC.q.trim(); if(q) src=src.filter(r=>(r.n||'').includes(q));
+  return src;
+}
+function ccRows(){
+  let src=ccRowsOf(CC.tab);
+  const q=CC.q.trim(); if(q) src=src.filter(r=>(r.n||'').includes(q)||(r.sub||'').includes(q));
   const k=CC.sort.k, dir=CC.sort.dir;
   src.sort((x,y)=>{ let a=x[k],b=y[k]; if(k==='n') return dir*String(a).localeCompare(String(b),'ar');
     if(a==null) a=dir>0?Infinity:-Infinity; if(b==null) b=dir>0?Infinity:-Infinity; return dir*(a-b); });
   return src;
 }
 function ccSort(k){ if(CC.sort.k===k) CC.sort.dir*=-1; else CC.sort={k,dir:k==='n'?1:-1}; ccRender(); }
+function ccIsFullMonth(m){ return m.f.slice(8)==='01' && m.t===new Date(Date.UTC(+m.t.slice(0,4),+m.t.slice(5,7),0)).toISOString().slice(0,10); }
 function ccRender(){
   const D=CC.D, t=D.tot, n1=t.s1-t.r1, n2=t.s2-t.r2, y1=D.y1, y2=D.y2;
   document.getElementById('cc-title').textContent=`مقارنة المبيعات ${y1} مقابل ${y2}`;
-  document.getElementById('cc-sub').textContent=`${y2}: من ${D.from2} إلى ${D.to2}  ·  ${y1}: من ${D.from1} إلى ${D.to1}  ·  ${D.filtersTxt}`;
+  document.getElementById('cc-sub').textContent=`${y2}: من ${D.from2} إلى ${D.to2}  ·  ${y1}: من ${D.from1} إلى ${D.to1}`;
   const card=(lab,a,b,inv,isPct)=>{ const f=v=>isPct?v.toFixed(2)+'%':csN(v);
     return `<div style="background:#fff;border:1px solid #E8DCC4;border-radius:12px;padding:12px 14px">
       <div style="font-size:12px;color:#8B6F47;font-weight:700">${lab}</div>
@@ -24675,41 +24761,39 @@ function ccRender(){
       <div style="font-size:12px;color:#6B5B45">${y1}: ${f(a)}</div>
       <div style="margin-top:4px;font-size:13px">${isPct?`<span style="color:${b<=a?'#1A7A4A':'#B71C1C'};font-weight:700;direction:ltr;display:inline-block">${b>=a?'▲':'▼'} ${Math.abs(b-a).toFixed(2)} نقطة</span>`:ccChg(a,b,inv)} ${isPct?'':`<span style="color:#8B6F47;font-size:11px">(${b-a>=0?'+':''}${csN(b-a)})</span>`}</div></div>`; };
   const rp1=t.s1?t.r1/t.s1*100:0, rp2=t.s2?t.r2/t.s2*100:0;
-  let h=`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:16px">
+  let h=`<div style="font-size:11.5px;color:#5B4630;margin-bottom:10px">${ccEsc(D.filtersTxt)}</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:16px">
     ${card('المبيعات (بعد الخصم)',t.s1,t.s2)}${card('المرتجع',t.r1,t.r2,true)}${card('الصافي',n1,n2)}${card('نسبة المرتجع',rp1,rp2,true,true)}</div>`;
-  // الرسم الشهري — الصافي
   const M=CC.months; if(M.length){
     const mx=Math.max(1,...M.map(m=>Math.max(m.s1-m.r1,m.s2-m.r2)));
     h+=`<div style="background:#fff;border:1px solid #E8DCC4;border-radius:12px;padding:12px 14px;margin-bottom:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px"><div style="font-weight:800;color:#731E2E">الصافي شهر بشهر</div>
       <div style="font-size:12px;display:flex;gap:12px"><span><span style="display:inline-block;width:11px;height:11px;background:#C8A96E;border-radius:2px;vertical-align:middle"></span> ${y1}</span><span><span style="display:inline-block;width:11px;height:11px;background:#731E2E;border-radius:2px;vertical-align:middle"></span> ${y2}</span></div></div>
       <div style="display:flex;align-items:flex-end;gap:10px;height:210px;overflow-x:auto;padding-top:18px">
-      ${M.map(m=>{ const a=m.s1-m.r1,b=m.s2-m.r2; const ha=Math.max(0,a/mx*170),hb=Math.max(0,b/mx*170); const part=(m.f.slice(8)!=='01'||m.t!==new Date(Date.UTC(+m.t.slice(0,4),+m.t.slice(5,7),0)).toISOString().slice(0,10));
+      ${M.map(m=>{ const a=m.s1-m.r1,b=m.s2-m.r2; const ha=Math.max(0,a/mx*170),hb=Math.max(0,b/mx*170);
         return `<div style="flex:1;min-width:58px;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
           <div style="font-size:10px;margin-bottom:2px">${ccChg(a,b)}</div>
           <div style="display:flex;align-items:flex-end;gap:3px;height:170px"><div title="${y1}: ${csN(a)}" style="width:18px;height:${ha}px;background:#C8A96E;border-radius:3px 3px 0 0"></div><div title="${y2}: ${csN(b)}" style="width:18px;height:${hb}px;background:#731E2E;border-radius:3px 3px 0 0"></div></div>
-          <div style="font-size:11px;font-weight:700;color:#5B4630;margin-top:4px;white-space:nowrap">${CC_MON[+m.lab.slice(5)-1]}${part?' *':''}</div></div>`; }).join('')}
+          <div style="font-size:11px;font-weight:700;color:#5B4630;margin-top:4px;white-space:nowrap">${CC_MON[+m.lab.slice(5)-1]}${ccIsFullMonth(m)?'':' *'}</div></div>`; }).join('')}
       </div>
       <div style="overflow-x:auto;margin-top:10px"><table style="width:100%;border-collapse:collapse;font-size:12px;text-align:center">
         <tr style="background:#F3EBDD"><th style="padding:6px;text-align:right">الشهر</th><th>مبيعات ${y1}</th><th>مبيعات ${y2}</th><th>مرتجع ${y1}</th><th>مرتجع ${y2}</th><th>صافي ${y1}</th><th>صافي ${y2}</th><th>الفرق</th><th>النمو</th></tr>
         ${M.map(m=>{ const a=m.s1-m.r1,b=m.s2-m.r2; return `<tr style="border-bottom:1px solid #EFE6D6"><td style="padding:6px;text-align:right;font-weight:700">${CC_MON[+m.lab.slice(5)-1]} <span style="color:#8B6F47;font-weight:400;font-size:10px">(${m.f.slice(8)}–${m.t.slice(8)})</span></td><td>${csN(m.s1)}</td><td>${csN(m.s2)}</td><td style="color:#B71C1C">${csN(m.r1)}</td><td style="color:#B71C1C">${csN(m.r2)}</td><td style="font-weight:700">${csN(a)}</td><td style="font-weight:700">${csN(b)}</td><td style="direction:ltr">${b-a>=0?'+':''}${csN(b-a)}</td><td>${ccChg(a,b)}</td></tr>`; }).join('')}
       </table></div>
-      ${M.some(m=>m.f.slice(8)!=='01'||m.t!==new Date(Date.UTC(+m.t.slice(0,4),+m.t.slice(5,7),0)).toISOString().slice(0,10))?'<div style="font-size:11px;color:#8B6F47;margin-top:6px">* شهر جزئي — بيتقارن بنفس الأيام بالظبط من السنة اللي فاتت</div>':''}
+      ${M.some(m=>!ccIsFullMonth(m))?'<div style="font-size:11px;color:#8B6F47;margin-top:6px">* شهر جزئي — بيتقارن بنفس الأيام بالظبط من السنة اللي فاتت</div>':''}
     </div>`; }
-  // جدول التفاصيل
-  const tabs=[['cust','العملاء','ti-building-store'],['br','فروع الشركة','ti-building'],['item','الأصناف','ti-package']];
-  const rows=ccRows(); const isItem=CC.tab==='item';
+  const tb=CC_TABS.find(x=>x[0]===CC.tab), rows=ccRows(), isItem=CC.tab==='item', isSite=CC.tab==='site';
   const th=(k,l)=>`<th onclick="ccSort('${k}')" style="padding:8px;cursor:pointer;white-space:nowrap${k==='n'?';text-align:right':''}">${l}${CC.sort.k===k?(CC.sort.dir>0?' ▲':' ▼'):''}</th>`;
   const up=rows.filter(r=>r.d>0).length, dn=rows.filter(r=>r.d<0).length, nw=rows.filter(r=>!r.a&&r.b).length, st=rows.filter(r=>r.a&&!r.b).length;
   h+=`<div style="background:#fff;border:1px solid #E8DCC4;border-radius:12px;padding:12px 14px">
-    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
-      ${tabs.map(([k,l,i])=>`<button type="button" class="cs-mode-btn${CC.tab===k?' on':''}" onclick="CC.tab='${k}';CC.sort={k:'g',dir:-1};ccRender()"><i class="ti ${i}"></i> ${l}</button>`).join('')}
-      <input id="cc-q" placeholder="بحث بالاسم..." value="${(CC.q||'').replace(/"/g,'&quot;')}" oninput="CC.q=this.value;ccRender();const e=document.getElementById('cc-q');e.focus();e.setSelectionRange(e.value.length,e.value.length)" style="margin-right:auto;padding:6px 10px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:inherit;min-width:200px"/>
+    <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      ${CC_TABS.map(([k,l,i])=>`<button type="button" class="cs-mode-btn${CC.tab===k?' on':''}" onclick="CC.tab='${k}';CC.sort={k:'g',dir:-1};ccRender()"><i class="ti ${i}"></i> ${l}</button>`).join('')}
+      <input id="cc-q" placeholder="بحث بالاسم..." value="${ccEsc(CC.q||'')}" oninput="CC.q=this.value;ccRender();const e=document.getElementById('cc-q');e.focus();e.setSelectionRange(e.value.length,e.value.length)" style="margin-right:auto;padding:6px 10px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:inherit;min-width:200px"/>
     </div>
     <div style="font-size:12px;color:#5B4630;margin-bottom:8px">${rows.length} · <span style="color:#1A7A4A;font-weight:700">زاد ${up}</span> · <span style="color:#B71C1C;font-weight:700">قلّ ${dn}</span> · جديد في ${y2}: ${nw} · وقف في ${y2}: ${st}</div>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px;text-align:center">
-      <tr style="background:#731E2E;color:#fff">${th('n',isItem?'الصنف':(CC.tab==='br'?'الفرع':'العميل'))}${isItem?th('q1','كمية '+y1)+th('q2','كمية '+y2):''}${th('a','صافي '+y1)}${th('b','صافي '+y2)}${th('d','الفرق')}${th('g','النمو')}${th('rp1','مرتجع% '+y1)}${th('rp2','مرتجع% '+y2)}</tr>
-      ${rows.map(r=>`<tr style="border-bottom:1px solid #EFE6D6"><td style="padding:7px;text-align:right;font-weight:700">${r.n}</td>${isItem?`<td>${csN(r.q1)}</td><td>${csN(r.q2)}</td>`:''}<td>${csN(r.a)}</td><td style="font-weight:700">${csN(r.b)}</td><td style="direction:ltr;color:${r.d>=0?'#1A7A4A':'#B71C1C'}">${r.d>=0?'+':''}${csN(r.d)}</td><td>${ccChg(r.a,r.b)}</td><td>${r.rp1.toFixed(1)}%</td><td>${r.rp2.toFixed(1)}%</td></tr>`).join('')||'<tr><td colspan="9" style="padding:20px;color:#8B6F47">مفيش بيانات</td></tr>'}
+      <tr style="background:#731E2E;color:#fff">${th('n',tb[3])}${isItem?th('q1','كمية '+y1)+th('q2','كمية '+y2):''}${th('a','صافي '+y1)}${th('b','صافي '+y2)}${th('d','الفرق')}${th('g','النمو')}${th('rp1','مرتجع% '+y1)}${th('rp2','مرتجع% '+y2)}</tr>
+      ${rows.map(r=>`<tr style="border-bottom:1px solid #EFE6D6"><td style="padding:7px;text-align:right;font-weight:700">${ccEsc(r.n)}${isSite&&r.sub?`<div style="font-size:10.5px;color:#8B6F47;font-weight:400">${ccEsc(r.sub)}</div>`:''}</td>${isItem?`<td>${csN(r.q1)}</td><td>${csN(r.q2)}</td>`:''}<td>${csN(r.a)}</td><td style="font-weight:700">${csN(r.b)}</td><td style="direction:ltr;color:${r.d>=0?'#1A7A4A':'#B71C1C'}">${r.d>=0?'+':''}${csN(r.d)}</td><td>${ccChg(r.a,r.b)}</td><td>${r.rp1.toFixed(1)}%</td><td>${r.rp2.toFixed(1)}%</td></tr>`).join('')||'<tr><td colspan="9" style="padding:20px;color:#8B6F47">مفيش بيانات</td></tr>'}
     </table></div></div>`;
   document.getElementById('cc-body').innerHTML=h;
 }
@@ -24721,13 +24805,67 @@ function ccExcel(){
   sum.push([],['الشهر','مبيعات '+y1,'مبيعات '+y2,'مرتجع '+y1,'مرتجع '+y2,'صافي '+y1,'صافي '+y2,'الفرق','النمو %']);
   CC.months.forEach(m=>{ const a=m.s1-m.r1,b=m.s2-m.r2; sum.push([CC_MON[+m.lab.slice(5)-1]+` (${m.f.slice(8)}-${m.t.slice(8)})`,Math.round(m.s1),Math.round(m.s2),Math.round(m.r1),Math.round(m.r2),Math.round(a),Math.round(b),Math.round(b-a),a?+((b-a)/Math.abs(a)*100).toFixed(1):'']); });
   const ws0=XLSX.utils.aoa_to_sheet(sum); ws0['!cols']=[{wch:26},...Array(8).fill({wch:15})]; ws0['!views']=[{RTL:true}]; XLSX.utils.book_append_sheet(wb,ws0,'الملخص');
-  const keep=[CC.tab,CC.q,CC.sort]; CC.q=''; CC.sort={k:'b',dir:-1};
-  [['cust','العملاء'],['br','فروع الشركة'],['item','الأصناف']].forEach(([k,l])=>{ CC.tab=k; const it=k==='item';
-    const aoa=[[l,...(it?['كمية '+y1,'كمية '+y2]:[]),'صافي '+y1,'صافي '+y2,'الفرق','النمو %','مرتجع% '+y1,'مرتجع% '+y2]];
-    ccRows().forEach(r=>aoa.push([r.n,...(it?[Math.round(r.q1),Math.round(r.q2)]:[]),Math.round(r.a),Math.round(r.b),Math.round(r.d),r.g==null?'جديد':+r.g.toFixed(1),+r.rp1.toFixed(1),+r.rp2.toFixed(1)]));
-    const ws=XLSX.utils.aoa_to_sheet(aoa); ws['!cols']=[{wch:40},...Array(8).fill({wch:14})]; ws['!views']=[{RTL:true}]; XLSX.utils.book_append_sheet(wb,ws,l); });
-  [CC.tab,CC.q,CC.sort]=keep;
+  CC_TABS.forEach(([k,l,,col])=>{ const it=k==='item', si=k==='site';
+    const aoa=[[col,...(si?['العميل']:[]),...(it?['كمية '+y1,'كمية '+y2]:[]),'صافي '+y1,'صافي '+y2,'الفرق','النمو %','مرتجع% '+y1,'مرتجع% '+y2]];
+    ccRowsOf(k).sort((x,y)=>y.b-x.b).forEach(r=>aoa.push([r.n,...(si?[r.sub||'']:[]),...(it?[Math.round(r.q1),Math.round(r.q2)]:[]),Math.round(r.a),Math.round(r.b),Math.round(r.d),r.g==null?'جديد':+r.g.toFixed(1),+r.rp1.toFixed(1),+r.rp2.toFixed(1)]));
+    const ws=XLSX.utils.aoa_to_sheet(aoa); ws['!cols']=[{wch:40},...Array(9).fill({wch:14})]; ws['!views']=[{RTL:true}]; XLSX.utils.book_append_sheet(wb,ws,l); });
   XLSX.writeFile(wb,`مقارنة_المبيعات_${y1.replace('/','-')}_مقابل_${y2.replace('/','-')}.xlsx`);
+}
+// ── طباعة PDF بهوية الطحان (لوجو + ألوان العنابي والدهبي) ──
+function ccPrint(){
+  if(!CC.D){ showToast('استنى المقارنة تخلص تحميل'); return; }
+  const D=CC.D, y1=D.y1, y2=D.y2, t=D.tot, n1=t.s1-t.r1, n2=t.s2-t.r2, rp1=t.s1?t.r1/t.s1*100:0, rp2=t.s2?t.r2/t.s2*100:0;
+  const logo=(typeof SINV_LOGO!=='undefined'?SINV_LOGO:'');
+  const N=v=>csN(v), G=(a,b)=>{ const p=ccPct(a,b); if(p==null) return '<span class="up">جديد</span>'; return `<span class="${p>=0?'up':'dn'}">${p>=0?'▲':'▼'} ${Math.abs(p).toFixed(1)}%</span>`; };
+  const GI=(a,b)=>{ const p=ccPct(a,b); if(p==null) return '—'; return `<span class="${p<=0?'up':'dn'}">${p>=0?'▲':'▼'} ${Math.abs(p).toFixed(1)}%</span>`; };
+  const kpi=(l,a,b,cmp)=>`<div class="kpi"><div class="kl">${l}</div><div class="kv">${b}</div><div class="ks">${y1}: ${a}</div><div class="kc">${cmp}</div></div>`;
+  const M=CC.months, mx=Math.max(1,...M.map(m=>Math.max(m.s1-m.r1,m.s2-m.r2)));
+  const chart=M.length?`<div class="sec"><div class="st">الصافي شهر بشهر</div><div class="chart">${M.map(m=>{ const a=m.s1-m.r1,b=m.s2-m.r2;
+      return `<div class="col"><div class="cg">${G(a,b)}</div><div class="bars"><div class="b1" style="height:${Math.max(0,a/mx*120)}px"></div><div class="b2" style="height:${Math.max(0,b/mx*120)}px"></div></div><div class="cm">${CC_MON[+m.lab.slice(5)-1]}${ccIsFullMonth(m)?'':' *'}</div></div>`; }).join('')}</div>
+      <div class="lg"><span><i style="background:#C8A96E"></i> ${y1}</span><span><i style="background:#731E2E"></i> ${y2}</span></div>
+      <table><tr><th class="r">الشهر</th><th>مبيعات ${y1}</th><th>مبيعات ${y2}</th><th>مرتجع ${y1}</th><th>مرتجع ${y2}</th><th>صافي ${y1}</th><th>صافي ${y2}</th><th>الفرق</th><th>النمو</th></tr>
+      ${M.map(m=>{ const a=m.s1-m.r1,b=m.s2-m.r2; return `<tr><td class="r b">${CC_MON[+m.lab.slice(5)-1]} <small>(${m.f.slice(8)}–${m.t.slice(8)})</small></td><td>${N(m.s1)}</td><td>${N(m.s2)}</td><td class="red">${N(m.r1)}</td><td class="red">${N(m.r2)}</td><td class="b">${N(a)}</td><td class="b">${N(b)}</td><td class="ltr">${b-a>=0?'+':''}${N(b-a)}</td><td>${G(a,b)}</td></tr>`; }).join('')}
+      <tr class="tot"><td class="r">الإجمالي</td><td>${N(t.s1)}</td><td>${N(t.s2)}</td><td>${N(t.r1)}</td><td>${N(t.r2)}</td><td>${N(n1)}</td><td>${N(n2)}</td><td class="ltr">${n2-n1>=0?'+':''}${N(n2-n1)}</td><td>${G(n1,n2)}</td></tr></table>
+      ${M.some(m=>!ccIsFullMonth(m))?'<div class="note">* شهر جزئي — بيتقارن بنفس الأيام بالظبط من السنة اللي فاتت</div>':''}</div>`:'';
+  const secs=CC_TABS.map(([k,l,,col])=>{ const rows=ccRowsOf(k).sort((x,y)=>y.b-x.b); if(!rows.length) return ''; const it=k==='item', si=k==='site';
+    let sa=0,sb=0; rows.forEach(r=>{ sa+=r.a; sb+=r.b; });
+    return `<div class="sec pb"><div class="st">${l} <small>(${rows.length})</small></div><table><thead><tr><th>#</th><th class="r">${col}</th>${si?'<th class="r">العميل</th>':''}${it?`<th>كمية ${y1}</th><th>كمية ${y2}</th>`:''}<th>صافي ${y1}</th><th>صافي ${y2}</th><th>الفرق</th><th>النمو</th><th>مرتجع% ${y1}</th><th>مرتجع% ${y2}</th></tr></thead><tbody>
+      ${rows.map((r,i)=>`<tr><td class="mu">${i+1}</td><td class="r b">${ccEsc(r.n)}</td>${si?`<td class="r mu">${ccEsc(r.sub||'')}</td>`:''}${it?`<td>${N(r.q1)}</td><td>${N(r.q2)}</td>`:''}<td>${N(r.a)}</td><td class="b">${N(r.b)}</td><td class="ltr ${r.d>=0?'up':'dn'}">${r.d>=0?'+':''}${N(r.d)}</td><td>${G(r.a,r.b)}</td><td>${r.rp1.toFixed(1)}%</td><td>${r.rp2.toFixed(1)}%</td></tr>`).join('')}
+      <tr class="tot"><td></td><td class="r">الإجمالي</td>${si?'<td></td>':''}${it?'<td></td><td></td>':''}<td>${N(sa)}</td><td>${N(sb)}</td><td class="ltr">${sb-sa>=0?'+':''}${N(sb-sa)}</td><td>${G(sa,sb)}</td><td></td><td></td></tr></tbody></table></div>`; }).join('');
+  const now=new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
+  const html=`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>مقارنة المبيعات ${y1} مقابل ${y2}</title>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}body{font-family:Cairo,Tahoma,Arial,sans-serif;color:#2C1F0A;background:#fff;padding:14px 16px;font-size:11px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.hd{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#731E2E;color:#fff;border-radius:12px 12px 0 0;padding:12px 16px}
+.hd img{height:62px;background:#FBF6EC;border-radius:8px;padding:4px 8px}.hd h1{font-size:19px;font-weight:800}.hd .en{font-size:10px;color:#E8D3A2;letter-spacing:.5px}
+.band{background:#C8A96E;color:#2C1F0A;text-align:center;padding:7px;font-size:14px;font-weight:800}
+.meta{background:#F5F0E8;border-radius:0 0 10px 10px;padding:8px 14px;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:10.5px;margin-bottom:12px}.meta b{color:#731E2E}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}.kpi{border:1px solid #E8DCC4;border-top:4px solid #731E2E;border-radius:10px;padding:8px 10px;background:#FFFDF8}
+.kl{font-size:10.5px;color:#8B6F47;font-weight:700}.kv{font-size:17px;font-weight:800;margin:2px 0}.ks{font-size:10px;color:#6B5B45}.kc{font-size:11px;margin-top:2px}
+.sec{margin-bottom:12px}.st{background:#731E2E;color:#fff;font-weight:800;font-size:12.5px;padding:6px 12px;border-radius:8px 8px 0 0}.st small{color:#E8D3A2;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:10.5px;text-align:center}th{background:#F3EBDD;color:#5B1622;padding:5px 4px;border:1px solid #E8DCC4;font-weight:800}td{padding:4px;border:1px solid #EFE6D6}
+tbody tr:nth-child(even) td{background:#FCFAF5}.r{text-align:right}.b{font-weight:700}.mu{color:#8B6F47}.red{color:#B71C1C}.ltr{direction:ltr}.up{color:#1A7A4A;font-weight:700}.dn{color:#B71C1C;font-weight:700}
+tr.tot td{background:#F5F0E8!important;font-weight:800;color:#731E2E;border-top:2px solid #C8A96E}small{font-size:9px;color:#8B6F47;font-weight:400}
+.chart{display:flex;align-items:flex-end;gap:6px;height:170px;border:1px solid #E8DCC4;border-top:none;padding:8px 10px 4px}.col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%}
+.bars{display:flex;align-items:flex-end;gap:2px;height:120px}.b1,.b2{width:14px;border-radius:3px 3px 0 0}.b1{background:#C8A96E}.b2{background:#731E2E}.cm{font-size:10px;font-weight:700;margin-top:3px}.cg{font-size:9px}
+.lg{display:flex;gap:14px;justify-content:center;font-size:10px;padding:4px;border:1px solid #E8DCC4;border-top:none;margin-bottom:6px}.lg i{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle}
+.note{font-size:9.5px;color:#8B6F47;margin-top:4px}.ft{margin-top:14px;border-top:2px solid #C8A96E;padding-top:6px;display:flex;justify-content:space-between;font-size:9.5px;color:#8B6F47}
+thead{display:table-header-group}tr{page-break-inside:avoid}.pb{page-break-inside:auto}
+.np{text-align:center;margin:10px 0}.np button{background:#731E2E;color:#fff;border:none;border-radius:8px;padding:9px 24px;font-family:inherit;font-size:13px;font-weight:700;cursor:pointer}
+@media print{.np{display:none}body{padding:6px 8px}@page{size:A4;margin:9mm}}
+</style></head><body>
+<div class="np"><button onclick="window.print()">🖨️ طباعة / حفظ PDF</button></div>
+<div class="hd"><div><h1>الطحان جولدن داتس</h1><div class="en">AL TAHHAN GOLDEN DATES</div></div>${logo?`<img src="${logo}" alt="Al Tahhan">`:''}</div>
+<div class="band">مقارنة مبيعات عملاء السلاسل — ${y1} مقابل ${y2}</div>
+<div class="meta"><span>${y2}: <b>${D.from2} → ${D.to2}</b></span><span>${y1}: <b>${D.from1} → ${D.to1}</b></span><span>تاريخ الإصدار: <b>${now}</b></span><span style="width:100%">${ccEsc(D.filtersTxt)}</span></div>
+<div class="kpis">${kpi('المبيعات (بعد الخصم)',N(t.s1),N(t.s2),G(t.s1,t.s2))}${kpi('المرتجع',N(t.r1),N(t.r2),GI(t.r1,t.r2))}${kpi('الصافي',N(n1),N(n2),G(n1,n2))}${kpi('نسبة المرتجع',rp1.toFixed(2)+'%',rp2.toFixed(2)+'%',`<span class="${rp2<=rp1?'up':'dn'}">${rp2>=rp1?'▲':'▼'} ${Math.abs(rp2-rp1).toFixed(2)} نقطة</span>`)}</div>
+${chart}${secs}
+<div class="ft"><span>الطحان جولدن داتس — منظومة منسق بلس</span><span>إعداد: AHMED BARGOHT</span></div>
+<script>window.onload=function(){setTimeout(function(){try{window.print()}catch(e){}},700)}<\/script>
+</body></html>`;
+  const w=window.open('','_blank'); if(!w){ showToast('اسمح بالنوافذ المنبثقة عشان الطباعة تشتغل'); return; }
+  w.document.open(); w.document.write(html); w.document.close();
 }
 
 // ══ عرض تقديمي للفترة المختارة (من/إلى) — تحليل مختصر بالرسوم البيانية ══
