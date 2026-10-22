@@ -1455,7 +1455,7 @@ async function loadAllClientData(){
   if(_clientDiscCache) return;
   try{
     const [discRows, branchRows] = await Promise.all([
-      sbFetchAll('client_category_discounts','?select=client_name,cat,discount_pct'),
+      sbFetchAll('client_category_discounts','?deleted_at=is.null&select=client_name,cat,discount_pct'),
       sbFetchAll('branch_client_map','?select=branch_name,client_name')
     ]);
     _clientDiscCache={};
@@ -2964,7 +2964,7 @@ async function openDelVisit(branch){
   if(branch.client_name){
     try{
       const [disc, promos] = await Promise.all([
-        sbFetch('client_category_discounts','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&select=cat,discount_pct'),
+        sbFetch('client_category_discounts','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&deleted_at=is.null&select=cat,discount_pct'),
         sbFetch('sales_promotions','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&active=eq.true&deleted_at=is.null&date_from=lte.'+today()+'&date_to=gte.'+today()+'&select=snf_name,promo_price,promo_type,notes,date_from,date_to')
       ]);
 
@@ -2973,7 +2973,7 @@ async function openDelVisit(branch){
       const discEntries = disc.filter(d=>d.discount_pct>0);
       if(!specialPL){
         if(discEntries.length){
-          $('v-discounts').innerHTML = '🎯 ' + discEntries.map(d=>`${d.cat} ${d.discount_pct}%`).join(' | ');
+          $('v-discounts').innerHTML = '🎯 ' + discLabel(discEntries);
         } else {
           $('v-discounts').innerHTML = '';
         }
@@ -3225,10 +3225,26 @@ function grpDisc(gItems, isReturn){
   return {dA, pct};
 }
 
+// خصم خاص لصنف معيّن لعميل معيّن: صف في client_category_discounts قيمة cat فيه = 'صنف:' + اسم الصنف
+// (مثلاً الفار: المجدول 10% وباقي التمر السعودي 5%). لو موجود بيغلب خصم الفئة للصنف ده بس.
+const ITEM_DISC_PREFIX='صنف:';
+function isItemDiscKey(k){ return typeof k==='string' && k.indexOf(ITEM_DISC_PREFIX)===0; }
+function discLabel(rows){
+  const cats=rows.filter(d=>!isItemDiscKey(d.cat)).map(d=>`${d.cat} ${d.discount_pct}%`);
+  const its=rows.filter(d=>isItemDiscKey(d.cat));
+  if(its.length){
+    const byPct={}; its.forEach(d=>{ (byPct[d.discount_pct]=byPct[d.discount_pct]||[]).push(d.cat.slice(ITEM_DISC_PREFIX.length)); });
+    Object.entries(byPct).forEach(([pct,names])=>cats.push(`<span title="${names.join(' / ').replace(/"/g,'&quot;')}">خصم خاص ${pct}% على ${names.length} صنف</span>`));
+  }
+  return cats.join(' | ');
+}
 function getDiscount(itemName){
   const pdb=pdbData||{};
   let disc=0;
+  const _ov=visitState.discounts[ITEM_DISC_PREFIX+itemName];
+  if(_ov!=null) return Math.max(+_ov||0, visitState.specialDisc||0);
   Object.entries(visitState.discounts).forEach(([cat,pct])=>{
+    if(isItemDiscKey(cat)) return;
     Object.entries(pdb).forEach(([fea,cats])=>{
       if(cats[cat]){
         Object.values(cats[cat]).forEach(grpItems=>{
@@ -3237,7 +3253,7 @@ function getDiscount(itemName){
       }
     });
   });
-  if(!disc&&Object.keys(visitState.discounts).length) disc=Math.max(0,...Object.values(visitState.discounts));
+  { const _cv=Object.entries(visitState.discounts).filter(([k])=>!isItemDiscKey(k)).map(([,v])=>+v||0); if(!disc&&_cv.length) disc=Math.max(0,..._cv); }
   // الخصم الاستثنائي — يُطبّق على كل الأصناف
   const specialDisc = visitState.specialDisc||0;
   return Math.max(disc, specialDisc);
@@ -3620,12 +3636,12 @@ async function openRetVisit(branch){
   if(branch.client_name){
     try{
       const [disc, promos] = await Promise.all([
-        sbFetch('client_category_discounts','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&select=cat,discount_pct'),
+        sbFetch('client_category_discounts','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&deleted_at=is.null&select=cat,discount_pct'),
         sbFetch('sales_promotions','?client_name=eq.'+encodeURIComponent(branch.client_name)+'&active=eq.true&deleted_at=is.null&date_from=lte.'+today()+'&date_to=gte.'+today()+'&select=snf_name,promo_price,promo_type,notes,date_from,date_to')
       ]);
       disc.forEach(d=>{returnState.discounts[d.cat]=d.discount_pct||0;});
       const discEntries=disc.filter(d=>d.discount_pct>0);
-      if(!specialPL) $('rv-discounts').innerHTML=discEntries.length?'🎯 '+discEntries.map(d=>`${d.cat} ${d.discount_pct}%`).join(' | '):'';
+      if(!specialPL) $('rv-discounts').innerHTML=discEntries.length?'🎯 '+discLabel(discEntries):'';
       // احفظ الـ promos في returnState للاستخدام في عرض الأسعار
       if(Array.isArray(promos)&&promos.length){
         returnState.promos={};
@@ -3831,7 +3847,10 @@ function getRetDiscount(itemName){
   // نفس منطق getDiscount تمامًا لكن من returnState.discounts
   const pdb=pdbData||{};
   let disc=0;
+  const _ov=returnState.discounts[ITEM_DISC_PREFIX+itemName];
+  if(_ov!=null) return Math.max(+_ov||0, returnState.specialDisc||0);
   Object.entries(returnState.discounts).forEach(([cat,pct])=>{
+    if(isItemDiscKey(cat)) return;
     Object.entries(pdb).forEach(([fea,cats])=>{
       if(cats[cat]){
         Object.values(cats[cat]).forEach(grpItems=>{
@@ -3840,7 +3859,7 @@ function getRetDiscount(itemName){
       }
     });
   });
-  if(!disc&&Object.keys(returnState.discounts).length) disc=Math.max(0,...Object.values(returnState.discounts));
+  { const _cv=Object.entries(returnState.discounts).filter(([k])=>!isItemDiscKey(k)).map(([,v])=>+v||0); if(!disc&&_cv.length) disc=Math.max(0,..._cv); }
   const specialDisc=returnState.specialDisc||0;
   return Math.max(disc, specialDisc);
 }
