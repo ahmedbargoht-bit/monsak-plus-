@@ -7662,6 +7662,27 @@ h2,h3{color:#2C1F0A}
             </div>
           </div>
 
+          <!-- ══ خطة أصناف المناديب (من توزيع الهدف) ══ -->
+          <div class="card" style="padding:14px;margin-bottom:14px;border:2px solid #C8A96E">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:6px">
+              <div style="font-size:13px;font-weight:800;color:#731E2E"><i class="ti ti-users-group"></i> خطة أصناف المناديب — من "توزيع الهدف"</div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <button type="button" class="btn btn-ghost btn-sm" onclick="rpiExcel()"><i class="ti ti-file-spreadsheet" style="color:#1A7A4A"></i> Excel</button>
+                <button type="button" class="btn btn-sm" style="background:#731E2E;color:#fff;border:none;font-weight:700" onclick="rpiSave()"><i class="ti ti-device-floppy"></i> حفظ خطة كل المناديب</button>
+              </div>
+            </div>
+            <div style="font-size:11px;color:#8B6F47;margin-bottom:10px">هدف كل مندوب (المتحوّل من تاب توزيع الهدف، من غير ضريبة) بيتقسم على الأصناف بنسبة مسحوبات عملاء MT على خطوط سيره في آخر الشهور اللي تختارها قبل شهر الهدف، ويتحول لكراتين بسعر الكرتونة الصافي (بعد الخصم ومن غير ضريبة) في آخر شهر اتباع فيه الصنف. بعد الحفظ تقدر تعدّل كراتين أي صنف وتحفظ تاني.</div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px">
+              <label style="font-size:10px;font-weight:700;color:var(--text2);display:flex;flex-direction:column;gap:4px">شهر الهدف<input type="month" id="rpi-month" onchange="rpiOnMonth()" style="padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:var(--surface-1)"/></label>
+              <label style="font-size:10px;font-weight:700;color:var(--text2);display:flex;flex-direction:column;gap:4px">متوسط آخر
+                <select id="rpi-months" onchange="rpiLoad()" style="padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:var(--surface-1)"><option value="1">1 شهر</option><option value="2">2 شهرين</option><option value="3" selected>3 شهور</option><option value="4">4 شهور</option><option value="5">5 شهور</option><option value="6">6 شهور</option><option value="7">7 شهور</option><option value="8">8 شهور</option><option value="9">9 شهور</option><option value="10">10 شهور</option><option value="11">11 شهور</option><option value="12">12 شهور</option></select></label>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="rpiLoad()"><i class="ti ti-refresh"></i> إعادة الحساب</button>
+            </div>
+            <div id="rpi-status" style="font-size:11.5px;margin-bottom:8px;color:#5B4630"></div>
+            <div id="rpi-body"></div>
+          </div>
+
+          <div style="font-size:11px;color:#8B6F47;font-weight:700;margin:4px 2px 8px">الطريقة اليدوية (هدف إجمالي تكتبه بإيدك):</div>
           <!-- إعداد الخطة -->
           <div class="card" style="padding:14px;margin-bottom:14px">
             <div style="font-size:12px;font-weight:700;color:var(--text-primary);margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
@@ -17145,7 +17166,7 @@ function showPanel(id){
   if(id==='location') refreshAll();
   if(id==='brand-settings') brsLoad();
   if(id==='tv-settings') tvsLoad();
-  if(id==='item-plan'){ const _ip=document.getElementById('aitab-itemplan'); if(_ip) _ip.style.display=''; itemPlanAdminInit(); }
+  if(id==='item-plan'){ const _ip=document.getElementById('aitab-itemplan'); if(_ip) _ip.style.display=''; itemPlanAdminInit(); rpiInit(); }
   if(id==='sector-strength') ssLoad();
   if(id==='chain-sales') csInit();
   if(id==='sales-forecast') fcInit();
@@ -55738,6 +55759,155 @@ async function ipaSave(){
   if(btn){ btn.disabled=false; btn.innerHTML='<i class="ti ti-device-floppy"></i> حفظ الخطة'; }
   if(ok){ _ipaState.savedRow = payload; ipaUpdateSavedNote(); }
   else alert('تعذر حفظ الخطة، حاول تاني.');
+}
+
+
+// ══════════════════════════════════════════════════════════════
+// خطة أصناف المناديب — الهدف من "توزيع الهدف" (rep_targets بعد التحويل) بيتقسم على الأصناف حسب مسحوبات
+// عملاء MT على خطوط سير كل مندوب (متوسط آخر N شهور قبل شهر الهدف)، ويتحول لكراتين بسعر الكرتونة الصافي
+// (بعد الخصم ومن غير ضريبة) في آخر شهر من الفترة المرجعية. الخطة قابلة للتعديل وتتحفظ في mt_item_plan_reps.
+// ══════════════════════════════════════════════════════════════
+const RPI={ym:'',months:3,reps:[],plans:{},open:{},saved:null,dirty:{},refFrom:'',refTo:'',prices:{},busy:false};
+function rpiEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function rpiN(n,d){ return (n==null||isNaN(n))?'—':Number(n).toLocaleString('en-US',{minimumFractionDigits:d||0,maximumFractionDigits:d||0}); }
+function rpiH(){ return {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}; }
+async function rpiGet(path){ const r=await fetch(`${SUPABASE_URL}/rest/v1/${path}`,{headers:rpiH()}); if(!r.ok) throw new Error(path.split('?')[0]+' HTTP '+r.status); return r.json(); }
+function rpiRange(ym,n){ // N شهور كاملة قبل شهر الهدف
+  const [y,m]=ym.split('-').map(Number); const to=new Date(Date.UTC(y,m-1,0)); const from=new Date(Date.UTC(y,m-1-n,1));
+  return [from.toISOString().slice(0,10), to.toISOString().slice(0,10)];
+}
+function rpiRegion(u){ const g=String((u&&(u.grp||''))+','+(u&&u.groups||'')).toLowerCase(); return /alex/.test(g)?'alex':'cairo'; }
+async function rpiInit(){
+  const mEl=document.getElementById('rpi-month');
+  if(mEl && !mEl.value){
+    const now=new Date(Date.now()+3*3600e3); const nx=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()+1,1));
+    // الافتراضي: الشهر الجاي لو اتعمله توزيع، وإلا الشهر الحالي
+    try{ const t=await rpiGet(`rep_targets?select=month&month=eq.${nx.toISOString().slice(0,7)}&deleted_at=is.null&limit=1`); mEl.value=t.length?nx.toISOString().slice(0,7):now.toISOString().slice(0,7); }
+    catch(e){ mEl.value=now.toISOString().slice(0,7); }
+  }
+  await rpiOnMonth();
+}
+async function rpiOnMonth(){
+  const ym=document.getElementById('rpi-month').value; if(!ym) return;
+  // عدد الشهور الافتراضي = نفس اللي اتحسب بيه توزيع الهدف للشهر ده
+  try{ const s=await rpiGet(`target_distribution_snapshots?select=hist_months&target_month=eq.${ym}&limit=1`); if(s[0]&&+s[0].hist_months>0) document.getElementById('rpi-months').value=String(Math.min(+s[0].hist_months,12)); }catch(e){}
+  await rpiLoad();
+}
+async function rpiLoad(){
+  const box=document.getElementById('rpi-body'), st=document.getElementById('rpi-status');
+  const ym=document.getElementById('rpi-month').value, n=+document.getElementById('rpi-months').value||3;
+  if(!ym||RPI.busy) return; RPI.busy=true; RPI.ym=ym; RPI.months=n; RPI.dirty={}; RPI.open={};
+  const [from,to]=rpiRange(ym,n); RPI.refFrom=from; RPI.refTo=to;
+  box.innerHTML='<div style="text-align:center;padding:24px;color:var(--text2)"><div class="spinner" style="margin:0 auto 10px"></div>جاري الحساب...</div>'; st.textContent='';
+  try{
+    const [tg,us,mix,saved]=await Promise.all([
+      rpiGet(`rep_targets?select=rep_name,supervisor_name,target_amount&month=eq.${ym}&deleted_at=is.null&limit=1000`),
+      rpiGet(`users?select=name,grp,groups,routes,supervisors&role=eq.sales&level=eq.rep&limit=1000`),
+      fetch(`${SUPABASE_URL}/rest/v1/rpc/mt_item_mix_by_route_v2`,{method:'POST',headers:Object.assign({'Content-Type':'application/json'},rpiH()),body:JSON.stringify({p_from:from,p_to:to})}).then(r=>{ if(!r.ok) throw new Error('mt_item_mix_by_route_v2 HTTP '+r.status); return r.json(); }),
+      rpiGet(`mt_item_plan_reps?select=*&target_ym=eq.${ym}&limit=20000`)
+    ]);
+    const tgt=(tg||[]).filter(t=>+t.target_amount>0);
+    if(!tgt.length){ box.innerHTML=`<div style="padding:22px;text-align:center;color:#B45309;font-weight:700">مفيش أهداف متسجلة لشهر ${ym} — اعمل "تحويل الأهداف" من تاب توزيع الهدف الأول</div>`; return; }
+    if(!mix.length){ box.innerHTML=`<div style="padding:22px;text-align:center;color:#B45309;font-weight:700">مفيش مسحوبات MT في الفترة ${from} → ${to}</div>`; return; }
+    const uOf={}; (us||[]).forEach(u=>uOf[u.name]=u);
+    const routesOf=n=>{ const r=(uOf[n]&&uOf[n].routes)||[]; return Array.isArray(r)?r:[]; };
+    // خط السير المشترك بين أكتر من مندوب ليهم هدف بيتقسم عليهم بالتساوي
+    const owners={}; tgt.forEach(t=>routesOf(t.rep_name).forEach(r=>{ (owners[r]=owners[r]||new Set()).add(t.rep_name); }));
+    // سعر الكرتونة الصافي: من آخر شهر في الفترة اتباع فيه الصنف
+    const pm={}, routeItem={}, regItem={alex:{},cairo:{}};
+    mix.forEach(x=>{ const v=+x.value||0, c=+x.cartons||0;
+      const p=pm[x.item]=pm[x.item]||{}; (p[x.ym]=p[x.ym]||{v:0,c:0}); p[x.ym].v+=v; p[x.ym].c+=c;
+      const ri=routeItem[x.route]=routeItem[x.route]||{}; ri[x.item]=(ri[x.item]||0)+v;
+      const rg=/alex/.test(String(x.grp).toLowerCase())?'alex':'cairo'; regItem[rg][x.item]=(regItem[rg][x.item]||0)+v; });
+    RPI.prices={}; Object.keys(pm).forEach(it=>{ const ms=Object.keys(pm[it]).sort().reverse(); let price=null,from_ym='';
+      for(const m of ms){ const o=pm[it][m]; if(o.c>0.5&&o.v>0){ price=o.v/o.c; from_ym=m; break; } }
+      if(price==null){ let v=0,c=0; ms.forEach(m=>{v+=pm[it][m].v;c+=pm[it][m].c}); if(c>0&&v>0){price=v/c;from_ym='الفترة';} }
+      RPI.prices[it]={price,ym:from_ym}; });
+    const savedBy={}; (saved||[]).forEach(r=>{ (savedBy[r.rep_name]=savedBy[r.rep_name]||[]).push(r); });
+    RPI.saved=saved&&saved.length?saved:null;
+    RPI.reps=tgt.map(t=>{
+      const mixR={}; let fb=false;
+      routesOf(t.rep_name).forEach(r=>{ const ri=routeItem[r]; if(!ri) return; const k=1/((owners[r]&&owners[r].size)||1); Object.keys(ri).forEach(it=>mixR[it]=(mixR[it]||0)+ri[it]*k); });
+      if(!Object.keys(mixR).length){ fb=true; Object.assign(mixR, regItem[rpiRegion(uOf[t.rep_name])]); }
+      const tot=Object.values(mixR).reduce((a,b)=>a+b,0)||1, target=+t.target_amount;
+      const items=Object.keys(mixR).filter(it=>mixR[it]>0).map(it=>{ const share=mixR[it]/tot, tv=target*share, pr=RPI.prices[it]&&RPI.prices[it].price;
+        return {item:it,share,calc_value:tv,price:pr,cartons:pr?Math.round(tv/pr):null,edited:false}; }).sort((a,b)=>b.calc_value-a.calc_value);
+      // لو فيه خطة محفوظة للمندوب ده: الكراتين المحفوظة (اللي ممكن تكون اتعدّلت) بتتعرض بدل المحسوبة
+      const sv=savedBy[t.rep_name];
+      if(sv&&sv.length){ const sm={}; sv.forEach(r=>sm[r.item]=r);
+        items.forEach(i=>{ const r=sm[i.item]; if(r){ i.cartons=r.cartons==null?null:+r.cartons; i.edited=!!r.edited; if(r.price_carton) i.price=+r.price_carton; } else i.cartons=i.cartons; });
+        sv.forEach(r=>{ if(!items.some(i=>i.item===r.item)) items.push({item:r.item,share:+r.share||0,calc_value:+r.target_value||0,price:+r.price_carton||null,cartons:r.cartons==null?null:+r.cartons,edited:!!r.edited}); }); }
+      const u=uOf[t.rep_name]||{}; const sup=String(u.supervisors||'').split(',')[0].trim()||t.supervisor_name||'—';
+      return {name:t.rep_name,sup,target,items,fallback:fb,routes:routesOf(t.rep_name),saved:!!(sv&&sv.length),savedAt:sv&&sv.length?sv.reduce((a,r)=>r.updated_at>a?r.updated_at:a,''):''};
+    }).sort((a,b)=>b.target-a.target);
+    rpiRender();
+    st.innerHTML=`الفترة المرجعية: <b>${from} → ${to}</b> (${n===1?'شهر واحد':n===2?'شهرين':n+' شهور'}) · ${RPI.saved?'<span style="color:#1A7A4A;font-weight:700">فيه خطة محفوظة للشهر ده — المعروض هو المحفوظ</span>':'<span style="color:#B45309;font-weight:700">لسه متحفظتش</span>'}`;
+  }catch(e){ console.error('[rpiLoad]',e); box.innerHTML='<div style="padding:22px;text-align:center;color:#B71C1C;font-weight:700">تعذر الحساب: '+rpiEsc(e.message||e)+'</div>'; }
+  finally{ RPI.busy=false; }
+}
+function rpiRepTotals(r){ let v=0,c=0; r.items.forEach(i=>{ if(i.cartons!=null&&i.price){ v+=i.cartons*i.price; c+=i.cartons; } }); return {v,c,diff:v-r.target}; }
+function rpiRender(){
+  const box=document.getElementById('rpi-body'); if(!box) return;
+  let tT=0,tV=0,tC=0; RPI.reps.forEach(r=>{ const t=rpiRepTotals(r); tT+=r.target; tV+=t.v; tC+=t.c; });
+  let h=`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:10px">
+    ${[['المناديب',RPI.reps.length,'#731E2E'],['إجمالي الأهداف',rpiN(tT),'#1E3A5F'],['قيمة الكراتين',rpiN(tV),'#1A7A4A'],['إجمالي الكراتين',rpiN(tC),'#92400E'],['فرق التقريب',(tV-tT>=0?'+':'')+rpiN(tV-tT),Math.abs(tV-tT)>tT*0.01?'#B71C1C':'#8B6F47']].map(([l,v,c])=>`<div style="background:#fff;border:1px solid #E8DCC4;border-top:3px solid ${c};border-radius:9px;padding:8px;text-align:center"><div style="font-size:10.5px;color:#8B6F47">${l}</div><div style="font-size:16px;font-weight:800;color:${c}">${v}</div></div>`).join('')}</div>
+  <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+    <tr style="background:#4E3B1F;color:#fff"><th style="padding:8px;text-align:right">المندوب</th><th>المشرف</th><th>الهدف (من توزيع الهدف)</th><th>عدد الأصناف</th><th>الكراتين</th><th>قيمة الكراتين</th><th>الفرق</th><th>الحالة</th><th></th></tr>`;
+  RPI.reps.forEach((r,ri)=>{ const t=rpiRepTotals(r), open=RPI.open[r.name], ed=r.items.some(i=>i.edited);
+    h+=`<tr style="border-bottom:1px solid #EFE6D6;background:${open?'#FBF6EC':'#fff'}">
+      <td style="padding:8px;font-weight:800">${rpiEsc(r.name)}${r.fallback?'<div style="font-size:10px;color:#B45309;font-weight:600">مالوش خطوط سير في MT — اتحسب بنسب منطقته</div>':''}</td>
+      <td style="text-align:center">${rpiEsc(r.sup)}</td><td style="text-align:center;font-weight:700">${rpiN(r.target)}</td>
+      <td style="text-align:center">${r.items.filter(i=>i.cartons>0).length}</td><td style="text-align:center;font-weight:700">${rpiN(t.c)}</td>
+      <td style="text-align:center">${rpiN(t.v)}</td><td style="text-align:center;direction:ltr;color:${Math.abs(t.diff)>r.target*0.01?'#B71C1C':'#8B6F47'}">${t.diff>=0?'+':''}${rpiN(t.diff)}</td>
+      <td style="text-align:center;font-size:11px">${RPI.dirty[r.name]?'<span style="color:#B45309;font-weight:700">● تعديلات مش محفوظة</span>':r.saved?`<span style="color:#1A7A4A;font-weight:700">✓ محفوظة${ed?' (معدّلة)':''}</span>`:'<span style="color:#8B6F47">مش محفوظة</span>'}</td>
+      <td style="text-align:center"><button type="button" class="btn btn-ghost btn-sm" onclick="rpiToggle(${ri})"><i class="ti ti-chevron-${open?'up':'down'}"></i> ${open?'إخفاء':'الأصناف'}</button></td></tr>`;
+    if(open){
+      h+=`<tr><td colspan="9" style="padding:8px 10px 14px;background:#FBF6EC"><div style="font-size:11px;color:#8B6F47;margin-bottom:6px">خطوط السير: ${r.routes.map(rpiEsc).join('، ')||'—'} · غيّر عدد الكراتين لأي صنف، والقيمة والفرق بيتحسبوا لوحدهم</div>
+        <table style="width:100%;border-collapse:collapse;font-size:11.5px;background:#fff"><tr style="background:#F3EBDD"><th style="padding:6px;text-align:right">الصنف</th><th>نسبته من مسحوبات المندوب</th><th>نصيبه من الهدف</th><th>سعر الكرتونة الصافي</th><th style="width:110px">الكراتين</th><th>القيمة</th></tr>
+        ${r.items.map((i,ii)=>{ const val=(i.cartons!=null&&i.price)?i.cartons*i.price:null, pi=RPI.prices[i.item];
+          return `<tr style="border-bottom:1px solid #F3EBDD;${i.cartons===0?'opacity:.55':''}"><td style="padding:5px 6px;font-weight:700">${rpiEsc(i.item)}${i.edited?' <span style="font-size:9.5px;color:#B45309">(معدّل)</span>':''}</td>
+            <td style="text-align:center">${(i.share*100).toFixed(2)}%</td><td style="text-align:center">${rpiN(i.calc_value)}</td>
+            <td style="text-align:center" title="${pi&&pi.ym?'من '+pi.ym:''}">${i.price?rpiN(i.price,2):'<span style="color:#B71C1C">مفيش سعر</span>'}</td>
+            <td style="text-align:center"><input type="number" min="0" step="1" value="${i.cartons==null?'':i.cartons}" ${i.price?'':'disabled'} onchange="rpiEdit(${ri},${ii},this.value)" style="width:90px;padding:4px;border:1.5px solid ${i.edited?'#D97706':'#D4C4A8'};border-radius:6px;font-family:inherit;text-align:center"/></td>
+            <td style="text-align:center">${val==null?'—':rpiN(val)}</td></tr>`; }).join('')}
+        </table><div style="text-align:left;margin-top:8px;display:flex;gap:6px;justify-content:flex-end">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="rpiResetRep(${ri})"><i class="ti ti-restore"></i> رجّع الحساب الأصلي</button>
+          <button type="button" class="btn btn-sm" style="background:#1A7A4A;color:#fff;border:none" onclick="rpiSave([${ri}])"><i class="ti ti-device-floppy"></i> حفظ خطة ${rpiEsc(r.name)}</button></div></td></tr>`;
+    }
+  });
+  h+='</table></div>';
+  box.innerHTML=h;
+}
+function rpiToggle(ri){ const n=RPI.reps[ri].name; RPI.open[n]=!RPI.open[n]; rpiRender(); }
+function rpiEdit(ri,ii,v){ const r=RPI.reps[ri], i=r.items[ii]; const n=v===''?0:Math.max(0,Math.round(+v)||0); i.cartons=n; i.edited=true; RPI.dirty[r.name]=1; rpiRender(); }
+function rpiResetRep(ri){ const r=RPI.reps[ri]; r.items.forEach(i=>{ i.cartons=i.price?Math.round(i.calc_value/i.price):null; i.edited=false; }); RPI.dirty[r.name]=1; rpiRender(); }
+async function rpiSave(idxs){
+  const st=document.getElementById('rpi-status'); const list=(idxs||RPI.reps.map((_,i)=>i)).map(i=>RPI.reps[i]);
+  if(!list.length) return;
+  const who=(typeof CU!=='undefined'&&CU&&CU.name)||'admin', now=new Date().toISOString();
+  const rows=[]; list.forEach(r=>r.items.forEach(i=>rows.push({target_ym:RPI.ym,rep_name:r.name,item:i.item,rep_target:r.target,share:+i.share.toFixed(8),target_value:Math.round(i.calc_value*100)/100,
+    price_carton:i.price?Math.round(i.price*100)/100:null,cartons:i.cartons,edited:!!i.edited,ref_from:RPI.refFrom,ref_to:RPI.refTo,updated_at:now,updated_by:who})));
+  st.innerHTML='جاري الحفظ...';
+  try{
+    const H=Object.assign({'Content-Type':'application/json'},rpiH());
+    // بنمسح خطة المناديب دول للشهر ده الأول وبعدين نكتبها من جديد (عشان لو صنف اتشال ميفضلش)
+    for(const r of list){ const d=await fetch(`${SUPABASE_URL}/rest/v1/mt_item_plan_reps?target_ym=eq.${RPI.ym}&rep_name=eq.${encodeURIComponent(r.name)}`,{method:'DELETE',headers:Object.assign({Prefer:'return=minimal'},rpiH())}); if(!d.ok) throw new Error('DELETE HTTP '+d.status); }
+    for(let k=0;k<rows.length;k+=500){ const res=await fetch(`${SUPABASE_URL}/rest/v1/mt_item_plan_reps`,{method:'POST',headers:Object.assign({Prefer:'return=minimal'},H),body:JSON.stringify(rows.slice(k,k+500))}); if(!res.ok) throw new Error('HTTP '+res.status+' '+(await res.text()).slice(0,120)); }
+    list.forEach(r=>{ r.saved=true; delete RPI.dirty[r.name]; });
+    rpiRender(); st.innerHTML=`<span style="color:#1A7A4A;font-weight:700">✅ اتحفظت خطة ${list.length} مندوب لشهر ${RPI.ym} — تقدر تعدّل وتحفظ تاني في أي وقت</span>`;
+    showToast('✅ تم حفظ خطة الأصناف');
+  }catch(e){ st.innerHTML='<span style="color:#B71C1C;font-weight:700">❌ تعذر الحفظ: '+rpiEsc(e.message||e)+'</span>'; }
+}
+function rpiExcel(){
+  if(!RPI.reps.length||typeof XLSX==='undefined'){ showToast('احسب الخطة الأول'); return; }
+  const wb=XLSX.utils.book_new();
+  const sum=[[`خطة أصناف المناديب — ${RPI.ym}`],[`الفترة المرجعية: ${RPI.refFrom} → ${RPI.refTo} (${RPI.months===1?'شهر واحد':RPI.months===2?'شهرين':RPI.months+' شهور'})`],[],['المندوب','المشرف','الهدف','عدد الأصناف','الكراتين','قيمة الكراتين','الفرق']];
+  RPI.reps.forEach(r=>{ const t=rpiRepTotals(r); sum.push([r.name,r.sup,Math.round(r.target),r.items.filter(i=>i.cartons>0).length,Math.round(t.c),Math.round(t.v),Math.round(t.diff)]); });
+  const ws0=XLSX.utils.aoa_to_sheet(sum); ws0['!cols']=[{wch:30},{wch:22},{wch:14},{wch:12},{wch:12},{wch:14},{wch:12}]; ws0['!views']=[{RTL:true}]; XLSX.utils.book_append_sheet(wb,ws0,'ملخص المناديب');
+  const det=[['المندوب','الصنف','النسبة %','نصيبه من الهدف','سعر الكرتونة الصافي','الكراتين','القيمة','معدّل']];
+  RPI.reps.forEach(r=>r.items.forEach(i=>det.push([r.name,i.item,+(i.share*100).toFixed(2),Math.round(i.calc_value),i.price?+i.price.toFixed(2):'',i.cartons==null?'':i.cartons,(i.cartons!=null&&i.price)?Math.round(i.cartons*i.price):'',i.edited?'نعم':''])));
+  const ws1=XLSX.utils.aoa_to_sheet(det); ws1['!cols']=[{wch:28},{wch:40},{wch:9},{wch:14},{wch:14},{wch:10},{wch:12},{wch:7}]; ws1['!views']=[{RTL:true}]; XLSX.utils.book_append_sheet(wb,ws1,'أصناف كل مندوب');
+  XLSX.writeFile(wb,`خطة_أصناف_المناديب_${RPI.ym}.xlsx`);
 }
 
 async function ipaRpc(name, body){
