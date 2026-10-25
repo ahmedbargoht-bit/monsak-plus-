@@ -3,6 +3,133 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8"/>
+
+<script id="sb-guard">
+/* ══ حماية من حد الـ 1000 صف بتاع Supabase (sbGuard v2) ══
+   Supabase بيقص أي رد عند 1000 صف من غير أي رسالة — ده بيخلي التقارير تطلع ناقصة.
+   الحماية دي بتشتغل على كل طلبات القراءة (جداول + دوال RPC):
+   • لو الطلب مفيهوش limit، أو فيه limit ≥ 1000، والرد رجع 1000 صف بالظبط
+     → بنجيب الباقي صفحة صفحة (بترتيب ثابت) ونرجّع الكل في رد واحد.
+   • الطلبات اللي فيها offset أو Range (بتقسّم لوحدها) أو limit أصغر من 1000 (مقصود) بتعدّي زي ما هي.
+   • لو أي صفحة فشلت → بنرجّع الرد الأصلي ونكتب تحذير في الكونسول. */
+(function(){
+  if(window.__sbGuard) return; window.__sbGuard = true;
+  var PAGE = 1000, MAX_ROWS = 1000000, _f = window.fetch.bind(window);
+  function hget(h, name){
+    if(!h) return null; name = name.toLowerCase();
+    try{
+      if(typeof Headers !== 'undefined' && h instanceof Headers) return h.get(name);
+      if(Array.isArray(h)){ for(var i=0;i<h.length;i++) if(String(h[i][0]).toLowerCase()===name) return h[i][1]; return null; }
+      for(var k in h) if(k.toLowerCase()===name) return h[k];
+    }catch(e){}
+    return null;
+  }
+  function withHeader(init, name, val){
+    var src = (init && init.headers) || {}, out = {};
+    try{
+      if(typeof Headers !== 'undefined' && src instanceof Headers) src.forEach(function(v,k){ out[k]=v; });
+      else if(Array.isArray(src)) src.forEach(function(p){ out[p[0]]=p[1]; });
+      else for(var k in src) out[k]=src[k];
+    }catch(e){}
+    out[name] = val;
+    var o = {}; for(var k2 in (init||{})) o[k2]=init[k2]; o.headers = out; return o;
+  }
+  function setParam(url, key, val){
+    var re = new RegExp('([?&])'+key+'=[^&]*');
+    if(re.test(url)) return url.replace(re, '$1'+key+'='+val);
+    return url + (url.indexOf('?')>=0 ? '&' : '?') + key + '=' + val;
+  }
+  function delParam(url, key){
+    return url.replace(new RegExp('([?&])'+key+'=[^&]*&?'), '$1').replace(/[?&]$/, '');
+  }
+  // تنبيه ظاهر لو أي طلب قراءة فشل — عشان محدش يفتكر إن البيانات كاملة وهي ناقصة
+  var _lastWarn = 0;
+  function warnIncomplete(msg){
+    try{
+      var now = Date.now();
+      try{ window.dispatchEvent(new CustomEvent('sb-incomplete', {detail:{msg:msg, at:now}})); }catch(_){}
+      if(now - _lastWarn < 8000) return; _lastWarn = now;
+      var el = document.getElementById('sb-guard-warn');
+      if(!el){ el = document.createElement('div'); el.id = 'sb-guard-warn';
+        el.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#B71C1C;color:#fff;font:700 13px Cairo,Tahoma,sans-serif;padding:10px 16px;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.3);direction:rtl;max-width:92vw;text-align:center;cursor:pointer';
+        el.onclick = function(){ el.style.display='none'; };
+        (document.body||document.documentElement).appendChild(el); }
+      el.textContent = '⚠️ ' + msg + ' — اعمل تحديث للصفحة قبل ما تعتمد على الأرقام';
+      el.style.display = 'block';
+      clearTimeout(el._t); el._t = setTimeout(function(){ el.style.display='none'; }, 9000);
+    }catch(e){}
+  }
+  window.sbGuardWarn = warnIncomplete;
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+  async function fRetry(u, i){
+    var waits = [700, 1800];
+    for(var k=0;;k++){
+      try{
+        var r = await _f(u, i);
+        if((r.status === 502 || r.status === 503 || r.status === 504 || r.status === 500) && k < 1){ await sleep(waits[k]); continue; }
+        return r;
+      }catch(e){
+        if(k < waits.length && navigator.onLine !== false){ await sleep(waits[k]); continue; }
+        throw e;
+      }
+    }
+  }
+  window.fetch = async function(input, init){
+    if(typeof input !== 'string' && !(input instanceof URL)) return _f(input, init);
+    var url = String(input);
+    var m = url.match(/\/rest\/v1\/(rpc\/)?([A-Za-z0-9_]+)/);
+    if(!m) return _f(input, init);
+    var isRpc = !!m[1], method = String((init && init.method) || 'GET').toUpperCase();
+    if(isRpc ? method !== 'POST' : method !== 'GET') return _f(input, init);
+    async function pass(){
+      var r;
+      try{ r = await fRetry(input, init); }catch(e){ if(navigator.onLine !== false) warnIncomplete('الاتصال بالسيرفر اتقطع — في بيانات ماتحملتش'); throw e; }
+      if(!r.ok && (r.status >= 500 || r.status === 400 || r.status === 404)) warnIncomplete('في بيانات ماتحملتش من السيرفر (خطأ '+r.status+')');
+      return r;
+    }
+    var h = init && init.headers;
+    if(hget(h,'range') || /[?&]offset=/.test(url)) return pass();
+    var lm = url.match(/[?&]limit=(\d+)/), lim = lm ? +lm[1] : 0;
+    if(lim && lim < PAGE) return pass();
+    var acc = String(hget(h,'accept')||'');
+    if(/vnd\.pgrst\.object|text\/csv/.test(acc)) return pass();
+    var res;
+    try{ res = await fRetry(input, init); }
+    catch(e){ if(navigator.onLine !== false) warnIncomplete('الاتصال بالسيرفر اتقطع — في بيانات ماتحملتش'); throw e; }
+    try{
+      if(!res.ok){ if(res.status >= 500 || res.status === 400 || res.status === 404) warnIncomplete('في بيانات ماتحملتش من السيرفر (خطأ '+res.status+')'); return res; }
+      var data = await res.clone().json();
+      if(!Array.isArray(data) || data.length !== PAGE) return res;
+      var want = lim || MAX_ROWS;
+      var row = data[0] || {};
+      var keys = Object.keys(row).filter(function(k){ var v=row[k]; return v===null || typeof v!=='object'; });
+      var base = delParam(url, 'limit');
+      var om = base.match(/[?&]order=([^&]*)/);
+      var have = om ? decodeURIComponent(om[1]).split(',').map(function(s){ return s.split('.')[0].trim(); }) : [];
+      var tie = (keys.indexOf('id')>=0 ? ['id'] : keys).filter(function(k){ return have.indexOf(k)<0; });
+      var ordered = base;
+      if(tie.length) ordered = setParam(base, 'order', (om ? om[1]+',' : '') + tie.map(encodeURIComponent).join(','));
+      async function pull(mode){
+        var all = [];
+        for(var off = 0; off < want; off += PAGE){
+          var n = Math.min(PAGE, want-off), r;
+          if(mode === 'order') r = await fRetry(setParam(setParam(ordered,'limit',n),'offset',off), init);
+          else r = await fRetry(base, withHeader(init, 'Range', off+'-'+(off+n-1)));
+          if(!r.ok) return null;
+          var part = await r.json(); if(!Array.isArray(part)) return null;
+          all.push.apply(all, part);
+          if(part.length < n) break;
+        }
+        return all;
+      }
+      var all = await pull('order');
+      if(!all) all = await pull('range');
+      if(!all){ console.warn('[sbGuard] تعذّر تحميل باقي الصفوف — البيانات ممكن تكون ناقصة:', url); warnIncomplete('البيانات ماتحملتش كاملة'); return new Response(JSON.stringify({message:'incomplete: rows beyond the first page could not be loaded'}), {status:503, headers:{'Content-Type':'application/json'}}); }
+      return new Response(JSON.stringify(all), {status:200, headers:{'Content-Type':'application/json'}});
+    }catch(e){ console.warn('[sbGuard]', e); return res; }
+  };
+})();
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
 <meta http-equiv="Pragma" content="no-cache"/>
@@ -5186,7 +5313,7 @@ async function renderRepRaisedReturns(){
     let rows=[];
     for(let i=0;i<names.length;i+=40){
       const chunk=names.slice(i,i+40).map(n=>'"'+String(n).replace(/"/g,'\\"')+'"').join(',');
-      const r=await fetch(`${SUPABASE_URL}/rest/v1/sales_returns?branch_name=in.(${encodeURIComponent(chunk)})&deleted_at=is.null&return_date=gte.${from}&select=id,rep_name,branch_name,return_date,items,coord_ack,coord_ack_by&order=return_date.desc,created_at.desc&limit=300`,{headers:H});
+      const r=await fetch(`${SUPABASE_URL}/rest/v1/sales_returns?branch_name=in.(${encodeURIComponent(chunk)})&deleted_at=is.null&return_date=gte.${from}&select=id,rep_name,branch_name,return_date,items,coord_ack,coord_ack_by&order=return_date.desc,created_at.desc&limit=5000`,{headers:H});
       if(r.ok){ const j=await r.json().catch(()=>[]); if(Array.isArray(j)) rows=rows.concat(j); }
     }
     _retInvCnt = {}; rows.forEach(r=>{ if(r.coord_ack!==true){ const b=r.branch_name||'—'; _retInvCnt[b]=(_retInvCnt[b]||0)+1; } });
@@ -6061,6 +6188,7 @@ async function sbInsert(table, data){
       },
       body: JSON.stringify(data)
     });
+    window.__sbLastStatus = res.status;
     if(!res.ok){
       // 409 = قاعدة البيانات رفضت الإدراج لأنه تكرار فعلي لصف موجود بالفعل (unique constraint) —
       // ده مش فشل حقيقي، الصف المطلوب أصلاً موجود على السيرفر، فنعتبره "نجح" عشان العنصر
@@ -6096,6 +6224,7 @@ async function sbInsertGetId(table, data){
       },
       body: JSON.stringify(data)
     });
+    window.__sbLastStatus = res.status;
     if(!res.ok){
       // 409 = قاعدة البيانات رفضت الإدراج لأنه تكرار (unique constraint) — الصف المطلوب أصلاً
       // موجود على السيرفر. بدل ما نرجّع فشل (اللي كان هيكسر ربط الأصناف/النواقص التالية بالزيارة
@@ -6157,6 +6286,7 @@ async function sbUpsert(table, data, onConflict='name'){
       },
       body: JSON.stringify(data)
     });
+    window.__sbLastStatus = res.status;
     return res.ok;
   }catch(e){ console.warn('sbUpsert error:', e); return false; }
 }
@@ -6174,6 +6304,7 @@ async function sbUpdate(table, match, data){
       },
       body: JSON.stringify(data)
     });
+    window.__sbLastStatus = res.status;
     return res.ok;
   }catch(e){ console.warn('sbUpdate error:', e); return false; }
 }
@@ -7132,6 +7263,7 @@ async function flushOQ(){
           item.data.visit_id = idMap[item.data.visit_id];
         }
         let ok = false;
+        window.__sbLastStatus = 0;
         if(item.action === 'insert'){
           // فحص تكرار قبل الرفع الفعلي من الطابور — لو نفس العنصر اتحفظ في IndexedDB أكتر من مرة
           // (مثلاً المنسق ضغط "إرسال" كذا مرة وهو أوفلاين لأنه مشافش تأكيد)، ما نكررش الصف على السيرفر.
@@ -7152,6 +7284,19 @@ async function flushOQ(){
           ok = await _origSbUpdate(item.table, item.data.match, item.data.values);
         }
         if(ok !== false){ await deleteFromOQ(item.id); done++; }
+        else {
+          // خطأ دائم من السيرفر (عمود مش موجود / بيانات مرفوضة) — إعادة المحاولة مش هتنجح أبداً وكانت بتتكرر آلاف المرات.
+          // بنشيلها من الطابور ونحفظ نسخة منها في سجل منفصل (oq_dead) عشان مايضيعش أثرها.
+          const st = +window.__sbLastStatus || 0;
+          if(st >= 400 && st < 500 && st !== 408 && st !== 429){
+            if(st === 409){ await deleteFromOQ(item.id); done++; }
+            else {
+              try{ const dead = JSON.parse(localStorage.getItem('oq_dead')||'[]'); dead.push({at:new Date().toISOString(), status:st, item}); localStorage.setItem('oq_dead', JSON.stringify(dead.slice(-50))); }catch(_){}
+              await deleteFromOQ(item.id);
+              console.warn('[OQ] اتشالت عملية مرفوضة من السيرفر', st, item.table, item.action);
+            }
+          }
+        }
       }catch(e){}
     }
     updateQueueBadge();

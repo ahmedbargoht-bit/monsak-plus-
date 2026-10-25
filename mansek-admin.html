@@ -20,6 +20,133 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8"/>
+
+<script id="sb-guard">
+/* ══ حماية من حد الـ 1000 صف بتاع Supabase (sbGuard v2) ══
+   Supabase بيقص أي رد عند 1000 صف من غير أي رسالة — ده بيخلي التقارير تطلع ناقصة.
+   الحماية دي بتشتغل على كل طلبات القراءة (جداول + دوال RPC):
+   • لو الطلب مفيهوش limit، أو فيه limit ≥ 1000، والرد رجع 1000 صف بالظبط
+     → بنجيب الباقي صفحة صفحة (بترتيب ثابت) ونرجّع الكل في رد واحد.
+   • الطلبات اللي فيها offset أو Range (بتقسّم لوحدها) أو limit أصغر من 1000 (مقصود) بتعدّي زي ما هي.
+   • لو أي صفحة فشلت → بنرجّع الرد الأصلي ونكتب تحذير في الكونسول. */
+(function(){
+  if(window.__sbGuard) return; window.__sbGuard = true;
+  var PAGE = 1000, MAX_ROWS = 1000000, _f = window.fetch.bind(window);
+  function hget(h, name){
+    if(!h) return null; name = name.toLowerCase();
+    try{
+      if(typeof Headers !== 'undefined' && h instanceof Headers) return h.get(name);
+      if(Array.isArray(h)){ for(var i=0;i<h.length;i++) if(String(h[i][0]).toLowerCase()===name) return h[i][1]; return null; }
+      for(var k in h) if(k.toLowerCase()===name) return h[k];
+    }catch(e){}
+    return null;
+  }
+  function withHeader(init, name, val){
+    var src = (init && init.headers) || {}, out = {};
+    try{
+      if(typeof Headers !== 'undefined' && src instanceof Headers) src.forEach(function(v,k){ out[k]=v; });
+      else if(Array.isArray(src)) src.forEach(function(p){ out[p[0]]=p[1]; });
+      else for(var k in src) out[k]=src[k];
+    }catch(e){}
+    out[name] = val;
+    var o = {}; for(var k2 in (init||{})) o[k2]=init[k2]; o.headers = out; return o;
+  }
+  function setParam(url, key, val){
+    var re = new RegExp('([?&])'+key+'=[^&]*');
+    if(re.test(url)) return url.replace(re, '$1'+key+'='+val);
+    return url + (url.indexOf('?')>=0 ? '&' : '?') + key + '=' + val;
+  }
+  function delParam(url, key){
+    return url.replace(new RegExp('([?&])'+key+'=[^&]*&?'), '$1').replace(/[?&]$/, '');
+  }
+  // تنبيه ظاهر لو أي طلب قراءة فشل — عشان محدش يفتكر إن البيانات كاملة وهي ناقصة
+  var _lastWarn = 0;
+  function warnIncomplete(msg){
+    try{
+      var now = Date.now();
+      try{ window.dispatchEvent(new CustomEvent('sb-incomplete', {detail:{msg:msg, at:now}})); }catch(_){}
+      if(now - _lastWarn < 8000) return; _lastWarn = now;
+      var el = document.getElementById('sb-guard-warn');
+      if(!el){ el = document.createElement('div'); el.id = 'sb-guard-warn';
+        el.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#B71C1C;color:#fff;font:700 13px Cairo,Tahoma,sans-serif;padding:10px 16px;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.3);direction:rtl;max-width:92vw;text-align:center;cursor:pointer';
+        el.onclick = function(){ el.style.display='none'; };
+        (document.body||document.documentElement).appendChild(el); }
+      el.textContent = '⚠️ ' + msg + ' — اعمل تحديث للصفحة قبل ما تعتمد على الأرقام';
+      el.style.display = 'block';
+      clearTimeout(el._t); el._t = setTimeout(function(){ el.style.display='none'; }, 9000);
+    }catch(e){}
+  }
+  window.sbGuardWarn = warnIncomplete;
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+  async function fRetry(u, i){
+    var waits = [700, 1800];
+    for(var k=0;;k++){
+      try{
+        var r = await _f(u, i);
+        if((r.status === 502 || r.status === 503 || r.status === 504 || r.status === 500) && k < 1){ await sleep(waits[k]); continue; }
+        return r;
+      }catch(e){
+        if(k < waits.length && navigator.onLine !== false){ await sleep(waits[k]); continue; }
+        throw e;
+      }
+    }
+  }
+  window.fetch = async function(input, init){
+    if(typeof input !== 'string' && !(input instanceof URL)) return _f(input, init);
+    var url = String(input);
+    var m = url.match(/\/rest\/v1\/(rpc\/)?([A-Za-z0-9_]+)/);
+    if(!m) return _f(input, init);
+    var isRpc = !!m[1], method = String((init && init.method) || 'GET').toUpperCase();
+    if(isRpc ? method !== 'POST' : method !== 'GET') return _f(input, init);
+    async function pass(){
+      var r;
+      try{ r = await fRetry(input, init); }catch(e){ if(navigator.onLine !== false) warnIncomplete('الاتصال بالسيرفر اتقطع — في بيانات ماتحملتش'); throw e; }
+      if(!r.ok && (r.status >= 500 || r.status === 400 || r.status === 404)) warnIncomplete('في بيانات ماتحملتش من السيرفر (خطأ '+r.status+')');
+      return r;
+    }
+    var h = init && init.headers;
+    if(hget(h,'range') || /[?&]offset=/.test(url)) return pass();
+    var lm = url.match(/[?&]limit=(\d+)/), lim = lm ? +lm[1] : 0;
+    if(lim && lim < PAGE) return pass();
+    var acc = String(hget(h,'accept')||'');
+    if(/vnd\.pgrst\.object|text\/csv/.test(acc)) return pass();
+    var res;
+    try{ res = await fRetry(input, init); }
+    catch(e){ if(navigator.onLine !== false) warnIncomplete('الاتصال بالسيرفر اتقطع — في بيانات ماتحملتش'); throw e; }
+    try{
+      if(!res.ok){ if(res.status >= 500 || res.status === 400 || res.status === 404) warnIncomplete('في بيانات ماتحملتش من السيرفر (خطأ '+res.status+')'); return res; }
+      var data = await res.clone().json();
+      if(!Array.isArray(data) || data.length !== PAGE) return res;
+      var want = lim || MAX_ROWS;
+      var row = data[0] || {};
+      var keys = Object.keys(row).filter(function(k){ var v=row[k]; return v===null || typeof v!=='object'; });
+      var base = delParam(url, 'limit');
+      var om = base.match(/[?&]order=([^&]*)/);
+      var have = om ? decodeURIComponent(om[1]).split(',').map(function(s){ return s.split('.')[0].trim(); }) : [];
+      var tie = (keys.indexOf('id')>=0 ? ['id'] : keys).filter(function(k){ return have.indexOf(k)<0; });
+      var ordered = base;
+      if(tie.length) ordered = setParam(base, 'order', (om ? om[1]+',' : '') + tie.map(encodeURIComponent).join(','));
+      async function pull(mode){
+        var all = [];
+        for(var off = 0; off < want; off += PAGE){
+          var n = Math.min(PAGE, want-off), r;
+          if(mode === 'order') r = await fRetry(setParam(setParam(ordered,'limit',n),'offset',off), init);
+          else r = await fRetry(base, withHeader(init, 'Range', off+'-'+(off+n-1)));
+          if(!r.ok) return null;
+          var part = await r.json(); if(!Array.isArray(part)) return null;
+          all.push.apply(all, part);
+          if(part.length < n) break;
+        }
+        return all;
+      }
+      var all = await pull('order');
+      if(!all) all = await pull('range');
+      if(!all){ console.warn('[sbGuard] تعذّر تحميل باقي الصفوف — البيانات ممكن تكون ناقصة:', url); warnIncomplete('البيانات ماتحملتش كاملة'); return new Response(JSON.stringify({message:'incomplete: rows beyond the first page could not be loaded'}), {status:503, headers:{'Content-Type':'application/json'}}); }
+      return new Response(JSON.stringify(all), {status:200, headers:{'Content-Type':'application/json'}});
+    }catch(e){ console.warn('[sbGuard]', e); return res; }
+  };
+})();
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <meta name="theme-color" content="#4B3C1A"/>
 <meta name="mobile-web-app-capable" content="yes"/>
@@ -7662,7 +7789,7 @@ h2,h3{color:#2C1F0A}
           <div style="background:linear-gradient(135deg,#1E3A5F,#92400E);border-radius:12px;padding:16px 20px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
             <div>
               <div style="font-size:16px;font-weight:800;color:#EDE5D8">🎯 خطة الأصناف</div>
-              <div style="font-size:11px;color:#FDE68A;margin-top:4px">هدف كل مندوب من توزيع الهدف بيتوزع على الأصناف حسب مسحوبات عملاء MT على خطوطه، وبيتحول لكراتين بآخر سعر كرتونة صافي — ومعاه إجمالي كميات كل مجموعة</div>
+              <div style="font-size:11px;color:#FDE68A;margin-top:4px">هدف كل مندوب من توزيع الهدف بيتوزع على الأصناف حسب مسحوبات عملاء MT على خطوطه، وبيتحول لقطع بآخر سعر قطعة صافي — ومعاه إجمالي كميات كل مجموعة</div>
             </div>
           </div>
 
@@ -7678,7 +7805,7 @@ h2,h3{color:#2C1F0A}
                 <button type="button" id="rpi-saveall" class="btn btn-sm" style="background:#731E2E;color:#fff;border:none;font-weight:700" onclick="rpiSave()"><i class="ti ti-device-floppy"></i> حفظ خطة كل المناديب</button>
               </div>
             </div>
-            <div style="font-size:11px;color:#8B6F47;margin-bottom:10px">هدف كل مندوب (المتحوّل من تاب توزيع الهدف، من غير ضريبة) بيتقسم على الأصناف بنسبة مسحوبات عملاء MT على خطوط سيره في آخر الشهور اللي تختارها قبل شهر الهدف، ويتحول لكراتين بسعر الكرتونة الصافي (بعد الخصم ومن غير ضريبة) في آخر شهر اتباع فيه الصنف. بعد الحفظ تقدر تعدّل كراتين أي صنف وتحفظ تاني.</div>
+            <div style="font-size:11px;color:#8B6F47;margin-bottom:10px">هدف كل مندوب (المتحوّل من تاب توزيع الهدف، من غير ضريبة) بيتقسم على الأصناف بنسبة مسحوبات عملاء MT على خطوط سيره في آخر الشهور اللي تختارها قبل شهر الهدف، ويتحول لقطع بسعر القطعة الصافي (بعد الخصم ومن غير ضريبة) في آخر شهر اتباع فيه الصنف. بعد الحفظ تقدر تعدّل قطع أي صنف وتحفظ تاني.</div>
             <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px">
               <label style="font-size:10px;font-weight:700;color:var(--text2);display:flex;flex-direction:column;gap:4px">شهر الهدف<input type="month" id="rpi-month" onchange="rpiOnMonth()" style="padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;background:var(--surface-1)"/></label>
               <label style="font-size:10px;font-weight:700;color:var(--text2);display:flex;flex-direction:column;gap:4px">متوسط آخر
@@ -7705,7 +7832,7 @@ h2,h3{color:#2C1F0A}
                 <button type="button" class="btn btn-ghost btn-sm" onclick="rpgXlsxOut(true)"><i class="ti ti-send" style="color:#1A7A4A"></i> إرسال Excel</button>
               </div>
             </div>
-            <div style="font-size:11px;color:#8B6F47;margin-bottom:10px">إجمالي كل مجموعة (زي الجيزة): هدفها، عدد مناديبها، عدد الأصناف وإجمالي الكراتين وقيمتها — اضغط "الأصناف" تشوف كميات كل صنف في المجموعة. بيتبع اختيار المجموعة والشهر اللي فوق، وبيتحدث مع أي تعديل في الكراتين.</div>
+            <div style="font-size:11px;color:#8B6F47;margin-bottom:10px">إجمالي كل مجموعة (زي الجيزة): هدفها، عدد مناديبها، عدد الأصناف وإجمالي القطع وقيمتها — اضغط "الأصناف" تشوف كميات كل صنف في المجموعة. بيتبع اختيار المجموعة والشهر اللي فوق، وبيتحدث مع أي تعديل في القطع.</div>
             <div id="rpg-body"></div>
           </div>
         </div><!-- /aitab-itemplan -->
@@ -18262,7 +18389,7 @@ async function locBuildBranchPopup(marker, branchName, extraLine, opts){
     let inv   = _locBranchInvCache[branchName];
     if(visit===undefined || inv===undefined){
       const [vr, ir] = await Promise.all([
-        visit===undefined ? fetch(`${SUPABASE_URL}/rest/v1/visits?select=created_at,date,lat,lng,rep_name,name&branch=eq.${enc}&order=created_at.desc&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]) : Promise.resolve(null),
+        visit===undefined ? fetch(`${SUPABASE_URL}/rest/v1/visits?select=created_at,date,lat,lng,name&branch=eq.${enc}&order=created_at.desc&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]) : Promise.resolve(null),
         inv===undefined   ? fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=delivery_date,rep_name,invoice_number&branch_name=eq.${enc}&deleted_at=is.null&order=delivery_date.desc,id.desc&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]) : Promise.resolve(null)
       ]);
       if(vr){ visit = vr[0]||null; _locBranchVisitCache[branchName]=visit; }
@@ -19421,7 +19548,7 @@ async function hsCompute(setSt){
   const prods = prodAll.filter(p=>scopeSet.has(p.branch));
   // 3) النواقص — آخر 120 يوم
   setSt('تحميل النواقص...');
-  const missAll = await hsCached('miss|'+grps.join(','), 2*60e3, ()=>fetchAllRows(`${SUPABASE_URL}/rest/v1/missing?grp=in.(${grps.join(',')})&created_at=gte.${hsIso(120)}&select=name,branch,snf,fea,cat,reason,created_at,delivered,status&order=created_at.desc`, H).catch(()=>[]));
+  const missAll = await hsCached('miss|'+grps.join(','), 2*60e3, ()=>fetchAllRows(`${SUPABASE_URL}/rest/v1/missing?grp=in.(${grps.join(',')})&created_at=gte.${hsIso(120)}&select=name,branch,snf,fea,reason,created_at,delivered,status&order=created_at.desc`, H).catch(()=>[]));
   let miss = missAll.filter(m=>scopeSet.has(m.branch));
   // 4) ربط الفرع بعميله + توحيد أسماء الأصناف
   const bcmRows = await hsCached('bcm', 10*60e3, ()=>fetchAllRows(`${SUPABASE_URL}/rest/v1/branch_client_map?select=client_name,branch_name`, H).catch(()=>[]));
@@ -55738,7 +55865,7 @@ async function ipaSave(){
 
 // ══════════════════════════════════════════════════════════════
 // خطة أصناف المناديب — الهدف من "توزيع الهدف" (rep_targets بعد التحويل) بيتقسم على الأصناف حسب مسحوبات
-// عملاء MT على خطوط سير كل مندوب (متوسط آخر N شهور قبل شهر الهدف)، ويتحول لكراتين بسعر الكرتونة الصافي
+// عملاء MT على خطوط سير كل مندوب (متوسط آخر N شهور قبل شهر الهدف)، ويتحول لقطع بسعر القطعة الصافي
 // (بعد الخصم ومن غير ضريبة) في آخر شهر من الفترة المرجعية. الخطة قابلة للتعديل وتتحفظ في mt_item_plan_reps.
 // ══════════════════════════════════════════════════════════════
 const RPI={ym:'',months:3,reps:[],plans:{},open:{},saved:null,dirty:{},refFrom:'',refTo:'',prices:{},busy:false,groups:[],grpNames:{},showAgg:false};
@@ -55808,7 +55935,7 @@ async function rpiLoad(){
     const [tg,us,mix,saved]=await Promise.all([
       rpiGet(`rep_targets?select=rep_name,supervisor_name,target_amount&month=eq.${ym}&deleted_at=is.null&limit=1000`),
       rpiGet(`users?select=name,grp,groups,routes,supervisors&role=eq.sales&level=eq.rep&limit=1000`),
-      fetch(`${SUPABASE_URL}/rest/v1/rpc/mt_item_mix_by_route_v2`,{method:'POST',headers:Object.assign({'Content-Type':'application/json'},rpiH()),body:JSON.stringify({p_from:from,p_to:to})}).then(r=>{ if(!r.ok) throw new Error('mt_item_mix_by_route_v2 HTTP '+r.status); return r.json(); }),
+      fetch(`${SUPABASE_URL}/rest/v1/rpc/mt_item_mix_by_route_json`,{method:'POST',headers:Object.assign({'Content-Type':'application/json'},rpiH()),body:JSON.stringify({p_from:from,p_to:to})}).then(r=>{ if(!r.ok) throw new Error('mt_item_mix_by_route_json HTTP '+r.status); return r.json(); }),
       rpiGet(`mt_item_plan_reps?select=*&target_ym=eq.${ym}&limit=20000`)
     ]);
     try{ (await rpiGet('groups?select=key_name,name&limit=200')).forEach(g=>{ if(g.key_name&&g.name) RPI.grpNames[g.key_name]=g.name; }); }catch(e){}
@@ -55819,14 +55946,14 @@ async function rpiLoad(){
     const routesOf=n=>{ const r=(uOf[n]&&uOf[n].routes)||[]; return Array.isArray(r)?r:[]; };
     // خط السير المشترك بين أكتر من مندوب ليهم هدف بيتقسم عليهم بالتساوي
     const owners={}; tgt.forEach(t=>routesOf(t.rep_name).forEach(r=>{ (owners[r]=owners[r]||new Set()).add(t.rep_name); }));
-    // سعر الكرتونة الصافي: من آخر شهر في الفترة اتباع فيه الصنف
+    // سعر القطعة الصافي: من آخر شهر في الفترة اتباع فيه الصنف
     const pm={}, routeItem={}, regItem={alex:{},cairo:{}};
-    mix.forEach(x=>{ const v=+x.value||0, c=+x.cartons||0;
+    mix.forEach(x=>{ const v=+x.value||0, c=+x.pieces||0;
       const p=pm[x.item]=pm[x.item]||{}; (p[x.ym]=p[x.ym]||{v:0,c:0}); p[x.ym].v+=v; p[x.ym].c+=c;
       const ri=routeItem[x.route]=routeItem[x.route]||{}; ri[x.item]=(ri[x.item]||0)+v;
       const rg=/alex/.test(String(x.grp).toLowerCase())?'alex':'cairo'; regItem[rg][x.item]=(regItem[rg][x.item]||0)+v; });
     RPI.prices={}; Object.keys(pm).forEach(it=>{ const ms=Object.keys(pm[it]).sort().reverse(); let price=null,from_ym='';
-      for(const m of ms){ const o=pm[it][m]; if(o.c>0.5&&o.v>0){ price=o.v/o.c; from_ym=m; break; } }
+      for(const m of ms){ const o=pm[it][m]; if(o.c>=1&&o.v>0){ price=o.v/o.c; from_ym=m; break; } }
       if(price==null){ let v=0,c=0; ms.forEach(m=>{v+=pm[it][m].v;c+=pm[it][m].c}); if(c>0&&v>0){price=v/c;from_ym='الفترة';} }
       RPI.prices[it]={price,ym:from_ym}; });
     const savedBy={}; (saved||[]).forEach(r=>{ (savedBy[r.rep_name]=savedBy[r.rep_name]||[]).push(r); });
@@ -55838,11 +55965,11 @@ async function rpiLoad(){
       const tot=Object.values(mixR).reduce((a,b)=>a+b,0)||1, target=+t.target_amount;
       const items=Object.keys(mixR).filter(it=>mixR[it]>0).map(it=>{ const share=mixR[it]/tot, tv=target*share, pr=RPI.prices[it]&&RPI.prices[it].price;
         return {item:it,share,calc_value:tv,price:pr,cartons:pr?Math.round(tv/pr):null,edited:false}; }).sort((a,b)=>b.calc_value-a.calc_value);
-      // لو فيه خطة محفوظة للمندوب ده: الكراتين المحفوظة (اللي ممكن تكون اتعدّلت) بتتعرض بدل المحسوبة
+      // لو فيه خطة محفوظة للمندوب ده: القطع المحفوظة (اللي ممكن تكون اتعدّلت) بتتعرض بدل المحسوبة
       const sv=savedBy[t.rep_name];
       if(sv&&sv.length){ const sm={}; sv.forEach(r=>sm[r.item]=r);
-        items.forEach(i=>{ const r=sm[i.item]; if(r){ i.cartons=r.cartons==null?null:+r.cartons; i.edited=!!r.edited; if(r.price_carton) i.price=+r.price_carton; } else i.cartons=i.cartons; });
-        sv.forEach(r=>{ if(!items.some(i=>i.item===r.item)) items.push({item:r.item,share:+r.share||0,calc_value:+r.target_value||0,price:+r.price_carton||null,cartons:r.cartons==null?null:+r.cartons,edited:!!r.edited}); }); }
+        items.forEach(i=>{ const r=sm[i.item]; if(r){ i.cartons=r.pieces==null?null:+r.pieces; i.edited=!!r.edited; if(r.price_piece) i.price=+r.price_piece; } else i.cartons=i.cartons; });
+        sv.forEach(r=>{ if(!items.some(i=>i.item===r.item)) items.push({item:r.item,share:+r.share||0,calc_value:+r.target_value||0,price:+r.price_piece||null,cartons:r.pieces==null?null:+r.pieces,edited:!!r.edited}); }); }
       const u=uOf[t.rep_name]||{}; const sup=String(u.supervisors||'').split(',')[0].trim()||t.supervisor_name||'—';
       return {name:t.rep_name,sup,target,items,groups:rpiRepGroups(uOf[t.rep_name]),fallback:fb,routes:routesOf(t.rep_name),saved:!!(sv&&sv.length),savedAt:sv&&sv.length?sv.reduce((a,r)=>r.updated_at>a?r.updated_at:a,''):''};
     }).sort((a,b)=>b.target-a.target);
@@ -55861,14 +55988,14 @@ function rpiRender(){
   const agg=rpiAgg(view);
   let h=`<div style="font-size:12.5px;font-weight:800;color:#731E2E;margin-bottom:6px">${rpiEsc(rpiGrpTitle())}</div>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:10px">
-    ${[['المناديب',S0.n,'#731E2E'],[rpiTgtLbl(),rpiN(tT),'#1E3A5F'],['عدد الأصناف',S0.items,'#7C3AED'],['إجمالي الكراتين',rpiN(tC),'#92400E'],['قيمة الكراتين',rpiN(tV),'#1A7A4A'],['فرق التقريب',(tV-tT>=0?'+':'')+rpiN(tV-tT),Math.abs(tV-tT)>tT*0.01?'#B71C1C':'#8B6F47']].map(([l,v,c])=>`<div style="background:#fff;border:1px solid #E8DCC4;border-top:3px solid ${c};border-radius:9px;padding:8px;text-align:center"><div style="font-size:10.5px;color:#8B6F47">${l}</div><div style="font-size:16px;font-weight:800;color:${c}">${v}</div></div>`).join('')}</div>
+    ${[['المناديب',S0.n,'#731E2E'],[rpiTgtLbl(),rpiN(tT),'#1E3A5F'],['عدد الأصناف',S0.items,'#7C3AED'],['إجمالي القطع',rpiN(tC),'#92400E'],['قيمة القطع',rpiN(tV),'#1A7A4A'],['فرق التقريب',(tV-tT>=0?'+':'')+rpiN(tV-tT),Math.abs(tV-tT)>tT*0.01?'#B71C1C':'#8B6F47']].map(([l,v,c])=>`<div style="background:#fff;border:1px solid #E8DCC4;border-top:3px solid ${c};border-radius:9px;padding:8px;text-align:center"><div style="font-size:10.5px;color:#8B6F47">${l}</div><div style="font-size:16px;font-weight:800;color:${c}">${v}</div></div>`).join('')}</div>
   <div style="margin-bottom:10px"><button type="button" class="btn btn-ghost btn-sm" onclick="RPI.showAgg=!RPI.showAgg;rpiRender()"><i class="ti ti-list-details"></i> ${RPI.showAgg?'إخفاء':'عرض'} أصناف ${RPI.groups.length?rpiSelWord():'الكل'} مجمّعة (${agg.length} صنف)</button>
   ${RPI.showAgg?`<div style="overflow-x:auto;margin-top:8px;max-height:420px;overflow-y:auto;border:1px solid #E8DCC4;border-radius:8px"><table style="width:100%;border-collapse:collapse;font-size:11.5px;background:#fff">
-    <tr style="background:#F3EBDD;position:sticky;top:0"><th style="padding:6px;text-align:right">#</th><th style="text-align:right">الصنف</th><th>عدد المناديب</th><th>الكراتين</th><th>القيمة</th><th>النسبة</th></tr>
+    <tr style="background:#F3EBDD;position:sticky;top:0"><th style="padding:6px;text-align:right">#</th><th style="text-align:right">الصنف</th><th>عدد المناديب</th><th>القطع</th><th>القيمة</th><th>النسبة</th></tr>
     ${agg.map((a,i)=>`<tr style="border-bottom:1px solid #F3EBDD"><td style="padding:5px 6px;color:#8B6F47">${i+1}</td><td style="font-weight:700">${rpiEsc(a.item)}</td><td style="text-align:center">${a.reps}</td><td style="text-align:center;font-weight:700">${rpiN(a.c)}</td><td style="text-align:center">${rpiN(a.v)}</td><td style="text-align:center">${tV?(a.v/tV*100).toFixed(1):0}%</td></tr>`).join('')}
     <tr style="background:#F5F0E8;font-weight:800;color:#731E2E"><td></td><td style="padding:6px">الإجمالي</td><td></td><td style="text-align:center">${rpiN(tC)}</td><td style="text-align:center">${rpiN(tV)}</td><td></td></tr></table></div>`:''}</div>
   <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
-    <tr style="background:#4E3B1F;color:#fff"><th style="padding:8px;text-align:right">المندوب</th><th>المشرف</th><th>الهدف (من توزيع الهدف)</th><th>عدد الأصناف</th><th>الكراتين</th><th>قيمة الكراتين</th><th>الفرق</th><th>الحالة</th><th></th></tr>`;
+    <tr style="background:#4E3B1F;color:#fff"><th style="padding:8px;text-align:right">المندوب</th><th>المشرف</th><th>الهدف (من توزيع الهدف)</th><th>عدد الأصناف</th><th>القطع</th><th>قيمة القطع</th><th>الفرق</th><th>الحالة</th><th></th></tr>`;
   view.forEach(({r,ri})=>{ const t=rpiRepTotals(r), open=RPI.open[r.name], ed=r.items.some(i=>i.edited);
     h+=`<tr style="border-bottom:1px solid #EFE6D6;background:${open?'#FBF6EC':'#fff'}">
       <td style="padding:8px;font-weight:800">${rpiEsc(r.name)}${r.fallback?'<div style="font-size:10px;color:#B45309;font-weight:600">مالوش خطوط سير في MT — اتحسب بنسب منطقته</div>':''}</td>
@@ -55878,8 +56005,8 @@ function rpiRender(){
       <td style="text-align:center;font-size:11px">${RPI.dirty[r.name]?'<span style="color:#B45309;font-weight:700">● تعديلات مش محفوظة</span>':r.saved?`<span style="color:#1A7A4A;font-weight:700">✓ محفوظة${ed?' (معدّلة)':''}</span>`:'<span style="color:#8B6F47">مش محفوظة</span>'}</td>
       <td style="text-align:center"><button type="button" class="btn btn-ghost btn-sm" onclick="rpiToggle(${ri})"><i class="ti ti-chevron-${open?'up':'down'}"></i> ${open?'إخفاء':'الأصناف'}</button></td></tr>`;
     if(open){
-      h+=`<tr><td colspan="9" style="padding:8px 10px 14px;background:#FBF6EC"><div style="font-size:11px;color:#8B6F47;margin-bottom:6px">خطوط السير: ${r.routes.map(rpiEsc).join('، ')||'—'} · غيّر عدد الكراتين لأي صنف، والقيمة والفرق بيتحسبوا لوحدهم</div>
-        <table style="width:100%;border-collapse:collapse;font-size:11.5px;background:#fff"><tr style="background:#F3EBDD"><th style="padding:6px;text-align:right">الصنف</th><th>نسبته من مسحوبات المندوب</th><th>نصيبه من الهدف</th><th>سعر الكرتونة الصافي</th><th style="width:110px">الكراتين</th><th>القيمة</th></tr>
+      h+=`<tr><td colspan="9" style="padding:8px 10px 14px;background:#FBF6EC"><div style="font-size:11px;color:#8B6F47;margin-bottom:6px">خطوط السير: ${r.routes.map(rpiEsc).join('، ')||'—'} · غيّر عدد القطع لأي صنف، والقيمة والفرق بيتحسبوا لوحدهم</div>
+        <table style="width:100%;border-collapse:collapse;font-size:11.5px;background:#fff"><tr style="background:#F3EBDD"><th style="padding:6px;text-align:right">الصنف</th><th>نسبته من مسحوبات المندوب</th><th>نصيبه من الهدف</th><th>سعر القطعة الصافي</th><th style="width:110px">القطع</th><th>القيمة</th></tr>
         ${r.items.map((i,ii)=>{ const val=(i.cartons!=null&&i.price)?i.cartons*i.price:null, pi=RPI.prices[i.item];
           return `<tr style="border-bottom:1px solid #F3EBDD;${i.cartons===0?'opacity:.55':''}"><td style="padding:5px 6px;font-weight:700">${rpiEsc(i.item)}${i.edited?' <span style="font-size:9.5px;color:#B45309">(معدّل)</span>':''}</td>
             <td style="text-align:center">${(i.share*100).toFixed(2)}%</td><td style="text-align:center">${rpiN(i.calc_value)}</td>
@@ -55902,7 +56029,7 @@ async function rpiSave(idxs){
   if(!list.length) return;
   const who=(typeof CU!=='undefined'&&CU&&CU.name)||'admin', now=new Date().toISOString();
   const rows=[]; list.forEach(r=>r.items.forEach(i=>rows.push({target_ym:RPI.ym,rep_name:r.name,item:i.item,rep_target:r.target,share:+i.share.toFixed(8),target_value:Math.round(i.calc_value*100)/100,
-    price_carton:i.price?Math.round(i.price*100)/100:null,cartons:i.cartons,edited:!!i.edited,ref_from:RPI.refFrom,ref_to:RPI.refTo,updated_at:now,updated_by:who})));
+    price_piece:i.price?Math.round(i.price*100)/100:null,pieces:i.cartons,price_carton:null,cartons:null,edited:!!i.edited,ref_from:RPI.refFrom,ref_to:RPI.refTo,updated_at:now,updated_by:who})));
   st.innerHTML='جاري الحفظ...';
   try{
     const H=Object.assign({'Content-Type':'application/json'},rpiH());
@@ -55922,15 +56049,15 @@ function rpiPdf(){
   const logo=(typeof SINV_LOGO!=='undefined'?SINV_LOGO:''), now=new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
   const [yy,mm]=RPI.ym.split('-'); const monName=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'][(+mm)-1]+' '+yy;
   const kpi=(l,v)=>`<div class="kpi"><div class="kl">${l}</div><div class="kv">${v}</div></div>`;
-  const aggT=`<div class="sec"><div class="st">أصناف ${RPI.groups.length?rpiSelWord():'الخطة'} مجمّعة <small>(${agg.length} صنف)</small></div><table><thead><tr><th>#</th><th class="r">الصنف</th><th>عدد المناديب</th><th>الكراتين</th><th>القيمة</th><th>النسبة</th></tr></thead><tbody>
+  const aggT=`<div class="sec"><div class="st">أصناف ${RPI.groups.length?rpiSelWord():'الخطة'} مجمّعة <small>(${agg.length} صنف)</small></div><table><thead><tr><th>#</th><th class="r">الصنف</th><th>عدد المناديب</th><th>القطع</th><th>القيمة</th><th>النسبة</th></tr></thead><tbody>
     ${agg.map((a,i)=>`<tr><td class="mu">${i+1}</td><td class="r b">${E(a.item)}</td><td>${a.reps}</td><td class="b">${N(a.c)}</td><td>${N(a.v)}</td><td>${S0.v?(a.v/S0.v*100).toFixed(1):0}%</td></tr>`).join('')}
     <tr class="tot"><td></td><td class="r">الإجمالي</td><td></td><td>${N(S0.c)}</td><td>${N(S0.v)}</td><td>100%</td></tr></tbody></table></div>`;
-  const repsSum=`<div class="sec"><div class="st">ملخص المناديب <small>(${view.length})</small></div><table><thead><tr><th>#</th><th class="r">المندوب</th><th class="r">المشرف</th><th>الهدف</th><th>عدد الأصناف</th><th>الكراتين</th><th>قيمة الكراتين</th><th>الفرق</th></tr></thead><tbody>
+  const repsSum=`<div class="sec"><div class="st">ملخص المناديب <small>(${view.length})</small></div><table><thead><tr><th>#</th><th class="r">المندوب</th><th class="r">المشرف</th><th>الهدف</th><th>عدد الأصناف</th><th>القطع</th><th>قيمة القطع</th><th>الفرق</th></tr></thead><tbody>
     ${view.map(({r},i)=>{ const t=rpiRepTotals(r); return `<tr><td class="mu">${i+1}</td><td class="r b">${E(r.name)}</td><td class="r">${E(r.sup)}</td><td class="b">${N(r.target)}</td><td>${r.items.filter(x=>x.cartons>0).length}</td><td class="b">${N(t.c)}</td><td>${N(t.v)}</td><td class="ltr">${t.diff>=0?'+':''}${N(t.diff)}</td></tr>`; }).join('')}
     <tr class="tot"><td></td><td class="r">الإجمالي</td><td></td><td>${N(S0.t)}</td><td>${S0.items}</td><td>${N(S0.c)}</td><td>${N(S0.v)}</td><td class="ltr">${S0.v-S0.t>=0?'+':''}${N(S0.v-S0.t)}</td></tr></tbody></table></div>`;
   const repSecs=view.map(({r})=>{ const t=rpiRepTotals(r), its=r.items.filter(x=>x.cartons>0);
-    return `<div class="sec pb"><div class="st">${E(r.name)} <small>— المشرف: ${E(r.sup)} · الهدف: ${N(r.target)} · ${its.length} صنف · ${N(t.c)} كرتونة</small></div>
-      <table><thead><tr><th>#</th><th class="r">الصنف</th><th>النسبة</th><th>نصيبه من الهدف</th><th>سعر الكرتونة الصافي</th><th>الكراتين</th><th>القيمة</th></tr></thead><tbody>
+    return `<div class="sec pb"><div class="st">${E(r.name)} <small>— المشرف: ${E(r.sup)} · الهدف: ${N(r.target)} · ${its.length} صنف · ${N(t.c)} قطعة</small></div>
+      <table><thead><tr><th>#</th><th class="r">الصنف</th><th>النسبة</th><th>نصيبه من الهدف</th><th>سعر القطعة الصافي</th><th>القطع</th><th>القيمة</th></tr></thead><tbody>
       ${its.map((x,i)=>`<tr><td class="mu">${i+1}</td><td class="r b">${E(x.item)}${x.edited?' <small>(معدّل)</small>':''}</td><td>${(x.share*100).toFixed(1)}%</td><td>${N(x.calc_value)}</td><td>${x.price?N(x.price):'—'}</td><td class="b">${N(x.cartons)}</td><td>${x.price?N(x.cartons*x.price):'—'}</td></tr>`).join('')}
       <tr class="tot"><td></td><td class="r">الإجمالي</td><td></td><td>${N(r.target)}</td><td></td><td>${N(t.c)}</td><td>${N(t.v)}</td></tr></tbody></table></div>`; }).join('');
   const html=`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>خطة أصناف المناديب ${monName}</title>
@@ -55948,7 +56075,7 @@ thead{display:table-header-group}tr{page-break-inside:avoid}.pb{page-break-befor
 <div class="hd"><div><h1>الطحان جولدن داتس</h1><div class="en">AL TAHHAN GOLDEN DATES</div></div>${logo?`<img src="${logo}" alt="Al Tahhan">`:''}</div>
 <div class="band">خطة أصناف المناديب — ${E(monName)} — ${E(rpiGrpTitle())}</div>
 <div class="meta"><span>الفترة المرجعية: <b>${RPI.refFrom} → ${RPI.refTo}</b></span><span>المصدر: <b>أهداف تاب توزيع الهدف + مسحوبات عملاء MT</b></span><span>تاريخ الإصدار: <b>${now}</b></span></div>
-<div class="kpis">${kpi('المناديب',S0.n)}${kpi(rpiTgtLbl(),N(S0.t))}${kpi('عدد الأصناف',S0.items)}${kpi('إجمالي الكراتين',N(S0.c))}${kpi('قيمة الكراتين',N(S0.v))}</div>
+<div class="kpis">${kpi('المناديب',S0.n)}${kpi(rpiTgtLbl(),N(S0.t))}${kpi('عدد الأصناف',S0.items)}${kpi('إجمالي القطع',N(S0.c))}${kpi('قيمة القطع',N(S0.v))}</div>
 ${repsSum}${aggT}${repSecs}
 <div class="ft"><span>الطحان جولدن داتس — منظومة منسق بلس</span><span>إعداد: AHMED BARGOHT</span></div>
 <script>window.onload=function(){setTimeout(function(){try{window.print()}catch(e){}},700)}<\/script></body></html>`;
@@ -55960,13 +56087,13 @@ function rpiExcel(){
   if(!RPI.reps.length||typeof XLSX==='undefined'){ showToast('احسب الخطة الأول'); return; }
   const view=rpiView(), S0=rpiStats(view), agg=rpiAgg(view);
   const wb=XLSX.utils.book_new();
-  const sum=[[`خطة أصناف المناديب — ${RPI.ym} — ${rpiGrpTitle()}`],[`الهدف: ${Math.round(S0.t)} | عدد الأصناف: ${S0.items} | الكراتين: ${Math.round(S0.c)} | قيمة الكراتين: ${Math.round(S0.v)}`],[`الفترة المرجعية: ${RPI.refFrom} → ${RPI.refTo} (${RPI.months===1?'شهر واحد':RPI.months===2?'شهرين':RPI.months+' شهور'})`],[],['المندوب','المشرف','الهدف','عدد الأصناف','الكراتين','قيمة الكراتين','الفرق']];
+  const sum=[[`خطة أصناف المناديب — ${RPI.ym} — ${rpiGrpTitle()}`],[`الهدف: ${Math.round(S0.t)} | عدد الأصناف: ${S0.items} | القطع: ${Math.round(S0.c)} | قيمة القطع: ${Math.round(S0.v)}`],[`الفترة المرجعية: ${RPI.refFrom} → ${RPI.refTo} (${RPI.months===1?'شهر واحد':RPI.months===2?'شهرين':RPI.months+' شهور'})`],[],['المندوب','المشرف','الهدف','عدد الأصناف','القطع','قيمة القطع','الفرق']];
   view.forEach(({r})=>{ const t=rpiRepTotals(r); sum.push([r.name,r.sup,Math.round(r.target),r.items.filter(i=>i.cartons>0).length,Math.round(t.c),Math.round(t.v),Math.round(t.diff)]); });
   const ws0=XLSX.utils.aoa_to_sheet(sum); ws0['!cols']=[{wch:30},{wch:22},{wch:14},{wch:12},{wch:12},{wch:14},{wch:12}]; ws0['!views']=[{RTL:true}]; XLSX.utils.book_append_sheet(wb,ws0,'ملخص المناديب');
-  const det=[['المندوب','الصنف','النسبة %','نصيبه من الهدف','سعر الكرتونة الصافي','الكراتين','القيمة','معدّل']];
+  const det=[['المندوب','الصنف','النسبة %','نصيبه من الهدف','سعر القطعة الصافي','القطع','القيمة','معدّل']];
   view.forEach(({r})=>r.items.forEach(i=>det.push([r.name,i.item,+(i.share*100).toFixed(2),Math.round(i.calc_value),i.price?+i.price.toFixed(2):'',i.cartons==null?'':i.cartons,(i.cartons!=null&&i.price)?Math.round(i.cartons*i.price):'',i.edited?'نعم':''])));
   const ws1=XLSX.utils.aoa_to_sheet(det); ws1['!cols']=[{wch:28},{wch:40},{wch:9},{wch:14},{wch:14},{wch:10},{wch:12},{wch:7}]; ws1['!views']=[{RTL:true}]; XLSX.utils.book_append_sheet(wb,ws1,'أصناف كل مندوب');
-  const ag=[['الصنف','عدد المناديب','الكراتين','القيمة']]; agg.forEach(a=>ag.push([a.item,a.reps,Math.round(a.c),Math.round(a.v)]));
+  const ag=[['الصنف','عدد المناديب','القطع','القيمة']]; agg.forEach(a=>ag.push([a.item,a.reps,Math.round(a.c),Math.round(a.v)]));
   const ws2=XLSX.utils.aoa_to_sheet(ag); ws2['!cols']=[{wch:42},{wch:12},{wch:12},{wch:14}]; ws2['!views']=[{RTL:true}]; XLSX.utils.book_append_sheet(wb,ws2,'أصناف مجمّعة');
   XLSX.writeFile(wb,`خطة_أصناف_المناديب_${RPI.ym}${RPI.group?'_'+RPI.group:''}.xlsx`);
 }
@@ -56057,14 +56184,14 @@ async function rpxDeliver(kind, makeBlob, fileName, shareTitle, send){
 function rpiReportData(){
   const view=rpiView(), S0=rpiStats(view), agg=rpiAgg(view), N=v=>rpiN(v);
   const title=`خطة أصناف المناديب — ${rpxMonName()} — ${rpiGrpTitle()}`;
-  const kpis=[['المناديب',String(S0.n)],[rpiTgtLbl(),N(S0.t)],['عدد الأصناف',String(S0.items)],['إجمالي الكراتين',N(S0.c)],['قيمة الكراتين',N(S0.v)]];
-  const secs=[{title:'ملخص المناديب',sub:`(${view.length})`,alignR:[2],head:['#','المندوب','المشرف','الهدف','عدد الأصناف','الكراتين','قيمة الكراتين','الفرق'],
+  const kpis=[['المناديب',String(S0.n)],[rpiTgtLbl(),N(S0.t)],['عدد الأصناف',String(S0.items)],['إجمالي القطع',N(S0.c)],['قيمة القطع',N(S0.v)]];
+  const secs=[{title:'ملخص المناديب',sub:`(${view.length})`,alignR:[2],head:['#','المندوب','المشرف','الهدف','عدد الأصناف','القطع','قيمة القطع','الفرق'],
       rows:view.map(({r},i)=>{ const t=rpiRepTotals(r); return [i+1,r.name,r.sup,N(r.target),r.items.filter(x=>x.cartons>0).length,N(t.c),N(t.v),(t.diff>=0?'+':'')+N(t.diff)]; }),
       total:['','الإجمالي','',N(S0.t),S0.items,N(S0.c),N(S0.v),(S0.v-S0.t>=0?'+':'')+N(S0.v-S0.t)]},
-    {title:`أصناف ${RPI.groups.length?rpiSelWord():'الخطة'} مجمّعة`,sub:`(${agg.length} صنف)`,head:['#','الصنف','عدد المناديب','الكراتين','القيمة','النسبة'],
+    {title:`أصناف ${RPI.groups.length?rpiSelWord():'الخطة'} مجمّعة`,sub:`(${agg.length} صنف)`,head:['#','الصنف','عدد المناديب','القطع','القيمة','النسبة'],
       rows:agg.map((a,i)=>[i+1,a.item,a.reps,N(a.c),N(a.v),(S0.v?(a.v/S0.v*100).toFixed(1):0)+'%']),total:['','الإجمالي','',N(S0.c),N(S0.v),'100%']}];
   view.forEach(({r})=>{ const t=rpiRepTotals(r), its=r.items.filter(x=>x.cartons>0);
-    secs.push({title:r.name,sub:`— المشرف: ${r.sup} · الهدف: ${N(r.target)} · ${its.length} صنف · ${N(t.c)} كرتونة`,head:['#','الصنف','النسبة','نصيبه من الهدف','سعر الكرتونة الصافي','الكراتين','القيمة'],
+    secs.push({title:r.name,sub:`— المشرف: ${r.sup} · الهدف: ${N(r.target)} · ${its.length} صنف · ${N(t.c)} قطعة`,head:['#','الصنف','النسبة','نصيبه من الهدف','سعر القطعة الصافي','القطع','القيمة'],
       rows:its.map((x,i)=>[i+1,x.item+(x.edited?' (معدّل)':''),(x.share*100).toFixed(1)+'%',N(x.calc_value),x.price?N(x.price):'—',N(x.cartons),x.price?N(x.cartons*x.price):'—']),
       total:['','الإجمالي','',N(r.target),'',N(t.c),N(t.v)]}); });
   return {title,kpis,secs,view,S0,agg};
@@ -56092,14 +56219,14 @@ function rpgRender(){
   const G=rpgGroups(), N=rpiN, E=rpiEsc;
   let tT=0,tC=0,tV=0; const allItems=new Set(); G.forEach(x=>{ tT+=x.S0.t; tC+=x.S0.c; tV+=x.S0.v; x.agg.forEach(a=>allItems.add(a.item)); });
   let h=`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
-    <tr style="background:#731E2E;color:#fff"><th style="padding:8px;text-align:right">المجموعة</th><th>المناديب</th><th>هدف المجموعة</th><th>عدد الأصناف</th><th>الكراتين</th><th>قيمة الكراتين</th><th></th></tr>`;
+    <tr style="background:#731E2E;color:#fff"><th style="padding:8px;text-align:right">المجموعة</th><th>المناديب</th><th>هدف المجموعة</th><th>عدد الأصناف</th><th>القطع</th><th>قيمة القطع</th><th></th></tr>`;
   G.forEach((x,gi)=>{ const open=RPG.open[x.g];
     h+=`<tr style="border-bottom:1px solid #EFE6D6;background:${open?'#FBF6EC':'#fff'}"><td style="padding:8px;font-weight:800">${E(x.name)}<div style="font-size:10.5px;color:#8B6F47;font-weight:500">${x.view.map(v=>E(v.r.name)).join('، ')}</div></td>
       <td style="text-align:center">${x.S0.n}</td><td style="text-align:center;font-weight:800;color:#1E3A5F">${N(x.S0.t)}</td><td style="text-align:center">${x.S0.items}</td>
       <td style="text-align:center;font-weight:800;color:#92400E">${N(x.S0.c)}</td><td style="text-align:center">${N(x.S0.v)}</td>
       <td style="text-align:center"><button type="button" class="btn btn-ghost btn-sm" onclick="RPG.open['${E(x.g)}']=!RPG.open['${E(x.g)}'];rpgRender()"><i class="ti ti-chevron-${open?'up':'down'}"></i> ${open?'إخفاء':'الأصناف'}</button></td></tr>`;
     if(open) h+=`<tr><td colspan="7" style="padding:8px 10px 14px;background:#FBF6EC"><table style="width:100%;border-collapse:collapse;font-size:11.5px;background:#fff">
-      <tr style="background:#F3EBDD"><th style="padding:6px;text-align:right">#</th><th style="text-align:right">الصنف</th><th>عدد المناديب</th><th>الكراتين</th><th>القيمة</th><th>النسبة</th></tr>
+      <tr style="background:#F3EBDD"><th style="padding:6px;text-align:right">#</th><th style="text-align:right">الصنف</th><th>عدد المناديب</th><th>القطع</th><th>القيمة</th><th>النسبة</th></tr>
       ${x.agg.map((a,i)=>`<tr style="border-bottom:1px solid #F3EBDD"><td style="padding:5px 6px;color:#8B6F47">${i+1}</td><td style="font-weight:700">${E(a.item)}</td><td style="text-align:center">${a.reps}</td><td style="text-align:center;font-weight:700">${N(a.c)}</td><td style="text-align:center">${N(a.v)}</td><td style="text-align:center">${x.S0.v?(a.v/x.S0.v*100).toFixed(1):0}%</td></tr>`).join('')}
       <tr style="background:#F5F0E8;font-weight:800;color:#731E2E"><td></td><td style="padding:6px">الإجمالي</td><td></td><td style="text-align:center">${N(x.S0.c)}</td><td style="text-align:center">${N(x.S0.v)}</td><td></td></tr></table></td></tr>`;
   });
@@ -56110,11 +56237,11 @@ function rpgRender(){
 function rpgReportData(){
   const G=rpgGroups(), N=rpiN; let tT=0,tC=0,tV=0; const all=new Set(); G.forEach(x=>{ tT+=x.S0.t; tC+=x.S0.c; tV+=x.S0.v; x.agg.forEach(a=>all.add(a.item)); });
   const title=`إجمالي كميات المجموعات — ${rpxMonName()}${RPI.groups.length?' — '+rpiGrpTitle():''}`;
-  const kpis=[['المجموعات',String(G.length)],['إجمالي الأهداف',N(tT)],['عدد الأصناف',String(all.size)],['إجمالي الكراتين',N(tC)],['قيمة الكراتين',N(tV)]];
-  const secs=[{title:'ملخص المجموعات',head:['#','المجموعة','المناديب','هدف المجموعة','عدد الأصناف','الكراتين','قيمة الكراتين'],
+  const kpis=[['المجموعات',String(G.length)],['إجمالي الأهداف',N(tT)],['عدد الأصناف',String(all.size)],['إجمالي القطع',N(tC)],['قيمة القطع',N(tV)]];
+  const secs=[{title:'ملخص المجموعات',head:['#','المجموعة','المناديب','هدف المجموعة','عدد الأصناف','القطع','قيمة القطع'],
     rows:G.map((x,i)=>[i+1,x.name,x.S0.n,N(x.S0.t),x.S0.items,N(x.S0.c),N(x.S0.v)]),total:['','الإجمالي','',N(tT),all.size,N(tC),N(tV)]}];
-  G.forEach(x=>secs.push({title:rpiGrpFull(x.g),sub:`— الهدف: ${N(x.S0.t)} · ${x.S0.items} صنف · ${N(x.S0.c)} كرتونة · المناديب: ${x.view.map(v=>v.r.name).join('، ')}`,
-    head:['#','الصنف','عدد المناديب','الكراتين','القيمة','النسبة'],rows:x.agg.map((a,i)=>[i+1,a.item,a.reps,N(a.c),N(a.v),(x.S0.v?(a.v/x.S0.v*100).toFixed(1):0)+'%']),total:['','الإجمالي','',N(x.S0.c),N(x.S0.v),'100%']}));
+  G.forEach(x=>secs.push({title:rpiGrpFull(x.g),sub:`— الهدف: ${N(x.S0.t)} · ${x.S0.items} صنف · ${N(x.S0.c)} قطعة · المناديب: ${x.view.map(v=>v.r.name).join('، ')}`,
+    head:['#','الصنف','عدد المناديب','القطع','القيمة','النسبة'],rows:x.agg.map((a,i)=>[i+1,a.item,a.reps,N(a.c),N(a.v),(x.S0.v?(a.v/x.S0.v*100).toFixed(1):0)+'%']),total:['','الإجمالي','',N(x.S0.c),N(x.S0.v),'100%']}));
   return {title,kpis,secs};
 }
 function rpgFileBase(){ return `AlTahhan_ItemPlan_Groups_${RPI.ym}${RPI.group?'_'+String(RPI.group).replace(/[^\w-]+/g,''):''}`; }
@@ -58214,10 +58341,10 @@ async function advisorRun(){
       fetch(SUPABASE_URL+'/rest/v1/sales_clients?select=name,client_type,discount_pct&limit=200',{headers:H}).then(r=>r.json()).catch(()=>[]),
       // ══ بيانات جديدة ══
       fetch(SUPABASE_URL+'/rest/v1/staff?active=eq.true&select=name,role,grp,reports_to&order=role.asc&limit=100',{headers:H}).then(r=>r.json()).catch(()=>[]),
-      fetch(SUPABASE_URL+'/rest/v1/branches?status=eq.active&select=branch_name,route,grp,rep_name,rep_name2,rep_name3,client_name&order=grp.asc,route.asc&limit=3000',{headers:H}).then(r=>r.json()).catch(()=>[]),
-      fetch(SUPABASE_URL+'/rest/v1/sales_plans_plus?select=id,name,rep_name,created_at,period_from,period_to,status&order=created_at.desc&limit=60',{headers:H}).then(r=>r.json()).catch(()=>[]),
-      fetchAllRows(SUPABASE_URL+'/rest/v1/sales_plan_items?select=plan_id,date,area,client_name,branch_name,rep_name,notes', H).catch(()=>[]),
-      fetch(SUPABASE_URL+'/rest/v1/supply_requests?select=name,route,snf,fea,qty,date,status,grp,note&order=created_at.desc&limit=300',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(SUPABASE_URL+'/rest/v1/branches?status=eq.active&select=branch_name,route,grp,rep_name,rep_name2,rep_name3&order=grp.asc,route.asc&limit=3000',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetch(SUPABASE_URL+'/rest/v1/sales_plans_plus?select=id,staff_name,sector,created_at,week_start,week_end,status&order=created_at.desc&limit=60',{headers:H}).then(r=>r.json()).catch(()=>[]),
+      fetchAllRows(SUPABASE_URL+'/rest/v1/sales_plan_items?select=plan_id,visit_date,area,client_name,rep_name,notes', H).catch(()=>[]),
+      fetch(SUPABASE_URL+'/rest/v1/supply_requests?select=name,route,snf,qty,date,status,grp,note&order=created_at.desc&limit=300',{headers:H}).then(r=>r.json()).catch(()=>[]),
     ]);
 
     setS('جاري تحليل البيانات...');
@@ -58339,9 +58466,9 @@ async function advisorRun(){
     });
     const plansSum = Array.isArray(plans) ? plans.slice(0,20).map(p=>{
       const items = planItemsByPlan[p.id]||[];
-      const branches_count = new Set(items.map(i=>i.branch_name)).size;
+      const branches_count = new Set(items.map(i=>i.area||i.client_name)).size;
       const clients_count  = new Set(items.map(i=>i.client_name)).size;
-      return `خطة:${p.name||p.id} | مشرف:${p.rep_name||'—'} | ${p.period_from||''}→${p.period_to||''} | ${items.length}بند | ${branches_count}فرع | ${clients_count}عميل`;
+      return `خطة:${p.id} | مشرف:${p.staff_name||'—'}${p.sector?' ('+p.sector+')':''} | ${p.week_start||''}→${p.week_end||''} | ${items.length}بند | ${branches_count}فرع | ${clients_count}عميل`;
     }).join('\n') : '—';
 
     // ══ بناء سياق تقارير الميدان (supply_requests) ══
@@ -60396,6 +60523,134 @@ async function svmShareExcel(){
     await svmShareBlob(blob, svmFileBase()+'.xlsx', blob.type, SVM_TITLE());
   }catch(e){ console.warn(e); alert('حصل خطأ أثناء تجهيز الملف — جرّب تاني.'); }
 }
+</script>
+<script id="panel-guard">
+/* ══ يا كامل يا مفيش ══
+   لو أي جزء من بيانات التاب المفتوح ماتحملش (بعد إعادة المحاولة)، التاب بيتقفل بشاشة
+   "البيانات ماكملتش" فمستحيل حد يشوف أو يصدّر أرقام ناقصة. زرار "إعادة التحميل" بيحمّل التاب من الأول. */
+(function(){
+  var curId = null, curAt = 0;
+  function activePanel(){ return document.querySelector('.panel.active'); }
+  function clearOv(pn){ var o = pn && pn.querySelector(':scope > .pg-ov'); if(o) o.remove(); }
+  if(typeof window.showPanel === 'function'){
+    var _sp = window.showPanel;
+    window.showPanel = showPanel = function(id){
+      curId = id; curAt = Date.now();
+      var r = _sp.apply(this, arguments);
+      try{ clearOv(document.getElementById('panel-'+id)); }catch(e){}
+      return r;
+    };
+  }
+  window.addEventListener('sb-incomplete', function(ev){
+    var pn = activePanel(); if(!pn || pn.querySelector(':scope > .pg-ov')) return;
+    var id = (pn.id||'').replace(/^panel-/,'');
+    if(getComputedStyle(pn).position === 'static') pn.style.position = 'relative';
+    var o = document.createElement('div'); o.className = 'pg-ov';
+    o.style.cssText = 'position:absolute;inset:0;z-index:50;background:rgba(250,247,242,.97);display:flex;align-items:flex-start;justify-content:center;padding-top:60px;min-height:320px;border-radius:12px';
+    o.innerHTML = '<div style="background:#fff;border:2px solid #B71C1C;border-radius:14px;padding:22px 26px;max-width:460px;text-align:center;font-family:Cairo,sans-serif;box-shadow:0 10px 30px rgba(0,0,0,.12)">'
+      + '<div style="font-size:34px">⚠️</div>'
+      + '<div style="font-size:16px;font-weight:800;color:#B71C1C;margin:6px 0">بيانات التاب ده ماكملتش</div>'
+      + '<div style="font-size:12.5px;color:#5B4630;line-height:1.8">جزء من البيانات ماوصلش من السيرفر (النت أو السيرفر كان بطيء)،<br>فالأرقام اتقفلت عشان ماتعتمدش على رقم ناقص.</div>'
+      + '<button type="button" style="margin-top:14px;background:#731E2E;color:#fff;border:none;border-radius:10px;padding:10px 22px;font:800 14px Cairo,sans-serif;cursor:pointer">🔄 إعادة التحميل</button></div>';
+    o.querySelector('button').onclick = function(){ o.remove(); if(id && typeof window.showPanel === 'function') window.showPanel(id); else location.reload(); };
+    pn.insertBefore(o, pn.firstChild);
+  });
+})();
+</script>
+<script id="mt-stamp">
+/* ══ ختم البيانات على تقارير MT ══
+   فوق كل تقرير مبيعات MT: آخر بيانات مرفوعة، الأيام اللي لسه مارفعتش أو مفيهاش فواتير،
+   ومطابقة الأصناف بالفواتير، والمبيعات على مواقع مش مربوطة — عشان أي نقص في المصدر يبان على طول. */
+(function(){
+  var MAP = {
+    'chain-sales':   function(){ return [val('cs-from'), val('cs-to')]; },
+    'branch-items':  function(){ return [val('fba-from'), val('fba-to')]; },
+    'sales-forecast':function(){ return [val('fc-from'), val('fc-to')]; },
+    'item-plan':     function(){ return (typeof RPI!=='undefined' && RPI.refFrom) ? [RPI.refFrom, RPI.refTo] : [null,null]; }
+  };
+  function val(id){ var e=document.getElementById(id); return e && e.value ? e.value : null; }
+  function N(n){ return Math.round(+n||0).toLocaleString('en-US'); }
+  function dd(s){ if(!s) return '—'; var p=String(s).slice(0,10).split('-'); return p[2]+'/'+p[1]; }
+  var seq = 0;
+  async function render(id){
+    var get = MAP[id]; if(!get) return;
+    var pn = document.getElementById('panel-'+id); if(!pn) return;
+    var r = get(), f = r[0], t = r[1];
+    var box = pn.querySelector('.mt-stamp');
+    if(!box){ box = document.createElement('div'); box.className='mt-stamp';
+      box.style.cssText='margin:0 0 12px;border:1.5px solid #E8DCC4;border-radius:12px;background:#FFFDF8;padding:9px 12px;font-family:Cairo,sans-serif;font-size:12px;line-height:1.9;color:#3D2E0F';
+      var hd = pn.querySelector('.page-header'); if(hd && hd.parentNode===pn) hd.insertAdjacentElement('afterend', box); else pn.insertBefore(box, pn.firstChild); }
+    if(!f || !t){ box.innerHTML='<span style="color:#8B6F47">📋 ختم البيانات بيظهر بعد ما تختار الفترة</span>'; return; }
+    var my = ++seq; box.innerHTML='<span style="color:#8B6F47">⏳ جاري فحص اكتمال بيانات الفترة…</span>';
+    try{
+      var res = await fetch(SUPABASE_URL+'/rest/v1/rpc/mt_data_stamp',{method:'POST',headers:{'Content-Type':'application/json',apikey:SUPABASE_KEY,Authorization:'Bearer '+SUPABASE_KEY},body:JSON.stringify({p_from:f,p_to:t})});
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      var s = await res.json(); if(my!==seq) return;
+      var ok = true, L = [];
+      var up = s.raw_last_upload ? new Date(s.raw_last_upload).toLocaleDateString('ar-EG',{day:'numeric',month:'short'}) : '—';
+      L.push('📅 آخر فاتورة MT مرفوعة: <b>'+dd(s.raw_last_invoice)+'</b> <span style="color:#8B6F47">(اترفعت '+up+')</span>');
+      if(+s.not_uploaded_days>0 && t > String(s.raw_last_invoice)){ ok=false; var nd=+s.not_uploaded_days; L.push('<span style="color:#B45309;font-weight:800">⚠️ '+(nd===1?'يوم':nd===2?'يومين':nd+' أيام')+' بعد '+dd(s.raw_last_invoice)+' لسه بياناتهم مارفعتش — أرقام الأيام دي مش داخلة</span>'); }
+      if(+s.missing_days_count>0){ ok=false; L.push('<span style="color:#B45309;font-weight:800">⚠️ أيام عمل من غير ولا فاتورة: '+s.missing_days.map(dd).join('، ')+'</span>'); }
+      if(id==='item-plan' && s.summary_last_day && s.raw_last_invoice && s.summary_last_day < s.raw_last_invoice){ ok=false; L.push('<span style="color:#B45309;font-weight:800">⚠️ الملخص محدّث لحد '+dd(s.summary_last_day)+' — هيتحدث تلقائي الساعة 2 بالليل و4 العصر</span>'); }
+      var gap = Math.abs(+s.no_detail) + Math.abs(+s.val_diff);
+      if(gap < 1) L.push('<span style="color:#1A7A4A;font-weight:800">✅ الأصناف مطابقة للفواتير: '+N(s.inv_total)+' ج</span>');
+      else { L.push('<span style="color:#B45309;font-weight:800">⚠️ إجمالي الفواتير '+N(s.inv_total)+' ج — منها '+N(gap)+' ج من غير تفاصيل أصناف (بتظهر في الإجماليات بس مش في تقارير الأصناف)</span>'); if(gap > Math.abs(+s.inv_total)*0.005) ok=false; }
+      if(Math.abs(+s.unmapped_sales)>=1) L.push('<span style="color:#B45309;font-weight:700">⚠️ '+N(s.unmapped_sales)+' ج مبيعات على '+s.unmapped_sites+' موقع مش مربوط بفرع/خط سير (بيظهر "غير مصنّف")</span>');
+      if(Math.abs(+s.ret_no_site)>=1) L.push('<span style="color:#8B6F47">↩️ مرتجعات '+N(s.ret_total)+' ج — منها '+N(s.ret_no_site)+' ج مش محدد موقعها</span>');
+      box.style.borderColor = ok ? '#A7D7B8' : '#F2C48D';
+      box.style.background = ok ? '#F3FBF6' : '#FFF8EE';
+      box.innerHTML = '<div style="font-weight:800;color:'+(ok?'#1A7A4A':'#B45309')+'">'+(ok?'✅ بيانات الفترة كاملة ومطابقة':'⚠️ خد بالك قبل ما تعتمد على أرقام الفترة دي')+' <span style="font-weight:600;color:#8B6F47;font-size:11px">('+dd(f)+' → '+dd(t)+')</span></div>'+L.join('<br>');
+    }catch(e){ if(my===seq) box.innerHTML='<span style="color:#B71C1C;font-weight:700">⚠️ تعذّر فحص اكتمال البيانات ('+e.message+') — اعمل تحديث</span>'; }
+  }
+  window.mtStampRender = render;
+  function after(fnName, id){ var o = window[fnName]; if(typeof o!=='function') return; window[fnName] = function(){ var r = o.apply(this, arguments); Promise.resolve(r).finally(function(){ render(id); }); return r; }; }
+  function init(){
+    after('csLoad','chain-sales'); after('fbaLoad','branch-items'); after('fcLoad','sales-forecast'); after('rpiLoad','item-plan');
+    ['cs','fba','fc'].forEach(function(p){ ['from','to'].forEach(function(k){ var e=document.getElementById(p+'-'+k); if(e) e.addEventListener('change', function(){ render({cs:'chain-sales',fba:'branch-items',fc:'sales-forecast'}[p]); }); }); });
+    if(typeof window.showPanel==='function'){ var _sp=window.showPanel; window.showPanel = showPanel = function(id){ var r=_sp.apply(this, arguments); if(MAP[id]) setTimeout(function(){ render(id); }, 400); return r; }; }
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
+</script>
+<script id="sys-health">
+/* ══ صحة البيانات — نتيجة الفحص الليلي (3:30 الفجر) بتظهر فوق الداشبورد وتاب الإعدادات ══ */
+(function(){
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function H(){ return {'Content-Type':'application/json',apikey:SUPABASE_KEY,Authorization:'Bearer '+SUPABASE_KEY}; }
+  function draw(box, r, open){
+    var checks = r.checks||[], bad = checks.filter(function(c){ return !c.ok; });
+    var when = r.run_at ? new Date(r.run_at).toLocaleString('ar-EG',{day:'numeric',month:'short',hour:'numeric',minute:'2-digit'}) : '—';
+    box.style.borderColor = r.ok ? '#A7D7B8' : '#F2C48D'; box.style.background = r.ok ? '#F3FBF6' : '#FFF8EE';
+    box.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
+      + '<div style="font-weight:800;color:'+(r.ok?'#1A7A4A':'#B45309')+'">'+(r.ok?'✅ صحة البيانات: كله سليم':'⚠️ صحة البيانات: '+bad.length+' ملاحظة')+' <span style="font-weight:600;color:#8B6F47;font-size:11px">— آخر فحص '+esc(when)+'</span></div>'
+      + '<div style="display:flex;gap:6px"><button type="button" class="sh-tg" style="border:1px solid #E8DCC4;background:#fff;border-radius:8px;padding:4px 10px;font:700 11px Cairo,sans-serif;cursor:pointer">'+(open?'إخفاء التفاصيل':'التفاصيل')+'</button>'
+      + '<button type="button" class="sh-run" style="border:none;background:#731E2E;color:#fff;border-radius:8px;padding:4px 10px;font:700 11px Cairo,sans-serif;cursor:pointer">🔄 افحص دلوقتي</button></div></div>'
+      + '<div class="sh-body" style="display:'+(open?'block':'none')+';margin-top:6px">'
+      + checks.map(function(c){ return '<div style="padding:3px 0;border-bottom:1px dashed #EFE6D6"><b>'+(c.ok?'✅':'⚠️')+' '+esc(c.title)+'</b> — <span style="color:#5B4630">'+esc(c.msg)+'</span></div>'; }).join('')
+      + '</div>';
+    box.querySelector('.sh-tg').onclick = function(){ draw(box, r, !open); };
+    box.querySelector('.sh-run').onclick = async function(){ this.disabled=true; this.textContent='⏳ جاري الفحص…';
+      try{ var res = await fetch(SUPABASE_URL+'/rest/v1/rpc/system_health_run_now',{method:'POST',headers:H(),body:'{}'}); if(!res.ok) throw 0; var j = await res.json(); draw(box, j, true); }
+      catch(e){ this.disabled=false; this.textContent='تعذّر — جرّب تاني'; } };
+  }
+  async function render(panelId){
+    var pn = document.getElementById('panel-'+panelId); if(!pn) return;
+    var box = pn.querySelector('.sys-health');
+    if(!box){ box = document.createElement('div'); box.className='sys-health';
+      box.style.cssText='margin:0 0 12px;border:1.5px solid #E8DCC4;border-radius:12px;padding:9px 12px;font-family:Cairo,sans-serif;font-size:12px;line-height:1.8;color:#3D2E0F';
+      var hd = pn.querySelector('.page-header'); if(hd && hd.parentNode===pn) hd.insertAdjacentElement('afterend', box); else pn.insertBefore(box, pn.firstChild); }
+    try{
+      var res = await fetch(SUPABASE_URL+'/rest/v1/system_health_log?select=run_at,ok,checks&order=run_at.desc&limit=1',{headers:H()});
+      var rows = res.ok ? await res.json() : [];
+      if(!rows.length){ box.innerHTML='<span style="color:#8B6F47">صحة البيانات: لسه مفيش فحص — أول فحص هيتعمل 3:30 الفجر</span>'; return; }
+      draw(box, rows[0], false);
+    }catch(e){}
+  }
+  function init(){
+    if(typeof window.showPanel==='function'){ var _sp=window.showPanel; window.showPanel = showPanel = function(id){ var r=_sp.apply(this, arguments); if(id==='dashboard'||id==='settings') setTimeout(function(){ render(id); }, 300); return r; }; }
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
 </script>
 </body>
 </html>
