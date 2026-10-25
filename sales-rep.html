@@ -2171,22 +2171,17 @@ async function loadGoalTab(){
     const totalRet   = retData.reduce((s,r)=>s+(+r.total_net||0),0);
     let net          = totalSales - totalRet;
 
-    // لو فيه تعديل يدوي على "المحقق" من لوحة التحكم (شاشة الأهداف)، الرقم ده بيبقى أساس الصافي لحد range_to
-    // وأي فاتورة (توريد/مرتجع) بتاريخ بعد كده بتتضاف تلقائي فوقه
+    // المحقق الرسمي من السيرفر (تقرير سيستم الشركة لحد آخر يوم مرفوع + فواتير التطبيق بعده، من غير ضريبة)
+    // — نفس رقم لوحة التحكم بالظبط. التعديل اليدوي اتلغى.
     let repAchievedOverridden = false;
     try{
-      const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?rep_name=eq.${repEnc}&month=eq.${month}&select=amount,range_to&limit=1`,{headers:SB_HEADERS});
-      const ovrData = ovrRes.ok ? await ovrRes.json() : [];
-      if(Array.isArray(ovrData) && ovrData.length){
-        const ovr = ovrData[0];
-        const cutoff = ovr.range_to || (month+'-31');
-        let afterCutoff = 0;
-        salesData.forEach(r=>{ if((r.delivery_date||'')>cutoff) afterCutoff += (r.total_net||0); });
-        retData.forEach(r=>{ if((r.return_date||'')>cutoff) afterCutoff -= (r.total_net||0); });
-        net = (+ovr.amount||0) + afterCutoff;
-        repAchievedOverridden = true;
-      }
-    }catch(e){}
+      const offRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rep_achieved`,{method:'POST',headers:{...SB_HEADERS,'Content-Type':'application/json'},body:JSON.stringify({p_month:month,p_to:null})});
+      if(!offRes.ok) throw new Error('HTTP '+offRes.status);
+      const offRows = await offRes.json();
+      const me = (offRows||[]).find(x=>norm(x.rep_name)===norm(currentRep.name));
+      net = me ? (+me.achieved||0) : 0;
+      repAchievedOverridden = !!(me && me.report_as_of);
+    }catch(e){ console.warn('rep_achieved',e); }
 
     // خصومات العملاء (من لوحة التحكم): المحقق قبل الخصم / بعده
     const preDisc = net; let discAmt = 0;
