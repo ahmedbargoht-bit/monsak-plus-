@@ -235,7 +235,7 @@ var AR_DAYS=['الأحد','الاثنين','الثلاثاء','الأربعاء'
 var DAY_KEYS={sunday:0,monday:1,tuesday:2,wednesday:3,thursday:4,friday:5,saturday:6,'الأحد':0,'الاثنين':1,'الثلاثاء':2,'الأربعاء':3,'الخميس':4,'الجمعة':5,'السبت':6};
 /* كل التابات المتاحة — اللي عليها off مش بتظهر غير لو اتفعّلت من "ضبط شاشة TV" في لوحة التحكم */
 var ALL_TABS=[{id:'svc',label:'مشرفي التنسيق'},{id:'svs',label:'مشرفي البيع'},{id:'hm',label:'خريطة حرارة الفروع'},{id:'loc',label:'الموقع الحالي'},{id:'sales',label:'المبيعات'},
-  {id:'rk',label:'ترتيب المناديب',off:1},{id:'att',label:'حضور المنسقين',off:1},{id:'miss',label:'نواقص اليوم',off:1},{id:'cust',label:'أعلى عملاء السلاسل',off:1}];
+  {id:'rk',label:'ترتيب المناديب',off:1},{id:'att',label:'حضور المنسقين',off:1},{id:'miss',label:'نواقص اليوم',off:1},{id:'cust',label:'أعلى عملاء السلاسل',off:1},{id:'items',label:'أعلى أصناف العملاء',off:1}];
 var TABS=ALL_TABS.filter(function(t){return !t.off}).map(function(t){return {id:t.id,label:t.label}});
 var GROUPS={giza:'الجيزة',cairo:'وسط القاهرة',south:'جنوب وشرق القاهرة',tajmuat:'التجمعات',hyper:'الهايبر ماركت',alex:'الإسكندرية',delta:'الدلتا'};
 var S={tab:0,data:{},errs:{},page:0,nextAt:0,loading:false,lastOk:0};
@@ -382,6 +382,21 @@ function loadOfficial(month){
     .then(function(r){if(!r.ok)throw new Error('المحقق الرسمي HTTP '+r.status);return r.json()})
     .then(function(rows){return (rows||[]).map(function(x){return {rep_name:x.rep_name,amount:+x.achieved||0,range_to:'9999-12-31'}})});
 }
+/* أعلى أصناف العملاء: مسحوبات MT للشهر الحالي لحد آخر يوم اترفع — صافي (بعد الخصم ومن غير ضريبة) ناقص المرتجع، والكمية بالقطعة.
+   نفس دالة تقارير السلاسل (chain_top_items) وبتستبعد عملاء الهدايا والعينات */
+function loadItems(){
+  if(DEMO)return Promise.resolve({cut:null,rows:[]});
+  var c=cairo(),monthStart=c.y+'-'+pad(c.m)+'-01',today=isoOf(c.y,c.m,c.d);
+  return get('tamr_sales_invoices?select=invoice_date&order=invoice_date.desc&limit=1').then(function(r){
+    var cut=(r&&r[0]&&r[0].invoice_date)?String(r[0].invoice_date).slice(0,10):null;
+    var end=cut&&cut<today?cut:today;
+    if(!cut||monthStart>end)return {cut:cut,rows:[]};
+    return fetch(SB_URL+'/rest/v1/rpc/chain_top_items',{method:'POST',headers:{apikey:SB_KEY,Authorization:'Bearer '+SB_KEY,'Content-Type':'application/json'},
+      body:JSON.stringify({p_from:monthStart,p_to:end,p_customers:null,p_items:null,p_branches:null})})
+      .then(function(x){if(!x.ok)throw new Error('أصناف MT HTTP '+x.status);return x.json()})
+      .then(function(rows){return {cut:cut,rows:(rows||[]).map(function(o){return {k:o.item,q:(+o.qty_sold||0)-(+o.qty_ret||0),v:(+o.val_sold||0)-(+o.val_ret||0)}})}});
+  });
+}
 function loadSales(){
   var c=cairo(),month=c.y+'-'+pad(c.m),monthStart=month+'-01';
   var wk=addDays(c.y,c.m,c.d,-6),weekStart=isoOf(wk.y,wk.m,wk.d);
@@ -404,6 +419,7 @@ function loadSales(){
 function refresh(){
   if(S.loading)return;S.loading=true;
   var jobs=[['today',loadToday],['sup',loadSup],['sales',loadSales],['svc',loadSvc],['svs',loadSvs]];
+  if(TABS.some(function(t){return t.id==='items'}))jobs.push(['items',loadItems]);
   Promise.all([loadCfg().then(applyCfg).catch(function(){})].concat(jobs.map(function(j){
     return j[1]().then(function(d){S.data[j[0]]=d;delete S.errs[j[0]]}).catch(function(e){S.errs[j[0]]=e&&e.message||'خطأ'});
   }))).then(function(){
@@ -1175,8 +1191,11 @@ function renderCust(){
   var el=$('v-cust'),d=S.data.sales;
   if(!d){el.innerHTML='<div class="empty">جاري التحميل...</div>';return}
   var mt=d.mt||{inv:[]},m={},tot=0;
-  (mt.inv||[]).forEach(function(r){var c=String(r.customer||'').replace(/^\s+|\s+$/g,'')||'غير محدد',v=Number(r.net)||0;m[c]=(m[c]||0)+v;tot+=v});
-  var rows=Object.keys(m).map(function(k){return {k:k,v:m[k]}}).sort(function(a,b){return b.v-a.v});
+  var sites={};
+  (mt.inv||[]).forEach(function(r){var c=String(r.customer||'').replace(/^\s+|\s+$/g,'')||'غير محدد',v=Number(r.net)||0;m[c]=(m[c]||0)+v;tot+=v;
+    var st=String(r.customer_site||'').replace(/^\s+|\s+$/g,'');if(st)(sites[c]=sites[c]||{})[st]=1});
+  /* عدد الفروع = فروع العميل اللي ليها فواتير MT في الشهر */
+  var rows=Object.keys(m).map(function(k){return {k:k,v:m[k],nb:Object.keys(sites[k]||{}).length}}).sort(function(a,b){return b.v-a.v});
   var per=xPer(9.5),sl=xPage('cust',rows,per),base=S.page*per,mx=rows.length?rows[0].v:1;
   var cut=mt.cut?mt.cut.split('-').reverse().slice(0,2).join('/'):'—';
   var h='<div class="sv"><b style="font-size:1.05rem;color:var(--tv-gold);margin-bottom:.4rem">🏬 أعلى عملاء السلاسل — الشهر الحالي</b>'+
@@ -1184,12 +1203,33 @@ function renderCust(){
     '<div class="card fill" style="overflow:hidden;min-height:0">';
   if(!rows.length)h+='<div class="empty">مفيش بيانات MT للشهر لسه</div>';
   else sl.forEach(function(x,i){h+='<div class="rank"><div class="no">'+(base+i+1)+'</div><div class="nm"><b>'+esc(x.k)+'</b><div class="bar" style="height:.4rem;margin-top:.2rem"><i style="width:'+Math.round(Math.max(0,x.v)/mx*100)+'%;background:#60A5FA"></i></div></div>'+
+    '<div style="text-align:center;min-width:6rem"><b style="font-size:1rem">'+x.nb+'</b><div class="lbl">'+(x.nb===1?'فرع':'فرع')+'</div></div>'+
     '<div style="text-align:left;min-width:9rem"><b style="font-size:1.05rem">'+fmt(x.v)+'</b><div class="lbl">'+(tot?(x.v/tot*100).toFixed(1):0)+'% من الإجمالي</div></div></div>'});
   el.innerHTML=h+'</div>'+xHint('cust','صافي فواتير MT بعد الخصم ومن غير ضريبة، لحد آخر تاريخ اترفع')+'</div>';
 }
 
+function renderItems(){
+  var el=$('v-items'),d=S.data.items;
+  if(!d){
+    /* التاب لسه متفعّل ومفيش بيانات: نحمّل فورًا بدل ما نستنى التحديث الجاي */
+    if(!S._itemsReq){S._itemsReq=1;loadItems().then(function(x){S.data.items=x;if(TABS[S.tab]&&TABS[S.tab].id==='items')renderItems()}).catch(function(e){S._itemsReq=0;el.innerHTML='<div class="empty">تعذر تحميل الأصناف: '+esc(e&&e.message||'')+'</div>'})}
+    el.innerHTML='<div class="empty">جاري التحميل...</div>';return}
+  var rows=(d.rows||[]).filter(function(x){return x.v>0.5}).sort(function(a,b){return b.v-a.v});
+  var tot=0,tq=0;rows.forEach(function(x){tot+=x.v;tq+=x.q});
+  var per=xPer(9.5),sl=xPage('items',rows,per),base=S.page*per,mx=rows.length?rows[0].v:1;
+  var cut=d.cut?d.cut.split('-').reverse().slice(0,2).join('/'):'—';
+  var h='<div class="sv"><b style="font-size:1.05rem;color:var(--tv-gold);margin-bottom:.4rem">📦 أعلى أصناف العملاء مبيعاً — الشهر الحالي</b>'+
+    '<div class="grid kpis4" style="margin-bottom:.5rem">'+xKc('#60A5FA','صافي مبيعات الأصناف (MT)',fmt(tot),'b')+xKc('#4ADE80','إجمالي القطع',fmt(tq),'g')+xKc('#C4B5FD','عدد الأصناف',rows.length,'p')+xKc('#F0C880','آخر بيانات MT',cut,'y')+'</div>'+
+    '<div class="card fill" style="overflow:hidden;min-height:0">';
+  if(!rows.length)h+='<div class="empty">مفيش بيانات MT للشهر لسه</div>';
+  else sl.forEach(function(x,i){h+='<div class="rank"><div class="no">'+(base+i+1)+'</div><div class="nm"><b>'+esc(x.k)+'</b><div class="bar" style="height:.4rem;margin-top:.2rem"><i style="width:'+Math.round(x.v/mx*100)+'%;background:#4ADE80"></i></div></div>'+
+    '<div style="text-align:center;min-width:7rem"><b style="font-size:1rem">'+fmt(x.q)+'</b><div class="lbl">قطعة</div></div>'+
+    '<div style="text-align:left;min-width:9rem"><b style="font-size:1.05rem">'+fmt(x.v)+'</b><div class="lbl">'+(tot?(x.v/tot*100).toFixed(1):0)+'% من الإجمالي</div></div></div>'});
+  el.innerHTML=h+'</div>'+xHint('items','صافي مسحوبات MT بعد الخصم ومن غير ضريبة ناقص المرتجع، والكمية بالقطعة، لحد آخر تاريخ اترفع')+'</div>';
+}
+
 /* ───────── التنقل والعرض ───────── */
-var RENDER={svc:function(){renderSupv('svc')},svs:function(){renderSupv('svs')},hm:renderHm,loc:renderLoc,sales:renderSales,rk:renderRk,att:renderAtt,miss:renderMiss,cust:renderCust};
+var RENDER={svc:function(){renderSupv('svc')},svs:function(){renderSupv('svs')},hm:renderHm,loc:renderLoc,sales:renderSales,rk:renderRk,att:renderAtt,miss:renderMiss,cust:renderCust,items:renderItems};
 function renderAll(){
   if(S.tab>=TABS.length)S.tab=0;
   var acv='v-'+TABS[S.tab].id,vs=document.querySelectorAll('main > .view');
