@@ -10578,31 +10578,18 @@ async function sgLoad(){
       const sel = document.getElementById('sg-workdays-sel');
       if(sel) sel.value = savedWd;
     }
-    // البيع الصافي = (total_net - total_tax) للتسليم − (total_net - total_tax) للمرتجع
-    const salesMap = {};
-    salesData.forEach(s=>{ salesMap[s.rep_name] = (salesMap[s.rep_name]||0) + ((s.total_net||0)-(s.total_tax||0)); });
-    retsData.forEach(r=>{  salesMap[r.rep_name] = (salesMap[r.rep_name]||0) - ((r.total_net||0)-(r.total_tax||0)); });
-
-    // ── تعديل يدوي على "المحقق" — الرقم بيبقى أساس لحد "range_to"، وأي فاتورة بعد التاريخ ده بتتضاف تلقائي فوقه ──
-    const rawSalesMap = {...salesMap};
+    // ── المحقق الرسمي: من الدالة الموحدة في السيرفر (تقرير الشركة + فواتير التطبيق بعده) ──
+    // التعديل اليدوي اتلغى؛ لو الفترة مش بادئة من أول الشهر (عرض جزئي) بيتحسب من فواتير التطبيق للفترة دي بس.
+    const rawSalesMap = {};
+    salesData.forEach(s=>{ rawSalesMap[s.rep_name] = (rawSalesMap[s.rep_name]||0) + ((s.total_net||0)-(s.total_tax||0)); });
+    retsData.forEach(r=>{  rawSalesMap[r.rep_name] = (rawSalesMap[r.rep_name]||0) - ((r.total_net||0)-(r.total_tax||0)); });
+    let salesMap = {...rawSalesMap};
     let overridesMap = {};
-    try{
-      const salesByRepList = {};
-      salesData.forEach(s=>{ (salesByRepList[s.rep_name] ||= []).push(s); });
-      const retsByRepList = {};
-      retsData.forEach(r=>{ (retsByRepList[r.rep_name] ||= []).push(r); });
-
-      const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?select=*&month=eq.${monthStr}`,{headers:H});
-      const ovrData = ovrRes.ok ? await ovrRes.json() : [];
-      ovrData.forEach(o=>{
-        overridesMap[o.rep_name] = o;
-        const cutoff = o.range_to || dateTo;
-        let afterCutoff = 0;
-        (salesByRepList[o.rep_name]||[]).forEach(s=>{ if((s.delivery_date||'')>cutoff) afterCutoff += (s.total_net||0)-(s.total_tax||0); });
-        (retsByRepList[o.rep_name]||[]).forEach(r=>{ if((r.return_date||'')>cutoff) afterCutoff -= (r.total_net||0)-(r.total_tax||0); });
-        salesMap[o.rep_name] = (+o.amount||0) + afterCutoff;
-      });
-    }catch(e){}
+    if(dateFrom === monthFullFrom && dateTo.slice(0,7) === monthStr){
+      const off = await repAchievedOfficial(monthStr, dateTo);
+      salesMap = {...off.map};
+      off.rows.forEach(x=>{ if(x.report_as_of) overridesMap[x.rep_name] = { amount:+x.report_net||0, range_to:x.report_as_of, note:'من تقرير سيستم الشركة' }; });
+    }
 
     // خصومات العملاء المحفوظة للشهر
     let discRow = null;
@@ -10657,6 +10644,31 @@ function sgRepRegion(r){
   for(const t of toks){ if(discRegionOfGrp(t)==='cairo') return 'cairo'; }
   return null;
 }
+// ══ المحقق الرسمي للمندوب (الدالة الموحدة rep_achieved في السيرفر) ══
+// = صافي تقرير سيستم الشركة لحد آخر يوم مرفوع + صافي فواتير التطبيق بعده (توريد − مرتجع، من غير ضريبة).
+// أي فشل في الطلب بيرمي خطأ (يا كامل يا مفيش) — مفيش رجوع ساكت لحساب تاني.
+// المحقق الرسمي لكل شهر في فترة — بس للشهور اللي الفترة فيها بادئة من أول الشهر (العرض الجزئي من نص الشهر بيتحسب من الفواتير)
+// بيرجع {'YYYY-MM': {rep_name: achieved}}
+async function repAchievedOfficialRange(start, end){
+  const out = {};
+  for(const m of revMonthsInRange(start, end)){
+    const ms = `${m}-01`; if(ms < start) continue;
+    const me = `${m}-${String(new Date(+m.slice(0,4), +m.slice(5,7), 0).getDate()).padStart(2,'0')}`;
+    out[m] = (await repAchievedOfficial(m, me < end ? me : end)).map;
+  }
+  return out;
+}
+async function repAchievedOfficial(month, to){
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rep_achieved`,{method:'POST',
+    headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+    body:JSON.stringify({p_month:month, p_to:to||null})});
+  if(!r.ok) throw new Error('المحقق الرسمي (rep_achieved) HTTP '+r.status);
+  const rows = await r.json(); if(!Array.isArray(rows)) throw new Error('المحقق الرسمي: رد غير متوقع');
+  const map = {}, meta = {};
+  rows.forEach(x=>{ map[x.rep_name] = +x.achieved||0; meta[x.rep_name] = x; });
+  return { map, meta, rows };
+}
+
 // ══════════════════════════════════════════════════════════════
 // تقرير المناديب من سيستم الشركة ("مبيعات ومرتجعات اليومية لمندوبي الأفرع")
 // المحقق الرسمي = صافي التقرير لكل مندوب (كل صفوفه + صفوف تمراتي بتاعته) لحد آخر يوم مرفوع،
@@ -11406,7 +11418,6 @@ function sgRenderTable(repsList, targets, sales, workDays){
         <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">
           <span style="font-size:11px;font-weight:700;color:${clr}">${actual>0?actual.toLocaleString('en-US')+' ج':'—'}</span>
           ${_ovr?`<span title="رقم السيستم لحد ${_ovrDateFmt}: ${(+_ovr.amount||0).toLocaleString('en-US')} ج — وبعد كده بيتضاف أي بيع جديد تلقائي. القيمة المحسوبة بالكامل من الفواتير: ${_rawActual.toLocaleString('en-US')} ج${_ovr.note?(' — '+_ovr.note):''}" style="font-size:9px;background:#FDE68A;color:#92400E;padding:1px 5px;border-radius:8px;font-weight:700;cursor:help;white-space:nowrap">✏️ معدَّل حتى ${_ovrDateFmt}</span>`:''}
-          <button title="تعديل المحقق يدوياً" onclick="sgEditAchieved('${r.id}','${encodeURIComponent(r.name)}')" style="background:none;border:none;cursor:pointer;color:#8B6F47;font-size:12px;padding:0 2px;line-height:1"><i class="ti ti-edit"></i></button>
         </div>
         <div style="display:flex;align-items:center;gap:5px">
           <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;min-width:35px"><div style="height:100%;width:${Math.min(pct,100)}%;background:${clr};border-radius:3px"></div></div>
@@ -11629,6 +11640,7 @@ function sgEditGoalRow(repId){
 let _sgAchEdit = { repId:null, repName:'', rangeRaw:0 };
 
 function sgEditAchieved(repId, encodedName){
+  showToast('التعديل اليدوي على المحقق اتلغى — المحقق بيتحسب من تقرير سيستم الشركة (ارفعه من الكارت الأخضر فوق)'); return;
   const name = decodeURIComponent(encodedName);
   const ovr = _sgData.overrides?.[name];
   const monthStr = _sgData.month || document.getElementById('sg-month')?.value || '';
@@ -40179,21 +40191,13 @@ async function sinvYawmRender(reps,from,to,groups){
   const showSys = sinvYawmIsMonthStartRange(from,to);
   const sysTh = document.getElementById('sinvyawm-th-sys');
   if(sysTh) sysTh.style.display = showSys ? '' : 'none';
+  // عمود "المحقق (سيستم الشركة)" = المحقق الرسمي من الدالة الموحدة لكل المناديب (مش بس اللي ليهم تعديل يدوي)
   let sysOverrides = {};
   if(showSys){
     try{
-      const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-      const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?select=rep_name,amount,range_to&month=eq.${from.slice(0,7)}`,{headers:H});
-      const ovrData = ovrRes.ok ? await ovrRes.json() : [];
-      // الرقم أساس لحد range_to، وأي فاتورة (توريد/مرتجع) بعد كده داخل الفترة المعروضة بتتضاف تلقائي فوقه
-      (ovrData||[]).forEach(o=>{
-        const cutoff = o.range_to || to;
-        let afterCutoff = 0;
-        dels.forEach(d=>{ if(d.rep_name===o.rep_name && (d.delivery_date||'')>cutoff) afterCutoff += (d.total_net||0)-(d.total_tax||0); });
-        rets.forEach(r=>{ if(r.rep_name===o.rep_name && (r.return_date||'')>cutoff) afterCutoff -= (r.total_net||0)-(r.total_tax||0); });
-        sysOverrides[o.rep_name] = (+o.amount||0) + afterCutoff;
-      });
-    }catch(e){}
+      const off = await repAchievedOfficial(from.slice(0,7), to);
+      sysOverrides = off.map;
+    }catch(e){ console.warn('yawm official', e); showToast('⚠️ تعذر تحميل عمود سيستم الشركة: '+e.message); }
   }
   const sysCellStyle = showSys ? '' : 'display:none';
 
@@ -40220,6 +40224,13 @@ async function sinvYawmRender(reps,from,to,groups){
     retGrossByRep[rn]+=(r.total_before_discount||0);
     if(!byRep[rn]) byRep[rn]={dels:[],grp:r.grp||'—'};
   });
+  if(showSys && !(groups && groups.length)){
+    Object.keys(sysOverrides).forEach(rn=>{
+      if(byRep[rn] || Math.abs(sysOverrides[rn]||0)<0.005) return;
+      if(reps.length && !reps.includes(rn)) return;
+      byRep[rn]={dels:[],grp:'—'};
+    });
+  }
 
   let html='';
   let gSales=0,gDisc=0,gRet=0,gRetGross=0,gSys=0;
@@ -44668,6 +44679,10 @@ async function wrLoad(){
   wrWorkDays = Math.max(1, wrWorkDays);
 
   // بناء بيانات كل مندوب
+  // المحقق الرسمي لكل شهر في الفترة (لو الفترة بادئة من أول الشهر) — بدل التعديل اليدوي
+  let wrOfficial = {};
+  try{ wrOfficial = await repAchievedOfficialRange(from, to); }
+  catch(e){ tbody.innerHTML=`<tr><td colspan="12" style="text-align:center;padding:30px;color:#C0392B">تعذر تحميل المحقق الرسمي: ${e.message}</td></tr>`; return; }
   _wrData = filteredReps.map(rep => {
     const rn = rep.name;
     const rd = DL.filter(x=>x.rep_name===rn);
@@ -44709,13 +44724,9 @@ async function wrLoad(){
     wrMonths.forEach(ym=>{
       const monthDels = rd.filter(x=>(x.delivery_date||'').slice(0,7)===ym);
       const monthRets = rr.filter(x=>(x.return_date||'').slice(0,7)===ym);
-      const ov = OV.find(o=>o.rep_name===rn && o.month===ym);
-      if(ov){
-        const cutoff = ov.range_to || `${ym}-31`;
-        let after = 0;
-        monthDels.forEach(x=>{ if((x.delivery_date||'')>cutoff) after += (+x.total_net||0)-(+x.total_tax||0); });
-        monthRets.forEach(x=>{ if((x.return_date||'')>cutoff) after -= (+x.total_net||0)-(+x.total_tax||0); });
-        achievedNet += (+ov.amount||0) + after;
+      if(wrOfficial[ym]){
+        // المحقق الرسمي (تقرير الشركة + فواتير التطبيق بعده) — الفترة بادئة من أول الشهر
+        achievedNet += +(wrOfficial[ym][rn]||0);
       } else {
         const netM = monthDels.reduce((s,x)=>s+(+x.total_net||0)-(+x.total_tax||0),0) - monthRets.reduce((s,x)=>s+(+x.total_net||0)-(+x.total_tax||0),0);
         achievedNet += netM;
@@ -49225,23 +49236,16 @@ async function sdLoad(){
       todaySalesBySector[sec]=(todaySalesBySector[sec]||0)-((+(r.total_net||0))-(+(r.total_tax||0)));
     }
   });
-  const sdOverridesCacheKey = `sd_rep_overrides_${month}`;
-  let sdRepOverrides = sdCacheGet(sdOverridesCacheKey);
-  if(!sdRepOverrides){
-    sdRepOverrides = [];
-    try{
-      const ovrRes = await fetch(`${SUPABASE_URL}/rest/v1/rep_achieved_overrides?select=rep_name,amount,range_to&month=eq.${month}`,{headers:H});
-      if(ovrRes.ok){ sdRepOverrides = await ovrRes.json(); if(!Array.isArray(sdRepOverrides)) sdRepOverrides=[]; else sdCacheSet(sdOverridesCacheKey, sdRepOverrides); }
-    }catch(e){}
+  // ── المحقق الرسمي لكل مندوب (تقرير الشركة + فواتير التطبيق بعده) — بدل التعديل اليدوي ──
+  // (فواتير اليوم المختار للعرض اليومي فوق لسه من فواتير التطبيق زي ما هي)
+  try{
+    const off = await repAchievedOfficial(month, null);
+    Object.keys(sdRepNetMap).forEach(k=>delete sdRepNetMap[k]);
+    Object.assign(sdRepNetMap, off.map);
+  }catch(e){
+    // يا كامل يا مفيش: من غير المحقق الرسمي مانعرضش أرقام محقق
+    console.error('sdLoad official', e); showToast('❌ تعذر تحميل المحقق الرسمي — اعمل تحديث للصفحة'); return;
   }
-  const sdMonthEnd = monthEndStr;
-  (Array.isArray(sdRepOverrides)?sdRepOverrides:[]).forEach(o=>{
-    const cutoff = o.range_to || sdMonthEnd;
-    let afterCutoff = 0;
-    (sdDeliveriesByRep[o.rep_name]||[]).forEach(d=>{ if((d.delivery_date||'')>cutoff) afterCutoff += (+(d.total_net||0))-(+(d.total_tax||0)); });
-    (sdReturnsByRep[o.rep_name]||[]).forEach(r=>{ if((r.return_date||'')>cutoff) afterCutoff -= (+(r.total_net||0))-(+(r.total_tax||0)); });
-    sdRepNetMap[o.rep_name] = (+o.amount||0) + afterCutoff;
-  });
   // ── خصومات العملاء (نفس منطق الخريطة الحرارية وشاشة الأهداف): خصم القاهرة وخصم الإسكندرية بيتوزعوا
   // على المناديب بنسبة مبيعاتهم داخل الإقليم، فبيتخصموا من المحقق وتتأثر كل الأرقام والتصنيفات ──
   let sdDiscApplied = 0, sdDiscPre = 0, sdTotalLevelDisc = 0;
@@ -52167,6 +52171,7 @@ async function revLoadContext(){
     prevMonthLabel: prevM.label,
     carInventory: Array.isArray(carInventory)?carInventory:[],
     stockRequests: Array.isArray(stockRequests)?stockRequests:[],
+    official: await repAchievedOfficialRange(start, end),
     now: Date.now(),
   };
 }
@@ -52190,14 +52195,8 @@ function revTargetCriterion(rep, ctx){
     ctx.deliveries.forEach(d=>{ if(d.rep_name===rep.name && (d.delivery_date||'')>=subFrom && (d.delivery_date||'')<=subTo) net += (d.total_net||0)-(d.total_tax||0); });
     ctx.returns.forEach(r=>{ if(r.rep_name===rep.name && (r.return_date||'')>=subFrom && (r.return_date||'')<=subTo) net -= (r.total_net||0)-(r.total_tax||0); });
 
-    const ovr = ctx.overrides.find(o=>o.rep_name===rep.name && o.month===m);
-    if(ovr){
-      const cutoff = ovr.range_to || monthEnd;
-      let afterCutoff = 0;
-      ctx.deliveries.forEach(d=>{ if(d.rep_name===rep.name && (d.delivery_date||'')>cutoff && (d.delivery_date||'')<=subTo) afterCutoff += (d.total_net||0)-(d.total_tax||0); });
-      ctx.returns.forEach(r=>{ if(r.rep_name===rep.name && (r.return_date||'')>cutoff && (r.return_date||'')<=subTo) afterCutoff -= (r.total_net||0)-(r.total_tax||0); });
-      net = (+ovr.amount||0) + afterCutoff;
-    }
+    // المحقق الرسمي (تقرير الشركة + فواتير التطبيق بعده) لو الفترة بادئة من أول الشهر
+    if(ctx.official && ctx.official[m]) net = +(ctx.official[m][rep.name]||0);
 
     totalTarget += (+tgt.target_amount||0);
     totalAchieved += net;
@@ -53098,6 +53097,7 @@ async function mseLoadContext(){
     prevDeliveries: Array.isArray(prevDeliveries)?prevDeliveries:[],
     prevReturns: Array.isArray(prevReturns)?prevReturns:[],
     prevMonthLabel: prevM.label,
+    official: await repAchievedOfficialRange(start, end),
     now: Date.now(),
   };
 }
@@ -53182,14 +53182,8 @@ function mseSalesCriterion(team, ctx){
       let net = 0;
       ctx.deliveries.forEach(d=>{ if(d.rep_name===rep.name && (d.delivery_date||'')>=subFrom && (d.delivery_date||'')<=subTo) net += (d.total_net||0)-(d.total_tax||0); });
       ctx.returns.forEach(r=>{ if(r.rep_name===rep.name && (r.return_date||'')>=subFrom && (r.return_date||'')<=subTo) net -= (r.total_net||0)-(r.total_tax||0); });
-      const ovr = ctx.overrides.find(o=>o.rep_name===rep.name && o.month===m);
-      if(ovr){
-        const cutoff = ovr.range_to || monthEnd;
-        let afterCutoff = 0;
-        ctx.deliveries.forEach(d=>{ if(d.rep_name===rep.name && (d.delivery_date||'')>cutoff && (d.delivery_date||'')<=subTo) afterCutoff += (d.total_net||0)-(d.total_tax||0); });
-        ctx.returns.forEach(r=>{ if(r.rep_name===rep.name && (r.return_date||'')>cutoff && (r.return_date||'')<=subTo) afterCutoff -= (r.total_net||0)-(r.total_tax||0); });
-        net = (+ovr.amount||0) + afterCutoff;
-      }
+      // المحقق الرسمي (تقرير الشركة + فواتير التطبيق بعده) لو الفترة بادئة من أول الشهر
+      if(ctx.official && ctx.official[m]) net = +(ctx.official[m][rep.name]||0);
       if(tgt && tgt.target_amount) repTarget += (+tgt.target_amount||0);
       repAchieved += net;
     });
