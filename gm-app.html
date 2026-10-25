@@ -38362,16 +38362,24 @@ async function tdLoad(){
   const nMonths = parseInt(document.getElementById('td-months-count')?.value) || 3;
 
   // الشهور التاريخية = آخر nMonths شهر قبل الشهر المستهدف مباشرة
+  // الشهور التاريخية = آخر nMonths شهر قبل الشهر المستهدف — بس عمرها ما تعدّي الشهر الحالي:
+  // لو الشهر المستهدف بعيد (زي فبراير وإحنا في أكتوبر) الشهور اللي قبله لسه ماجتش ومفيهاش مبيعات،
+  // فكان كل المناديب بياخدوا نصيب صفر ويتحوّل هدف صفر من غير أي تحذير. دلوقتي النافذة بتقف عند الشهر الحالي.
+  const _tdNow = new Date(Date.now()+3*3600e3);
+  const _tdCurIdx = _tdNow.getUTCFullYear()*12 + _tdNow.getUTCMonth();   // الشهر الحالي (توقيت القاهرة)
+  const _tdEndIdx = Math.min(ty*12 + (tm-1) - 1, _tdCurIdx);            // آخر شهر في النافذة
+  const _tdShifted = _tdEndIdx < ty*12 + (tm-1) - 1;
   const histMonths = [];
-  for(let i=nMonths; i>=1; i--){
-    const d = new Date(ty, tm-1-i, 1);
+  for(let i=nMonths-1; i>=0; i--){
+    const idx = _tdEndIdx - i;
+    const d = new Date(Math.floor(idx/12), idx%12, 1);
     histMonths.push({ y: d.getFullYear(), m: d.getMonth()+1, key: `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` });
   }
   const rangeFrom = `${histMonths[0].y}-${String(histMonths[0].m).padStart(2,'0')}-01`;
   const lastM = histMonths[histMonths.length-1];
   const rangeTo = `${lastM.y}-${String(lastM.m).padStart(2,'0')}-${String(new Date(lastM.y, lastM.m, 0).getDate()).padStart(2,'0')}`;
 
-  msgEl.textContent = `جاري حساب متوسط المبيعات من ${rangeFrom} إلى ${rangeTo}...`;
+  msgEl.textContent = `جاري حساب متوسط المبيعات من ${rangeFrom} إلى ${rangeTo}...` + (_tdShifted ? ' (الشهور اللي قبل الشهر المستهدف لسه ماجتش — اتحسب من آخر شهور متاحة)' : '');
   msgEl.style.color = 'var(--ink-soft)';
 
   try{
@@ -38687,6 +38695,25 @@ async function tdTransferTargets(){
   });
 
   if(!allRepTargets.length){ alert('مفيش أي منطقة مدخّل لها رقم إجمالي مستهدف — دخّل الرقم في خانة واحدة على الأقل واحسب التوزيع.'); return; }
+
+  // فحص قبل التحويل: مجموع أهداف المناديب في كل منطقة لازم يساوي الرقم الإجمالي المدخّل —
+  // لو التوزيع طلع صفر أو ناقص (مثلاً مفيش مبيعات تاريخية للشهور المحسوب منها) التحويل يترفض بدل ما يتحفظ غلط
+  {
+    const problems = [];
+    Object.entries(totalsByRegion).forEach(([key,total])=>{
+      if(!(total>0)) return;
+      const regionReps = new Set(((_tdData[key]||{}).reps||[]).map(r=>r.name));
+      const sum = allRepTargets.filter(t=>regionReps.has(t.rep_name)).reduce((s,t)=>s+(+t.target_amount||0),0);
+      if(Math.abs(sum-total) > Math.max(regionReps.size*5000, total*0.01)){ // سماحية تقريب الأهداف لأقرب 10,000
+        const lbl = {cairo:'القاهرة',alex:'الإسكندرية',markets:'الأسواق الخاصة'}[key]||key;
+        problems.push(`${lbl}: المدخّل ${Math.round(total).toLocaleString('en-US')} — الموزّع على المناديب ${Math.round(sum).toLocaleString('en-US')}`);
+      }
+    });
+    if(problems.length){
+      alert('❌ التحويل اتلغى — التوزيع مش مكتمل:\n\n' + problems.join('\n') + '\n\nغالبًا مفيش مبيعات في الشهور المحسوب منها التوزيع. اضغط "احسب التوزيع" تاني وراجع الأرقام.');
+      return;
+    }
+  }
 
   if(!confirm(`هيتم تحويل هدف ${allRepTargets.length} مندوب لشهر ${targetMonth} إلى تاب "الأهداف" الرسمي (وأي هدف متسجل لنفس المندوب لنفس الشهر هيتعدّل بالرقم الجديد). متأكد؟`)) return;
 
