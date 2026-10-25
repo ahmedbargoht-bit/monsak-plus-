@@ -6014,6 +6014,24 @@ h2,h3{color:#2C1F0A}
             <button onclick="sgResetToToday()" style="margin-right:auto;background:#92400E;color:#FEF3C7;border:none;border-radius:6px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">رجّع "إلى" للنهاردة</button>
           </div>
 
+          <!-- تقرير المناديب من سيستم الشركة (مصدر المحقق الرسمي) -->
+          <div id="srr-card" style="background:#F4F8EE;border:0.5px solid #B9CF95;border-radius:8px;padding:10px 12px;margin-bottom:12px">
+            <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between">
+              <div>
+                <div style="font-size:12px;font-weight:800;color:#3B6D11">📑 تقرير المناديب من سيستم الشركة — مصدر المحقق الرسمي</div>
+                <div id="srr-status" style="font-size:11px;color:var(--text-secondary);margin-top:3px">جاري التحميل...</div>
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <button onclick="srrPickFile()" style="background:#3B6D11;color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">⬆️ رفع تقرير المناديب (Excel)</button>
+                <button onclick="srrToggleCompare()" style="background:#fff;color:#3B6D11;border:1px solid #B9CF95;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">📊 المحقق حسب التقرير</button>
+              </div>
+            </div>
+            <input type="file" id="srr-file" accept=".xlsx,.xls" style="display:none" onchange="srrOnFile(this)"/>
+            <div id="srr-upload-box" style="display:none;margin-top:10px"></div>
+            <div id="srr-issues" style="margin-top:8px"></div>
+            <div id="srr-compare" style="display:none;margin-top:10px"></div>
+          </div>
+
           <!-- خصومات العملاء -->
           <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:#FFF8EC;border:0.5px solid #E8C98A;border-radius:8px;padding:8px 12px;margin-bottom:12px">
             <span style="font-size:11px;font-weight:700;color:#854F0B">خصومات العملاء (تُخصم من المبيعات الفعلية — خصم القاهرة على مجموعة القاهرة فقط، وخصم الإسكندرية على مجموعة الإسكندرية فقط، وتتوزع على المناديب بنسبة مبيعات MT الثانوية لعملائهم في آخر 3 شهور قبل الشهر):</span>
@@ -7831,6 +7849,9 @@ h2,h3{color:#2C1F0A}
             <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:6px">
               <div style="font-size:13px;font-weight:800;color:#731E2E"><i class="ti ti-stack-2"></i> إجمالي كميات المجموعات</div>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <button type="button" class="btn btn-sm" onclick="rptPdfOut(false)" style="background:#731E2E;color:#fff;border:none"><i class="ti ti-file-type-pdf"></i> إجمالي الخطة PDF</button>
+                <button type="button" class="btn btn-sm" onclick="rptXlsxOut(false)" style="background:#1A7A4A;color:#fff;border:none"><i class="ti ti-file-spreadsheet"></i> إجمالي الخطة Excel</button>
+                <button type="button" class="btn btn-ghost btn-sm" onclick="rptPdfOut(true)"><i class="ti ti-send" style="color:#731E2E"></i> إرسال إجمالي الخطة</button>
                 <button type="button" class="btn btn-ghost btn-sm" onclick="rpgPdfOut(false)"><i class="ti ti-file-type-pdf" style="color:#731E2E"></i> تصدير PDF</button>
                 <button type="button" class="btn btn-ghost btn-sm" onclick="rpgPdfOut(true)"><i class="ti ti-send" style="color:#731E2E"></i> إرسال PDF</button>
                 <button type="button" class="btn btn-ghost btn-sm" onclick="rpgXlsxOut(false)"><i class="ti ti-file-spreadsheet" style="color:#1A7A4A"></i> Excel</button>
@@ -10603,6 +10624,7 @@ async function sgLoad(){
     _sgData = { supervisors: supData, reps: repData, targets: tgtMap, sales: salesMap, preDiscSales: {...salesMap}, rawSales: rawSalesMap, overrides: overridesMap, month: monthStr, branchCount: branchCountMap, supSourceTable, discShares, discTotals:{cairo:0,alex:0} };
     sgApplyDiscounts();
     sgRender();
+    srrRefresh(monthStr);
   }catch(e){
     details.innerHTML = `<div style="text-align:center;padding:40px;color:#C55B48">تعذر التحميل: ${e.message}</div>`;
   }
@@ -10635,6 +10657,219 @@ function sgRepRegion(r){
   for(const t of toks){ if(discRegionOfGrp(t)==='cairo') return 'cairo'; }
   return null;
 }
+// ══════════════════════════════════════════════════════════════
+// تقرير المناديب من سيستم الشركة ("مبيعات ومرتجعات اليومية لمندوبي الأفرع")
+// المحقق الرسمي = صافي التقرير لكل مندوب (كل صفوفه + صفوف تمراتي بتاعته) لحد آخر يوم مرفوع،
+// وبعده فواتير التطبيق — بيتحسب في السيرفر بالدالة rep_achieved. الجداول:
+// sys_rep_report_uploads / sys_rep_report_rows / sys_rep_name_map
+// ══════════════════════════════════════════════════════════════
+const SRR = { month:null, parsed:null, latest:null, appReps:null };
+function srrH(json){ const h={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}; if(json){ h['Content-Type']='application/json'; } return h; }
+function srrFmt(n){ return Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function srrEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function srrDM(d){ return d ? `${d.slice(8,10)}/${d.slice(5,7)}` : ''; }
+async function srrRpc(fn, body){
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`,{method:'POST',headers:srrH(true),body:JSON.stringify(body)});
+  if(!r.ok) throw new Error(fn+' HTTP '+r.status+' '+(await r.text()).slice(0,120));
+  return r.json();
+}
+
+async function srrRefresh(month){
+  SRR.month = month || SRR.month || document.getElementById('sg-month')?.value;
+  const st = document.getElementById('srr-status'), iss = document.getElementById('srr-issues');
+  if(!st || !SRR.month) return;
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_report_uploads?month=eq.${SRR.month}&status=eq.active&select=*&order=as_of.desc,uploaded_at.desc&limit=1`,{headers:srrH()});
+    const rows = r.ok ? await r.json() : [];
+    SRR.latest = rows[0] || null;
+    if(!SRR.latest){
+      st.innerHTML = `⚠️ مفيش تقرير مرفوع لشهر ${SRR.month} — المحقق بيتحسب من فواتير التطبيق بس لحد ما ترفع التقرير`;
+      if(iss) iss.innerHTML = '';
+    } else {
+      const u = SRR.latest;
+      st.innerHTML = `آخر تقرير: من ${srrDM(u.period_from)} لحد <b>${srrDM(u.as_of)}</b> — ${u.row_count} صف — صافي ${srrFmt(u.total_net)} ج — اترفع ${new Date(u.uploaded_at).toLocaleString('ar-EG',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}. بعد ${srrDM(u.as_of)} المحقق بيتحسب من فواتير التطبيق.`;
+      await srrRenderIssues(u.id);
+    }
+    if(document.getElementById('srr-compare')?.style.display!=='none') srrRenderCompare();
+  }catch(e){ st.textContent = 'تعذر تحميل حالة التقرير: '+e.message; }
+}
+
+// مشاكل التقرير: صفوف مش مربوطة + اختلاف مع فواتير MT
+async function srrRenderIssues(uploadId){
+  const box = document.getElementById('srr-issues'); if(!box) return;
+  let html = '';
+  try{
+    const [unm, ver] = await Promise.all([ srrRpc('rep_report_unmapped',{p_upload:uploadId}), srrRpc('rep_report_verify',{p_upload:uploadId}) ]);
+    if(unm.length){
+      const reps = await srrAppReps();
+      const opts = '<option value="">— اختار —</option><option value="__excluded">مستبعد (إشعارات/مخازن/عجز)</option>' + reps.map(n=>`<option value="${srrEsc(n)}">${srrEsc(n)}</option>`).join('');
+      html += `<div style="background:#FDECEC;border:1px solid #E7A3A3;border-radius:8px;padding:8px 10px;margin-bottom:8px">
+        <div style="font-size:11px;font-weight:800;color:#A32D2D;margin-bottom:6px">🔗 محتاج ربط — ${unm.length} صف في التقرير ليه صافي ومش مربوط بمندوب (مش داخل في المحقق لحد ما يتربط)</div>
+        ${unm.map((u,i)=>`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11px;margin-bottom:4px">
+            <span style="min-width:260px;font-weight:700">${srrEsc(u.row_name)}</span><span style="color:#666">${srrEsc(u.branch_name||'')}</span>
+            <span style="font-weight:700;color:#731E2E">${srrFmt(u.net)} ج</span>
+            <select id="srr-map-${i}" data-name="${srrEsc(u.row_name)}" style="padding:3px 6px;font-family:Cairo,sans-serif;font-size:11px">${opts}</select>
+            <button onclick="srrSaveMap(${i})" style="background:#A32D2D;color:#fff;border:none;border-radius:5px;padding:3px 10px;font-size:11px;cursor:pointer;font-family:Cairo,sans-serif">ربط</button>
+          </div>`).join('')}
+      </div>`;
+    }
+    const bad = ver.filter(v=>!v.ok);
+    if(bad.length){
+      html += `<div style="background:#FFF8EC;border:1px solid #E8C98A;border-radius:8px;padding:8px 10px">
+        <div style="font-size:11px;font-weight:800;color:#854F0B;margin-bottom:4px">⚠️ ${bad.length} صف مبيعاتهم (بعد الخصم) مختلفة عن فواتير MT لنفس الفترة — غالبًا ملف MT ليوم ناقص أو لسه مترفعش</div>
+        ${bad.map(v=>`<div style="font-size:11px">• ${srrEsc(v.row_name)}: التقرير ${srrFmt(v.report_sales_net)} — MT ${srrFmt(v.mt_net)} — الفرق <b>${srrFmt(v.diff)}</b></div>`).join('')}
+        <div style="font-size:10px;color:#666;margin-top:4px">المحقق بيتحسب من التقرير نفسه (هو المرجع)؛ التنبيه ده بيوضّح إن بيانات MT ناقصة للفترة دي.</div>
+      </div>`;
+    } else if(ver.length){
+      html += `<div style="font-size:11px;color:#3B6D11;font-weight:700">✅ مبيعات التقرير مطابقة لفواتير MT في كل الصفوف (${ver.length} صف)</div>`;
+    }
+  }catch(e){ html = `<div style="font-size:11px;color:#A32D2D">تعذر فحص التقرير: ${srrEsc(e.message)}</div>`; }
+  box.innerHTML = html;
+}
+
+async function srrAppReps(){
+  if(SRR.appReps) return SRR.appReps;
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/users?role=eq.sales&select=name&order=name.asc&limit=1000`,{headers:srrH()});
+  SRR.appReps = r.ok ? (await r.json()).map(u=>u.name).filter(Boolean) : [];
+  return SRR.appReps;
+}
+
+async function srrSaveMap(i){
+  const sel = document.getElementById('srr-map-'+i); if(!sel) return;
+  const v = sel.value, name = sel.dataset.name;
+  if(!v){ showToast('اختار المندوب الأول'); return; }
+  const body = { report_name_norm: name.replace(/ /g,' ').replace(/\s+/g,' ').trim(), app_rep: v==='__excluded'?null:v, kind: v==='__excluded'?'excluded':'rep', note:'ربط من لوحة التحكم', updated_at:new Date().toISOString() };
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_name_map?on_conflict=report_name_norm`,{method:'POST',headers:{...srrH(true),'Prefer':'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(body)});
+  if(!r.ok){ showToast('❌ '+(await r.text()).slice(0,100)); return; }
+  showToast('✅ اتربط'); srrRefresh(); if(typeof sgLoad==='function') sgLoad();
+}
+
+function srrPickFile(){ const f=document.getElementById('srr-file'); if(f){ f.value=''; f.click(); } }
+
+// قراءة ملف Excel بتاع السيستم — الأعمدة بالترتيب (من اليمين للشمال في التقرير):
+// 0 الصافي | 1 مرتجع صالح | 2 صافي المرتجع | 3 خصم المرتجع | 4 إجمالي المرتجع | 5 مرتجع نقدي | 6 إجمالي الخصومات
+// 7 خصم إشعارات العملاء | 8 الخصم | 9 مصاريف الشحن | 10 شيكات | 11 نقدي+تحصيلات | 12 إجمالي المبيعات | 13 مبيعات نقدي
+// 14 اسم المندوب | 15 هالك | 16 نسبة المرتجع | 17 مرتجع آجل | 18-19 نسب الخصم | 20 مبيعات آجل | 21 اسم الفرع
+async function srrOnFile(input){
+  const file = input.files && input.files[0]; if(!file) return;
+  const box = document.getElementById('srr-upload-box');
+  try{
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf,{type:'array'});
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const all = XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:null});
+    const num = v => (typeof v==='number') ? v : (v==null||v==='' ? 0 : Number(String(v).replace(/,/g,'')));
+    const rows = [], broken = [];
+    all.forEach((r,idx)=>{
+      if(!r || typeof r[14]!=='string' || !r[14].trim()) return;
+      if(r[0]==null || isNaN(num(r[0]))) return;
+      const row = { row_no:idx+1, row_name:r[14], branch_name:r[21]||null,
+        net:num(r[0]), ret_good:num(r[1]), ret_net:num(r[2]), ret_disc:num(r[3]), ret_total:num(r[4]), ret_cash:num(r[5]),
+        disc_total:num(r[6]), notif_disc:num(r[7]), disc:num(r[8]), shipping:num(r[9]), cheques:num(r[10]), cash_collect:num(r[11]),
+        sales:num(r[12]), sales_cash:num(r[13]), ret_damaged:num(r[15]), ret_credit:num(r[17]), sales_credit:num(r[20]) };
+      // فحص شكل الملف: الصافي لازم = المبيعات − إجمالي الخصومات − صافي المرتجع
+      if(Math.abs(row.sales - row.disc_total - row.ret_net - row.net) > 0.05) broken.push(row.row_name);
+      rows.push(row);
+    });
+    if(rows.length < 3){ throw new Error('الملف مش بشكل تقرير "مبيعات ومرتجعات اليومية لمندوبي الأفرع" — مفيش صفوف مناديب'); }
+    if(broken.length){ throw new Error(`شكل الأعمدة مختلف عن المتوقع (${broken.length} صف الصافي فيهم مش = المبيعات − الخصومات − المرتجع). اتأكد إنه نفس التقرير ومن غير تعديل.`); }
+    const total = rows.reduce((s,r)=>s+r.net,0);
+    SRR.parsed = { rows, total, fileName:file.name };
+    const month = SRR.month || document.getElementById('sg-month')?.value;
+    const yest = new Date(Date.now()+3*3600e3-86400e3).toISOString().slice(0,10);
+    const monthEnd = `${month}-${String(new Date(+month.slice(0,4), +month.slice(5,7), 0).getDate()).padStart(2,'0')}`;
+    const defTo = yest.slice(0,7)===month ? yest : (yest > monthEnd ? monthEnd : `${month}-01`);
+    box.style.display = '';
+    box.innerHTML = `<div style="background:#fff;border:1px solid #B9CF95;border-radius:8px;padding:10px">
+      <div style="font-size:12px;font-weight:800;margin-bottom:6px">الملف: ${srrEsc(file.name)} — ${rows.length} صف — إجمالي الصافي ${srrFmt(total)} ج</div>
+      <div style="font-size:11px;color:#854F0B;margin-bottom:8px">الملف مفيهوش تاريخ الفترة — اكتب نفس "من تاريخ / إلى تاريخ" اللي طلعت بيه التقرير من السيستم بالظبط</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end">
+        <label style="font-size:11px">من تاريخ<br><input type="date" id="srr-from" value="${month}-01" style="padding:5px 8px;font-family:Cairo,sans-serif"></label>
+        <label style="font-size:11px">إلى تاريخ<br><input type="date" id="srr-to" value="${defTo}" style="padding:5px 8px;font-family:Cairo,sans-serif"></label>
+        <button onclick="srrUpload()" id="srr-up-btn" style="background:#3B6D11;color:#fff;border:none;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">✅ حفظ التقرير</button>
+        <button onclick="document.getElementById('srr-upload-box').style.display='none'" style="background:#eee;border:none;border-radius:6px;padding:7px 14px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">إلغاء</button>
+      </div></div>`;
+  }catch(e){
+    box.style.display=''; box.innerHTML = `<div style="background:#FDECEC;border:1px solid #E7A3A3;border-radius:8px;padding:8px 10px;font-size:12px;color:#A32D2D;font-weight:700">❌ ${srrEsc(e.message)}</div>`;
+  }
+}
+
+async function srrUpload(){
+  const p = SRR.parsed; if(!p) return;
+  const from = document.getElementById('srr-from').value, to = document.getElementById('srr-to').value;
+  const today = new Date(Date.now()+3*3600e3).toISOString().slice(0,10);
+  if(!from || !to){ alert('اكتب التاريخين'); return; }
+  if(from.slice(0,7)!==to.slice(0,7)){ alert('الفترة لازم تكون جوه شهر واحد (التقرير بيتحسب من أول الشهر)'); return; }
+  if(from > to){ alert('"من" بعد "إلى"'); return; }
+  if(to >= today){ alert('"إلى تاريخ" لازم يكون يوم خلص (قبل النهارده)'); return; }
+  if(from.slice(8)!=='01' && !confirm('"من تاريخ" مش أول الشهر — المحقق محتاج تقرير من أول الشهر. تكمّل برضه؟')) return;
+  const month = from.slice(0,7);
+  if(!confirm(`حفظ تقرير المناديب لشهر ${month} من ${srrDM(from)} لحد ${srrDM(to)}؟\nالمحقق لكل المناديب هيتحسب من التقرير ده لحد ${srrDM(to)}.`)) return;
+  const btn = document.getElementById('srr-up-btn'); if(btn){ btn.disabled=true; btn.textContent='جاري الحفظ...'; }
+  let uploadId = null;
+  try{
+    const ur = await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_report_uploads`,{method:'POST',headers:{...srrH(true),'Prefer':'return=representation'},
+      body:JSON.stringify({ month, period_from:from, as_of:to, file_name:p.fileName, row_count:p.rows.length, total_net:Math.round(p.total*10000)/10000, uploaded_by:'admin', status:'cancelled', note:'جاري الرفع' })});
+    if(!ur.ok) throw new Error('تسجيل الرفع: '+(await ur.text()).slice(0,150));
+    uploadId = (await ur.json())[0].id;
+    const rr = await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_report_rows`,{method:'POST',headers:{...srrH(true),'Prefer':'return=minimal'},
+      body:JSON.stringify(p.rows.map(r=>({...r, upload_id:uploadId})))});
+    if(!rr.ok) throw new Error('حفظ الصفوف: '+(await rr.text()).slice(0,150));
+    // اتأكد إن كل الصفوف اتحفظت (يا كامل يا مفيش)
+    const cr = await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_report_rows?upload_id=eq.${uploadId}&select=id`,{headers:{...srrH(),'Prefer':'count=exact','Range':'0-0'}});
+    const cnt = +((cr.headers.get('content-range')||'').split('/')[1]||0);
+    if(cnt !== p.rows.length) throw new Error(`اتحفظ ${cnt} صف من ${p.rows.length}`);
+    // تفعيل الرفع الجديد، والقديم لنفس الشهر ونفس "إلى تاريخ" يبقى "اتستبدل"
+    await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_report_uploads?month=eq.${month}&as_of=eq.${to}&status=eq.active&id=neq.${uploadId}`,{method:'PATCH',headers:{...srrH(true),'Prefer':'return=minimal'},body:JSON.stringify({status:'replaced'})});
+    const ar = await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_report_uploads?id=eq.${uploadId}`,{method:'PATCH',headers:{...srrH(true),'Prefer':'return=minimal'},body:JSON.stringify({status:'active', note:null})});
+    if(!ar.ok) throw new Error('تفعيل الرفع: '+(await ar.text()).slice(0,150));
+    document.getElementById('srr-upload-box').style.display='none';
+    SRR.parsed = null;
+    showToast(`✅ اتحفظ تقرير المناديب لحد ${srrDM(to)} (${p.rows.length} صف)`);
+    await srrRefresh(month);
+    if(typeof sgLoad==='function') sgLoad();
+  }catch(e){
+    // أي فشل = الرفع ده مش بيتحسب (بيفضل status=cancelled)
+    alert('❌ الرفع فشل ومتحسبش: '+e.message);
+    if(btn){ btn.disabled=false; btn.textContent='✅ حفظ التقرير'; }
+  }
+}
+
+function srrToggleCompare(){
+  const el = document.getElementById('srr-compare'); if(!el) return;
+  const show = el.style.display==='none'; el.style.display = show?'':'none';
+  if(show) srrRenderCompare();
+}
+// مقارنة: المحقق من الدالة الموحدة (rep_achieved) مقابل الرقم الحالي في الشاشة دي (قبل خصومات العملاء)
+async function srrRenderCompare(){
+  const el = document.getElementById('srr-compare'); if(!el) return;
+  const month = SRR.month || document.getElementById('sg-month')?.value;
+  el.innerHTML = '<div style="font-size:11px;color:#888">جاري الحساب...</div>';
+  try{
+    const data = await srrRpc('rep_achieved',{p_month:month, p_to:null});
+    const cur = (_sgData && _sgData.month===month) ? (_sgData.preDiscSales||{}) : {};
+    let tR=0,tA=0,tT=0,tC=0;
+    const rows = data.map(d=>{
+      const c = cur[d.rep_name]; const diff = (c==null) ? null : (+d.achieved - c);
+      tR+=+d.report_net; tA+=+d.app_net; tT+=+d.achieved; if(c!=null) tC+=c;
+      return `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:5px 8px;font-weight:700">${srrEsc(d.rep_name)}</td>
+        <td style="padding:5px 8px;text-align:center">${srrFmt(d.report_net)}</td>
+        <td style="padding:5px 8px;text-align:center">${srrFmt(d.app_net)}</td>
+        <td style="padding:5px 8px;text-align:center;font-weight:800;color:#3B6D11">${srrFmt(d.achieved)}</td>
+        <td style="padding:5px 8px;text-align:center">${c==null?'—':srrFmt(c)}</td>
+        <td style="padding:5px 8px;text-align:center;font-weight:700;color:${diff!=null&&Math.abs(diff)>=1?'#A32D2D':'#3B6D11'}">${diff==null?'—':srrFmt(diff)}</td>
+        <td style="padding:5px 8px;font-size:10px;color:#666">${srrEsc(d.source)}</td></tr>`;
+    }).join('');
+    el.innerHTML = `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px;background:#fff">
+      <thead><tr style="background:#3B6D11;color:#fff"><th style="padding:6px">المندوب</th><th>من التقرير</th><th>فواتير التطبيق بعده</th><th>المحقق الرسمي</th><th>الرقم الحالي في الشاشة</th><th>الفرق</th><th>المصدر</th></tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr style="background:#EAF3DE;font-weight:800"><td style="padding:6px 8px">الإجمالي</td><td style="text-align:center">${srrFmt(tR)}</td><td style="text-align:center">${srrFmt(tA)}</td><td style="text-align:center">${srrFmt(tT)}</td><td style="text-align:center">${srrFmt(tC)}</td><td style="text-align:center">${srrFmt(tT-tC)}</td><td></td></tr></tfoot>
+    </table></div>
+    <div style="font-size:10px;color:#666;margin-top:4px">"الرقم الحالي في الشاشة" = اللي شاشة الأهداف بتحسبه دلوقتي (قبل خصومات العملاء). الخطوة الجاية إن الشاشات كلها تعرض "المحقق الرسمي".</div>`;
+  }catch(e){ el.innerHTML = `<div style="font-size:11px;color:#A32D2D">تعذر الحساب: ${srrEsc(e.message)}</div>`; }
+}
+
 function sgApplyDiscounts(){
   if(!_sgData || !_sgData.preDiscSales) return;
   const dC = Math.max(0, +document.getElementById('sg-disc-cairo')?.value||0);
@@ -55936,8 +56171,10 @@ function rpiEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp
 function rpiN(n,d){ return (n==null||isNaN(n))?'—':Number(n).toLocaleString('en-US',{minimumFractionDigits:d||0,maximumFractionDigits:d||0}); }
 function rpiH(){ return {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}; }
 async function rpiGet(path){ const r=await fetch(`${SUPABASE_URL}/rest/v1/${path}`,{headers:rpiH()}); if(!r.ok) throw new Error(path.split('?')[0]+' HTTP '+r.status); return r.json(); }
-function rpiRange(ym,n){ // N شهور كاملة قبل شهر الهدف
-  const [y,m]=ym.split('-').map(Number); const to=new Date(Date.UTC(y,m-1,0)); const from=new Date(Date.UTC(y,m-1-n,1));
+function rpiRange(ym,n){ // N شهور قبل شهر الهدف — بس عمرها ما تعدّي الشهر الحالي (شهر هدف بعيد زي فبراير كانت فترته في المستقبل ومفيهاش مسحوبات)
+  const [y0,m0]=ym.split('-').map(Number); const now=new Date(Date.now()+3*3600e3);
+  const endIdx=Math.min(y0*12+(m0-1)-1, now.getUTCFullYear()*12+now.getUTCMonth()); const y=Math.floor((endIdx+1)/12), m=(endIdx+1)%12+1;
+  const to=new Date(Date.UTC(y,m-1,0)); const from=new Date(Date.UTC(y,m-1-n,1));
   return [from.toISOString().slice(0,10), to.toISOString().slice(0,10)];
 }
 function rpiRegion(u){ const g=String((u&&(u.grp||''))+','+(u&&u.groups||'')).toLowerCase(); return /alex/.test(g)?'alex':'cairo'; }
@@ -56276,6 +56513,32 @@ function rpgReportData(){
     head:['#','الصنف','عدد المناديب','القطع','القيمة','النسبة'],rows:x.agg.map((a,i)=>[i+1,a.item,a.reps,N(a.c),N(a.v),(x.S0.v?(a.v/x.S0.v*100).toFixed(1):0)+'%']),total:['','الإجمالي','',N(x.S0.c),N(x.S0.v),'100%']}));
   return {title,kpis,secs};
 }
+// ══ إجمالي أصناف الخطة للشهر — كل أصناف كل المجموعات في جدول واحد (الصنف × المجموعة) بهوية الطحان ══
+// عمود "الإجمالي" بيتحسب من المناديب مرة واحدة بس (مندوب تابع لمجموعتين مايتحسبش مرتين)
+function rptReportData(){
+  const G=rpgGroups(), N=rpiN, view=rpiView(), S0=rpiStats(view), tot=rpiAgg(view);
+  const byG=G.map(x=>{ const m={}; x.agg.forEach(a=>m[a.item]=a); return m; });
+  const multi=view.some(({r})=>(r.groups||[]).filter(g=>G.some(x=>x.g===g)).length>1);
+  const head=['#','الصنف',...G.map(x=>x.name),'إجمالي القطع','القيمة','النسبة'];
+  const rows=tot.map((a,i)=>[i+1,a.item,...byG.map(m=>m[a.item]?N(m[a.item].c):'—'),N(a.c),N(a.v),(S0.v?(a.v/S0.v*100).toFixed(1):0)+'%']);
+  const total=['','الإجمالي',...G.map(x=>N(x.S0.c)),N(S0.c),N(S0.v),'100%'];
+  const title=`إجمالي خطة الأصناف — ${rpxMonName()}${RPI.groups.length?' — '+rpiGrpTitle():''}`;
+  const kpis=[['المجموعات',String(G.length)],['المناديب',String(S0.n)],['إجمالي الأهداف',N(S0.t)],['عدد الأصناف',String(tot.length)],['إجمالي القطع',N(S0.c)],['قيمة القطع',N(S0.v)]];
+  const sub=`الكميات بالقطعة — عمود لكل مجموعة + الإجمالي${multi?' (فيه مندوب تابع لأكتر من مجموعة: بيظهر في عمود كل مجموعة، لكن الإجمالي بيحسبه مرة واحدة)':''}`;
+  return {title,kpis,sub,head,rows,total,nG:G.length};
+}
+function rptFileBase(){ return `AlTahhan_ItemPlan_Total_${RPI.ym}`; }
+function rptPdfOut(send){ if(!RPI.reps.length){ showToast('احسب الخطة الأول'); return; } const d=rptReportData();
+  rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,[{title:'إجمالي الأصناف لكل المجموعات',sub:d.sub,head:d.head,rows:d.rows,total:d.total}]); return pdf?pdf.output('blob'):null; },rptFileBase()+'.pdf',d.title,send); }
+function rptXlsxOut(send){ if(!RPI.reps.length){ showToast('احسب الخطة الأول'); return; } const d=rptReportData();
+  rpxDeliver('xlsx',async()=>{ const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]};
+    const num=v=>typeof v==='string'&&/^[+\-]?[\d,]+(\.\d+)?$/.test(v)?+v.replace(/,/g,''):v;
+    const sub=`الفترة المرجعية: من ${RPI.refFrom} إلى ${RPI.refTo} · ${d.kpis.map(k=>k[0]+': '+k[1]).join(' · ')} · ${d.sub}`;
+    const widths=d.head.map((_,i)=>({wch:i===0?5:i===1?40:i<2+d.nG?13:15}));
+    rpxSheet(wb,'إجمالي الخطة',d.title,sub,d.head,d.rows.map(r=>r.map(num)),d.total.map(num),widths);
+    const arr=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true}); return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}); },
+    rptFileBase()+'.xlsx',d.title,send); }
+
 function rpgFileBase(){ return `AlTahhan_ItemPlan_Groups_${RPI.ym}${RPI.group?'_'+String(RPI.group).replace(/[^\w-]+/g,''):''}`; }
 function rpgPdfOut(send){ if(!RPI.reps.length){ showToast('احسب الخطة الأول'); return; } const d=rpgReportData();
   rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,d.secs); return pdf?pdf.output('blob'):null; },rpgFileBase()+'.pdf',d.title,send); }
