@@ -28672,7 +28672,8 @@ const TVS_TABS=[
   {id:'rk',label:'ترتيب المناديب',desc:'جديد — كل مندوب: الهدف والمحقق ونسبة التحقيق والمتوقع',on:false},
   {id:'att',label:'حضور المنسقين',desc:'جديد — مين حضر ومين لسه ومين انصرف النهاردة',on:false},
   {id:'miss',label:'نواقص اليوم',desc:'جديد — أكتر الفروع والأصناف فيها نواقص النهاردة',on:false},
-  {id:'cust',label:'أعلى عملاء السلاسل',desc:'جديد — ترتيب عملاء السلاسل بصافي مبيعات الشهر (MT)',on:false}
+  {id:'cust',label:'أعلى عملاء السلاسل',desc:'ترتيب عملاء السلاسل بصافي مبيعات الشهر (MT) + عدد فروع كل عميل',on:false},
+  {id:'items',label:'أعلى أصناف العملاء',desc:'جديد — ترتيب الأصناف بصافي مسحوبات عملاء السلاسل في الشهر (MT) + الكمية بالقطعة',on:false}
 ];
 const TVS_COLORS=[['bg','الخلفية','#14090d'],['hdr','الشريط العلوي','#1d0e13'],['card','الكروت والأزرار','#231016'],['line','الحدود','#3a1f27'],
   ['accent','اللون الأساسي (التاب المختار)','#731E2E'],['gold','لون العناوين','#F0C880'],['text','لون الخط','#f5ece0'],['mute','الخط الثانوي','#bfae98']];
@@ -60443,7 +60444,7 @@ function svmDetail(id){
     ${row(SVM_RC()[0],rate(r.rc))}${row(SVM_RC()[1],rate(r.rd))}${row(SVM_RC()[2],rate(r.rl))}
     ${r.sx&&r.sx.movedFrom?row('تم نقل الزيارة','<span style="color:#E65100;font-weight:700">من '+svmEsc(r.sx.movedFrom)+' إلى '+svmEsc(r.date)+'</span>'+(r.sx.moveReason?'<br><span style="font-size:11px">السبب: '+svmEsc(r.sx.moveReason)+(r.sx.movedBy?' — '+svmEsc(r.sx.movedBy):'')+'</span>':'')):''}
     ${r.sx?`${row('نوع الزيارة المسجّلة', r.sx.supType?svmEsc(r.sx.supType)+(r.sx.logOther?` <span style="color:#E65100;font-size:11px">(مسجّلة باسم ${svmEsc(r.sx.logBy||'')})</span>`:''):(r.sx.manual?'تأشير يدوي في الخطة':'—'))}
-    ${row('آخر زيارة مندوب', r.sx.repDate?svmEsc(r.sx.repDate)+' ('+svsAgo(r.sx.repDate)+') — '+svmEsc(r.sx.repName||'—'):'—')}
+    ${row('آخر فاتورة مندوب (سيستم الشركة MT)', r.sx.repDate?svmEsc(r.sx.repDate)+' ('+svsAgo(r.sx.repDate)+') — '+svmEsc(r.sx.repName||'—'):(SVS_MT_ERR?'تعذر تحميل فواتير MT':'مفيش فاتورة MT في آخر 180 يوم'+(SVS_MT_UPTO?' (MT مرفوع لحد '+svmEsc(SVS_MT_UPTO)+')':'')))}
     ${row('آخر تقرير منسق', r.sx.coordDate?svmEsc(r.sx.coordDate)+' ('+svsAgo(r.sx.coordDate)+')'+(r.sx.coordName?' — '+svmEsc(r.sx.coordName):''):'—')}
     ${row('مرتجعات معلّقة بالفرع', r.sx.pend?`<b style="color:#C62828">${r.sx.pend}</b>`:'لا يوجد')}`:''}
     ${r.done&&r.isNew&&!r.reviewed&&!r.sx?'<div style="margin-top:8px;color:#B71C1C;font-size:12px;font-weight:700">نموذج المراجعة غير مكتمل</div>':''}
@@ -60480,18 +60481,34 @@ function svsHav(a,b,c,d){
 // قطاع البيع بنفس شكل جدول التنسيق: بيبني صفوف بنفس الشكل من خطط مشرفي البيع.
 // الزيارة "منجزة" = فيه سجل للمشرف على نفس الفرع واليوم (field_support_logs) أو تأشير يدوي في الخطة
 // الموقع = إحداثيات السجل (بنعرض المسافة من الفرع) — التقييم = العرض/التعامل/المخزون من sales_visit_ratings
+let SVS_MT_UPTO = null, SVS_MT_ERR = false;
 async function svsBuildRows(from,to){
+  SVS_MT_ERR = false;
   const B = SUPABASE_URL+'/rest/v1/';
   const addD = (d,n)=>{ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()+n); return svmIso(x); };
-  const [plans, items, logs, rates, dels, vis, rets] = await Promise.all([
+  const [plans, items, logs, rates, _appDels, vis, rets] = await Promise.all([
     svmGetAll(`${B}sales_plans_plus?select=id,staff_name,sector,week_start&week_start=gte.${addD(from,-7)}&week_start=lte.${to}`),
     svmGetAll(`${B}sales_plan_items?select=id,plan_id,client_name,area,visit_date,visit_status,notes,original_visit_date,change_reason,moved_by&visit_date=gte.${from}&visit_date=lte.${to}&order=visit_date.desc,id.desc`),
     svmGetAll(`${B}field_support_logs?select=supervisor_name,branch_name,visit_date,created_at,support_type,rep_name,lat,lng&branch_name=not.is.null&created_at=gte.${addD(from,-1)}&created_at=lte.${addD(to,2)}&order=created_at.asc`),
     svmGetAll(`${B}sales_visit_ratings?select=*&visit_date=gte.${addD(from,-1)}&visit_date=lte.${addD(to,7)}&order=created_at.desc`).catch(()=>[]),
-    svmGetAll(`${B}sales_deliveries?select=branch_name,rep_name,delivery_date&deleted_at=is.null&delivery_date=gte.${addD(to,-120)}&order=delivery_date.desc,id.desc`).catch(()=>[]),
+    Promise.resolve([]),
     svmGetAll(`${B}visits?select=branch,date,name&branch=not.is.null&order=date.desc`).catch(()=>[]),
     svmGetAll(`${B}returns?select=branch,pulled&order=id.desc`).catch(()=>[])
   ]);
+  // "آخر زيارة مندوب" = آخر فاتورة للفرع في سيستم الشركة (فواتير MT، آخر 180 يوم لحد "إلى") — مش فواتير التطبيق.
+  // الربط بالفرع من ربط مواقع MT، والمندوب باسمه في التطبيق لو مربوط في تقرير المناديب، وإلا باسمه في MT
+  let dels = [];
+  SVS_MT_UPTO = null;
+  try{
+    const names = [...new Set(items.map(i=>i.client_name).filter(Boolean))];
+    if(names.length){
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/mt_branch_last_invoice`,{method:'POST',headers:{...svmHdr(),'Content-Type':'application/json'},body:JSON.stringify({p_branches:names,p_to:to})});
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const rows = await r.json();
+      dels = rows.map(x=>({branch_name:x.branch_name, rep_name:x.app_rep||x.mt_rep, delivery_date:x.last_date}));
+      SVS_MT_UPTO = rows[0] ? rows[0].mt_last_upload : null;
+    }
+  }catch(e){ console.warn('mt_branch_last_invoice', e); SVS_MT_ERR = true; }
   // توحيد أسماء الفروع في كل المصادر قبل المطابقة
   items.forEach(x=>{ x.client_name=svmK(x.client_name); });
   logs.forEach(x=>{ x.branch_name=svmK(x.branch_name); });
