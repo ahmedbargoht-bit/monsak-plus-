@@ -1229,6 +1229,9 @@ h2,h3{color:#2C1F0A}
           <div class="nav-item" id="nav-sales-dashboard" onclick="showPanel('sales-dashboard')" style="background:linear-gradient(135deg,#3A0008,#6B1E2E);border:1.5px solid #F0C880;color:#F0C880;font-weight:700">
             <i class="ti ti-layout-dashboard" style="color:#F0C880"></i> Sales Dashboard
           </div>
+          <div class="nav-item" onclick="showPanel('indirect-disc')">
+            <i class="ti ti-receipt-tax" style="color:#B45309"></i> خصومات العملاء الغير مباشره
+          </div>
           <div class="nav-item" onclick="showPanel('sales-goals')">
             <i class="ti ti-target" style="color:#C55B48"></i> الأهداف
           </div>
@@ -6695,6 +6698,31 @@ h2,h3{color:#2C1F0A}
           </div>
         </div>
 
+        <!-- ══ خصومات العملاء الغير مباشره (إشعارات الخصم من تقرير الشركة) ══ -->
+        <div id="panel-indirect-disc" class="panel">
+          <div class="page-header">
+            <div>
+              <h2 style="color:#6B1E2E"><i class="ti ti-receipt-tax"></i> خصومات العملاء الغير مباشره</h2>
+              <p>إشعارات خصم العملاء شهر بشهر — من تقرير الشركة "مبيعات ومرتجعات اليومية لمندوبي الأفرع"</p>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <select id="idc-year" onchange="idcLoad()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif"></select>
+              <button onclick="idcPick()" style="background:#3B6D11;color:#fff;border:none;border-radius:8px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif"><i class="ti ti-upload"></i> رفع تقرير شهر</button>
+              <button onclick="idcLoad()" style="background:#eee;border:none;border-radius:8px;padding:7px 12px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">🔄 تحديث</button>
+              <input type="file" id="idc-file" accept=".xlsx,.xls" style="display:none" onchange="idcOnFile(this)"/>
+            </div>
+          </div>
+          <div style="background:#FFF8EC;border:1px solid #E8C98A;border-radius:8px;padding:8px 12px;font-size:11px;color:#5B4630;margin-bottom:10px;line-height:1.9">
+            • <b>القاهرة الكبرى</b> = عمود "خصم إشعارات العملاء" في صف <b>مخزن_مبيعات_القاهرة الكبري</b> من تقرير الشركة.<br>
+            • <b>إسكندرية</b> = مجموع عمود "خصم إشعارات العملاء" لكل صفوف فرع <b>سلاسل اسكندرية الطحان</b> (ما عدا صفوف العجز).<br>
+            • أي رقم تقدر تعدّله يدوي من ✏️ (اليدوي بيغلب على التقرير).<br>
+            • ارفع تقرير <b>كل شهر كامل</b> (من أول الشهر لآخره). الرفع هنا <b>مش بيغيّر محقق المناديب</b> — بيتحفظ لحساب الخصومات بس.<br>
+            • النسبة = الخصم ÷ صافي مبيعات الفرع في نفس التقرير (المبيعات − الخصم المباشر − صافي المرتجع).
+          </div>
+          <div id="idc-upload-box" style="display:none;margin-bottom:10px"></div>
+          <div id="idc-table" style="overflow-x:auto"></div>
+        </div>
+
                 <div id="panel-sales-dashboard" class="panel">
           <div class="page-header">
             <div>
@@ -10675,6 +10703,177 @@ async function repAchievedOfficial(month, to){
 // وبعده فواتير التطبيق — بيتحسب في السيرفر بالدالة rep_achieved. الجداول:
 // sys_rep_report_uploads / sys_rep_report_rows / sys_rep_name_map
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// خصومات العملاء الغير مباشره — شهر بشهر
+// المصدر: تقرير الشركة (نفس شكل تقرير المناديب). الرفع هنا بيتحفظ status='disc_ref'
+// يعني مش بيدخل في المحقق (rep_achieved / sys_sync_overrides بيقروا 'active' بس).
+// الحساب في السيرفر: indirect_disc_monthly(p_year) — الصفوف المحسوبة في indirect_disc_rows،
+// والإدخال اليدوي في indirect_disc_manual (لو موجود بيغلب على التقرير).
+// ══════════════════════════════════════════════════════════════
+const IDC = { parsed:null, rows:[] };
+const IDC_MON = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+function idcInit(){
+  const sel = document.getElementById('idc-year'); if(!sel || sel.options.length) return;
+  const y = new Date(Date.now()+3*3600e3).getFullYear();
+  [y+1, y, y-1].forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; if(v===y) o.selected=true; sel.appendChild(o); });
+}
+function idcMoney(n){ return (n==null) ? '—' : Number(n).toLocaleString('en-US',{maximumFractionDigits:0}); }
+async function idcLoad(){
+  const box = document.getElementById('idc-table'); if(!box) return;
+  const year = +(document.getElementById('idc-year')?.value || new Date().getFullYear());
+  box.innerHTML = '<div style="font-size:12px;color:#888;padding:10px">جاري التحميل...</div>';
+  try{
+    IDC.rows = await srrRpc('indirect_disc_monthly',{p_year:year});
+    const by = {}; IDC.rows.forEach(r=>{ (by[r.month]=by[r.month]||{})[r.region]=r; });
+    const months = Object.keys(by).sort();
+    let tC=0,tA=0,bC=0,bA=0;
+    const cell = (r, region, month)=>{
+      if(!r) return '<td>—</td><td>—</td>';
+      let tag='', warn='';
+      if(r.manual_amount!=null) tag = `<div style="font-size:9px;color:#1565C0">✍️ يدوي${r.report_amount!=null?` (التقرير: ${idcMoney(r.report_amount)})`:''}</div>`;
+      else if(r.report_amount!=null){
+        const me = `${month}-${String(new Date(+month.slice(0,4), +month.slice(5,7), 0).getDate()).padStart(2,'0')}`;
+        const full = r.as_of===me && String(r.period_from||'').endsWith('-01');
+        tag = `<div style="font-size:9px;color:${full?'#3B6D11':'#B45309'}">${full?'✅ تقرير الشهر كامل':'⚠️ تقرير لحد '+srrDM(r.as_of)}</div>`;
+      } else if(r.upload_id && region==='cairo') warn = '<div style="font-size:9px;color:#A32D2D">⚠️ الصف مش موجود في التقرير</div>';
+      const v = r.amount;
+      const edit = `<button onclick="idcEdit('${month}','${region}')" title="إدخال يدوي" style="background:none;border:none;cursor:pointer;color:#888;font-size:12px">✏️</button>`;
+      return `<td style="padding:6px 8px;text-align:center;font-weight:800;color:#731E2E">${idcMoney(v)} ${edit}${tag}${warn}</td>
+              <td style="padding:6px 8px;text-align:center;color:#555">${r.pct!=null? r.pct+'%':'—'}</td>`;
+    };
+    const body = months.map(m=>{
+      const c=by[m].cairo, a=by[m].alex;
+      if(c&&c.amount!=null){ tC+=+c.amount; if(c.base_net!=null) bC+=+c.base_net; }
+      if(a&&a.amount!=null){ tA+=+a.amount; if(a.base_net!=null) bA+=+a.base_net; }
+      const tot = (c&&c.amount!=null?+c.amount:0)+(a&&a.amount!=null?+a.amount:0);
+      const any = (c&&c.amount!=null)||(a&&a.amount!=null);
+      return `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:6px 8px;font-weight:700">${IDC_MON[+m.slice(5,7)-1]} ${m.slice(0,4)}</td>
+        ${cell(c,'cairo',m)}${cell(a,'alex',m)}
+        <td style="padding:6px 8px;text-align:center;font-weight:800">${any?idcMoney(tot):'—'}</td></tr>`;
+    }).join('');
+    const pc = (t,b)=> b>0 ? (Math.round(t/b*10000)/100)+'%' : '—';
+    box.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px;background:#fff;border-radius:8px;overflow:hidden">
+      <thead><tr style="background:#731E2E;color:#fff">
+        <th style="padding:8px">الشهر</th><th style="padding:8px">القاهرة الكبرى</th><th style="padding:8px">% من مبيعات القاهرة</th>
+        <th style="padding:8px">إسكندرية</th><th style="padding:8px">% من مبيعات إسكندرية</th><th style="padding:8px">الإجمالي</th></tr></thead>
+      <tbody>${body}</tbody>
+      <tfoot><tr style="background:#F5F0E8;font-weight:800">
+        <td style="padding:8px">إجمالي ${year}</td><td style="padding:8px;text-align:center">${idcMoney(tC)}</td><td style="padding:8px;text-align:center">${pc(tC,bC)}</td>
+        <td style="padding:8px;text-align:center">${idcMoney(tA)}</td><td style="padding:8px;text-align:center">${pc(tA,bA)}</td>
+        <td style="padding:8px;text-align:center">${idcMoney(tC+tA)}</td></tr></tfoot></table>
+      <div style="font-size:10px;color:#888;margin-top:6px">النسبة في الإجمالي محسوبة على الشهور اللي ليها تقرير بس.</div>`;
+  }catch(e){ box.innerHTML = `<div style="color:#A32D2D;font-size:12px;padding:10px">❌ تعذر التحميل: ${srrEsc(e.message)}</div>`; }
+}
+async function idcEdit(month, region){
+  const r = (IDC.rows||[]).find(x=>x.month===month && x.region===region) || {};
+  const label = (region==='cairo'?'القاهرة الكبرى':'إسكندرية')+' — '+IDC_MON[+month.slice(5,7)-1]+' '+month.slice(0,4);
+  const cur = r.manual_amount!=null ? r.manual_amount : '';
+  const v = prompt(`قيمة الخصم الغير مباشر يدوي: ${label}\n(سيبها فاضية عشان تمسح الإدخال اليدوي وترجع لرقم التقرير)`, cur);
+  if(v===null) return;
+  const clean = String(v).replace(/,/g,'').trim();
+  try{
+    if(clean===''){
+      const d = await fetch(`${SUPABASE_URL}/rest/v1/indirect_disc_manual?month=eq.${month}&region=eq.${region}`,{method:'DELETE',headers:srrH()});
+      if(!d.ok) throw new Error((await d.text()).slice(0,120));
+      showToast('✅ اتمسح الإدخال اليدوي');
+    } else {
+      const n = Number(clean); if(!isFinite(n) || n<0){ alert('اكتب رقم صحيح'); return; }
+      const w = await fetch(`${SUPABASE_URL}/rest/v1/indirect_disc_manual?on_conflict=month,region`,{method:'POST',headers:{...srrH(true),'Prefer':'resolution=merge-duplicates,return=minimal'},
+        body:JSON.stringify({month, region, amount:n, updated_by:'admin', updated_at:new Date().toISOString()})});
+      if(!w.ok) throw new Error((await w.text()).slice(0,120));
+      showToast('✅ اتحفظ');
+    }
+    idcLoad();
+  }catch(e){ alert('❌ الحفظ فشل: '+e.message); }
+}
+function idcPick(){ const f=document.getElementById('idc-file'); if(f){ f.value=''; f.click(); } }
+// نفس قراءة تقرير المناديب بالظبط (srrOnFile) — نفس الأعمدة ونفس فحص الشكل
+function idcParse(all){
+  const num = v => (typeof v==='number') ? v : (v==null||v==='' ? 0 : Number(String(v).replace(/,/g,'')));
+  const rows=[], broken=[];
+  all.forEach((r,idx)=>{
+    if(!r || typeof r[14]!=='string' || !r[14].trim()) return;
+    if(r[0]==null || isNaN(num(r[0]))) return;
+    const row = { row_no:idx+1, row_name:r[14], branch_name:r[21]||null,
+      net:num(r[0]), ret_good:num(r[1]), ret_net:num(r[2]), ret_disc:num(r[3]), ret_total:num(r[4]), ret_cash:num(r[5]),
+      disc_total:num(r[6]), notif_disc:num(r[7]), disc:num(r[8]), shipping:num(r[9]), cheques:num(r[10]), cash_collect:num(r[11]),
+      sales:num(r[12]), sales_cash:num(r[13]), ret_damaged:num(r[15]), ret_credit:num(r[17]), sales_credit:num(r[20]) };
+    if(Math.abs(row.sales - row.disc_total - row.ret_net - row.net) > 0.05) broken.push(row.row_name);
+    rows.push(row);
+  });
+  if(rows.length < 3) throw new Error('الملف مش بشكل تقرير "مبيعات ومرتجعات اليومية لمندوبي الأفرع"');
+  if(broken.length) throw new Error(`شكل الأعمدة مختلف عن المتوقع (${broken.length} صف). اتأكد إنه نفس التقرير ومن غير تعديل.`);
+  return rows;
+}
+async function idcOnFile(input){
+  const file = input.files && input.files[0]; if(!file) return;
+  const box = document.getElementById('idc-upload-box');
+  try{
+    const wb = XLSX.read(await file.arrayBuffer(),{type:'array'});
+    const all = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:true,defval:null});
+    const rows = idcParse(all);
+    const norm = s => String(s||'').replace(/ /g,' ').replace(/\s+/g,' ').trim();
+    const cairo = rows.filter(r=>norm(r.row_name)==='مخزن_مبيعات_القاهرة الكبري');
+    const disc = cairo.reduce((s,r)=>s+r.notif_disc,0);
+    const alexR = rows.filter(r=>norm(r.branch_name)===norm('سلاسل اسكندرية الطحان') && !/عجز/.test(norm(r.row_name)));
+    const discA = alexR.reduce((s,r)=>s+r.notif_disc,0);
+    IDC.parsed = { rows, fileName:file.name, total:rows.reduce((s,r)=>s+r.net,0) };
+    const now = new Date(Date.now()+3*3600e3);
+    const pm = new Date(now.getFullYear(), now.getMonth()-1, 1);
+    const defM = `${pm.getFullYear()}-${String(pm.getMonth()+1).padStart(2,'0')}`;
+    box.style.display='';
+    box.innerHTML = `<div style="background:#fff;border:1px solid #B9CF95;border-radius:8px;padding:10px">
+      <div style="font-size:12px;font-weight:800;margin-bottom:4px">الملف: ${srrEsc(file.name)} — ${rows.length} صف</div>
+      <div style="font-size:12px;margin-bottom:8px">${cairo.length?`صف مخزن_مبيعات_القاهرة الكبري: خصم إشعارات العملاء <b style="color:#731E2E">${idcMoney(disc)} ج</b>`:'<span style="color:#A32D2D;font-weight:700">⚠️ صف مخزن_مبيعات_القاهرة الكبري مش موجود في الملف</span>'}<br>إسكندرية (سلاسل اسكندرية الطحان): خصم إشعارات العملاء <b style="color:#731E2E">${idcMoney(discA)} ج</b></div>
+      <div style="font-size:11px;color:#854F0B;margin-bottom:8px">الملف مفيهوش تاريخ — اختار الشهر اللي طلعت بيه التقرير (لازم من أول الشهر لآخره)</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end">
+        <label style="font-size:11px">الشهر<br><input type="month" id="idc-month" value="${defM}" style="padding:5px 8px;font-family:Cairo,sans-serif"></label>
+        <label style="font-size:11px;display:flex;gap:4px;align-items:center"><input type="checkbox" id="idc-full" checked> التقرير للشهر كامل</label>
+        <label style="font-size:11px">لو مش كامل: لحد يوم<br><input type="date" id="idc-to" style="padding:5px 8px;font-family:Cairo,sans-serif"></label>
+        <button onclick="idcUpload()" id="idc-up-btn" style="background:#3B6D11;color:#fff;border:none;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">✅ حفظ</button>
+        <button onclick="document.getElementById('idc-upload-box').style.display='none'" style="background:#eee;border:none;border-radius:6px;padding:7px 14px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">إلغاء</button>
+      </div></div>`;
+  }catch(e){
+    box.style.display=''; box.innerHTML = `<div style="background:#FDECEC;border:1px solid #E7A3A3;border-radius:8px;padding:8px 10px;font-size:12px;color:#A32D2D;font-weight:700">❌ ${srrEsc(e.message)}</div>`;
+  }
+}
+async function idcUpload(){
+  const p = IDC.parsed; if(!p) return;
+  const month = document.getElementById('idc-month').value;
+  if(!/^\d{4}-\d{2}$/.test(month)){ alert('اختار الشهر'); return; }
+  const me = `${month}-${String(new Date(+month.slice(0,4), +month.slice(5,7), 0).getDate()).padStart(2,'0')}`;
+  const full = document.getElementById('idc-full').checked;
+  const to = full ? me : document.getElementById('idc-to').value;
+  const today = new Date(Date.now()+3*3600e3).toISOString().slice(0,10);
+  if(!to || to.slice(0,7)!==month){ alert('"لحد يوم" لازم يكون جوه نفس الشهر'); return; }
+  if(to >= today){ alert('الشهر لسه مخلصش — اختار "لحد يوم" قبل النهارده'); return; }
+  if(!confirm(`حفظ تقرير ${IDC_MON[+month.slice(5,7)-1]} ${month.slice(0,4)} (من 01/${month.slice(5,7)} لحد ${srrDM(to)}) لحساب الخصومات الغير مباشرة؟\n(مش هيغيّر محقق المناديب)`)) return;
+  const btn = document.getElementById('idc-up-btn'); if(btn){ btn.disabled=true; btn.textContent='جاري الحفظ...'; }
+  let id=null;
+  try{
+    const ur = await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_report_uploads`,{method:'POST',headers:{...srrH(true),'Prefer':'return=representation'},
+      body:JSON.stringify({ month, period_from:`${month}-01`, as_of:to, file_name:p.fileName, row_count:p.rows.length, total_net:Math.round(p.total*10000)/10000, uploaded_by:'admin', status:'cancelled', note:'خصومات غير مباشرة — جاري الرفع' })});
+    if(!ur.ok) throw new Error('تسجيل الرفع: '+(await ur.text()).slice(0,150));
+    id = (await ur.json())[0].id;
+    const rr = await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_report_rows`,{method:'POST',headers:{...srrH(true),'Prefer':'return=minimal'},body:JSON.stringify(p.rows.map(r=>({...r, upload_id:id})))});
+    if(!rr.ok) throw new Error('حفظ الصفوف: '+(await rr.text()).slice(0,150));
+    const cr = await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_report_rows?upload_id=eq.${id}&select=id`,{headers:{...srrH(),'Prefer':'count=exact','Range':'0-0'}});
+    const cnt = +((cr.headers.get('content-range')||'').split('/')[1]||0);
+    if(cnt !== p.rows.length) throw new Error(`اتحفظ ${cnt} صف من ${p.rows.length}`);
+    await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_report_uploads?month=eq.${month}&as_of=eq.${to}&status=eq.disc_ref&id=neq.${id}`,{method:'PATCH',headers:{...srrH(true),'Prefer':'return=minimal'},body:JSON.stringify({status:'replaced'})});
+    const ar = await fetch(`${SUPABASE_URL}/rest/v1/sys_rep_report_uploads?id=eq.${id}`,{method:'PATCH',headers:{...srrH(true),'Prefer':'return=minimal'},body:JSON.stringify({status:'disc_ref', note:'خصومات العملاء الغير مباشرة'})});
+    if(!ar.ok) throw new Error('تفعيل الرفع: '+(await ar.text()).slice(0,150));
+    document.getElementById('idc-upload-box').style.display='none'; IDC.parsed=null;
+    const ys = document.getElementById('idc-year'); if(ys && ys.value!==month.slice(0,4)){ ys.value = month.slice(0,4); }
+    showToast(`✅ اتحفظ تقرير ${IDC_MON[+month.slice(5,7)-1]}`);
+    idcLoad();
+  }catch(e){
+    alert('❌ الرفع فشل ومتحسبش: '+e.message);
+    if(btn){ btn.disabled=false; btn.textContent='✅ حفظ'; }
+  }
+}
+
 const SRR = { month:null, parsed:null, latest:null, appReps:null };
 function srrH(json){ const h={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}; if(json){ h['Content-Type']='application/json'; } return h; }
 function srrFmt(n){ return Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
@@ -15544,7 +15743,7 @@ function updateBadges(){
 // ══════════════════════════════════════════════════════════════
 // NAV
 // ══════════════════════════════════════════════════════════════
-const PANEL_TITLES={'item-plan':'خطة الأصناف','tv-settings':'ضبط شاشة TV','sup-visits-monitor':'متابعة زيارات المشرفين','brand-settings':'تعديلات جوهرية','gm-visits':'زيارة gm','sector-strength':'قوة القطاع','chain-sales':'مبيعات عملاء السلاسل','sales-forecast':'فوركاست المبيعات','sup-monitor':'خطط مشرفي التنسيق',dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'الموقع الحالي','rep-detail':'تفاصيل المنسق',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',returns:'المرتجعات',attendance:'الحضور والانصراف','expiry-alert':'تنبيهات الصلاحية','shelf-expiry':'صلاحيات السوق',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',supervisors:'المشرفون والمديرون','sales-users':'مشرفو المبيعات','rep-users':'مناديب البيع',branches:'الفروع والعملاء',settings:'الإعدادات','promo-banner':'بانر العرض الترويجي','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام','sales-dashboard':'Sales Dashboard','sales-invoices':'فواتير المناديب','sales-goals':'الأهداف الشهرية','target-dist':'توزيع الهدف',heatmap:'خريطة حرارة الفروع','sales-products':'أصناف المبيعات','sales-returns':'مرتجعات المبيعات','sales-missing':'نواقص المبيعات','sales-archive':'أرشيف البيانات القديمة','ai-analysis':'تحليل AI — مبيعات السلاسل','letters-archive':'أرشيف الخطابات الموقّعة','field-support-report':'تقارير دعم الميدان','field-monitor':'مراقبة الميدان','competitors':'تقارير المنافسين','contract-analysis':'تحليل عقود العملاء','sup-eval':'تقييم مشرفي التنسيق','rep-eval':'تقييم المناديب','sales-sup-eval':'تقييم مشرفي المبيعات','mt-invoices':'تحليل فواتير عملاء MT','display-tools':'أدوات العرض','date-benefits':'فوائد التمر','spt':'الأهداف الخاصة','stock-compare':'مقارنة أرصدة','rep-balance':'رصيد مخزن المندوب','rep-inventory':'الجرد','rep-requests':'طلب بضاعة','visits-heatmap':'خريطة حرارة زيارات المنسقين','company-letters':'خطابات وقرارات'};
+const PANEL_TITLES={'item-plan':'خطة الأصناف','tv-settings':'ضبط شاشة TV','sup-visits-monitor':'متابعة زيارات المشرفين','brand-settings':'تعديلات جوهرية','gm-visits':'زيارة gm','sector-strength':'قوة القطاع','chain-sales':'مبيعات عملاء السلاسل','sales-forecast':'فوركاست المبيعات','sup-monitor':'خطط مشرفي التنسيق',dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'الموقع الحالي','rep-detail':'تفاصيل المنسق',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',returns:'المرتجعات',attendance:'الحضور والانصراف','expiry-alert':'تنبيهات الصلاحية','shelf-expiry':'صلاحيات السوق',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',supervisors:'المشرفون والمديرون','sales-users':'مشرفو المبيعات','rep-users':'مناديب البيع',branches:'الفروع والعملاء',settings:'الإعدادات','promo-banner':'بانر العرض الترويجي','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام','sales-dashboard':'Sales Dashboard','indirect-disc':'خصومات العملاء الغير مباشره','sales-invoices':'فواتير المناديب','sales-goals':'الأهداف الشهرية','target-dist':'توزيع الهدف',heatmap:'خريطة حرارة الفروع','sales-products':'أصناف المبيعات','sales-returns':'مرتجعات المبيعات','sales-missing':'نواقص المبيعات','sales-archive':'أرشيف البيانات القديمة','ai-analysis':'تحليل AI — مبيعات السلاسل','letters-archive':'أرشيف الخطابات الموقّعة','field-support-report':'تقارير دعم الميدان','field-monitor':'مراقبة الميدان','competitors':'تقارير المنافسين','contract-analysis':'تحليل عقود العملاء','sup-eval':'تقييم مشرفي التنسيق','rep-eval':'تقييم المناديب','sales-sup-eval':'تقييم مشرفي المبيعات','mt-invoices':'تحليل فواتير عملاء MT','display-tools':'أدوات العرض','date-benefits':'فوائد التمر','spt':'الأهداف الخاصة','stock-compare':'مقارنة أرصدة','rep-balance':'رصيد مخزن المندوب','rep-inventory':'الجرد','rep-requests':'طلب بضاعة','visits-heatmap':'خريطة حرارة زيارات المنسقين','company-letters':'خطابات وقرارات'};
 
 // ══════════════════════════════════════════════════════════════
 // الأهداف الخاصة (special targets) — تخصيص أصناف معيّنة لمنسق في فرع خلال
@@ -17502,6 +17701,7 @@ function showPanel(id){
   if(id==='rep-eval') repEvalRefresh();
   if(id==='sales-sup-eval') mseRefresh();
   if(id==='sales-dashboard'){ sdInit(); sdBuildDaysDropdown(); sdLoad(); loadCoordNotes(); }
+  if(id==='indirect-disc'){ idcInit(); idcLoad(); }
   if(id==='sales-targets'){ stInitMonth(); stLoad(); }
   if(id==='holidays'){ hlInitMonth(); hlLoad(); }
   if(id==='sales-products'){ sprodInitFilters().then(()=>sprodLoad()); }
