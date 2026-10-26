@@ -10734,7 +10734,7 @@ async function repAchievedOfficial(month, to){
 //  + الخصومات الغير مباشرة = الصافي × % الخصم × نصيب العملاء المستحقين
 // ══════════════════════════════════════════════════════════════
 const SO = { year:2027, opps:[], set:{}, tgt:null, act:{}, res:null };
-const SO_KIND = {O1:'توسعات جوه العملاء (فجوات توزيع)',O2:'فروع وقفت عند عملاء حاليين',O3:'عملاء وقفوا خالص',O4:'توريد مركزي وقف',O5:'عملاء موسم رمضان اللي فات'};
+const SO_KIND = {O1:'أصناف ناقصة في فروع العملاء',O2:'فروع وقفت سحب',O3:'عملاء وقفوا',O4:'عملاء السيزون (بيم)',O5:'عملاء الموسم اللي فات'};
 const SO_RN = {cairo:'سلاسل القاهرة', alex:'سلاسل إسكندرية'};
 const SO_MON = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
 const soN = v => rpiN(Math.round(v||0));
@@ -10772,7 +10772,8 @@ function soCompute(){
   });
   SO.opps.forEach(o=>{
     const R = res[o.region]; if(!R) return; const r = +(real[o.kind]||0);
-    const mv = Array.from({length:12},(_,m)=> o.kind==='O5' ? (+o.season_value||0)*r*(+split[m]||0) : (+o.run_rate||0)*R.idx[m]*(+ramp[m]||0)*r);
+    const cs = S.central_split||{};
+    const mv = Array.from({length:12},(_,m)=> o.kind==='O5' ? (+o.season_value||0)*r*(+split[m]||0) : o.kind==='O4' ? (+o.season_value||0)*r*(+cs[m]||0) : (+o.run_rate||0)*R.idx[m]*(+ramp[m]||0)*r);
     o._m = mv; o._y = mv.reduce((a,b)=>a+b,0);
     mv.forEach((v,m)=>R.byKind[o.kind][m]+=v); R.opps.push(o);
   });
@@ -10786,6 +10787,7 @@ function soCompute(){
   });
   SO.res = res;
 }
+function soOthers(){ const o = SO.set.others_disc||{}; const r = +o.rate||0; return Array.from({length:12},(_,m)=>(+((o.base||[])[m])||0)*r); }
 function soView(){
   const sel = document.getElementById('so-region')?.value || 'all';
   const regs = sel==='all' ? ['cairo','alex'] : [sel];
@@ -10797,6 +10799,23 @@ function soView(){
   v.T = { tgt:T(v.tgt), growth:T(v.growth), net:T(v.net), disc:T(v.disc), gross:T(v.gross), a25:T(v.a25), a26:T(v.a26) };
   v.label = regs.map(r=>SO_RN[r]).join(' + ');
   return v;
+}
+function soPlan(rg){
+  const R = SO.res[rg], by = {}, it = {};
+  R.opps.forEach(o=>{ const a = by[o.customer] = by[o.customer] || {c:o.customer, v:0, gaps:0, items:new Set(), sites:[], kinds:new Set()};
+    a.v += o._y; a.kinds.add(o.kind);
+    if(o.kind==='O1'){ a.gaps += +o.gap_sites||0; a.items.add(o.item); const x = it[o.item] = it[o.item] || {i:o.item, v:0, gaps:0}; x.v += o._y; x.gaps += +o.gap_sites||0; }
+    if(o.kind==='O2') a.sites.push(o.site); });
+  const todo = a=>{ const t=[];
+    if(a.kinds.has('O1')) t.push(`ينزّل ${a.items.size} صنف ناقص في فروعه (${a.gaps} مكان)`);
+    if(a.kinds.has('O2')) t.push(`يرجّع ${a.sites.length} فرع وقف: ${a.sites.slice(0,3).join('، ')}${a.sites.length>3?'...':''}`);
+    if(a.kinds.has('O3')) t.push('عميل وقف — يرجع يسحب');
+    if(a.kinds.has('O4')) t.push('عميل سيزون — يرجع لمستوى سحب 2025 في توريد نوفمبر');
+    if(a.kinds.has('O5')) t.push('سحب في الموسم اللي فات ووقف — يرجع في الموسم');
+    return t.join(' + '); };
+  const cust = Object.values(by).sort((a,b)=>b.v-a.v).map(a=>({c:a.c, v:a.v, todo:todo(a)}));
+  const items = Object.values(it).sort((a,b)=>b.v-a.v);
+  return {cust, items, total:cust.reduce((x,a)=>x+a.v,0)};
 }
 function soTopCust(v, n){ const m={}; v.opps.forEach(o=>{ const k=o.region+'|'+o.customer; m[k]=(m[k]||0)+o._y; });
   return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,n).map(([k,val])=>({rg:k.split('|')[0], c:k.split('|').slice(1).join('|'), v:val})); }
@@ -10814,9 +10833,32 @@ function soRender(){
     ${card(`هدف ${y} (السيستم)`, soN(v.T.tgt), v.label)}
     ${card('النمو من الفرص', '+'+soN(v.T.growth), 'نسبة النمو '+soP(v.T.growth/v.T.tgt), '#1A7A4A')}
     ${card(`الصافي المتوقع ${y}`, soN(v.T.net), 'مقابل '+(y-1)+': '+soP(v.T.net/v.T.a26-1))}
-    ${card('الخصومات الغير مباشرة', soN(v.T.disc), 'فوق الصافي', '#B45309')}
+    ${card('إشعارات الخصم', soN(v.T.disc), 'فوق الصافي', '#B45309')}
     ${card('الإجمالي قبل الإشعارات', soN(v.T.gross), 'الصافي + الخصومات', '#5B1622')}
   </div>`;
+  const goal = +(SO.set.goal||0);
+  if(goal && v.regs.length>1){ const diff = v.T.net-goal;
+    h += `<div style="background:${diff>=0?'#E3F1DA':'#FDECEC'};border:1px solid ${diff>=0?'#B9CF95':'#E7A3A3'};border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px;font-weight:700">
+      🎯 الهدف المطلوب على الصافي: <span style="color:#731E2E">${soN(goal)}</span> — الخطة بتوصل لـ <span style="color:#731E2E">${soN(v.T.net)}</span> —
+      ${diff>=0?`✅ زيادة ${soN(diff)} فوق المطلوب`:`⚠️ ناقص ${soN(-diff)}`}</div>`; }
+  // الخطة ببساطة
+  h += `<div style="font-weight:800;color:#731E2E;margin:6px 0 4px;font-size:14px">الخطة ببساطة — الزيادة جاية منين؟</div>
+    <div style="font-size:11px;color:#5B4630;margin-bottom:8px">من عملاء موجودين: نزّل الأصناف الناقصة في فروعهم، رجّع الفروع اللي وقفت، ورجّع بيم لمستوى 2025 في السيزون.</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:12px;margin-bottom:12px">`;
+  v.regs.forEach(rg=>{ const p = soPlan(rg), top = p.cust.slice(0,10), rest = p.total - top.reduce((x,a)=>x+a.v,0);
+    h += `<div style="border:1px solid #E8DCC4;border-radius:10px;overflow:hidden;background:#fff">
+      <div style="background:#731E2E;color:#fff;padding:8px 12px;font-weight:800">${SO_RN[rg]} — زيادة <span style="color:#F0C880">${soN(p.total)}</span></div>
+      <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+        <tr style="background:#F3EBDD"><th style="padding:6px;text-align:right">العميل</th><th style="padding:6px;text-align:right">المطلوب ببساطة</th><th style="padding:6px">الزيادة</th></tr>
+        ${top.map(a=>`<tr style="border-bottom:1px solid #F3EBDD"><td style="padding:6px;font-weight:800;vertical-align:top">${E(a.c)}</td><td style="padding:6px;color:#444">${E(a.todo)}</td><td style="padding:6px;text-align:center;font-weight:800;color:#1A7A4A;white-space:nowrap">${soN(a.v)}</td></tr>`).join('')}
+        ${p.cust.length>10?`<tr><td style="padding:6px;color:#777">باقي العملاء (${p.cust.length-10})</td><td style="padding:6px;color:#777">نفس الفكرة — التفاصيل تحت</td><td style="padding:6px;text-align:center;color:#777">${soN(rest)}</td></tr>`:''}
+      </table>
+      <div style="background:#F5F0E8;padding:6px 12px;font-weight:800;color:#731E2E;font-size:12px">الأصناف اللي تركز عليها</div>
+      <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+        <tr style="background:#F3EBDD"><th style="padding:6px;text-align:right">الصنف</th><th style="padding:6px">هينزل في كام مكان</th><th style="padding:6px">الزيادة</th></tr>
+        ${p.items.slice(0,8).map(x=>`<tr style="border-bottom:1px solid #F3EBDD"><td style="padding:6px;font-weight:700">${E(x.i)}</td><td style="padding:6px;text-align:center">${x.gaps}</td><td style="padding:6px;text-align:center;font-weight:800;color:#1A7A4A">${soN(x.v)}</td></tr>`).join('')}
+      </table></div>`; });
+  h += `</div>`;
   // نسب التحقيق (قابلة للتعديل)
   h += `<div style="background:#FFF8EC;border:1px solid #E8C98A;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:11px">
     <b>نسب التحقيق المتوقعة</b> (غيّرها واضغط حفظ — الحسبة بتتحدث على طول):
@@ -10830,8 +10872,10 @@ function soRender(){
     ${row('إجمالي النمو', v.growth, v.T.growth,'font-weight:800;color:#1A7A4A')}
     <tr><td style="${td};text-align:right;font-weight:700">نسبة النمو</td>${v.growth.map((g,m)=>`<td style="${td}">${soP(v.tgt[m]?g/v.tgt[m]:0)}</td>`).join('')}<td style="${td};font-weight:800;background:#F5F0E8">${soP(v.T.growth/v.T.tgt)}</td></tr>
     ${row('الصافي المتوقع', v.net, v.T.net,'font-weight:800;background:#F7F1E3')}
-    ${row('الخصومات الغير مباشرة', v.disc, v.T.disc,'color:#B45309')}
+    ${row('إشعارات الخصم', v.disc, v.T.disc,'color:#B45309')}
     ${row('الإجمالي قبل الإشعارات', v.gross, v.T.gross,'font-weight:800;background:#F3EBDD')}
+    ${v.regs.length>1 && soOthers().some(x=>x) ? (()=>{ const ot=soOthers(), cr=ot.map((x,m)=>x? x+v.disc[m] : 0);
+      return row('للعلم: نصيب باقي الفروع من الإشعارات (برا الخطة)', ot, sum(ot),'color:#8B6F47;font-size:10.5px') + row('للعلم: اللي هيبان على صف القاهرة في التقرير', cr, sum(cr),'color:#8B6F47;font-size:10.5px'); })() : ''}
     ${row(`فعلي ${y-2}`, v.a25, v.T.a25,'color:#777')}
     ${row(`${y-1} (فعلي + هدف نوفمبر/ديسمبر)`, v.a26, v.T.a26,'color:#777')}
   </table></div>
@@ -10879,12 +10923,20 @@ async function soRealSave(){
 function soReport(){
   const v = soView(), y = SO.year, sum=a=>a.reduce((x,z)=>x+z,0);
   const title = `التوقع البيعي ${y} — ${v.label}`;
-  const kpis = [[`هدف ${y}`,soN(v.T.tgt)],['النمو من الفرص','+'+soN(v.T.growth)+' ('+soP(v.T.growth/v.T.tgt)+')'],['الصافي المتوقع',soN(v.T.net)],['الخصومات الغير مباشرة',soN(v.T.disc)],['الإجمالي قبل الإشعارات',soN(v.T.gross)]];
+  const kpis = [[`هدف ${y}`,soN(v.T.tgt)],['النمو من الفرص','+'+soN(v.T.growth)+' ('+soP(v.T.growth/v.T.tgt)+')'],['الصافي المتوقع',soN(v.T.net)],['إشعارات الخصم',soN(v.T.disc)],['الإجمالي قبل الإشعارات',soN(v.T.gross)]];
   const mrow = (lab,arr)=>[lab,...arr.map(soN),soN(sum(arr))];
-  const secs = [{title:'التوقع شهر بشهر', head:['البند',...SO_MON,'الإجمالي'], alignR:[0], rows:[
+  const goal = +(SO.set.goal||0);
+  if(goal && v.regs.length>1) kpis.push(['الهدف المطلوب', soN(goal)+(v.T.net>=goal?' ✅':' ⚠️')]);
+  const plan = v.regs.flatMap(rg=>{ const p=soPlan(rg), top=p.cust.slice(0,10), rest=p.total-top.reduce((x,a)=>x+a.v,0);
+    return [{sheet:`الخطة ببساطة - ${SO_RN[rg]}`, title:`الخطة ببساطة — ${SO_RN[rg]} (زيادة ${soN(p.total)})`, head:['#','العميل','المطلوب ببساطة','الزيادة'], alignR:[2], widths:['4%','30%','52%','14%'],
+              rows:[...top.map((a,i)=>[i+1,a.c,a.todo,soN(a.v)]), ...(p.cust.length>10?[['',`باقي العملاء (${p.cust.length-10})`,'نفس الفكرة — التفاصيل في الفرص بالتفصيل',soN(rest)]]:[])], total:['','الإجمالي','',soN(p.total)]},
+            {sheet:`أصناف التركيز - ${SO_RN[rg]}`, title:`الأصناف اللي تركز عليها — ${SO_RN[rg]}`, head:['#','الصنف','هينزل في كام مكان','الزيادة'], rows:p.items.slice(0,8).map((x,i)=>[i+1,x.i,x.gaps,soN(x.v)])}]; });
+  const secs = [...plan, {title:'التوقع شهر بشهر', head:['البند',...SO_MON,'الإجمالي'], alignR:[0], rows:[
       mrow(`هدف ${y} (السيستم)`,v.tgt), ...['O1','O2','O3','O4','O5'].map(k=>mrow('نمو: '+SO_KIND[k],v.byKind[k])), mrow('إجمالي النمو',v.growth),
       ['نسبة النمو',...v.growth.map((g,m)=>soP(v.tgt[m]?g/v.tgt[m]:0)),soP(v.T.growth/v.T.tgt)],
-      mrow('الصافي المتوقع',v.net), mrow('الخصومات الغير مباشرة',v.disc), mrow('الإجمالي قبل الإشعارات',v.gross),
+      mrow('الصافي المتوقع',v.net), mrow('إشعارات الخصم',v.disc), mrow('الإجمالي قبل الإشعارات',v.gross),
+      ...(v.regs.length>1 && soOthers().some(x=>x) ? (()=>{ const ot=soOthers(), cr=ot.map((x,m)=>x? x+v.disc[m] : 0);
+          return [mrow('للعلم: نصيب باقي الفروع من الإشعارات (برا الخطة)',ot), mrow('للعلم: اللي هيبان على صف القاهرة في التقرير',cr)]; })() : []),
       mrow(`فعلي ${y-2}`,v.a25), mrow(`${y-1} (فعلي + هدف نوفمبر/ديسمبر)`,v.a26)]}];
   secs.push({title:'ملخص الأقاليم', head:['#','الإقليم',`فعلي ${y-2}`,`${y-1}`,`هدف ${y}`,'النمو','%','الصافي المتوقع','الخصومات','الإجمالي قبل الإشعارات'],
     rows:v.regs.map((rg,i)=>{ const R=SO.res[rg], t=sum(R.tgt), g=sum(R.growth); return [i+1,SO_RN[rg],soN(sum(R.a25)),soN(sum(R.a26)),soN(t),'+'+soN(g),soP(g/t),soN(sum(R.net)),soN(sum(R.disc)),soN(sum(R.gross))]; })});
@@ -10895,20 +10947,20 @@ function soReport(){
   const detail = {title:'الفرص بالتفصيل', head:['#','نوع الفرصة','الإقليم','العميل','الفرع / الصنف','التفاصيل','القيمة الأساسية',`قيمة ${y}`], alignR:[3,4],
     rows:all.map((o,i)=>[i+1,SO_KIND[o.kind],SO_RN[o.region],o.customer,o.item||o.site||'—',o.kind==='O1'?`نازل في ${o.carry_sites} من ${o.total_sites} — ناقص ${o.gap_sites}`:(o.last_date?'آخر سحب '+o.last_date:''),soN(o.kind==='O5'?o.season_value:o.run_rate)+(o.kind==='O5'?' (موسم)':' /شهر'),soN(o._y)]),
     total:['','الإجمالي','','','','','',soN(v.T.growth)]};
-  return {title,kpis,secs,detail,v};
+  return {title,kpis,secs,detail,v,nPlan:plan.length};
 }
 function soMeta(){ return `<span>الأساس: <b style="color:#731E2E">أهداف ${SO.year} على السيستم (صافي)</b></span><span>الفرص من: <b style="color:#731E2E">فواتير MT أغسطس–أكتوبر ${SO.year-1}</b></span>`; }
 function soFile(){ const r=document.getElementById('so-region')?.value||'all'; return `AlTahhan_SalesOutlook_${SO.year}_${r}`; }
 function soPdf(send){ if(!SO.res){ showToast('استنى التحميل'); return; } const d=soReport();
-  const M=d.secs[0], half=(a,b,lab)=>({title:M.title+' — '+lab, head:[M.head[0],...M.head.slice(a,b)], alignR:[0], rows:M.rows.map(r=>[r[0],...r.slice(a,b)])});
-  const pSecs=[half(1,7,'يناير–يونيو'), half(7,14,'يوليو–ديسمبر + الإجمالي'), ...d.secs.slice(1)];
+  const k=d.nPlan, M=d.secs[k], half=(a,b,lab)=>({title:M.title+' — '+lab, head:[M.head[0],...M.head.slice(a,b)], alignR:[0], rows:M.rows.map(r=>[r[0],...r.slice(a,b)])});
+  const pSecs=[...d.secs.slice(0,k), half(1,7,'يناير–يونيو'), half(7,14,'يوليو–ديسمبر + الإجمالي'), ...d.secs.slice(k+1)];
   rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,[...pSecs,{...d.detail,rows:d.detail.rows.slice(0,150),title:d.detail.title+(d.detail.rows.length>150?` (أكبر 150 من ${d.detail.rows.length} — الباقي في Excel)`:'')}],soMeta()); return pdf?pdf.output('blob'):null; },soFile()+'.pdf',d.title,send); }
 function soXlsx(send){ if(!SO.res){ showToast('استنى التحميل'); return; } const d=soReport();
   rpxDeliver('xlsx',async()=>{ const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]};
     const num=v=>typeof v==='string'&&/^[+\-]?[\d,]+(\.\d+)?$/.test(v)?+v.replace(/,/g,''):v;
     const sub=d.kpis.map(k=>k[0]+': '+k[1]).join(' · ');
-    d.secs.forEach((s,i)=>rpxSheet(wb, s.title, d.title+' — '+s.title, i===0?sub:'', s.head, s.rows.map(r=>r.map(num)), s.total&&s.total.map(num),
-      i===0?[{wch:34},...SO_MON.map(()=>({wch:12})),{wch:14}]:null));
+    d.secs.forEach((s,i)=>rpxSheet(wb, (s.sheet||s.title).replace(/[\\/?*\[\]:]/g,'').slice(0,31), d.title+' — '+s.title, i===0?sub:'', s.head, s.rows.map(r=>r.map(num)), s.total&&s.total.map(num),
+      i===d.nPlan?[{wch:34},...SO_MON.map(()=>({wch:12})),{wch:14}]:(s.head[2]==='المطلوب ببساطة'?[{wch:5},{wch:46},{wch:80},{wch:16}]:null)));
     rpxSheet(wb, 'الفرص بالتفصيل', d.title+' — الفرص بالتفصيل', 'القيمة الأساسية للفرص المستمرة = قيمة شهرية (أغسطس–أكتوبر)، ولعملاء الموسم = مسحوبات الموسم اللي فات', d.detail.head, d.detail.rows.map(r=>r.map(num)), d.detail.total.map(num),
       [{wch:5},{wch:28},{wch:14},{wch:44},{wch:40},{wch:26},{wch:16},{wch:14}]);
     const arr=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true}); return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}); },
