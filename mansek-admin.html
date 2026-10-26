@@ -6704,8 +6704,11 @@ h2,h3{color:#2C1F0A}
               <p>هدف السنة على السيستم + نمو من فرص محددة بالاسم + الخصومات الغير مباشرة — سلاسل القاهرة وسلاسل إسكندرية</p>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <select id="so-mode" onchange="soModeChange()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto;font-weight:700">
+                <option value="plan">📊 الخطة والتوقع</option><option value="month">🔎 تحليل الشهر (أوتوماتيك)</option></select>
+              <input type="month" id="so-month" onchange="soLoad()" style="display:none;padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto"/>
               <select id="so-year" onchange="soLoad()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto"><option value="2027">2027</option><option value="2026">نوفمبر–ديسمبر 2026</option></select>
-              <select id="so-scope" onchange="soRender()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto">
+              <select id="so-scope" onchange="soMode()==='month'?soLoad():soRender()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto">
                 <option value="all">القاهرة + إسكندرية</option><option value="r-cairo">سلاسل القاهرة</option><option value="r-alex">سلاسل إسكندرية</option></select>
               <button onclick="soXlsx()" style="background:#1A7A4A;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif"><i class="ti ti-file-spreadsheet"></i> Excel</button>
               <button onclick="soPdf()" style="background:#731E2E;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif"><i class="ti ti-file-type-pdf"></i> PDF</button>
@@ -10746,6 +10749,8 @@ async function soLoad(){
   const box = document.getElementById('so-body'); if(!box) return;
   SO.year = +(document.getElementById('so-year')?.value || 2027);
   box.innerHTML = '<div style="font-size:12px;color:#888;padding:10px">جاري التحميل...</div>';
+  if(soMode()==='month') return soLoadMonth();
+  SO.mon = null;
   if(SO.year===2026) return soLoad26();
   SO.y26 = null;
   try{
@@ -10803,8 +10808,9 @@ async function soLoad26(){
   try{
     const [tg, sets] = await Promise.all([
       soGet('rep_targets?deleted_at=is.null&month=gte.2026-11&month=lte.2026-12&select=month,supervisor_name,target_amount&limit=5000'),
-      soGet('sales_forecast_settings?year=eq.2027&key=eq.disc&select=key,value') ]);
-    const disc = (sets[0]||{}).value || {};
+      soGet('sales_forecast_settings?or=(and(year.eq.2027,key.eq.disc),and(year.eq.2026,key.eq.y26_plan))&select=year,key,value') ]);
+    const disc = ((sets.find(x=>x.key==='disc'))||{}).value || {};
+    SO.plan26 = ((sets.find(x=>x.key==='y26_plan'))||{}).value || null;
     const R = {cairo:{net:[0,0]}, alex:{net:[0,0]}};
     tg.forEach(t=>{ const rg = t.supervisor_name==='محمود راجح' ? 'alex' : 'cairo'; R[rg].net[t.month==='2026-11'?0:1] += +t.target_amount; });
     ['cairo','alex'].forEach(rg=>{ const d=disc[rg]||{}; R[rg].add=(+d.rate||0)*(+d.elig_share||0); R[rg].disc=R[rg].net.map(v=>v*R[rg].add); });
@@ -10817,6 +10823,24 @@ function soData26(){
   const rn = net.map(soR100), rd = disc.map(soR100), rg_ = rn.map((v,i)=>v+rd[i]);
   return {regs, label:regs.map(r=>SO_RN[r]).join(' + '), rn, rd, rg:rg_, T:{net:rn[0]+rn[1], disc:rd[0]+rd[1], gross:rg_[0]+rg_[1]},
     byReg:regs.map(rg=>({rg, net:R[rg].net.map(soR100), disc:R[rg].disc.map(soR100), add:R[rg].add}))};
+}
+function soPlan26(rg){ const p = (SO.plan26||{})[rg]; return p || null; }
+function soPlan26Html(rg){
+  const p = soPlan26(rg); if(!p) return '';
+  const E=srrEsc, th='padding:6px;background:#F3EBDD', td='padding:6px;border-bottom:1px solid #F3EBDD;text-align:center';
+  const stTag = st => st&&st!=='عادي' ? `<span style="font-size:10px;padding:1px 6px;border-radius:8px;background:${st.startsWith('جوكر')?'#FDE7C8':'#E3F1DA'};color:#5B4630">${E(st)}</span>` : '';
+  const itTable = (rows)=>`<table style="width:100%;border-collapse:collapse;font-size:11.5px"><tr><th style="${th};text-align:right">الصنف</th><th style="${th}">نوفمبر</th><th style="${th}">كراتين</th><th style="${th}">ديسمبر</th><th style="${th}">كراتين</th></tr>
+      ${rows.map(x=>`<tr><td style="${td};text-align:right;font-weight:700">${E(x[0])} ${stTag(x[1])}</td><td style="${td}">${soN(x[2])}</td><td style="${td};font-weight:800;color:#731E2E">${soN(x[4])}</td><td style="${td}">${soN(x[3])}</td><td style="${td};font-weight:800;color:#731E2E">${soN(x[5])}</td></tr>`).join('')}</table>`;
+  return `<div style="border:1px solid #E8DCC4;border-radius:10px;overflow:hidden;background:#fff;margin-bottom:12px">
+    <div style="background:#731E2E;color:#fff;padding:8px 12px;font-weight:800">${SO_RN[rg]} — منين هنجيب الرقم؟</div>
+    <div style="padding:8px 12px;font-size:12px"><b>🏬 الفروع القوية اللي نضغط فيها:</b> ${p.sites.map(x=>`<span style="display:inline-block;margin:2px;padding:2px 8px;border-radius:10px;background:#F5F0E8;border:1px solid #E8DCC4">${E(x)}</span>`).join('')}
+      ${p.central&&p.central.length?`<div style="margin-top:6px"><b>🚚 توريد مركزي في نوفمبر:</b> ${p.central.map(E).join(' — ')}</div>`:''}</div>
+    <div style="background:#F5F0E8;padding:6px 12px;font-weight:800;color:#731E2E;font-size:12px">العملاء (من خطة أصناف الموسم)</div>
+    <table style="width:100%;border-collapse:collapse;font-size:11.5px"><tr><th style="${th};text-align:right">العميل</th><th style="${th}">نوفمبر</th><th style="${th}">ديسمبر</th></tr>
+      ${p.cust.map(x=>`<tr><td style="${td};text-align:right;font-weight:700">${E(x[0])}</td><td style="${td}">${soN(x[1])}</td><td style="${td}">${soN(x[2])}</td></tr>`).join('')}</table>
+    <div style="background:#F5F0E8;padding:6px 12px;font-weight:800;color:#731E2E;font-size:12px">⭐ أصناف التركيز (الجواكر + المجدول الجديد + أصناف التركيز)</div>${itTable(p.focus)}
+    <div style="background:#F5F0E8;padding:6px 12px;font-weight:800;color:#731E2E;font-size:12px">أكبر الأصناف اللي هتجيب الرقم</div>${itTable(p.items)}
+  </div>`;
 }
 function soRender26(){
   const box = document.getElementById('so-body'); if(!box || !SO.y26) return;
@@ -10835,6 +10859,9 @@ function soRender26(){
       ${d.byReg.map(x=>[0,1].map(i=>`<tr><td style="${td};font-weight:700">${SO_RN[x.rg]}</td><td style="${td}">${MN[i]}</td><td style="${td}">${soN(x.net[i])}</td><td style="${td};color:#B45309">${soN(x.disc[i])}</td><td style="${td};font-weight:800">${soN(x.net[i]+x.disc[i])}</td></tr>`).join('')).join('')}
     </table>`;
   }
+  if(SO.plan26){ h += `<div style="font-weight:800;color:#731E2E;margin:14px 0 6px;font-size:14px">منين هنجيب الرقم في نوفمبر وديسمبر؟</div>
+    <div style="font-size:11px;color:#5B4630;margin-bottom:8px">من خطة أصناف الموسم (اتبنت على نفس الأهداف): العملاء والأصناف بالقيمة والكراتين، والفروع القوية اللي نضغط فيها (الفروع الصيفية زي الساحل والعلمين برا الموسم ده).</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(480px,1fr));gap:12px">${d.regs.map(soPlan26Html).join('')}</div>`; }
   h += `<div style="font-size:11px;color:#777;margin-top:8px;line-height:1.8">• الصافي = أهداف نوفمبر وديسمبر 2026 على السيستم (محمود راجح = إسكندرية، الباقي = القاهرة شامل الأسواق الخاصة).<br>
     • الإشعارات = 20.4% من مبيعات العملاء المستحقين (كل العملاء ما عدا جمله ماركت / فتح الله / بيت الجمله / الفار) — نفس نسبة 2027. من أكتوبر 2026 كل فرع بياخد إشعاراته على صفه.</div>`;
   box.innerHTML = h;
@@ -10846,6 +10873,89 @@ function soReport26(){
     rows:[0,1].map(i=>[i+1,MN[i],soN(d.rn[i]),soN(d.rd[i]),soN(d.rg[i])]), total:['','الإجمالي',soN(d.T.net),soN(d.T.disc),soN(d.T.gross)]}];
   if(d.regs.length>1) secs.push({sheet:'لكل إقليم', title:'لكل إقليم', head:['#','الإقليم','الشهر','الصافي','الإشعارات','الصافي + الإشعارات'],
     rows:d.byReg.flatMap((x,k)=>[0,1].map(i=>[k*2+i+1,SO_RN[x.rg],MN[i],soN(x.net[i]),soN(x.disc[i]),soN(x.net[i]+x.disc[i])]))});
+  if(SO.plan26) d.regs.forEach(rg=>{ const p=soPlan26(rg); if(!p) return; const R=SO_RN[rg];
+    secs.push({sheet:'فروع ومركزي - '+R, title:`${R} — الفروع القوية اللي نضغط فيها + التوريد المركزي`, head:['#','الفرع / التوريد'], rows:[...p.sites.map((x,i)=>[i+1,x]), ...(p.central||[]).map((x,i)=>['مركزي',x])]});
+    secs.push({sheet:'العملاء - '+R, title:`${R} — العملاء (من خطة أصناف الموسم)`, head:['#','العميل','نوفمبر','ديسمبر'], rows:p.cust.map((x,i)=>[i+1,x[0],soN(x[1]),soN(x[2])])});
+    secs.push({sheet:'التركيز - '+R, title:`${R} — أصناف التركيز`, head:['#','الصنف','الحالة','نوفمبر','كراتين نوفمبر','ديسمبر','كراتين ديسمبر'], rows:p.focus.map((x,i)=>[i+1,x[0],x[1],soN(x[2]),soN(x[4]),soN(x[3]),soN(x[5])])});
+    secs.push({sheet:'الأصناف - '+R, title:`${R} — أكبر الأصناف`, head:['#','الصنف','الحالة','نوفمبر','كراتين نوفمبر','ديسمبر','كراتين ديسمبر'], rows:p.items.map((x,i)=>[i+1,x[0],x[1],soN(x[2]),soN(x[4]),soN(x[3]),soN(x[5])])}); });
+  return {title,kpis,secs};
+}
+function soMode(){ return document.getElementById('so-mode')?.value || 'plan'; }
+function soModeChange(){
+  const m = soMode(), mi = document.getElementById('so-month'), yi = document.getElementById('so-year');
+  if(mi){ mi.style.display = m==='month' ? '' : 'none'; if(!mi.value){ const d=new Date(Date.now()+3*3600e3); mi.value = d.toISOString().slice(0,7); } }
+  if(yi) yi.style.display = m==='month' ? 'none' : '';
+  soLoad();
+}
+const soShort = c => String(c||'').replace(/شركة ماف لتجهيز وادارة الهايبر ماركت ش\.م\.م\s*\(كـ+ارفـ+ور\)/,'كارفور').replace(/شركة مترو ماركت للتجارة والتوزيع.*$/,'مترو ماركت')
+  .replace(/شركة اسواق\s+عبد الله العثيم - مصر/,'العثيم').replace(/شركة بنده العالمية لتجارة التجزئة -مصر/,'بنده').replace(/شركة سبينيس ايجيبت.*$/,'سبينيس')
+  .replace(/\(اوسكار جراند ستور.*$/,'أوسكار').replace(/اللولو للاسواق التجارية.*$/,'لولو').replace(/^شركة /,'');
+async function soLoadMonth(){
+  const box = document.getElementById('so-body'), mon = document.getElementById('so-month')?.value;
+  if(!mon){ box.innerHTML = '<div style="padding:10px;font-size:12px">اختار الشهر</div>'; return; }
+  try{
+    const sc = soScope();
+    SO.mon = await srrRpc('month_supply_analysis',{p_month:mon, p_region: sc});
+    soRenderMonth();
+  }catch(e){ box.innerHTML = `<div style="color:#A32D2D;font-size:12px;padding:10px">❌ تعذر التحميل: ${srrEsc(e.message)}</div>`; }
+}
+function soMonthCalc(){
+  const d = SO.mon, mon = d.month, y=+mon.slice(0,4), m=+mon.slice(5,7), days = new Date(y,m,0).getDate();
+  const last = d.last_invoice ? +String(d.last_invoice).slice(8,10) : 0, done = (d.last_invoice && String(d.last_invoice).slice(0,7)===mon) ? last : (d.last_invoice && String(d.last_invoice).slice(0,7)>mon ? days : 0);
+  const tgt=+d.target||0, net=+d.net||0, pace = done ? net/done*days : 0;
+  return {tgt, net, pct: tgt? net/tgt : 0, done, days, pace, pacePct: tgt? pace/tgt : 0};
+}
+function soRenderMonth(){
+  const box = document.getElementById('so-body'); if(!box || !SO.mon) return;
+  const d = SO.mon, k = soMonthCalc(), E=srrEsc, MN=SO_MON[+d.month.slice(5,7)-1]+' '+d.month.slice(0,4);
+  const th='padding:6px;background:#731E2E;color:#fff;font-weight:700;white-space:nowrap', td='padding:5px 6px;text-align:center;border-bottom:1px solid #F0E6D6';
+  const card=(l,val,sub,c)=>`<div style="border:1px solid #E8DCC4;border-top:4px solid ${c||'#731E2E'};border-radius:10px;padding:10px;background:#FFFDF8;text-align:center"><div style="font-size:11px;color:#8B6F47;font-weight:700">${l}</div><div style="font-size:19px;font-weight:800;color:${c||'#731E2E'}">${val}</div>${sub?`<div style="font-size:10px;color:#777">${sub}</div>`:''}</div>`;
+  const pctC = p => p>=1?'#1A7A4A':p>=0.8?'#B45309':'#A32D2D';
+  let h = `<div style="font-size:12px;color:#5B4630;margin-bottom:8px">🔎 <b>${MN}</b> — ${E(soScope()==='all'?'القاهرة + إسكندرية':SO_RN[soScope()])} — آخر فاتورة MT: <b>${d.last_invoice||'—'}</b> — الفرع القوي اتحدد من بيع ${d.ref_from} لـ ${d.ref_to}</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px">
+    ${card('الهدف', soN(k.tgt))}
+    ${card('المبيعات لحد دلوقتي', soN(k.net), soP(k.pct)+' من الهدف', pctC(k.pct))}
+    ${card('المتوقع آخر الشهر بنفس المعدل', k.done?soN(k.pace):'—', k.done?`${k.done} يوم من ${k.days} — ${soP(k.pacePct)}`:'', pctC(k.pacePct))}
+    ${card('الفروع القوية اللي اتوردت', `${d.strong_supplied} / ${d.strong_sites}`, `ناقص ${d.strong_sites-d.strong_supplied} فرع`, d.strong_supplied>=d.strong_sites?'#1A7A4A':'#B45309')}
+    ${card('فرص أصناف لسه ممكن تتورد', soN((d.item_opps||[]).reduce((a,x)=>a+(+x.val||0),0)), `${(d.site_opps||[]).length} فرع فيهم أصناف ناقصة`, '#1A7A4A')}
+  </div>`;
+  // العملاء
+  h += `<div style="font-weight:800;color:#731E2E;margin:6px 0">العملاء — بيع الشهر والفروع القوية</div><div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11.5px;background:#fff">
+    <tr><th style="${th};text-align:right">العميل</th><th style="${th}">الإقليم</th><th style="${th}">بيع الشهر</th><th style="${th}">متوسط شهري (مرجع)</th><th style="${th}">%</th><th style="${th}">فروع قوية اتوردت</th><th style="${th}">فروع ناقصة</th><th style="${th}">فرصة أصناف</th></tr>
+    ${(d.customers||[]).slice(0,30).map(c=>{ const p = c.ref_month? c.v/c.ref_month : 0, miss=c.strong-c.strong_ok;
+      return `<tr><td style="${td};text-align:right;font-weight:700">${E(soShort(c.c))}</td><td style="${td}">${SO_RN[c.rg]}</td><td style="${td};font-weight:800">${soN(c.v)}</td><td style="${td};color:#777">${soN(c.ref_month)}</td>
+        <td style="${td};font-weight:700;color:${pctC(p)}">${soP(p)}</td><td style="${td}">${c.strong_ok} / ${c.strong}</td><td style="${td};font-weight:700;color:${miss?'#A32D2D':'#1A7A4A'}">${miss||'✓'}</td><td style="${td};color:#1A7A4A;font-weight:700">${c.opp?soN(c.opp):'—'}</td></tr>`; }).join('')}
+  </table></div><div style="font-size:10px;color:#888;margin-top:3px">المتوسط الشهري = بيع الفروع القوية في الـ 3 شهور اللي قبل الشهر ÷ 3 (للمقارنة بس — مواسم رجب/شعبان بتكون أعلى).</div>`;
+  // الفروع القوية الناقصة
+  const ms = d.missing_sites||[];
+  h += `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:12px;margin-top:14px">
+   <div><div style="font-weight:800;color:#731E2E;margin-bottom:6px">🏬 فروع قوية لسه ماتوردتش الشهر ده (${ms.length})</div><div style="max-height:520px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:11.5px;background:#fff">
+    <tr><th style="${th}">#</th><th style="${th};text-align:right">الفرع</th><th style="${th};text-align:right">العميل</th><th style="${th}">بيعه الشهري المعتاد</th></tr>
+    ${ms.slice(0,60).map((x,i)=>`<tr><td style="${td}">${i+1}</td><td style="${td};text-align:right;font-weight:700">${E(x.st)}</td><td style="${td};text-align:right">${E(soShort(x.c))}</td><td style="${td};font-weight:700">${soN(x.ref_month)}</td></tr>`).join('')}
+   </table></div></div>
+   <div><div style="font-weight:800;color:#731E2E;margin-bottom:6px">⭐ أصناف لسه فيها فرصة تتورد</div><div style="max-height:520px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:11.5px;background:#fff">
+    <tr><th style="${th}">#</th><th style="${th};text-align:right">الصنف</th><th style="${th}">الإقليم</th><th style="${th}">في كام فرع</th><th style="${th}">القيمة المتوقعة</th></tr>
+    ${(d.item_opps||[]).slice(0,40).map((x,i)=>`<tr><td style="${td}">${i+1}</td><td style="${td};text-align:right;font-weight:700">${E(x.i)}</td><td style="${td}">${SO_RN[x.rg]}</td><td style="${td}">${x.sites}</td><td style="${td};font-weight:800;color:#1A7A4A">${soN(x.val)}</td></tr>`).join('')}
+   </table></div></div></div>`;
+  // الفروع والأصناف الناقصة فيها
+  h += `<div style="font-weight:800;color:#731E2E;margin:14px 0 6px">📋 كل فرع والأصناف الناقصة فيه (مرتب بالأهم)</div><div style="overflow-x:auto;max-height:600px"><table style="width:100%;border-collapse:collapse;font-size:11px;background:#fff">
+    <tr><th style="${th}">#</th><th style="${th};text-align:right">الفرع</th><th style="${th};text-align:right">العميل</th><th style="${th}">اتورد الشهر ده؟</th><th style="${th}">أصناف ناقصة</th><th style="${th}">القيمة</th><th style="${th};text-align:right">الأصناف</th></tr>
+    ${(d.site_opps||[]).slice(0,80).map((x,i)=>`<tr><td style="${td}">${i+1}</td><td style="${td};text-align:right;font-weight:700;white-space:nowrap">${E(x.st)}</td><td style="${td};text-align:right">${E(soShort(x.c))}</td><td style="${td}">${x.active?'✅':'❌'}</td><td style="${td}">${x.n}</td><td style="${td};font-weight:800;color:#1A7A4A">${soN(x.val)}</td><td style="${td};text-align:right;font-size:10px;color:#555">${E(String(x.items).split(' | ').slice(0,6).join('، '))}${x.n>6?'...':''}</td></tr>`).join('')}
+  </table></div>
+  <div style="font-size:10.5px;color:#777;margin-top:8px;line-height:1.8">• الفرع القوي = بيعه في الـ 3 شهور اللي قبل الشهر ≥ خُمس بيع أكبر فرع عند نفس العميل (الفروع الضعيفة مش بتظهر).<br>• صنف فيه فرصة = نازل في نص الفروع القوية للعميل على الأقل، ولسه ماتوردش للفرع ده الشهر ده. القيمة = الوسيط الشهري لبيع الصنف في الفروع القوية اللي شايلاه.<br>• الأرقام من فواتير MT — كل ما ترفع فواتير جديدة التحليل بيتحدث لوحده.</div>`;
+  box.innerHTML = h;
+}
+function soReportMonth(){
+  const d = SO.mon, k = soMonthCalc(), MN=SO_MON[+d.month.slice(5,7)-1]+' '+d.month.slice(0,4);
+  const title = `تحليل الشهر — ${MN} — ${soScope()==='all'?'القاهرة + إسكندرية':SO_RN[soScope()]}`;
+  const kpis = [['الهدف',soN(k.tgt)],['المبيعات لحد دلوقتي',soN(k.net)+' ('+soP(k.pct)+')'],['المتوقع آخر الشهر',k.done?soN(k.pace):'—'],['فروع قوية اتوردت',`${d.strong_supplied} / ${d.strong_sites}`]];
+  const secs = [
+    {sheet:'العملاء', title:'العملاء — بيع الشهر والفروع القوية', head:['#','العميل','الإقليم','بيع الشهر','متوسط شهري','%','فروع قوية اتوردت','فروع ناقصة','فرصة أصناف'],
+      rows:(d.customers||[]).map((c,i)=>[i+1,soShort(c.c),SO_RN[c.rg],soN(c.v),soN(c.ref_month),soP(c.ref_month?c.v/c.ref_month:0),`${c.strong_ok} / ${c.strong}`,c.strong-c.strong_ok,soN(c.opp)])},
+    {sheet:'فروع قوية ناقصة', title:'فروع قوية لسه ماتوردتش', head:['#','الفرع','العميل','بيعه الشهري المعتاد'], alignR:[2], rows:(d.missing_sites||[]).map((x,i)=>[i+1,x.st,soShort(x.c),soN(x.ref_month)])},
+    {sheet:'أصناف فيها فرصة', title:'أصناف لسه فيها فرصة تتورد', head:['#','الصنف','الإقليم','في كام فرع','القيمة المتوقعة'], rows:(d.item_opps||[]).map((x,i)=>[i+1,x.i,SO_RN[x.rg],x.sites,soN(x.val)])},
+    {sheet:'الفروع والأصناف', title:'كل فرع والأصناف الناقصة فيه', head:['#','الفرع','العميل','اتورد؟','أصناف ناقصة','القيمة','الأصناف'], alignR:[2,6], widths:['4%','20%','14%','7%','7%','10%','38%'],
+      rows:(d.site_opps||[]).map((x,i)=>[i+1,x.st,soShort(x.c),x.active?'نعم':'لا',x.n,soN(x.val),String(x.items).split(' | ').join('، ')])}];
   return {title,kpis,secs};
 }
 function soScope(){ const v = document.getElementById('so-scope')?.value || 'all'; return v==='r-cairo' ? 'cairo' : v==='r-alex' ? 'alex' : 'all'; }
@@ -10884,6 +10994,7 @@ function soTopCust(v, n){ const m={}; v.opps.forEach(o=>{ const k=o.region+'|'+o
 function soTopItems(v, n){ const m={}; v.opps.filter(o=>o.item).forEach(o=>{ const k=o.region+'|'+o.item; m[k]=(m[k]||0)+o._y; });
   return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,n).map(([k,val])=>({rg:k.split('|')[0], i:k.split('|').slice(1).join('|'), v:val})); }
 function soRender(){
+  if(soMode()==='month') return soRenderMonth();
   if(SO.year===2026) return soRender26();
   const box = document.getElementById('so-body'); if(!box || !SO.res) return;
   const v = soView(), y=SO.year, E=srrEsc, real = SO.set.real||{};
@@ -11030,6 +11141,8 @@ function soReport(){
 function soMeta(){ return `<span>الأساس: <b style="color:#731E2E">أهداف ${SO.year} على السيستم (صافي)</b></span><span>الفرص من: <b style="color:#731E2E">فواتير MT أغسطس–أكتوبر ${SO.year-1}</b></span>`; }
 function soFile(){ const r=soScope(); return `AlTahhan_SalesOutlook_${SO.year}_${r}`; }
 function soPdf(send){
+  if(soMode()==='month'){ if(!SO.mon){ showToast('استنى التحميل'); return; } const d=soReportMonth();
+    return rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,[{...d.secs[0],title:d.secs[0].title+' (أكبر 30)',rows:d.secs[0].rows.slice(0,30)},{...d.secs[1],rows:d.secs[1].rows.slice(0,60)},{...d.secs[2],rows:d.secs[2].rows.slice(0,60)},{...d.secs[3],rows:d.secs[3].rows.slice(0,80)}],`<span>المصدر: <b style="color:#731E2E">فواتير MT + أهداف السيستم</b></span>`); return pdf?pdf.output('blob'):null; },`AlTahhan_MonthAnalysis_${SO.mon.month}_${soScope()}.pdf`,d.title,send); }
   if(SO.year===2026){ if(!SO.y26){ showToast('استنى التحميل'); return; } const d=soReport26();
     return rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,d.secs,`<span>الأساس: <b style="color:#731E2E">أهداف نوفمبر وديسمبر 2026 على السيستم</b></span>`); return pdf?pdf.output('blob'):null; },`AlTahhan_SalesOutlook_2026-11-12_${soScope()}.pdf`,d.title,send); }
   if(!SO.res){ showToast('استنى التحميل'); return; } const d=soReport();
@@ -11037,6 +11150,13 @@ function soPdf(send){
   const pSecs=[...d.secs.slice(0,k), half(1,7,'يناير–يونيو'), half(7,14,'يوليو–ديسمبر + الإجمالي'), ...d.secs.slice(k+1)];
   rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,[...pSecs,{...d.detail,rows:d.detail.rows.slice(0,150),title:d.detail.title+(d.detail.rows.length>150?` (أكبر 150 من ${d.detail.rows.length} — الباقي في Excel)`:'')}],soMeta()); return pdf?pdf.output('blob'):null; },soFile()+'.pdf',d.title,send); }
 function soXlsx(send){
+  if(soMode()==='month'){ if(!SO.mon){ showToast('استنى التحميل'); return; } const d=soReportMonth();
+    return rpxDeliver('xlsx',async()=>{ const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]};
+      const num=v=>typeof v==='string'&&/^[+\-]?[\d,]+(\.\d+)?$/.test(v)?+v.replace(/,/g,''):v;
+      d.secs.forEach((s,i)=>rpxSheet(wb, s.sheet, d.title+' — '+s.title, i===0?d.kpis.map(k=>k[0]+': '+k[1]).join(' · '):'', s.head, s.rows.map(r=>r.map(num)), null,
+        s.sheet==='الفروع والأصناف'?[{wch:5},{wch:34},{wch:18},{wch:8},{wch:10},{wch:14},{wch:90}]:null));
+      const arr=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true}); return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}); },
+      `AlTahhan_MonthAnalysis_${SO.mon.month}_${soScope()}.xlsx`,d.title,send); }
   if(SO.year===2026){ if(!SO.y26){ showToast('استنى التحميل'); return; } const d=soReport26();
     return rpxDeliver('xlsx',async()=>{ const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]};
       const num=v=>typeof v==='string'&&/^[+\-]?[\d,]+(\.\d+)?$/.test(v)?+v.replace(/,/g,''):v;
