@@ -6709,7 +6709,7 @@ h2,h3{color:#2C1F0A}
               <p>هدف السنة على السيستم + نمو من فرص محددة بالاسم + الخصومات الغير مباشرة — سلاسل القاهرة وسلاسل إسكندرية</p>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <select id="so-year" onchange="soLoad()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto"><option value="2027">2027</option></select>
+              <select id="so-year" onchange="soLoad()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto"><option value="2027">2027</option><option value="2026">نوفمبر–ديسمبر 2026</option></select>
               <select id="so-scope" onchange="soRender()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto">
                 <option value="all">القاهرة + إسكندرية</option><option value="r-cairo">سلاسل القاهرة</option><option value="r-alex">سلاسل إسكندرية</option></select>
               <button onclick="soXlsx()" style="background:#1A7A4A;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif"><i class="ti ti-file-spreadsheet"></i> Excel</button>
@@ -10751,6 +10751,8 @@ async function soLoad(){
   const box = document.getElementById('so-body'); if(!box) return;
   SO.year = +(document.getElementById('so-year')?.value || 2027);
   box.innerHTML = '<div style="font-size:12px;color:#888;padding:10px">جاري التحميل...</div>';
+  if(SO.year===2026) return soLoad26();
+  SO.y26 = null;
   try{
     const y=SO.year, py=y-1, pp=y-2;
     const [opps, sets, tg, act] = await Promise.all([
@@ -10799,6 +10801,58 @@ function soApproved(){ const a = SO.set.approved; if(!a || !a.net) return null;
   const net=a.net.map(Number), disc=(a.disc||[]).map(Number), sum=x=>x.reduce((p,q)=>p+q,0);
   return {net, disc, gross:net.map((x,m)=>x+(disc[m]||0)), T:{net:sum(net), disc:sum(disc), gross:sum(net)+sum(disc)}}; }
 function soOthers(){ const o = SO.set.others_disc||{}; const r = +o.rate||0; return Array.from({length:12},(_,m)=>(+((o.base||[])[m])||0)*r); }
+const SO26_M = [10, 11];
+const soR100 = v => Math.round((v||0)/100000)*100000;
+async function soLoad26(){
+  const box = document.getElementById('so-body');
+  try{
+    const [tg, sets] = await Promise.all([
+      soGet('rep_targets?deleted_at=is.null&month=gte.2026-11&month=lte.2026-12&select=month,supervisor_name,target_amount&limit=5000'),
+      soGet('sales_forecast_settings?year=eq.2027&key=eq.disc&select=key,value') ]);
+    const disc = (sets[0]||{}).value || {};
+    const R = {cairo:{net:[0,0]}, alex:{net:[0,0]}};
+    tg.forEach(t=>{ const rg = t.supervisor_name==='محمود راجح' ? 'alex' : 'cairo'; R[rg].net[t.month==='2026-11'?0:1] += +t.target_amount; });
+    ['cairo','alex'].forEach(rg=>{ const d=disc[rg]||{}; R[rg].add=(+d.rate||0)*(+d.elig_share||0); R[rg].disc=R[rg].net.map(v=>v*R[rg].add); });
+    SO.y26 = R; SO.res = null; soRender26();
+  }catch(e){ box.innerHTML = `<div style="color:#A32D2D;font-size:12px;padding:10px">❌ تعذر التحميل: ${srrEsc(e.message)}</div>`; }
+}
+function soData26(){
+  const R = SO.y26, sc = soScope(), regs = sc==='all' ? ['cairo','alex'] : [sc];
+  const net = [0,1].map(i=>regs.reduce((a,rg)=>a+R[rg].net[i],0)), disc = [0,1].map(i=>regs.reduce((a,rg)=>a+R[rg].disc[i],0));
+  const rn = net.map(soR100), rd = disc.map(soR100), rg_ = rn.map((v,i)=>v+rd[i]);
+  return {regs, label:regs.map(r=>SO_RN[r]).join(' + '), rn, rd, rg:rg_, T:{net:rn[0]+rn[1], disc:rd[0]+rd[1], gross:rg_[0]+rg_[1]},
+    byReg:regs.map(rg=>({rg, net:R[rg].net.map(soR100), disc:R[rg].disc.map(soR100), add:R[rg].add}))};
+}
+function soRender26(){
+  const box = document.getElementById('so-body'); if(!box || !SO.y26) return;
+  const d = soData26(), MN=['نوفمبر 2026','ديسمبر 2026'];
+  const th='padding:7px;background:#F3EBDD', td='padding:7px;text-align:center;border-bottom:1px solid #F3EBDD';
+  let h = `<div style="border:2px solid #C8A96E;border-radius:12px;overflow:hidden;margin-bottom:14px;background:#fff">
+    <div style="background:#731E2E;color:#fff;padding:9px 14px;font-weight:800;font-size:14px">التوقع البيعي نوفمبر–ديسمبر 2026 — ${srrEsc(d.label)} <span style="font-size:11px;color:#F0C880;font-weight:600">(مقرب لأقرب 100 ألف)</span></div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <tr><th style="${th}">الشهر</th><th style="${th}">الصافي (الهدف على السيستم)</th><th style="${th}">الإشعارات المتوقعة</th><th style="${th}">الصافي + الإشعارات</th></tr>
+      ${[0,1].map(i=>`<tr><td style="${td};font-weight:700">${MN[i]}</td><td style="${td}">${soN(d.rn[i])}</td><td style="${td};color:#B45309">${soN(d.rd[i])}</td><td style="${td};font-weight:800">${soN(d.rg[i])}</td></tr>`).join('')}
+      <tr style="background:#F5F0E8;font-weight:800;color:#731E2E"><td style="padding:8px;text-align:center">الإجمالي</td><td style="padding:8px;text-align:center">${soN(d.T.net)}</td><td style="padding:8px;text-align:center">${soN(d.T.disc)}</td><td style="padding:8px;text-align:center">${soN(d.T.gross)}</td></tr>
+    </table></div>`;
+  if(d.regs.length>1){
+    h += `<div style="font-weight:800;color:#731E2E;margin:6px 0">لكل إقليم</div><table style="width:100%;border-collapse:collapse;font-size:12.5px;background:#fff">
+      <tr><th style="${th}">الإقليم</th><th style="${th}">الشهر</th><th style="${th}">الصافي</th><th style="${th}">الإشعارات</th><th style="${th}">الصافي + الإشعارات</th></tr>
+      ${d.byReg.map(x=>[0,1].map(i=>`<tr><td style="${td};font-weight:700">${SO_RN[x.rg]}</td><td style="${td}">${MN[i]}</td><td style="${td}">${soN(x.net[i])}</td><td style="${td};color:#B45309">${soN(x.disc[i])}</td><td style="${td};font-weight:800">${soN(x.net[i]+x.disc[i])}</td></tr>`).join('')).join('')}
+    </table>`;
+  }
+  h += `<div style="font-size:11px;color:#777;margin-top:8px;line-height:1.8">• الصافي = أهداف نوفمبر وديسمبر 2026 على السيستم (محمود راجح = إسكندرية، الباقي = القاهرة شامل الأسواق الخاصة).<br>
+    • الإشعارات = 20.4% من مبيعات العملاء المستحقين (كل العملاء ما عدا جمله ماركت / فتح الله / بيت الجمله / الفار) — نفس نسبة 2027. من أكتوبر 2026 كل فرع بياخد إشعاراته على صفه.</div>`;
+  box.innerHTML = h;
+}
+function soReport26(){
+  const d = soData26(), MN=['نوفمبر 2026','ديسمبر 2026'], title = `التوقع البيعي نوفمبر–ديسمبر 2026 — ${d.label}`;
+  const kpis = [['الصافي',soN(d.T.net)],['الإشعارات المتوقعة',soN(d.T.disc)],['الصافي + الإشعارات',soN(d.T.gross)]];
+  const secs = [{sheet:'نوفمبر وديسمبر 2026', title:'الأرقام (مقربة لأقرب 100 ألف)', head:['#','الشهر','الصافي','الإشعارات المتوقعة','الصافي + الإشعارات'],
+    rows:[0,1].map(i=>[i+1,MN[i],soN(d.rn[i]),soN(d.rd[i]),soN(d.rg[i])]), total:['','الإجمالي',soN(d.T.net),soN(d.T.disc),soN(d.T.gross)]}];
+  if(d.regs.length>1) secs.push({sheet:'لكل إقليم', title:'لكل إقليم', head:['#','الإقليم','الشهر','الصافي','الإشعارات','الصافي + الإشعارات'],
+    rows:d.byReg.flatMap((x,k)=>[0,1].map(i=>[k*2+i+1,SO_RN[x.rg],MN[i],soN(x.net[i]),soN(x.disc[i]),soN(x.net[i]+x.disc[i])]))});
+  return {title,kpis,secs};
+}
 function soScope(){ const v = document.getElementById('so-scope')?.value || 'all'; return v==='r-cairo' ? 'cairo' : v==='r-alex' ? 'alex' : 'all'; }
 function soView(){
   const sel = soScope();
@@ -10835,6 +10889,7 @@ function soTopCust(v, n){ const m={}; v.opps.forEach(o=>{ const k=o.region+'|'+o
 function soTopItems(v, n){ const m={}; v.opps.filter(o=>o.item).forEach(o=>{ const k=o.region+'|'+o.item; m[k]=(m[k]||0)+o._y; });
   return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,n).map(([k,val])=>({rg:k.split('|')[0], i:k.split('|').slice(1).join('|'), v:val})); }
 function soRender(){
+  if(SO.year===2026) return soRender26();
   const box = document.getElementById('so-body'); if(!box || !SO.res) return;
   const v = soView(), y=SO.year, E=srrEsc, real = SO.set.real||{};
   const card=(l,val,sub,c)=>`<div style="border:1px solid #E8DCC4;border-top:4px solid ${c||'#731E2E'};border-radius:10px;padding:10px;background:#FFFDF8;text-align:center">
@@ -10979,11 +11034,21 @@ function soReport(){
 }
 function soMeta(){ return `<span>الأساس: <b style="color:#731E2E">أهداف ${SO.year} على السيستم (صافي)</b></span><span>الفرص من: <b style="color:#731E2E">فواتير MT أغسطس–أكتوبر ${SO.year-1}</b></span>`; }
 function soFile(){ const r=soScope(); return `AlTahhan_SalesOutlook_${SO.year}_${r}`; }
-function soPdf(send){ if(!SO.res){ showToast('استنى التحميل'); return; } const d=soReport();
+function soPdf(send){
+  if(SO.year===2026){ if(!SO.y26){ showToast('استنى التحميل'); return; } const d=soReport26();
+    return rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,d.secs,`<span>الأساس: <b style="color:#731E2E">أهداف نوفمبر وديسمبر 2026 على السيستم</b></span>`); return pdf?pdf.output('blob'):null; },`AlTahhan_SalesOutlook_2026-11-12_${soScope()}.pdf`,d.title,send); }
+  if(!SO.res){ showToast('استنى التحميل'); return; } const d=soReport();
   const k=d.nPlan, M=d.secs[k], half=(a,b,lab)=>({title:M.title+' — '+lab, head:[M.head[0],...M.head.slice(a,b)], alignR:[0], rows:M.rows.map(r=>[r[0],...r.slice(a,b)])});
   const pSecs=[...d.secs.slice(0,k), half(1,7,'يناير–يونيو'), half(7,14,'يوليو–ديسمبر + الإجمالي'), ...d.secs.slice(k+1)];
   rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,[...pSecs,{...d.detail,rows:d.detail.rows.slice(0,150),title:d.detail.title+(d.detail.rows.length>150?` (أكبر 150 من ${d.detail.rows.length} — الباقي في Excel)`:'')}],soMeta()); return pdf?pdf.output('blob'):null; },soFile()+'.pdf',d.title,send); }
-function soXlsx(send){ if(!SO.res){ showToast('استنى التحميل'); return; } const d=soReport();
+function soXlsx(send){
+  if(SO.year===2026){ if(!SO.y26){ showToast('استنى التحميل'); return; } const d=soReport26();
+    return rpxDeliver('xlsx',async()=>{ const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]};
+      const num=v=>typeof v==='string'&&/^[+\-]?[\d,]+(\.\d+)?$/.test(v)?+v.replace(/,/g,''):v;
+      d.secs.forEach((s,i)=>rpxSheet(wb, s.sheet, d.title+' — '+s.title, i===0?d.kpis.map(k=>k[0]+': '+k[1]).join(' · '):'', s.head, s.rows.map(r=>r.map(num)), s.total&&s.total.map(num)));
+      const arr=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true}); return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}); },
+      `AlTahhan_SalesOutlook_2026-11-12_${soScope()}.xlsx`,d.title,send); }
+  if(!SO.res){ showToast('استنى التحميل'); return; } const d=soReport();
   rpxDeliver('xlsx',async()=>{ const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]};
     const num=v=>typeof v==='string'&&/^[+\-]?[\d,]+(\.\d+)?$/.test(v)?+v.replace(/,/g,''):v;
     const sub=d.kpis.map(k=>k[0]+': '+k[1]).join(' · ');
