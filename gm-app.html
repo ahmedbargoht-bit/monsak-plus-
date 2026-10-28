@@ -14455,10 +14455,12 @@ function exportReturnsPDF(onlySelected){
 // تحديث badge عند تحميل الإدارة
 async function adminCheckReturnsBadge(){
   try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/returns?status=eq.new&select=id`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    const data=await res.json();
-    const count=Array.isArray(data)?data.length:0;
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/returns?status=eq.new&select=id&limit=1`,
+      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'count=exact'}});
+    const cr=(res.headers.get('content-range')||'').split('/')[1];
+    let count;
+    if(res.ok && cr && cr!=='*') count=+cr||0;
+    else { const r2=await fetch(`${SUPABASE_URL}/rest/v1/returns?status=eq.new&select=id`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}); const d=await r2.json(); count=Array.isArray(d)?d.length:0; }
     const badge=document.getElementById('nav-ret-badge');
     if(badge){badge.textContent=count;badge.style.display=count?'':'none';}
   }catch(e){}
@@ -14714,6 +14716,12 @@ function expiryExportPDF(){
 
 // badge polling عند التحميل
 async function adminCheckExpiryBadge(){
+  const _nav = document.getElementById('nav-expiry-badge')?.closest('.nav-item');
+  if(!_nav || _nav.dataset.forceHidden==='1' || _nav.style.display==='none') return;
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/admin_expiry_badge_count`,{method:'POST',headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`},body:'{}'});
+    if(r.ok){ const count = +(await r.json())||0; const badge=document.getElementById('nav-expiry-badge'); if(badge){ badge.textContent=count; badge.style.display=count?'':'none'; } return; }
+  }catch(e){}
   try{
     let data = await fetchAllRows(`${SUPABASE_URL}/rest/v1/products?select=name,snf,date_shelf,months_shelf,date_stock,months_stock&order=created_at.desc`,
       {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`});
@@ -16045,14 +16053,14 @@ async function setupApp(){
   if(miFromEl) miFromEl.value = localISO();
   await loadStaticData();           // بيانات ثابتة أولاً
   refreshAll();
-  refreshTimer=setInterval(refreshAll,5*60*1000);        // كل 5 دقائق بدل 2
-  _staticTimer=setInterval(loadStaticData,15*60*1000);   // بيانات ثابتة كل 15 دقيقة
+  refreshTimer=setInterval(()=>bgRefresh('timer'),5*60*1000);        // كل 5 دقائق — في الخلفية بشروط
+  _staticTimer=setInterval(()=>bgRefresh('static'),15*60*1000);      // بيانات ثابتة كل 15 دقيقة — بنفس الشروط
   // المتصفح بيوقف الـ setInterval لو التاب فضلت في الخلفية لفترة طويلة (خصوصاً موبايل) —
   // فلما الأدمن يرجع للتاب بعد غيبة، نجدد البيانات فوراً بدل ما يفضل شايف بيانات قديمة من ساعات
   if(!window._visRefreshBound){
     window._visRefreshBound = true;
     document.addEventListener('visibilitychange', ()=>{
-      if(!document.hidden && CU) refreshAll();
+      if(!document.hidden && CU) bgRefresh('focus');
     });
   }
 }
@@ -16187,6 +16195,19 @@ async function salesArchiveLoad(){
   ).join('');
 }
 
+// تابات تقارير المبيعات/MT — بتجيب بياناتها بنفسها من السيرفر ومابتستخدمش بيانات المنسقين اللحظية
+const BG_SKIP_PANELS = new Set(['chain-sales','branch-items','sales-forecast','item-plan','sales-outlook','indirect-disc','sales-returns','sector-strength']);
+let _bgLast = 0, _bgBusy = false, _bgPending = false, _bgStaticPending = false;
+function bgActivePanel(){ const a=document.querySelector('.panel.active'); return a ? a.id.replace('panel-','') : ''; }
+async function bgRefresh(kind){
+  if(!CU) return;
+  const skip = document.hidden || BG_SKIP_PANELS.has(bgActivePanel());
+  if(kind==='static'){ if(skip){ _bgStaticPending = true; return; } _bgStaticPending = false; try{ await loadStaticData(); }catch(e){} return; }
+  if(skip){ _bgPending = true; return; }
+  if(_bgBusy || Date.now()-_bgLast < 2*60*1000) return;
+  _bgBusy = true; _bgPending = false;
+  try{ await refreshAll(); } finally { _bgBusy = false; }
+}
 async function refreshAll(){
   document.querySelectorAll('.live-update-text').forEach(el=>el.textContent='جاري التحديث...');
   // البيانات اللحظية فقط — الثابتة في loadStaticData
@@ -16205,6 +16226,7 @@ async function refreshAll(){
   const coord_route_assignments = cachedData.coord_route_assignments || [];
   cachedData={visits,missing,products,attendance,location,messages,orders,snapshots,branches,coord_route_assignments};
   const now=new Date();
+  _bgLast = Date.now();
   const timeStr='آخر تحديث: '+now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
   document.querySelectorAll('.live-update-text').forEach(el=>el.textContent=timeStr);
   renderCurrentPanel();
@@ -18205,6 +18227,10 @@ document.addEventListener('DOMContentLoaded', navColorize);
 function showPanel(id){
   // تابات مخفية نهائيًا بقرار الإدارة (الأصناف / تنبيهات الصلاحية / صلاحيات السوق)
   if(['products','expiry-alert','shelf-expiry'].includes(id)) id='dashboard';
+  if(!BG_SKIP_PANELS.has(id)){
+    if(_bgStaticPending){ _bgStaticPending=false; loadStaticData().catch(()=>{}); }
+    if(_bgPending && !_bgBusy){ _bgPending=false; _bgBusy=true; setTimeout(()=>{ refreshAll().finally(()=>{ _bgBusy=false; }); }, 50); }
+  }
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   navColorize();
@@ -61681,8 +61707,18 @@ async function svmShareExcel(){
   function val(id){ var e=document.getElementById(id); return e && e.value ? e.value : null; }
   function N(n){ return Math.round(+n||0).toLocaleString('en-US'); }
   function dd(s){ if(!s) return '—'; var p=String(s).slice(0,10).split('-'); return p[2]+'/'+p[1]; }
-  var seq = 0;
-  async function render(id){
+  var seq = 0, CACHE = {}, TIMERS = {};
+  function stampFetch(f, t){
+    var k = f+'|'+t, c = CACHE[k];
+    if(c && Date.now()-c.at < 60000) return c.p;
+    var p = fetch(SUPABASE_URL+'/rest/v1/rpc/mt_data_stamp',{method:'POST',headers:{'Content-Type':'application/json',apikey:SUPABASE_KEY,Authorization:'Bearer '+SUPABASE_KEY},body:JSON.stringify({p_from:f,p_to:t})})
+      .then(function(res){ if(!res.ok) throw new Error('HTTP '+res.status); return res.json(); });
+    CACHE[k] = {at:Date.now(), p:p};
+    p.catch(function(){ delete CACHE[k]; });
+    return p;
+  }
+  function render(id){ clearTimeout(TIMERS[id]); TIMERS[id] = setTimeout(function(){ renderNow(id); }, 350); }
+  async function renderNow(id){
     var get = MAP[id]; if(!get) return;
     var pn = document.getElementById('panel-'+id); if(!pn) return;
     var r = get(), f = r[0], t = r[1];
@@ -61693,9 +61729,7 @@ async function svmShareExcel(){
     if(!f || !t){ box.innerHTML='<span style="color:#8B6F47">📋 ختم البيانات بيظهر بعد ما تختار الفترة</span>'; return; }
     var my = ++seq; box.innerHTML='<span style="color:#8B6F47">⏳ جاري فحص اكتمال بيانات الفترة…</span>';
     try{
-      var res = await fetch(SUPABASE_URL+'/rest/v1/rpc/mt_data_stamp',{method:'POST',headers:{'Content-Type':'application/json',apikey:SUPABASE_KEY,Authorization:'Bearer '+SUPABASE_KEY},body:JSON.stringify({p_from:f,p_to:t})});
-      if(!res.ok) throw new Error('HTTP '+res.status);
-      var s = await res.json(); if(my!==seq) return;
+      var s = await stampFetch(f, t); if(my!==seq) return;
       var ok = true, L = [];
       var up = s.raw_last_upload ? new Date(s.raw_last_upload).toLocaleDateString('ar-EG',{day:'numeric',month:'short'}) : '—';
       L.push('📅 آخر فاتورة MT مرفوعة: <b>'+dd(s.raw_last_invoice)+'</b> <span style="color:#8B6F47">(اترفعت '+up+')</span>');
