@@ -5405,7 +5405,9 @@ h2,h3{color:#2C1F0A}
             <div class="card" style="margin-bottom:14px">
               <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px">
                 <div class="fld" style="margin:0">
-                  <label class="lbl">العميل *</label>
+                  <label class="lbl">العميل * <span style="font-weight:400;color:#8B6F47;font-size:10px">(الأسماء زي جريد)</span></label>
+                  <input id="sci-client-q" type="text" placeholder="🔍 اكتب اسم العميل..." oninput="sciFilterClients()" autocomplete="off"
+                    style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px 10px;border:1.5px solid #E8DCC4;border-radius:8px;font-family:Cairo,sans-serif;font-size:13px"/>
                   <select id="sci-client" onchange="sciOnClientChange()" style="width:100%">
                     <option value="">اختر العميل...</option>
                   </select>
@@ -35516,17 +35518,33 @@ async function sciLoadClients(){
       if(!_sciClientBranches[m.client_name]) _sciClientBranches[m.client_name] = new Set();
       _sciClientBranches[m.client_name].add(m.branch_name);
     });
-    const names = (Array.isArray(clients)?clients:[]).map(c=>c.name).filter(Boolean);
-    sel.innerHTML = '<option value="">اختر العميل...</option>' +
-      '<option value="__ALL__">⭐ كل العملاء (كل الأصناف اللي بتتورد)</option>' +
-      names.map(n=>{
-        const count = _sciClientBranches[n] ? _sciClientBranches[n].size : 0;
-        return `<option value="${n.replace(/"/g,'&quot;')}">${n} (${count} فرع)</option>`;
-      }).join('');
+    const names = [...new Set((Array.isArray(clients)?clients:[]).map(c=>c.name).filter(Boolean))];
+    // ربط أسماء التطبيق بأسماء جريد — اسم جريد هو اللي بيظهر (sales_client_jareed_map)
+    let jm = [];
+    try{ const r = await fetch(`${SUPABASE_URL}/rest/v1/sales_client_jareed_map?select=app_client,jareed_customer&limit=5000`, {headers:H}); jm = r.ok ? await r.json() : []; }catch(e){}
+    const jr = {}; (Array.isArray(jm)?jm:[]).forEach(m=>{ (jr[m.app_client]=jr[m.app_client]||[]).push(m.jareed_customer); });
+    _sciClientOpts = names.map(n=>{
+      const count = _sciClientBranches[n] ? _sciClientBranches[n].size : 0, j = jr[n]||[];
+      const label = j.length>1 ? `${n} (${j.length} اسم في جريد)` : (j.length ? j[0] : `⚠️ ${n} — مش مربوط بجريد`);
+      return {v:n, label:`${label} (${count} فرع)`, key:sciNorm([n,label,...j].join(' '))};
+    }).sort((a,b)=>a.label.replace('⚠️ ','').localeCompare(b.label.replace('⚠️ ',''),'ar'));
+    sciFilterClients();
     sel.dataset.loaded = '1';
   }catch(e){ console.error('[sciLoadClients]', e); }
 }
 
+let _sciClientOpts = [];
+function sciNorm(t){ return String(t||'').replace(/[إأآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/ـ/g,'').replace(/\s+/g,'').toLowerCase(); }
+function sciFilterClients(){
+  const sel = document.getElementById('sci-client'); if(!sel) return;
+  const q = sciNorm(document.getElementById('sci-client-q')?.value||''), cur = sel.value;
+  const list = q ? _sciClientOpts.filter(o=>o.key.includes(q)) : _sciClientOpts;
+  sel.innerHTML = '<option value="">'+(q?`اختر من ${list.length} نتيجة...`:'اختر العميل...')+'</option>' +
+    (q?'':'<option value="__ALL__">⭐ كل العملاء (كل الأصناف اللي بتتورد)</option>') +
+    list.map(o=>`<option value="${o.v.replace(/&/g,'&amp;').replace(/"/g,'&quot;')}">${o.label.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</option>`).join('');
+  if(cur && [...sel.options].some(op=>op.value===cur)) sel.value = cur;
+  if(q && list.length===1){ sel.value = list[0].v; if(sel.value!==cur) sciOnClientChange(); }
+}
 // ── يبني فهرس (اسم الصنف → باركود) ومعاه فهرس (اسم الصنف → لينك صورة جوجل درايف) من كتالوج أصناف
 // تحليل فواتير عملاء MT (tamr_sales_item_catalog) — نفس الجدول، عمود image_link ══════════════════
 let _sciBarcodeIdx = null; // بيتحمّل مرة واحدة ويتخزّن (170 صنف بس، مفيش داعي نعيد الجلب كل مرة)
