@@ -5531,6 +5531,7 @@ h2,h3{color:#2C1F0A}
               <!-- أسعار الأصناف -->
               <div class="form-fld">
                 <label class="form-lbl">أسعار الأصناف * <span id="spl-sp-prod-count" style="color:#2E7D32;font-weight:700"></span></label>
+                <div id="spl-sp-cli-items" style="display:none;background:#F4F9F1;border:1.5px solid #CFE3C4;border-radius:8px;padding:8px;margin-bottom:8px"></div>
                 <input type="text" id="spl-sp-prod-search" placeholder="ابحث عن صنف لإضافته..." oninput="splCPLSearchProd()"
                   style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;box-sizing:border-box;margin-bottom:6px"/>
                 <div id="spl-sp-prod-results" style="background:#fff;border:1.5px solid var(--border);border-radius:8px;max-height:130px;overflow-y:auto;display:none;margin-bottom:8px"></div>
@@ -37363,9 +37364,10 @@ function splSetType(type){
 }
 
 // ── دوال قائمة الأسعار الخاصة بالعملاء ──
+let _splCplSel = new Set();
 function splCPLRenderClients(selectedClients=[]){
   const search=(document.getElementById('spl-sp-client-search')?.value||'').toLowerCase();
-  const selSet=new Set(selectedClients);
+  const selSet=new Set(selectedClients); _splCplSel=selSet;
   const clients=_splClients.filter(c=>!search||c.name.toLowerCase().includes(search));
   const container=document.getElementById('spl-sp-clients-list');
   if(!container) return;
@@ -37378,15 +37380,80 @@ function splCPLRenderClients(selectedClients=[]){
     ${clients.map(c=>`
     <label style="display:flex;align-items:center;gap:7px;padding:5px 4px;font-size:12px;cursor:pointer;border-bottom:0.5px solid #F0E8D8">
       <input type="checkbox" class="spl-cpl-client-cb" value="${c.name}" ${selSet.has(c.name)?'checked':''}
-        onchange="splCPLUpdateClientCount()" style="width:14px;height:14px;accent-color:#4B3C1A;cursor:pointer"/>
+        onchange="splCPLCliToggle(this)" style="width:14px;height:14px;accent-color:#4B3C1A;cursor:pointer"/>
       ${c.name}
     </label>`).join('')}`;
   splCPLUpdateClientCount();
 }
-function splCPLFilterClients(){ const sel=[...document.querySelectorAll('.spl-cpl-client-cb:checked')].map(c=>c.value); splCPLRenderClients(sel); }
-function splCPLToggleAll(cb){ document.querySelectorAll('.spl-cpl-client-cb').forEach(c=>c.checked=cb.checked); splCPLUpdateClientCount(); }
-function splCPLUpdateClientCount(){ const n=document.querySelectorAll('.spl-cpl-client-cb:checked').length; const el=document.getElementById('spl-sp-client-count'); if(el) el.textContent=n?`(${n} عميل)`:'';}
-function splCPLGetClients(){ return [...document.querySelectorAll('.spl-cpl-client-cb:checked')].map(c=>c.value); }
+function splCPLFilterClients(){ splCPLRenderClients([..._splCplSel]); }
+function splCPLCliToggle(cb){ if(cb.checked) _splCplSel.add(cb.value); else _splCplSel.delete(cb.value); splCPLUpdateClientCount(); }
+function splCPLToggleAll(cb){ document.querySelectorAll('.spl-cpl-client-cb').forEach(c=>{ c.checked=cb.checked; if(cb.checked) _splCplSel.add(c.value); else _splCplSel.delete(c.value); }); splCPLUpdateClientCount(); }
+function splCPLUpdateClientCount(){ const n=_splCplSel.size; const el=document.getElementById('spl-sp-client-count'); if(el) el.textContent=n?`(${n} عميل)`:''; splCPLQueueCliItems(); }
+function splCPLGetClients(){ return [..._splCplSel]; }
+
+// ── أصناف العملاء المختارين (نفس منطق تاب "أصناف العملاء"): فواتير المناديب على فروعه + المضاف يدويًا،
+// ولو مالوش فواتير مناديب → من فواتير جريد، وناقص المخفي. بتظهر فوق البحث عشان تختار منها على طول.
+let _splCliItemsT=null, _splCliItemsSeq=0, _splCliItems=[];
+function splCPLQueueCliItems(){ clearTimeout(_splCliItemsT); _splCliItemsT=setTimeout(splCPLLoadCliItems,350); }
+async function splClientItemSet(client, H){
+  const seen=new Set();
+  let branches=[...(_sciClientBranches[client]||[])];
+  if(branches.length){
+    const orFilter='or=('+branches.map(b=>`branch_name.eq.${pgOrVal(b)}`).join(',')+')';
+    const rows=await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?${orFilter}&deleted_at=is.null&select=items`, H);
+    (Array.isArray(rows)?rows:[]).forEach(r=>(Array.isArray(r.items)?r.items:[]).forEach(it=>{ const n=(it&&it.name?String(it.name):'').trim(); if(n) seen.add(sciCanonicalItemName(n)); }));
+  }
+  if(!seen.size){
+    const jrNames=_sciJrOnly.has(client)?[client]:(_sciJr[client]||[]);
+    const jx=await sciJareedItems(jrNames, H);
+    jx.items.forEach(n=>{ const sc=(_sciItemCanonicalMap&&_sciItemCanonicalMap[sciNormalizeItemKey(n)])||n; seen.add(sciCanonicalItemName(sc)); });
+  }
+  const enc=encodeURIComponent;
+  const [m,h,g]=await Promise.all([
+    fetch(`${SUPABASE_URL}/rest/v1/client_items_manual?select=item_name&client_name=eq.${enc(client)}&limit=5000`,{headers:H,cache:'no-store'}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?select=item_name&client_name=eq.${enc(client)}&limit=5000`,{headers:H,cache:'no-store'}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    fetch(`${SUPABASE_URL}/rest/v1/sci_hidden_items?select=item_name&client_name=eq.${enc(SCI_GLOBAL_HIDE_KEY)}&limit=5000`,{headers:H,cache:'no-store'}).then(r=>r.ok?r.json():[]).catch(()=>[])]);
+  (Array.isArray(m)?m:[]).forEach(r=>{ if(r.item_name) seen.add(sciCanonicalItemName(r.item_name)); });
+  [...(Array.isArray(h)?h:[]),...(Array.isArray(g)?g:[])].forEach(r=>{ if(r.item_name) seen.delete(r.item_name); });
+  return seen;
+}
+async function splCPLLoadCliItems(){
+  const box=document.getElementById('spl-sp-cli-items'); if(!box) return;
+  const clients=[..._splCplSel];
+  if(!clients.length){ box.style.display='none'; box.innerHTML=''; _splCliItems=[]; return; }
+  const seq=++_splCliItemsSeq;
+  box.style.display=''; box.innerHTML='<div style="font-size:12px;color:#5B7A4A;padding:6px">جاري تحميل أصناف العميل...</div>';
+  const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  const all=new Set();
+  try{
+    await sciLoadClients(); await sciLoadItemAliasMap();
+    for(const c of clients){ (await splClientItemSet(c,H)).forEach(n=>all.add(n)); if(seq!==_splCliItemsSeq) return; }
+  }catch(e){ console.error('[splCPLLoadCliItems]',e); }
+  if(seq!==_splCliItemsSeq) return;
+  // نربط كل صنف بصنف كتالوج الأسعار (بالاسم، ولو مش متطابق حرفيًا بالمفتاح الموحّد)
+  const byName=new Set(_splProducts.map(p=>p.name)), byKey={};
+  _splProducts.forEach(p=>{ const k=sciNormalizeItemKey(p.name); if(k&&!byKey[k]) byKey[k]=p.name; });
+  const found=new Set(); let missing=0;
+  all.forEach(n=>{ const pn=byName.has(n)?n:byKey[sciNormalizeItemKey(n)]; if(pn) found.add(pn); else missing++; });
+  _splCliItems=[...found].sort((a,b)=>a.localeCompare(b,'ar'));
+  splCPLRenderCliItems(missing);
+}
+function splCPLRenderCliItems(missing){
+  const box=document.getElementById('spl-sp-cli-items'); if(!box) return;
+  if(missing!==undefined) box.dataset.missing=missing; missing=+box.dataset.missing||0;
+  const left=_splCliItems.filter(n=>_splCPLProdRows[n]===undefined);
+  const note=missing?`<div style="font-size:11px;color:#8B6F47;padding:4px 2px">${missing} صنف من أصناف العميل مش موجود في كتالوج الأصناف، فمش هيظهر هنا</div>`:'';
+  if(!_splCliItems.length){ box.innerHTML=`<div style="font-size:12px;color:#8B6F47;padding:6px">مافيش أصناف مسجلة للعملاء المختارين في "أصناف العملاء"</div>`+note; return; }
+  box.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:2px 2px 6px;border-bottom:0.5px solid #CFE3C4">
+      <span style="font-size:12px;font-weight:700;color:#2E7D32">📦 أصناف العميل (${_splCliItems.length}) — ${left.length?`فاضل ${left.length} مش مضاف`:'كلها اتضافت'}</span>
+      ${left.length?`<button type="button" onclick="splCPLAddAllCliItems()" style="background:#2E7D32;color:#fff;border:none;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer">+ إضافة الكل (${left.length})</button>`:''}
+    </div>
+    <div style="max-height:150px;overflow-y:auto">${left.map(n=>`
+      <label style="display:flex;align-items:center;gap:8px;padding:5px 4px;font-size:12px;cursor:pointer;border-bottom:0.5px solid #E3EEDC">
+        <input type="checkbox" value="${splEscAttr(n)}" onchange="if(this.checked) splCPLAddProd(this.value)" style="width:14px;height:14px;accent-color:#2E7D32;cursor:pointer"/>
+        <span>${n}</span></label>`).join('')}</div>`+note;
+}
+function splCPLAddAllCliItems(){ _splCliItems.forEach(n=>{ if(_splCPLProdRows[n]===undefined) splCPLAddProd(n,0,true); }); splCPLRenderCliItems(); }
 
 function splCPLSearchProd(){
   const q=(document.getElementById('spl-sp-prod-search')?.value||'').toLowerCase().trim();
@@ -37423,6 +37490,7 @@ function splCPLAddProd(name,price=0,skipRefresh){
 function splCPLRemoveProd(name){ delete _splCPLProdRows[name]; splCPLRenderProdRows(); }
 function splCPLUpdatePrice(name,val){ _splCPLProdRows[name]=parseFloat(val)||0; }
 function splCPLRenderProdRows(){
+  if(_splCliItems.length) splCPLRenderCliItems();
   const container=document.getElementById('spl-sp-prod-rows');
   const entries=Object.entries(_splCPLProdRows);
   const el=document.getElementById('spl-sp-prod-count');
