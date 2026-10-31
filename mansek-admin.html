@@ -6745,28 +6745,10 @@ h2,h3{color:#2C1F0A}
           </div>
         </div>
 
-        <!-- ══ التوقع البيعي 2027 (الهدف + نمو من فرص محددة + الخصومات الغير مباشرة) ══ -->
+        <!-- ══ التوقع البيعي — رقم واحد بيتوزع على المجموعات/خطوط السير/العملاء/الفروع/الأصناف (fc*) ══ -->
         <div id="panel-sales-outlook" class="panel">
-          <div class="page-header">
-            <div>
-              <h2 style="color:#6B1E2E"><i class="ti ti-chart-arrows-vertical"></i> التوقع البيعي</h2>
-              <p>هدف السنة على السيستم + نمو من فرص محددة بالاسم + الخصومات الغير مباشرة — سلاسل القاهرة وسلاسل إسكندرية</p>
-            </div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <select id="so-mode" onchange="soModeChange()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto;font-weight:700">
-                <option value="plan">📊 الخطة والتوقع</option><option value="month">🔎 تحليل الشهر (أوتوماتيك)</option></select>
-              <input type="month" id="so-month" onchange="soLoad()" style="display:none;padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto"/>
-              <select id="so-year" onchange="soLoad()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto"><option value="2027">2027</option><option value="2026">نوفمبر–ديسمبر 2026</option></select>
-              <select id="so-scope" onchange="soMode()==='month'?soLoad():soRender()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;width:auto">
-                <option value="all">القاهرة + إسكندرية</option><option value="r-cairo">سلاسل القاهرة</option><option value="r-alex">سلاسل إسكندرية</option></select>
-              <button onclick="soXlsx()" style="background:#1A7A4A;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif"><i class="ti ti-file-spreadsheet"></i> Excel</button>
-              <button onclick="soPdf()" style="background:#731E2E;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif"><i class="ti ti-file-type-pdf"></i> PDF</button>
-              <button onclick="soLoad()" style="background:#eee;border:none;border-radius:8px;padding:7px 12px;font-size:12px;cursor:pointer;font-family:Cairo,sans-serif">🔄</button>
-            </div>
-          </div>
-          <div id="so-body"><div style="font-size:12px;color:#888;padding:10px">جاري التحميل...</div></div>
+          <div id="sfc-root"></div>
         </div>
-
         <!-- ══ خصومات العملاء الغير مباشره (إشعارات الخصم من تقرير الشركة) ══ -->
         <div id="panel-indirect-disc" class="panel">
           <div class="page-header">
@@ -18262,7 +18244,7 @@ function showPanel(id){
   if(id==='sales-sup-eval') mseRefresh();
   if(id==='sales-dashboard'){ sdInit(); sdBuildDaysDropdown(); sdLoad(); loadCoordNotes(); }
   if(id==='indirect-disc'){ idcInit(); idcLoad(); }
-  if(id==='sales-outlook'){ soLoad(); }
+  if(id==='sales-outlook'){ sfcInit(); }
   if(id==='monthly-promos'){ promosInit(); }
   if(id==='sales-targets'){ stInitMonth(); stLoad(); }
   if(id==='holidays'){ hlInitMonth(); hlLoad(); }
@@ -62133,6 +62115,394 @@ async function svmShareExcel(){
   }
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
+</script>
+<script>
+
+// ══ التوقع البيعي — هدف لكل شهر، والسيستم يوزعه لتحت:
+//    فرع الشركة ← المجموعة ← خط السير ← العميل ← فرع العميل ← الصنف (قيمة + كمية)
+//    أساس النسب لكل شهر = نفس الأيام الهجرية من السنة الهجرية اللي فاتت (موسم رجب/شعبان بيتقدم ~11 يوم كل سنة)
+//    — ولو الأيام دي لسه مالهاش بيع بنرجع سنة هجرية كمان. بيع بس من غير المرتجع، من غير الهدايا والعينات،
+//    ومن غير الفواتير اللي مالهاش فرع عميل. الفروع اللي مالهاش فاتورة في آخر 4 شهور بتتشال، ماعدا اللي تختارها (عملاء الموسم).
+//    التثبيت (لكل شهر): الرقم المثبت بياخد رقمه، واللي جنبه تحت نفس الأب يتقسم عليهم الباقي بنسبهم.
+const SFC={sel:{br:new Set(),grp:new Set(),route:new Set(),cust:new Set(),site:new Set(),item:new Set()},
+  months:{},ov:{},keep:new Set(),view:'all',plan:null,plans:[],base:{},meta:null,metaKey:'',itemOpts:[],itemKey:'',
+  open:null,msq:{},dirty:false,req:0,tab:'grp',q:'',openSite:{},res:{},saveT:null,saved:true,showStopped:false,stopQ:''};
+const SFC_LEVELS=[['br','فروع الشركة','b'],['grp','المجموعات','g'],['route','خطوط السير','r'],['cust','العملاء','c'],['site','فروع العملاء','s'],['item','الأصناف',null]];
+const SFC_HM=['محرم','صفر','ربيع الأول','ربيع الآخر','جمادى الأولى','جمادى الآخرة','رجب','شعبان','رمضان','شوال','ذو القعدة','ذو الحجة'];
+function sfcLbl(k,v){ return k==='grp'||k==='g'?csGrpLbl(v):v; }
+function sfcArr(k){ return SFC.sel[k].size?[...SFC.sel[k]]:null; }
+function sfcN(v){ return csN(Math.round(v||0)); }
+function sfcQ(v){ return v==null?'—':Number(v).toLocaleString('en-US',{maximumFractionDigits:1}); }
+function sfcNum(v){ const n=parseFloat(String(v==null?'':v).replace(/[,،\s]/g,'')); return isFinite(n)?n:null; }
+const sfcD=s=>new Date(s+'T00:00:00Z'), sfcS=d=>d.toISOString().slice(0,10), sfcAdd=(s,k)=>sfcS(new Date(sfcD(s).getTime()+k*864e5));
+
+// ── التاريخ الهجري (أم القرى) ──
+let _sfcHF=null;
+function sfcHij(s){ try{ _sfcHF=_sfcHF||new Intl.DateTimeFormat('en-u-ca-islamic-umalqura',{day:'numeric',month:'numeric',year:'numeric',timeZone:'UTC'});
+  const p=_sfcHF.formatToParts(sfcD(s)), g=t=>parseInt((p.find(x=>x.type===t)||{}).value,10); return {y:g('year'),m:g('month'),d:g('day')}; }catch(e){ return null; } }
+function sfcHijBack(s){ // نفس اليوم الهجري في السنة الهجرية اللي فاتت
+  const h=sfcHij(s); if(!h) return sfcAdd(s,-354);
+  for(const dd of [h.d,h.d-1]) for(let k=350;k<=359;k++){ const c=sfcAdd(s,-k), x=sfcHij(c); if(x&&x.y===h.y-1&&x.m===h.m&&x.d===dd) return c; }
+  return sfcAdd(s,-354); }
+function sfcHLabel(f,t){ const a=sfcHij(f), b=sfcHij(t); if(!a||!b) return '';
+  return a.m===b.m&&a.y===b.y?`${SFC_HM[a.m-1]} ${a.y}`:`${a.d} ${SFC_HM[a.m-1]}${a.y!==b.y?' '+a.y:''} – ${b.d} ${SFC_HM[b.m-1]} ${b.y}`; }
+function sfcLastData(){ return sfcAdd(ccToday(),-1); }
+function sfcMonthRange(ym){ const y=+ym.slice(0,4), m=+ym.slice(5,7); return [ym+'-01', sfcS(new Date(Date.UTC(y,m,0)))]; }
+function sfcBaseOf(ym){ // فترة الأساس للشهر: نفس الأيام الهجرية من السنة الهجرية اللي فاتت (أو اللي قبلها لو لسه مالهاش بيع)
+  let [f,t]=sfcMonthRange(ym), back=0;
+  do{ f=sfcHijBack(f); t=sfcHijBack(t); back++; } while(t>sfcLastData() && back<3);
+  return {f,t,back,lbl:sfcHLabel(f,t)}; }
+function sfcMonthList(){ const t=ccToday(); let y=+t.slice(0,4), m=+t.slice(5,7); const out=[];
+  for(let i=0;i<15;i++){ out.push(y+'-'+String(m).padStart(2,'0')); m++; if(m>12){ m=1; y++; } } return out; }
+function sfcMonLbl(ym){ return CC_MON[+ym.slice(5,7)-1]+' '+ym.slice(0,4); }
+function sfcActiveMonths(){ return Object.keys(SFC.months).filter(k=>SFC.months[k]>0).sort(); }
+
+// ── الشاشة ──
+function sfcInit(){
+  const root=document.getElementById('sfc-root'); if(!root) return;
+  if(!root.dataset.built){ root.dataset.built='1';
+    const SS="padding:6px 8px;border-radius:8px;border:1.5px solid var(--border);font-family:inherit;font-weight:700;width:auto;min-width:0;height:auto;display:inline-block";
+    root.innerHTML=`
+    <div style="background:#731E2E;color:#fff;border-radius:12px;padding:12px 16px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
+      <div style="flex:1;min-width:220px"><div style="font-size:18px;font-weight:800"><i class="ti ti-chart-arrows-vertical" style="color:#E8D3A2"></i> التوقع البيعي</div>
+        <div style="font-size:11px;color:#E8D3A2">اكتب هدف كل شهر، والسيستم يوزعه على المجموعات وخطوط السير والعملاء والفروع وكميات الأصناف — بنسب نفس الأيام الهجرية من السنة اللي فاتت</div></div>
+      <label style="font-size:11px;color:#E8D3A2;font-weight:700;display:flex;flex-direction:column;gap:2px">التوقع المحفوظ
+        <select id="sfc-plan" onchange="sfcPickPlan(this.value)" style="${SS};min-width:200px"></select></label>
+      <button class="btn btn-ghost btn-sm" style="background:#fff" onclick="sfcSave(true)"><i class="ti ti-device-floppy" style="color:#731E2E"></i> حفظ</button>
+      <button class="btn btn-ghost btn-sm" style="background:#fff" onclick="sfcSave(true,true)"><i class="ti ti-copy" style="color:#731E2E"></i> حفظ باسم جديد</button>
+      <button class="btn btn-ghost btn-sm" style="background:#fff" onclick="sfcDeletePlan()" title="حذف التوقع"><i class="ti ti-trash" style="color:#B71C1C"></i></button>
+      <button class="btn btn-ghost btn-sm" style="background:#fff" onclick="sfcExcel()"><i class="ti ti-file-spreadsheet" style="color:#1A7A4A"></i> Excel</button>
+      <span id="sfc-savest" style="font-size:11px;color:#E8D3A2;align-self:center"></span>
+    </div>
+    <div id="sfc-filters" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;padding:10px 14px;background:#F3EBDD;border:1px solid #E8DCC4;border-radius:12px;margin-bottom:10px"></div>
+    <div id="sfc-months" style="margin-bottom:10px"></div>
+    <div id="sfc-stopped" style="margin-bottom:10px"></div>
+    <div id="sfc-body"></div>`;
+    document.addEventListener('click',()=>{ if(SFC.open) sfcMsClose(); });
+  }
+  sfcLoadPlans();
+}
+function sfcRenderMonths(){
+  const box=document.getElementById('sfc-months'); if(!box) return;
+  const ms=sfcActiveMonths(), tot=ms.reduce((a,k)=>a+SFC.months[k],0);
+  box.innerHTML=`<div style="background:#fff;border:1px solid #E8DCC4;border-radius:12px;padding:12px 14px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap"><div style="font-weight:800;color:#731E2E">أهداف الشهور (جنيه)</div>
+      <div style="font-size:11.5px;color:#8B6F47">كل شهر بيتوزع بنسب بيع نفس الأيام الهجرية من السنة اللي فاتت — سيب الشهر فاضي لو مش عايزه</div>
+      <div style="margin-right:auto;font-weight:800">الإجمالي: <span style="color:#731E2E">${sfcN(tot)}</span> ج</div></div>
+    <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;text-align:center;min-width:100%">
+      <tr style="background:#F3EBDD">${sfcMonthList().map(ym=>`<th style="padding:6px 4px;white-space:nowrap">${sfcMonLbl(ym)}</th>`).join('')}</tr>
+      <tr>${sfcMonthList().map(ym=>`<td style="padding:4px 3px"><input type="text" inputmode="decimal" value="${SFC.months[ym]?Math.round(SFC.months[ym]).toLocaleString('en-US'):''}" placeholder="—" data-ym="${ym}" onchange="sfcSetMonth(this.dataset.ym,this.value)"
+        style="width:104px;padding:6px 4px;border:1.5px solid ${SFC.months[ym]?'#731E2E':'#D4C4A8'};border-radius:7px;font-family:inherit;font-weight:700;text-align:center;direction:ltr"/></td>`).join('')}</tr>
+      <tr>${sfcMonthList().map(ym=>{ const b=sfcBaseOf(ym); return `<td style="padding:2px 3px;font-size:10px;color:#8B6F47;line-height:1.4" title="أساس النسب: من ${b.f} إلى ${b.t}">${b.lbl}${b.back>1?'<br><span style="color:#B26A00">(سنتين قبل)</span>':''}</td>`; }).join('')}</tr>
+    </table></div></div>`;
+}
+function sfcSetMonth(ym,v){ const n=sfcNum(v); if(n&&n>0) SFC.months[ym]=n; else { delete SFC.months[ym]; delete SFC.ov[ym]; if(SFC.view===ym) SFC.view='all'; }
+  sfcRenderMonths(); sfcChanged(); sfcLoad(); }
+
+// ── القوائم المتتابعة ──
+function sfcOpts(level){
+  if(level==='item') return SFC.itemOpts.slice();
+  const idx=SFC_LEVELS.findIndex(l=>l[0]===level), fld=SFC_LEVELS[idx][2], up=SFC_LEVELS.slice(0,idx).filter(l=>l[2]&&SFC.sel[l[0]].size);
+  const set=new Set(); ((SFC.meta&&SFC.meta.dims)||[]).forEach(r=>{ if(up.every(l=>SFC.sel[l[0]].has(r[l[2]]))) set.add(r[fld]); });
+  return [...set].filter(v=>v!=null&&v!=='').sort((a,b)=>String(sfcLbl(level,a)).localeCompare(String(sfcLbl(level,b)),'ar'));
+}
+function sfcPrune(fromIdx){ SFC_LEVELS.slice(fromIdx+1).forEach(([k])=>{ if(k==='item') return; const ok=new Set(sfcOpts(k)); [...SFC.sel[k]].forEach(v=>{ if(!ok.has(v)) SFC.sel[k].delete(v); }); }); }
+function sfcMsBar(){
+  return SFC_LEVELS.map(([k,l])=>{ const n=SFC.sel[k].size;
+    return `<div style="position:relative"><label style="font-size:11px;font-weight:700;color:#8B6F47;display:block;margin-bottom:3px">${l}</label>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="sfcMsToggle('${k}',event)" style="min-width:160px;justify-content:space-between;background:#fff;${n?'border:1.5px solid #731E2E;color:#731E2E;font-weight:700':''}">
+        <span>${n?(n===1?ccEsc(sfcLbl(k,[...SFC.sel[k]][0])).slice(0,26):n+' مختار'):'الكل'}</span><i class="ti ti-chevron-down"></i></button>
+      ${SFC.open===k?sfcMsBox(k):''}</div>`; }).join('')
+    +(SFC_LEVELS.some(([k])=>SFC.sel[k].size)?`<div><label style="display:block;margin-bottom:3px;font-size:11px">&nbsp;</label><button type="button" class="btn btn-ghost btn-sm" onclick="sfcClearAll()" style="color:#B71C1C;background:#fff"><i class="ti ti-filter-off"></i> مسح الفلاتر</button></div>`:'');
+}
+function sfcMsBox(k){
+  const q=(SFC.msq[k]||'').trim(), all=sfcOpts(k), list=q?all.filter(v=>String(sfcLbl(k,v)).includes(q)||String(v).includes(q)):all;
+  return `<div onclick="event.stopPropagation()" style="position:absolute;z-index:900;top:100%;right:0;width:330px;background:#fff;border:1.5px solid #D4C4A8;border-radius:10px;padding:8px;box-shadow:0 6px 20px rgba(0,0,0,.18)">
+    <input id="sfc-msq" placeholder="بحث..." value="${ccEsc(SFC.msq[k]||'')}" oninput="SFC.msq['${k}']=this.value;sfcMsRefresh()" style="width:100%;padding:6px 8px;border:1px solid #D4C4A8;border-radius:7px;font-family:inherit;margin-bottom:6px;box-sizing:border-box"/>
+    <div style="display:flex;gap:6px;margin-bottom:6px"><button type="button" class="btn btn-ghost btn-sm" onclick="sfcMsAll('${k}',1)">تحديد الظاهر</button><button type="button" class="btn btn-ghost btn-sm" onclick="sfcMsAll('${k}',0)">مسح</button>
+      <span style="margin-right:auto;font-size:11px;color:#8B6F47;align-self:center">${all.length} اختيار</span></div>
+    <div id="sfc-mslist" style="max-height:300px;overflow:auto">${list.length?list.slice(0,600).map(v=>`<label style="display:flex;gap:6px;align-items:flex-start;padding:4px 2px;font-size:12px;cursor:pointer;border-bottom:1px solid #F3EBDD"><input type="checkbox" ${SFC.sel[k].has(v)?'checked':''} onchange="sfcMsPick('${k}',this.dataset.v,this.checked)" data-v="${ccEsc(v)}"/> <span>${ccEsc(sfcLbl(k,v))}</span></label>`).join(''):'<div style="padding:10px;color:#8B6F47;font-size:12px">مفيش اختيارات</div>'}</div>
+    <div style="text-align:left;margin-top:6px"><button type="button" class="btn btn-sm" style="background:#731E2E;color:#fff;border:none" onclick="sfcMsClose()">تم</button></div></div>`;
+}
+function sfcMsRefresh(){ const bar=document.getElementById('sfc-filters'); if(!bar) return; const L=document.getElementById('sfc-mslist'), st=L?L.scrollTop:0;
+  bar.innerHTML=sfcMsBar(); const L2=document.getElementById('sfc-mslist'); if(L2) L2.scrollTop=st;
+  const e=document.getElementById('sfc-msq'); if(e){ e.focus({preventScroll:true}); e.setSelectionRange(e.value.length,e.value.length); } }
+function sfcMsToggle(k,ev){ if(ev) ev.stopPropagation(); if(SFC.open&&SFC.open!==k){ sfcMsClose(); } SFC.open=SFC.open===k?null:k; if(SFC.open) SFC.msq[k]=''; document.getElementById('sfc-filters').innerHTML=sfcMsBar(); const e=document.getElementById('sfc-msq'); if(e) e.focus(); if(!SFC.open&&SFC.dirty){ SFC.dirty=false; sfcChanged(); sfcLoad(); } }
+function sfcMsPick(k,v,on){ if(on) SFC.sel[k].add(v); else SFC.sel[k].delete(v); SFC.dirty=true; sfcPrune(SFC_LEVELS.findIndex(l=>l[0]===k)); sfcMsRefresh(); }
+function sfcMsAll(k,on){ const q=(SFC.msq[k]||'').trim(); sfcOpts(k).filter(v=>!q||String(sfcLbl(k,v)).includes(q)||String(v).includes(q)).forEach(v=>on?SFC.sel[k].add(v):SFC.sel[k].delete(v)); SFC.dirty=true; sfcPrune(SFC_LEVELS.findIndex(l=>l[0]===k)); sfcMsRefresh(); }
+function sfcMsClose(){ if(!SFC.open) return; SFC.open=null; document.getElementById('sfc-filters').innerHTML=sfcMsBar(); if(SFC.dirty){ SFC.dirty=false; sfcChanged(); sfcLoad(); } }
+function sfcClearAll(){ SFC_LEVELS.forEach(([k])=>SFC.sel[k].clear()); SFC.open=null; SFC.dirty=false; sfcChanged(); sfcLoad(); }
+
+// ── التحميل ──
+function sfcActiveWin(){ const t=sfcLastData(); return [sfcAdd(t,-122),t]; } // آخر 4 شهور
+async function sfcLoad(){
+  const my=++SFC.req, body=document.getElementById('sfc-body'); if(!body) return;
+  sfcRenderMonths();
+  const ms=sfcActiveMonths();
+  // فترة القوائم = من أول أساس لآخر أساس للشهور اللي ليها هدف (أو الشهر الجاي لو مفيش)
+  const bases=(ms.length?ms:[sfcMonthList()[1]]).map(sfcBaseOf);
+  const mf=bases.reduce((a,b)=>b.f<a?b.f:a,'9999'), mt=bases.reduce((a,b)=>b.t>a?b.t:a,'0000'), [af,at]=sfcActiveWin();
+  body.innerHTML='<div style="text-align:center;padding:50px;color:#8B6F47"><div class="spinner" style="margin:0 auto 12px"></div>جاري تحميل بيع فترات الأساس...</div>';
+  try{
+    const mk=mf+mt+af+at;
+    if(mk!==SFC.metaKey){ const r=await csRpc('sfc_meta',{p_from:mf,p_to:mt,p_active_from:af,p_active_to:at}); if(my!==SFC.req) return;
+      SFC.meta={dims:((r&&r.dims)||[]).map(a=>({b:a[0],g:a[1],r:a[2],c:a[3],s:a[4]})),active:new Set((r&&r.active)||[])}; SFC.metaKey=mk; SFC.itemKey=''; sfcPrune(-1); }
+    const args={p_branches:sfcArr('br'),p_grps:sfcArr('grp'),p_routes:sfcArr('route'),p_customers:sfcArr('cust'),p_sites:sfcArr('site')};
+    const ik=JSON.stringify({...args,mf,mt});
+    if(ik!==SFC.itemKey){ const it=await csRpc('chain_cmp_items',{p_from:mf,p_to:mt,...args}); if(my!==SFC.req) return; SFC.itemKey=ik;
+      SFC.itemOpts=[...new Set((it||[]).map(r=>r.item))].sort((a,b)=>a.localeCompare(b,'ar'));
+      const ok=new Set(SFC.itemOpts); [...SFC.sel.item].forEach(v=>{ if(!ok.has(v)) SFC.sel.item.delete(v); }); }
+    document.getElementById('sfc-filters').innerHTML=sfcMsBar();
+    const full={...args,p_items:sfcArr('item')};
+    for(const ym of ms){ const b=sfcBaseOf(ym), key=JSON.stringify({...full,f:b.f,t:b.t});
+      if(!SFC.base[ym]||SFC.base[ym].key!==key){ const r=await csRpc('fc_base',{p_from:b.f,p_to:b.t,...full}); if(my!==SFC.req) return;
+        SFC.base[ym]={key,b,rows:((r&&r.rows)||[]).map(a=>({b:a[0],g:a[1],r:a[2],c:a[3],s:a[4],i:a[5],w:+a[6]||0,q:+a[7]||0}))}; } }
+    sfcComputeAll(); sfcRender();
+  }catch(e){ if(my!==SFC.req) return; console.error('[sfcLoad]',e); body.innerHTML='<div style="padding:40px;text-align:center;color:#B71C1C;font-weight:700">تعذر تحميل البيانات: '+ccEsc(e&&e.message||e)+'</div>'; }
+}
+
+// ── الفروع اللي وقفت ──
+function sfcStoppedList(){ const A=SFC.meta&&SFC.meta.active; if(!A) return []; const m={};
+  sfcActiveMonths().forEach(ym=>((SFC.base[ym]||{}).rows||[]).forEach(x=>{ if(A.has(x.s)) return; const o=m[x.s]=m[x.s]||{s:x.s,c:x.c,w:0}; o.w+=x.w; }));
+  return Object.values(m).sort((a,b)=>a.c.localeCompare(b.c,'ar')||a.s.localeCompare(b.s,'ar')); }
+function sfcRenderStopped(){
+  const box=document.getElementById('sfc-stopped'); if(!box) return; const L=sfcStoppedList();
+  if(!L.length){ box.innerHTML=''; return; }
+  const q=SFC.stopQ.trim(), list=q?L.filter(o=>o.s.includes(q)||o.c.includes(q)):L, kept=L.filter(o=>SFC.keep.has(o.s)).length;
+  box.innerHTML=`<div style="background:#fff;border:1px solid #E8DCC4;border-radius:12px;padding:10px 14px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer" onclick="SFC.showStopped=!SFC.showStopped;sfcRenderStopped()">
+      <b style="color:#731E2E">${SFC.showStopped?'▾':'▸'} فروع وقفت (${L.length})</b>
+      <span style="font-size:11.5px;color:#8B6F47">فروع ليها بيع في فترة الأساس ومالهاش ولا فاتورة في آخر 4 شهور — مش داخلة في التوقع. علّم على عملاء الموسم عشان يدخلوا.</span>
+      ${kept?`<span style="margin-right:auto;color:#1A7A4A;font-weight:700">داخل منهم: ${kept}</span>`:''}</div>
+    ${SFC.showStopped?`<div style="margin-top:8px"><input id="sfc-stopq" placeholder="بحث بالعميل أو الفرع..." value="${ccEsc(SFC.stopQ)}" oninput="SFC.stopQ=this.value;sfcRenderStopped();const e=document.getElementById('sfc-stopq');e.focus();e.setSelectionRange(e.value.length,e.value.length)" style="padding:6px 10px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:inherit;min-width:260px;margin-bottom:6px"/>
+      <div style="max-height:260px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <tr style="background:#F3EBDD"><th style="padding:5px;width:70px">يدخل؟</th><th style="text-align:right">العميل</th><th style="text-align:right">الفرع</th><th>بيع فترة الأساس</th></tr>
+      ${list.map(o=>`<tr style="border-bottom:1px solid #EFE6D6;${SFC.keep.has(o.s)?'background:#E8F5E9':''}"><td style="text-align:center"><input type="checkbox" ${SFC.keep.has(o.s)?'checked':''} data-s="${ccEsc(o.s)}" onchange="sfcKeep(this.dataset.s,this.checked)" style="width:15px;height:15px;accent-color:#1A7A4A"/></td><td style="padding:4px">${ccEsc(o.c)}</td><td>${ccEsc(o.s)}</td><td style="text-align:center">${sfcN(o.w)}</td></tr>`).join('')}
+      </table></div></div>`:''}</div>`;
+}
+function sfcKeep(s,on){ if(on) SFC.keep.add(s); else SFC.keep.delete(s); sfcChanged(); sfcComputeAll(); sfcRender(); }
+
+// ── التوزيع ──
+const SFC_PATH=['b','g','r','c','s','i'];
+function sfcCompute(rows,T,OV){
+  const root={w:0,kids:{},fix:null,v:0,lv:-1};
+  rows.forEach(x=>{ let n=root; n.w+=x.w;
+    SFC_PATH.forEach((d,lv)=>{ const k=x[d]; let c=n.kids[k]; if(!c){ c=n.kids[k]={w:0,kids:{},fix:null,v:0,lv,name:k,dim:d}; } c.w+=x.w; n=c; });
+    n.row=x; });
+  const byDimVal={}; (function walk(n){ Object.values(n.kids).forEach(c=>{ const k=c.dim+':'+c.name; (byDimVal[k]=byDimVal[k]||[]).push(c); walk(c); }); })(root);
+  const missing=[];
+  Object.keys(OV||{}).forEach(k=>{ const nodes=byDimVal[k], V=+OV[k]||0; if(!nodes){ missing.push(k); return; }
+    const W=nodes.reduce((s,n)=>s+n.w,0); nodes.forEach(n=>{ n.fix=W?V*n.w/W:V/nodes.length; }); });
+  // من تحت لفوق: لو كل اللي تحت عقدة مثبت، العقدة نفسها تتحسب بمجموعهم (lb = أقل قيمة لازمة)
+  (function up(n){ const kids=Object.values(n.kids); n.lb=0; n.allFixed=kids.length>0;
+    kids.forEach(c=>{ up(c); const e=c.fix!=null?c.fix:(c.allFixed?c.lb:null); n.lb+=e!=null?e:c.lb; if(e==null) n.allFixed=false; }); })(root);
+  const eff=c=>c.fix!=null?c.fix:(c.allFixed?c.lb:null);
+  const warns=[];
+  (function alloc(n,val){ n.v=val; const kids=Object.values(n.kids); if(!kids.length) return;
+    let fixed=0; const free=[]; kids.forEach(c=>{ const e=eff(c); if(e!=null){ fixed+=e; c._v=e; } else free.push(c); });
+    let pool=val-fixed; const over0=pool<-0.5; if(over0) warns.push({node:n,over:-pool});
+    let F=free.slice();
+    while(F.length){ const W=F.reduce((a,c)=>a+c.w,0), P=Math.max(0,pool);
+      const bad=F.filter(c=>(W?P*c.w/W:P/F.length)<c.lb-0.005);
+      if(!bad.length){ F.forEach(c=>c._v=W?P*c.w/W:P/F.length); break; }
+      bad.forEach(c=>{ c._v=c.lb; pool-=c.lb; }); F=F.filter(c=>!bad.includes(c)); }
+    if(pool<-0.5&&!over0) warns.push({node:n,over:-pool});
+    if(!free.length&&pool>0.5) warns.push({node:n,under:pool});
+    kids.forEach(c=>alloc(c,c._v||0));
+  })(root,T);
+  const out=[]; (function leaves(n){ const kids=Object.values(n.kids); if(!kids.length&&n.row){ const x=n.row; out.push({...x,v:n.v,qty:x.q>0&&x.w>0?n.v*x.q/x.w:null}); return; } kids.forEach(leaves); })(root);
+  return {rows:out,total:T,sum:out.reduce((s,r)=>s+r.v,0),W:root.w,warns,missing};
+}
+function sfcComputeAll(){ const A=SFC.meta&&SFC.meta.active; SFC.res={};
+  sfcActiveMonths().forEach(ym=>{ const B=SFC.base[ym]; if(!B) return;
+    const rows=B.rows.filter(x=>!A||A.has(x.s)||SFC.keep.has(x.s));
+    SFC.res[ym]=sfcCompute(rows,SFC.months[ym],SFC.ov[ym]||{}); SFC.res[ym].b=B.b; }); }
+function sfcViewRows(){ const v=SFC.view; if(v!=='all'&&SFC.res[v]) return SFC.res[v].rows.map(r=>({...r,ym:v}));
+  const out=[]; Object.keys(SFC.res).sort().forEach(ym=>SFC.res[ym].rows.forEach(r=>out.push({...r,ym}))); return out; }
+function sfcAgg(rows,keys){ const m={}; rows.forEach(r=>{ const k=keys.map(d=>r[d]).join('|'); const o=m[k]=m[k]||{w:0,v:0,qty:0,hasQ:false}; keys.forEach(d=>o[d]=r[d]); o.w+=r.w; o.v+=r.v; if(r.qty!=null){ o.qty+=r.qty; o.hasQ=true; } }); return Object.values(m); }
+
+// ── العرض ──
+const SFC_TABS=[['grp','المجموعات','ti-users-group'],['route','خطوط السير','ti-route'],['cust','العملاء','ti-building-store'],['site','فروع العملاء','ti-map-pin'],['item','الأصناف','ti-package'],['br','فروع الشركة','ti-building']];
+const SFC_TABDIM={br:'b',grp:'g',route:'r',cust:'c',site:'s'};
+function sfcRender(){
+  sfcRenderStopped();
+  const body=document.getElementById('sfc-body'); if(!body) return;
+  const ms=sfcActiveMonths();
+  if(!ms.length){ body.innerHTML='<div style="background:#FFF8E1;border:1px solid #F0C880;border-radius:12px;padding:30px;text-align:center;font-weight:700;color:#8B6F47">اكتب هدف شهر واحد على الأقل في جدول الشهور فوق</div>'; return; }
+  if(SFC.view!=='all'&&!SFC.res[SFC.view]) SFC.view='all';
+  const one=SFC.view!=='all', R1=one?SFC.res[SFC.view]:null, rowsAll=sfcViewRows();
+  const T=one?R1.total:ms.reduce((a,k)=>a+SFC.months[k],0), W=rowsAll.reduce((a,r)=>a+r.w,0), S=rowsAll.reduce((a,r)=>a+r.v,0);
+  let h=`<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px">
+    <button type="button" class="cs-mode-btn${!one?' on':''}" onclick="SFC.view='all';sfcRender()">كل الشهور</button>
+    ${ms.map(ym=>`<button type="button" class="cs-mode-btn${SFC.view===ym?' on':''}" onclick="SFC.view='${ym}';sfcRender()">${sfcMonLbl(ym)}</button>`).join('')}</div>`;
+  const card=(l,v,sub,col)=>`<div style="background:#fff;border:1px solid #E8DCC4;border-radius:12px;padding:10px 14px"><div style="font-size:12px;color:#8B6F47;font-weight:700">${l}</div><div style="font-size:20px;font-weight:800;color:${col||'#2C1F0A'};margin:3px 0">${v}</div><div style="font-size:11px;color:#6B5B45">${sub||''}</div></div>`;
+  const nOv=one?Object.keys(SFC.ov[SFC.view]||{}).length:ms.reduce((a,k)=>a+Object.keys(SFC.ov[k]||{}).length,0);
+  h+=`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:12px">
+    ${card(one?'هدف '+sfcMonLbl(SFC.view):'إجمالي الأهداف',sfcN(T)+' ج',one?'':ms.length+' شهر','#731E2E')}
+    ${card('بيع فترة الأساس',sfcN(W)+' ج',one?`${R1.b.lbl} (${R1.b.f} → ${R1.b.t})`:'مجموع فترات الأساس')}
+    ${card('الهدف ÷ بيع الأساس',W?(T/W*100).toFixed(1)+'%':'—','')}
+    ${card('أرقام مثبتة',nOv,one?(nOv?'<a href="javascript:void 0" onclick="sfcClearOv()" style="color:#B71C1C">إلغاء تثبيت الشهر ده</a>':'ثبّت أي رقم من الجدول تحت'):'التثبيت بيتعمل من شهر لوحده')}</div>`;
+  const lines=[];
+  (one?[SFC.view]:ms).forEach(ym=>{ const R=SFC.res[ym]; if(!R) return; const pre=one?'':`<b>${sfcMonLbl(ym)}:</b> `;
+    if(!R.rows.length) lines.push(pre+'مفيش بيع في فترة الأساس بالفلاتر دي');
+    R.warns.forEach(w=>{ const n=w.node, nm=n.lv<0?'الإجمالي':sfcLbl(n.dim,n.name);
+      lines.push(pre+(w.over?`المثبت تحت <b>${ccEsc(nm)}</b> أكبر من رقمه بـ ${sfcN(w.over)} ج`:`كل اللي تحت <b>${ccEsc(nm)}</b> مثبت، وفاضل ${sfcN(w.under)} ج مش متوزعين`)); });
+    R.missing.forEach(k=>lines.push(pre+`التثبيت على <b>${ccEsc(sfcLbl(k.split(':')[0],k.slice(k.indexOf(':')+1)))}</b> مش موجود في الفلاتر دي — مش داخل في الحسبة`)); });
+  if(Math.abs(S-T)>1) lines.push(`مجموع التوزيع ${sfcN(S)} ج مختلف عن الهدف ${sfcN(T)} ج`);
+  if(lines.length) h+=`<div style="background:#FFEBEE;border:1px solid #E57373;border-radius:10px;padding:10px 14px;margin-bottom:12px;color:#B71C1C;font-size:12.5px;line-height:1.9">⚠️ ${lines.join('<br>⚠️ ')}</div>`;
+  const tab=SFC.tab, isItem=tab==='item', isSite=tab==='site', isRoute=tab==='route', dim=SFC_TABDIM[tab], canFix=one&&!!dim, OV=one?(SFC.ov[SFC.view]||{}):{};
+  const firstBy={s:{},r:{}}; rowsAll.forEach(x=>{ if(!firstBy.s[x.s]) firstBy.s[x.s]=x; if(!firstBy.r[x.r]) firstBy.r[x.r]=x; });
+  let rows;
+  if(isItem) rows=sfcAgg(rowsAll,['g','i']).map(o=>({...o,n:o.i,grp:csGrpLbl(o.g)}));
+  else if(isSite) rows=sfcAgg(rowsAll,['s']).map(o=>{ const x=firstBy.s[o.s]||{}; return {...o,n:o.s,grp:csGrpLbl(x.g),route:x.r,cust:x.c}; });
+  else if(isRoute) rows=sfcAgg(rowsAll,['r']).map(o=>{ const x=firstBy.r[o.r]||{}; return {...o,n:o.r,grp:csGrpLbl(x.g)}; });
+  else rows=sfcAgg(rowsAll,[dim]).map(o=>({...o,n:sfcLbl(dim,o[dim]),raw:o[dim]}));
+  const q=SFC.q.trim(); if(q) rows=rows.filter(r=>[r.n,r.grp,r.route,r.cust].some(x=>String(x||'').includes(q)));
+  rows.sort((a,b)=>String(a.grp||'').localeCompare(String(b.grp||''),'ar')||String(a.route||'').localeCompare(String(b.route||''),'ar')||String(a.n).localeCompare(String(b.n),'ar'));
+  const ovKey=r=>dim?dim+':'+(r.raw!=null?r.raw:r[dim]):null;
+  h+=`<div style="background:#fff;border:1px solid #E8DCC4;border-radius:12px;padding:12px 14px">
+    <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      ${SFC_TABS.map(([k,l,i])=>`<button type="button" class="cs-mode-btn${tab===k?' on':''}" onclick="SFC.tab='${k}';sfcRender()"><i class="ti ${i}"></i> ${l}</button>`).join('')}
+      <input id="sfc-q" placeholder="بحث..." value="${ccEsc(SFC.q)}" oninput="SFC.q=this.value;sfcRender();const e=document.getElementById('sfc-q');e.focus();e.setSelectionRange(e.value.length,e.value.length)" style="margin-right:auto;padding:6px 10px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:inherit;min-width:200px"/>
+    </div>
+    ${canFix?'<div style="font-size:11.5px;color:#8B6F47;margin-bottom:6px">📌 اكتب رقم في خانة "تثبيت" عشان تثبّت الرقم ده في الشهر ده — الباقي هيتوزع على اللي جنبه. سيبها فاضية للتوزيع بالنسبة.</div>':(dim?'<div style="font-size:11.5px;color:#8B6F47;margin-bottom:6px">📌 عشان تثبّت رقم، اختار شهر من فوق.</div>':'')}
+    <div style="overflow:auto;max-height:62vh"><table style="width:100%;border-collapse:collapse;font-size:12.5px;text-align:center">
+      <thead style="position:sticky;top:0;z-index:1"><tr style="background:#731E2E;color:#fff">
+        ${isItem||isSite||isRoute?'<th style="padding:8px;text-align:right">المجموعة</th>':''}${isSite?'<th style="padding:8px;text-align:right">خط السير</th>':''}
+        <th style="padding:8px;text-align:right">${{grp:'المجموعة',route:'خط السير',cust:'العميل',site:'فرع العميل',item:'الصنف',br:'فرع الشركة'}[tab]}</th>${isSite?'<th style="padding:8px;text-align:right">العميل</th>':''}
+        <th style="padding:8px">بيع الأساس</th><th style="padding:8px">النسبة</th><th style="padding:8px">التوقع (ج)</th>${isItem?'<th style="padding:8px">الكمية</th>':''}${canFix?'<th style="padding:8px">تثبيت</th>':''}</tr></thead><tbody>
+      ${rows.map(r=>{ const k=ovKey(r), fixed=canFix&&k&&OV[k]!=null;
+        return `<tr style="border-bottom:1px solid #EFE6D6;${fixed?'background:#FFF8E1':''}">
+          ${isItem||isSite||isRoute?`<td style="padding:6px;text-align:right;color:#8B6F47">${ccEsc(r.grp||'')}</td>`:''}${isSite?`<td style="padding:6px;text-align:right;color:#8B6F47">${ccEsc(r.route||'')}</td>`:''}
+          <td style="padding:6px;text-align:right;font-weight:700">${isSite?`<a href="javascript:void 0" data-s="${ccEsc(r.n)}" onclick="sfcToggleSite(this.dataset.s)" style="color:#2C1F0A;text-decoration:none">${SFC.openSite[r.n]?'▾':'▸'} ${ccEsc(r.n)}</a>`:ccEsc(r.n)}${fixed?' <span title="مثبت" style="color:#B26A00">📌</span>':''}</td>${isSite?`<td style="padding:6px;text-align:right;font-size:11.5px">${ccEsc(r.cust||'')}</td>`:''}
+          <td style="color:#8B6F47">${sfcN(r.w)}</td><td>${S?(r.v/S*100).toFixed(1)+'%':'—'}</td><td style="font-weight:800;color:#731E2E">${sfcN(r.v)}</td>${isItem?`<td>${r.hasQ?sfcQ(r.qty):'—'}</td>`:''}
+          ${canFix?`<td style="white-space:nowrap"><input type="text" inputmode="decimal" data-k="${ccEsc(k)}" value="${fixed?Math.round(OV[k]).toLocaleString('en-US'):''}" placeholder="—" onchange="sfcSetOv(this.dataset.k,this.value)" style="width:110px;padding:4px 6px;border:1.5px solid ${fixed?'#B26A00':'#D4C4A8'};border-radius:6px;font-family:inherit;text-align:center;direction:ltr"/>${fixed?` <button type="button" onclick="sfcSetOv(this.previousElementSibling.dataset.k,'')" title="إلغاء التثبيت" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 7px;cursor:pointer">✕</button>`:''}</td>`:''}</tr>
+          ${isSite&&SFC.openSite[r.n]?sfcSiteItemsHTML(rowsAll,r.n):''}`; }).join('')||'<tr><td colspan="9" style="padding:20px;color:#8B6F47">مفيش بيانات</td></tr>'}
+      </tbody></table></div></div>`;
+  body.innerHTML=h;
+}
+function sfcSiteItemsHTML(rowsAll,site){
+  const its=sfcAgg(rowsAll.filter(r=>r.s===site),['i']).sort((a,b)=>a.i.localeCompare(b.i,'ar'));
+  return `<tr><td colspan="9" style="background:#FBF8F2;padding:6px 30px"><table style="width:100%;border-collapse:collapse;font-size:12px">
+    <tr style="background:#EDE5D8"><th style="padding:5px;text-align:right">الصنف</th><th>التوقع (ج)</th><th>الكمية</th></tr>
+    ${its.map(r=>`<tr style="border-bottom:1px solid #EFE6D6"><td style="padding:4px;text-align:right">${ccEsc(r.i)}</td><td>${sfcN(r.v)}</td><td style="font-weight:700">${r.hasQ?sfcQ(r.qty):'—'}</td></tr>`).join('')}</table></td></tr>`;
+}
+function sfcToggleSite(s){ SFC.openSite[s]=!SFC.openSite[s]; sfcRender(); }
+function sfcSetOv(k,v){ const ym=SFC.view; if(ym==='all') return; const n=sfcNum(v), o=SFC.ov[ym]=SFC.ov[ym]||{};
+  if(n!=null&&String(v).trim()!=='') o[k]=n; else delete o[k]; if(!Object.keys(o).length) delete SFC.ov[ym]; sfcChanged(); sfcComputeAll(); sfcRender(); }
+function sfcClearOv(){ if(!confirm('إلغاء كل الأرقام المثبتة في الشهر ده؟')) return; delete SFC.ov[SFC.view]; sfcChanged(); sfcComputeAll(); sfcRender(); }
+
+// ── الحفظ ──
+function sfcCfg(){ const sel={}; SFC_LEVELS.forEach(([k])=>sel[k]=[...SFC.sel[k]]); return {v:2,months:SFC.months,ov:SFC.ov,keep:[...SFC.keep],sel}; }
+function sfcApplyCfg(c){ c=c||{}; SFC.months=(c.v===2&&c.months)||{}; SFC.ov=(c.v===2&&c.ov)||{}; SFC.keep=new Set(c.keep||[]);
+  SFC_LEVELS.forEach(([k])=>SFC.sel[k]=new Set((c.sel&&c.sel[k])||[])); SFC.metaKey=''; SFC.itemKey=''; SFC.base={}; SFC.res={}; SFC.openSite={}; SFC.view='all'; }
+function sfcSaveSt(t,col){ const e=document.getElementById('sfc-savest'); if(e) e.innerHTML=`<span style="color:${col||'#E8D3A2'};font-weight:700">${t}</span>`; }
+function sfcChanged(){ SFC.saved=false; if(SFC.plan){ sfcSaveSt('جاري الحفظ...'); clearTimeout(SFC.saveT); SFC.saveT=setTimeout(()=>sfcSave(false),1200); } else sfcSaveSt('مش محفوظ — دوس "حفظ"','#FFD54F'); }
+const SFC_H=()=>({'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'});
+async function sfcLoadPlans(){
+  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/sales_fc_plans?select=id,name,cfg,updated_at&order=updated_at.desc&limit=200`,{headers:SFC_H(),cache:'no-store'}); SFC.plans=r.ok?await r.json():[]; }catch(e){ SFC.plans=[]; }
+  if(SFC.plan==null && SFC.plans.length){ SFC.plan=SFC.plans[0].id; sfcApplyCfg(SFC.plans[0].cfg); }
+  sfcPlanOpts(); document.getElementById('sfc-filters').innerHTML=sfcMsBar();
+  if(SFC.plan) sfcSaveSt('محفوظ ✓','#C8E6C9'); sfcLoad();
+}
+function sfcPlanOpts(){ const s=document.getElementById('sfc-plan'); if(!s) return;
+  s.innerHTML='<option value="">➕ توقع جديد</option>'+SFC.plans.map(p=>`<option value="${p.id}"${p.id===SFC.plan?' selected':''}>${ccEsc(p.name)}</option>`).join(''); }
+async function sfcPickPlan(id){
+  if(!SFC.saved && !SFC.plan && sfcActiveMonths().length && !confirm('التوقع الحالي مش محفوظ — تكمل من غير حفظ؟')){ sfcPlanOpts(); return; }
+  if(SFC.saveT){ clearTimeout(SFC.saveT); await sfcSave(false); }
+  if(!id){ SFC.plan=null; sfcApplyCfg({}); sfcSaveSt(''); }
+  else { const p=SFC.plans.find(x=>String(x.id)===String(id)); if(!p) return; SFC.plan=p.id; sfcApplyCfg(p.cfg); sfcSaveSt('محفوظ ✓','#C8E6C9'); }
+  SFC.saved=true; sfcPlanOpts(); document.getElementById('sfc-filters').innerHTML=sfcMsBar(); sfcLoad();
+}
+async function sfcSave(manual,asNew){
+  clearTimeout(SFC.saveT); SFC.saveT=null;
+  const cfg=sfcCfg();
+  try{
+    if(!SFC.plan||asNew){
+      if(!manual) return;
+      const cur=SFC.plans.find(p=>p.id===SFC.plan);
+      const name=prompt('اسم التوقع (مثلاً: توقع 2027 — سلاسل القاهرة)', asNew&&cur?cur.name+' (نسخة)':''); if(!name||!name.trim()) return;
+      const r=await fetch(`${SUPABASE_URL}/rest/v1/sales_fc_plans`,{method:'POST',headers:{...SFC_H(),Prefer:'return=representation'},body:JSON.stringify({name:name.trim(),cfg})});
+      if(!r.ok) throw new Error(r.status+' '+(await r.text().catch(()=>'')));
+      const row=(await r.json())[0]; SFC.plans.unshift(row); SFC.plan=row.id; sfcPlanOpts();
+    } else {
+      const r=await fetch(`${SUPABASE_URL}/rest/v1/sales_fc_plans?id=eq.${SFC.plan}`,{method:'PATCH',headers:{...SFC_H(),Prefer:'return=minimal'},body:JSON.stringify({cfg,updated_at:new Date().toISOString()})});
+      if(!r.ok) throw new Error(r.status+' '+(await r.text().catch(()=>'')));
+      const p=SFC.plans.find(x=>x.id===SFC.plan); if(p) p.cfg=cfg;
+    }
+    SFC.saved=true; sfcSaveSt('محفوظ ✓ '+new Date().toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'}),'#C8E6C9');
+  }catch(e){ console.error('[sfcSave]',e); sfcSaveSt('⚠️ ماتحفظش — دوس حفظ تاني','#FFCDD2'); if(manual) alert('⚠️ التوقع ماتحفظش — جرّب تاني\n'+(e&&e.message||'')); }
+}
+async function sfcDeletePlan(){
+  if(!SFC.plan) return; const p=SFC.plans.find(x=>x.id===SFC.plan); if(!confirm(`حذف التوقع "${p?p.name:''}"؟`)) return;
+  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/sales_fc_plans?id=eq.${SFC.plan}`,{method:'DELETE',headers:SFC_H()}); if(!r.ok) throw new Error(r.status); }
+  catch(e){ alert('تعذر الحذف — جرّب تاني'); return; }
+  SFC.plans=SFC.plans.filter(x=>x.id!==SFC.plan); SFC.plan=null; sfcApplyCfg({}); SFC.saved=true; sfcPlanOpts(); sfcSaveSt(''); document.getElementById('sfc-filters').innerHTML=sfcMsBar(); sfcLoad();
+}
+
+// ── Excel بهوية الطحان — عمود لكل شهر + الإجمالي ──
+function sfcExcel(){
+  const ms=sfcActiveMonths().filter(ym=>SFC.res[ym]);
+  if(!ms.length){ showToast('اكتب هدف شهر واحد على الأقل'); return; }
+  if(typeof XLSX==='undefined'){ showToast('جاري تحميل مكتبة Excel...'); return; }
+  const p=SFC.plans.find(x=>x.id===SFC.plan), title0=p?p.name:'التوقع البيعي';
+  const C={dark:'2C1F0A',caramel:'4B3C1A',gold:'C8A96E',cream:'EDE5D8',light:'F5F0E8',maroon:'731E2E',white:'FFFFFF',line:'E0D8CC',alt:'FBF8F2'};
+  const fill=c=>({patternType:'solid',fgColor:{rgb:c}}), font=(b,sz,col)=>({bold:!!b,sz:sz||11,color:{rgb:col||C.dark},name:'Cairo'});
+  const aln=h=>({horizontal:h||'right',vertical:'center',wrapText:true,readingOrder:2});
+  const bd=()=>{const b={style:'thin',color:{rgb:C.line}};return{left:b,right:b,top:b,bottom:b};};
+  const AR=(a,b)=>String(a||'').localeCompare(String(b||''),'ar'), G=g=>csGrpLbl(g), ML=ms.map(sfcMonLbl);
+  const T=ms.reduce((a,k)=>a+SFC.months[k],0);
+  const filtersTxt=SFC_LEVELS.map(([k,l])=>l+': '+(SFC.sel[k].size?(SFC.sel[k].size<=3?[...SFC.sel[k]].map(v=>sfcLbl(k,v)).join('، '):SFC.sel[k].size+' مختار'):'الكل')).join(' | ');
+  const sheet=(title,head,rows,nKey)=>{
+    const nc=head.length, aoa=[['الطحان جولدن داتس — Al Tahhan Golden Dates',...Array(nc-1).fill('')],[title,...Array(nc-1).fill('')],
+      [`إجمالي الأهداف: ${sfcN(T)} ج   |   ${ms.length} شهر   |   النسب من نفس الأيام الهجرية السنة اللي فاتت   |   تاريخ التصدير: ${new Date().toLocaleDateString('en-GB')}`,...Array(nc-1).fill('')],
+      [filtersTxt,...Array(nc-1).fill('')],head,...rows.map(r=>r.c)];
+    const ws=XLSX.utils.aoa_to_sheet(aoa), enc=(r,c)=>XLSX.utils.encode_cell({r,c});
+    const sty=(r,c,st)=>{ const k=enc(r,c); if(!ws[k]) ws[k]={t:'z',v:''}; ws[k].s=st; };
+    ws['!merges']=nc>1?[0,1,2,3].map(r=>({s:{r,c:0},e:{r,c:nc-1}})):[];
+    sty(0,0,{font:font(1,15,C.cream),fill:fill(C.maroon),alignment:aln('center')});
+    sty(1,0,{font:font(1,13,C.dark),fill:fill(C.gold),alignment:aln('center')});
+    sty(2,0,{font:font(0,10,C.caramel),fill:fill(C.light),alignment:aln('center')});
+    sty(3,0,{font:font(0,10,C.caramel),fill:fill(C.light),alignment:aln('center')});
+    for(let c=0;c<nc;c++) sty(4,c,{font:font(1,11,C.cream),fill:fill(C.maroon),alignment:aln('center'),border:bd()});
+    rows.forEach((r,i)=>{ const Rw=5+i, isT=r.k!=='d', bg=r.k==='tot'?C.gold:(r.k==='sub'?C.cream:(i%2?C.alt:C.white));
+      for(let c=0;c<nc;c++){ const v=r.c[c], h=head[c]||'', num=c>=nKey&&typeof v==='number';
+        sty(Rw,c,{font:font(isT||h.indexOf('الإجمالي')===0,isT?11:10,r.k==='sub'?C.maroon:C.dark),fill:fill(bg),alignment:aln(c<nKey?'right':'center'),border:bd(),
+          numFmt:num?(h.indexOf('كمية')>=0?'#,##0.0':'#,##0'):undefined}); } });
+    ws['!cols']=head.map((h,c)=>({wch:c<nKey?(c===0?26:38):15})); ws['!views']=[{RTL:true}];
+    return ws; };
+  // صف لكل مفتاح: قيمة كل شهر + الإجمالي (ولو q: كمية كل شهر + إجمالي الكمية + إجمالي القيمة)
+  const build=(keys,mapF)=>{ const m={};
+    ms.forEach((ym,mi)=>SFC.res[ym].rows.forEach(r=>{ const k=keys.map(d=>r[d]).join('|'); const o=m[k]=m[k]||Object.assign(mapF(r),{v:Array(ms.length).fill(0),q:Array(ms.length).fill(0),hq:false});
+      o.v[mi]+=r.v; if(r.qty!=null){ o.q[mi]+=r.qty; o.hq=true; } }));
+    return Object.values(m); };
+  const vals=(o,q)=>q?[...o.q.map(x=>o.hq?+x.toFixed(1):''),o.hq?+o.q.reduce((a,b)=>a+b,0).toFixed(1):'',Math.round(o.v.reduce((a,b)=>a+b,0))]
+                     :[...o.v.map(Math.round),Math.round(o.v.reduce((a,b)=>a+b,0))];
+  const z=()=>({v:Array(ms.length).fill(0),q:Array(ms.length).fill(0),hq:false}), add=(a,o)=>{ o.v.forEach((x,i)=>a.v[i]+=x); o.q.forEach((x,i)=>a.q[i]+=x); if(o.hq) a.hq=true; };
+  const vHead=q=>q?[...ML.map(l=>'كمية '+l),'الإجمالي — كمية','الإجمالي — قيمة (ج)']:[...ML,'الإجمالي (ج)'];
+  const grouped=(list,labels,q)=>{ const by={}; list.forEach(o=>(by[o.G]=by[o.G]||[]).push(o)); const out=[], all=z();
+    Object.keys(by).sort(AR).forEach(g=>{ const tg=z();
+      by[g].sort((a,b)=>{ for(const l of labels){ const x=AR(a[l],b[l]); if(x) return x; } return 0; }).forEach(o=>{ add(tg,o); out.push({k:'d',c:[g,...labels.map(l=>o[l]||''),...vals(o,q)]}); });
+      add(all,tg); out.push({k:'sub',c:['إجمالي '+g,...labels.map(()=>''),...vals(tg,q)]}); });
+    out.push({k:'tot',c:['الإجمالي العام',...labels.map(()=>''),...vals(all,q)]}); return out; };
+  const flat=list=>{ const all=z(), out=list.sort((a,b)=>AR(a.N,b.N)).map(o=>{ add(all,o); return {k:'d',c:[o.N,...vals(o)]}; }); out.push({k:'tot',c:['الإجمالي العام',...vals(all)]}); return out; };
+  const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]};
+  { const rows=ms.map(ym=>{ const R=SFC.res[ym]; return {k:'d',c:[sfcMonLbl(ym),Math.round(SFC.months[ym]),`${R.b.lbl}`,`${R.b.f} → ${R.b.t}`,Math.round(R.W)]}; });
+    rows.push({k:'tot',c:['الإجمالي',Math.round(T),'','',Math.round(ms.reduce((a,k)=>a+SFC.res[k].W,0))]});
+    const ovs=[]; ms.forEach(ym=>Object.keys(SFC.ov[ym]||{}).forEach(k=>{ const d=k.split(':')[0], v=k.slice(k.indexOf(':')+1); ovs.push({k:'d',c:[sfcMonLbl(ym),Math.round(SFC.ov[ym][k]),({b:'فرع الشركة',g:'المجموعة',r:'خط السير',c:'العميل',s:'فرع العميل'}[d]||'')+': '+sfcLbl(d,v),'','']}); }));
+    if(ovs.length){ rows.push({k:'sub',c:['أرقام مثبتة','الرقم','على','','']}); rows.push(...ovs); }
+    if(SFC.keep.size){ rows.push({k:'sub',c:['فروع وقفت ودخلت (عملاء موسم)','','','','']}); [...SFC.keep].sort(AR).forEach(s=>rows.push({k:'d',c:['',' ',s,'','']})); }
+    XLSX.utils.book_append_sheet(wb,sheet(title0+' — الملخص',['الشهر','الهدف (ج)','أساس النسب (هجري)','فترة الأساس','بيع الأساس (ج)'],rows,1),'الملخص'); }
+  XLSX.utils.book_append_sheet(wb,sheet(title0+' — فروع الشركة',['فرع الشركة',...vHead()],flat(build(['b'],r=>({N:r.b}))),1),'فروع الشركة');
+  XLSX.utils.book_append_sheet(wb,sheet(title0+' — المجموعات',['المجموعة',...vHead()],flat(build(['g'],r=>({N:G(r.g)}))),1),'المجموعات');
+  XLSX.utils.book_append_sheet(wb,sheet(title0+' — خطوط السير',['المجموعة','خط السير',...vHead()],grouped(build(['g','r'],r=>({G:G(r.g),r:r.r})),['r']),2),'خطوط السير');
+  XLSX.utils.book_append_sheet(wb,sheet(title0+' — العملاء',['العميل',...vHead()],flat(build(['c'],r=>({N:r.c}))),1),'العملاء');
+  XLSX.utils.book_append_sheet(wb,sheet(title0+' — فروع العملاء',['المجموعة','خط السير','فرع العميل','العميل',...vHead()],grouped(build(['g','r','s','c'],r=>({G:G(r.g),r:r.r,s:r.s,c:r.c})),['r','s','c']),4),'فروع العملاء');
+  XLSX.utils.book_append_sheet(wb,sheet(title0+' — الأصناف',['المجموعة','الصنف',...vHead(true)],grouped(build(['g','i'],r=>({G:G(r.g),i:r.i})),['i'],true),2),'الأصناف');
+  XLSX.utils.book_append_sheet(wb,sheet(title0+' — الأصناف على الفروع',['المجموعة','خط السير','فرع العميل','العميل','الصنف',...vHead(true)],grouped(build(['g','r','s','c','i'],r=>({G:G(r.g),r:r.r,s:r.s,c:r.c,i:r.i})),['r','s','c','i'],true),5),'الأصناف على الفروع');
+  XLSX.writeFile(wb,`${title0.replace(/[\\/:*?"<>|]/g,'-')}.xlsx`);
+}
+
 </script>
 </body>
 </html>
