@@ -26160,18 +26160,87 @@ function ccRender(){
     </table></div></div>`;
   document.getElementById('cc-body').innerHTML=h;
 }
-function ccExcel(){
+// ── تصدير Excel بهوية الطحان (عنابي/دهبي) — خطوط السير بالمجموعة، فروع العملاء بالمجموعة وخط السير،
+//    والأصناف متقسمة على المجموعات. ترتيب أبجدي جوه كل مجموعة وسطر إجمالي تحت كل مجموعة.
+async function ccExcel(){
   if(!CC.D||typeof XLSX==='undefined'){ showToast('استنى المقارنة تخلص تحميل'); return; }
-  const D=CC.D, y1=D.y1, y2=D.y2, wb=XLSX.utils.book_new();
-  const t=D.tot, sum=[[`مقارنة المبيعات ${y1} مقابل ${y2}`],[`${y2}: ${D.from2} → ${D.to2}   |   ${y1}: ${D.from1} → ${D.to1}`],[D.filtersTxt],[],['البند',y1,y2,'الفرق','النمو %'],
-    ...[['المبيعات',t.s1,t.s2],['المرتجع',t.r1,t.r2],['الصافي',t.s1-t.r1,t.s2-t.r2]].map(([l,a,b])=>[l,Math.round(a),Math.round(b),Math.round(b-a),a?+((b-a)/Math.abs(a)*100).toFixed(1):''])];
-  sum.push([],['الشهر','مبيعات '+y1,'مبيعات '+y2,'مرتجع '+y1,'مرتجع '+y2,'صافي '+y1,'صافي '+y2,'الفرق','النمو %']);
-  CC.months.forEach(m=>{ const a=m.s1-m.r1,b=m.s2-m.r2; sum.push([CC_MON[+m.lab.slice(5)-1]+` (${m.f.slice(8)}-${m.t.slice(8)})`,Math.round(m.s1),Math.round(m.s2),Math.round(m.r1),Math.round(m.r2),Math.round(a),Math.round(b),Math.round(b-a),a?+((b-a)/Math.abs(a)*100).toFixed(1):'']); });
-  const ws0=XLSX.utils.aoa_to_sheet(sum); ws0['!cols']=[{wch:26},...Array(8).fill({wch:15})]; ws0['!views']=[{RTL:true}]; XLSX.utils.book_append_sheet(wb,ws0,'الملخص');
-  CC_TABS.forEach(([k,l,,col])=>{ const it=k==='item', si=k==='site';
-    const aoa=[[col,...(si?['العميل']:[]),...(it?['كمية '+y1,'كمية '+y2]:[]),'صافي '+y1,'صافي '+y2,'الفرق','النمو %','مرتجع% '+y1,'مرتجع% '+y2]];
-    ccRowsOf(k).sort((x,y)=>y.b-x.b).forEach(r=>aoa.push([r.n,...(si?[r.sub||'']:[]),...(it?[Math.round(r.q1),Math.round(r.q2)]:[]),Math.round(r.a),Math.round(r.b),Math.round(r.d),r.g==null?'جديد':+r.g.toFixed(1),+r.rp1.toFixed(1),+r.rp2.toFixed(1)]));
-    const ws=XLSX.utils.aoa_to_sheet(aoa); ws['!cols']=[{wch:40},...Array(9).fill({wch:14})]; ws['!views']=[{RTL:true}]; XLSX.utils.book_append_sheet(wb,ws,l); });
+  const D=CC.D, y1=D.y1, y2=D.y2;
+  showToast('جاري تجهيز ملف الإكسيل...');
+  let E1=[],E2=[];
+  try{
+    const body=(f,t)=>({p_from:f,p_to:t,p_branches:ccArr('br'),p_grps:ccArr('grp'),p_routes:ccArr('route'),p_customers:ccArr('cust'),p_sites:ccArr('site'),p_items:ccArr('item')});
+    [E1,E2]=await Promise.all([csRpc('chain_cmp_export',body(D.from1,D.to1)),csRpc('chain_cmp_export',body(D.from2,D.to2))]);
+  }catch(e){ console.error('[ccExcel]',e); alert('تعذر تجهيز ملف الإكسيل — جرّب تاني'); return; }
+  const C={dark:'2C1F0A',caramel:'4B3C1A',gold:'C8A96E',cream:'EDE5D8',light:'F5F0E8',maroon:'731E2E',white:'FFFFFF',line:'E0D8CC',alt:'FBF8F2',green:'1A7A4A',red:'B71C1C'};
+  const fill=c=>({patternType:'solid',fgColor:{rgb:c}});
+  const font=(b,sz,col)=>({bold:!!b,sz:sz||11,color:{rgb:col||C.dark},name:'Cairo'});
+  const aln=h=>({horizontal:h||'right',vertical:'center',wrapText:true,readingOrder:2});
+  const bd=()=>{const b={style:'thin',color:{rgb:C.line}};return{left:b,right:b,top:b,bottom:b};};
+  const G=g=>csGrpLbl(g), AR=(a,b)=>String(a||'').localeCompare(String(b||''),'ar');
+  const pct=(a,b)=>a?+((b-a)/Math.abs(a)*100).toFixed(1):(b?'جديد':0);
+  const valCols=it=>[...(it?['كمية '+y1,'كمية '+y2]:[]),'صافي '+y1,'صافي '+y2,'الفرق','النمو %','مرتجع% '+y1,'مرتجع% '+y2];
+  const vals=(o,it)=>{ const a=o.s1-o.r1,b=o.s2-o.r2;
+    return [...(it?[Math.round(o.q1-o.qr1),Math.round(o.q2-o.qr2)]:[]),Math.round(a),Math.round(b),Math.round(b-a),pct(a,b),o.s1?+(o.r1/o.s1*100).toFixed(1):0,o.s2?+(o.r2/o.s2*100).toFixed(1):0]; };
+  const z=()=>({s1:0,r1:0,s2:0,r2:0,q1:0,q2:0,qr1:0,qr2:0});
+  const add=(t,o)=>{ for(const k in t) t[k]+=(+o[k]||0); return t; };
+  // بيبني شيت: عنوان + فلاتر + رأس جدول + صفوف (row: kind d/sub/tot)
+  const sheet=(title,head,rows,nKey)=>{
+    const nc=head.length, aoa=[['الطحان جولدن داتس — Al Tahhan Golden Dates',...Array(nc-1).fill('')],[title,...Array(nc-1).fill('')],
+      [`${y2}: ${D.from2} → ${D.to2}   |   ${y1}: ${D.from1} → ${D.to1}   |   تاريخ التصدير: ${new Date().toLocaleDateString('en-GB')}`,...Array(nc-1).fill('')],
+      [D.filtersTxt,...Array(nc-1).fill('')],head,...rows.map(r=>r.c)];
+    const ws=XLSX.utils.aoa_to_sheet(aoa), enc=(r,c)=>XLSX.utils.encode_cell({r,c});
+    const sty=(r,c,st)=>{ const k=enc(r,c); if(!ws[k]) ws[k]={t:'z',v:''}; ws[k].s=st; };
+    ws['!merges']=nc>1?[0,1,2,3].map(r=>({s:{r,c:0},e:{r,c:nc-1}})):[];
+    sty(0,0,{font:font(1,15,C.cream),fill:fill(C.maroon),alignment:aln('center')});
+    sty(1,0,{font:font(1,13,C.dark),fill:fill(C.gold),alignment:aln('center')});
+    sty(2,0,{font:font(0,10,C.caramel),fill:fill(C.light),alignment:aln('center')});
+    sty(3,0,{font:font(0,10,C.caramel),fill:fill(C.light),alignment:aln('center')});
+    for(let c=0;c<nc;c++) sty(4,c,{font:font(1,11,C.cream),fill:fill(C.maroon),alignment:aln('center'),border:bd()});
+    rows.forEach((r,i)=>{ const R=5+i, isT=r.k!=='d', bg=r.k==='tot'?C.gold:(r.k==='sub'?C.cream:(i%2?C.alt:C.white));
+      for(let c=0;c<nc;c++){ const v=r.c[c], h=head[c]||'', num=c>=nKey&&typeof v==='number';
+        let col=r.k==='sub'?C.maroon:C.dark;
+        if((h==='الفرق'||h==='النمو %')&&typeof v==='number'&&v!==0) col=v>0?C.green:C.red;
+        if(v==='جديد') col=C.green;
+        sty(R,c,{font:font(isT||h==='صافي '+y2,isT?11:10,col),fill:fill(bg),alignment:aln(c<nKey?'right':'center'),border:bd(),
+          numFmt:num?(h.indexOf('%')>=0?'0.0':'#,##0'):undefined}); } });
+    ws["!cols"]=head.map((h,c)=>({wch:c<nKey?(c===0?26:38):14}));
+    ws['!views']=[{RTL:true}]; ws['!freeze']={xSplit:0,ySplit:5};
+    return ws; };
+  // صفوف مجمّعة بالمجموعة: ترتيب أبجدي جوه المجموعة + إجمالي المجموعة + الإجمالي العام
+  const grouped=(list,labelCols,it)=>{ const by={}; list.forEach(o=>{ (by[o.grp]=by[o.grp]||[]).push(o); });
+    const out=[], all=z();
+    Object.keys(by).sort(AR).forEach(g=>{ const tg=z();
+      by[g].sort((a,b)=>{ for(const f of labelCols){ const x=AR(a[f],b[f]); if(x) return x; } return 0; })
+        .forEach(o=>{ add(tg,o); out.push({k:'d',c:[g,...labelCols.map(f=>o[f]||''),...vals(o,it)]}); });
+      add(all,tg); out.push({k:'sub',c:['إجمالي '+g,...labelCols.map(()=>''),...vals(tg,it)]}); });
+    out.push({k:'tot',c:['الإجمالي العام',...labelCols.map(()=>''),...vals(all,it)]}); return out; };
+  // تجميع صفوف chain_cmp_export للسنتين
+  const comb=(kind,keyF,base)=>{ const m={};
+    [[E1,1],[E2,2]].forEach(([E,y])=>(E||[]).filter(r=>r.kind===kind).forEach(r=>{ const k=keyF(r), o=m[k]=m[k]||Object.assign(z(),base(r));
+      o['s'+y]+=+r.vs||0; o['r'+y]+=+r.vr||0; o['q'+y]+=+r.qs||0; o['qr'+y]+=+r.qr||0; }));
+    return Object.values(m).filter(o=>Math.abs(o.s1-o.r1)>0.5||Math.abs(o.s2-o.r2)>0.5); };
+  const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]};
+  // 1) الملخص
+  { const t=D.tot, head=['البند',y1,y2,'الفرق','النمو %'];
+    const rows=[['المبيعات (بعد الخصم)',t.s1,t.s2],['المرتجع',t.r1,t.r2],['الصافي',t.s1-t.r1,t.s2-t.r2]].map(([l,a,b],i)=>({k:i===2?'tot':'d',c:[l,Math.round(a),Math.round(b),Math.round(b-a),pct(a,b)]}));
+    rows.push({k:'sub',c:['الشهر',y1,y2,'الفرق','النمو %']});
+    CC.months.forEach(m=>{ const a=m.s1-m.r1,b=m.s2-m.r2; rows.push({k:'d',c:[CC_MON[+m.lab.slice(5)-1]+` (${m.f.slice(8)}-${m.t.slice(8)}) — صافي`,Math.round(a),Math.round(b),Math.round(b-a),pct(a,b)]}); });
+    XLSX.utils.book_append_sheet(wb,sheet(`مقارنة المبيعات ${y1} مقابل ${y2} — الملخص`,head,rows,1),'الملخص'); }
+  // 2) العملاء / فروع الشركة / المجموعات — صفوف بسيطة أبجدي + إجمالي
+  [['cust','العملاء','العميل'],['br','فروع الشركة','فرع الشركة'],['grp','المجموعات','المجموعة']].forEach(([k,l,col])=>{
+    const list=(D[k]||[]).map(o=>Object.assign(z(),o,{nm:k==='grp'?G(o.n):o.n})).filter(o=>Math.abs(o.s1-o.r1)>0.5||Math.abs(o.s2-o.r2)>0.5).sort((a,b)=>AR(a.nm,b.nm));
+    const all=z(), rows=list.map(o=>{ add(all,o); return {k:'d',c:[o.nm,...vals(o)]}; });
+    rows.push({k:'tot',c:['الإجمالي العام',...vals(all)]});
+    XLSX.utils.book_append_sheet(wb,sheet(`${l} — ${y1} مقابل ${y2}`,[col,...valCols()],rows,1),l); });
+  // 3) خطوط السير — المجموعة ثم خط السير
+  { const list=(D.route||[]).map(o=>Object.assign(z(),o,{grp:G(o.sub),route:o.n})).filter(o=>Math.abs(o.s1-o.r1)>0.5||Math.abs(o.s2-o.r2)>0.5);
+    XLSX.utils.book_append_sheet(wb,sheet(`خطوط السير — ${y1} مقابل ${y2}`,['المجموعة','خط السير',...valCols()],grouped(list,['route']),2),'خطوط السير'); }
+  // 4) فروع العملاء — المجموعة ثم خط السير ثم فرع العميل ثم العميل
+  { const list=comb('site',r=>[r.grp,r.route,r.customer,r.site].join('|'),r=>({grp:G(r.grp),route:r.route||'',site:r.site||'',cust:r.customer||''}));
+    XLSX.utils.book_append_sheet(wb,sheet(`فروع العملاء — ${y1} مقابل ${y2}`,['المجموعة','خط السير','فرع العميل','العميل',...valCols()],grouped(list,['route','site','cust']),4),'فروع العملاء'); }
+  // 5) الأصناف — المجموعة ثم الصنف
+  { const list=comb('item',r=>r.grp+'|'+r.item,r=>({grp:G(r.grp),item:r.item||''}));
+    XLSX.utils.book_append_sheet(wb,sheet(`الأصناف حسب المجموعة — ${y1} مقابل ${y2}`,['المجموعة','الصنف',...valCols(true)],grouped(list,['item'],true),2),'الأصناف'); }
   XLSX.writeFile(wb,`مقارنة_المبيعات_${y1.replace('/','-')}_مقابل_${y2.replace('/','-')}.xlsx`);
 }
 // ── طباعة PDF بهوية الطحان (لوجو + ألوان العنابي والدهبي) ──
