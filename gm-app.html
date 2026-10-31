@@ -35528,17 +35528,33 @@ async function sciLoadClients(){
     let jm = [];
     try{ const r = await fetch(`${SUPABASE_URL}/rest/v1/sales_client_jareed_map?select=app_client,jareed_customer&limit=5000`, {headers:H}); jm = r.ok ? await r.json() : []; }catch(e){}
     const jr = {}; (Array.isArray(jm)?jm:[]).forEach(m=>{ (jr[m.app_client]=jr[m.app_client]||[]).push(m.jareed_customer); });
+    _sciJr = jr;
+    let jrOnly = [];
+    try{ const r2 = await fetch(`${SUPABASE_URL}/rest/v1/rpc/sci_jareed_only_customers`, {method:'POST', headers:{...H,'Content-Type':'application/json'}, body:'{}'}); jrOnly = r2.ok ? await r2.json() : []; }catch(e){}
+    _sciJrOnly = new Map((Array.isArray(jrOnly)?jrOnly:[]).map(x=>[x.customer, +x.sites||0]));
     _sciClientOpts = names.map(n=>{
       const count = _sciClientBranches[n] ? _sciClientBranches[n].size : 0, j = jr[n]||[];
       const label = j.length>1 ? `${n} (${j.length} اسم في جريد)` : (j.length ? j[0] : `⚠️ ${n} — مش مربوط بجريد`);
       return {v:n, label:`${label} (${count} فرع)`, key:sciNorm([n,label,...j].join(' '))};
-    }).sort((a,b)=>a.label.replace('⚠️ ','').localeCompare(b.label.replace('⚠️ ',''),'ar'));
+    }).concat([..._sciJrOnly.entries()].filter(([c])=>!names.includes(c)).map(([c,n])=>({v:c, label:`${c} (${n} فرع · من جريد)`, key:sciNorm(c)})))
+      .sort((a,b)=>a.label.replace('⚠️ ','').localeCompare(b.label.replace('⚠️ ',''),'ar'));
     sciFilterClients();
     sel.dataset.loaded = '1';
   }catch(e){ console.error('[sciLoadClients]', e); }
 }
 
 let _sciClientOpts = [];
+let _sciJr = {};             // اسم العميل في التطبيق → أسماءه في جريد
+let _sciJrOnly = new Map();  // عملاء جريد مالهمش عميل في التطبيق → عدد فروعهم في جريد
+// أصناف العميل من فواتير جريد (tamr_sales_items) — للعملاء اللي مالهمش فواتير مناديب
+async function sciJareedItems(names, H){
+  if(!names || !names.length) return {items:[], sites:[]};
+  const inList = 'in.(' + names.map(n=>'"'+String(n).replace(/"/g,'\\"')+'"').join(',') + ')';
+  const rows = await fetchAllRows(`${SUPABASE_URL}/rest/v1/tamr_sales_items?select=item,customer_site&customer=${encodeURIComponent(inList)}`, H);
+  const items = new Set(), sites = new Set();
+  (Array.isArray(rows)?rows:[]).forEach(r=>{ if(r.item) items.add(String(r.item).trim()); if(r.customer_site) sites.add(String(r.customer_site).trim()); });
+  return {items:[...items], sites:[...sites]};
+}
 function sciNorm(t){ return String(t||'').replace(/[إأآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/ـ/g,'').replace(/\s+/g,'').toLowerCase(); }
 function sciFilterClients(){
   const sel = document.getElementById('sci-client'); if(!sel) return;
@@ -36259,9 +36275,11 @@ async function sciOnClientChange(){
     const allSet = new Set();
     Object.values(_sciClientBranches).forEach(s=>{ [...s].forEach(b=>allSet.add(b)); });
     branches = [...allSet];
+  } else if(_sciJrOnly.has(client)){
+    branches = [];
   } else {
     branches = [..._sciClientBranches[client] || []];
-    if(!branches.length){
+    if(!branches.length && !(_sciJr[client]||[]).length){
       if(emptyEl){ emptyEl.style.display = ''; emptyEl.textContent = 'العميل ده مفيش فروع مربوطة بيه دلوقتي — اربط فروعه الأول من تاب "خصومات العملاء"'; }
       return;
     }
@@ -36273,7 +36291,7 @@ async function sciOnClientChange(){
     if(isAll){
       // كل العملاء: نجيب كل الفواتير من غير فلترة بفرع (أسرع وأشمل من عمل or= بمئات الفروع)
       rows = await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?deleted_at=is.null&select=items`, H);
-    } else {
+    } else if(branches.length){
       const orFilter = 'or=(' + branches.map(b=>`branch_name.eq.${pgOrVal(b)}`).join(',') + ')';
       rows = await fetchAllRows(`${SUPABASE_URL}/rest/v1/sales_deliveries?${orFilter}&deleted_at=is.null&select=items`, H);
     }
@@ -36321,6 +36339,19 @@ async function sciOnClientChange(){
       seen[sciCanonicalItemName(spellingCanonical)] = true;
     });
   }catch(e){ console.error('[sciOnClientChange MT merge]', e); }
+
+  // عميل مالوش أصناف من فواتير المناديب (أو عميل جريد بس): أصنافه من فواتير جريد نفسها
+  if(!isAll && !Object.keys(seen).length){
+    try{
+      const jrNames = _sciJrOnly.has(client) ? [client] : (_sciJr[client]||[]);
+      const jx = await sciJareedItems(jrNames, H);
+      jx.items.forEach(name=>{
+        const spellingCanonical = (_sciItemCanonicalMap && _sciItemCanonicalMap[sciNormalizeItemKey(name)]) || name;
+        seen[sciCanonicalItemName(spellingCanonical)] = true;
+      });
+      if(!branches.length) branches = jx.sites;
+    }catch(e){ console.error('[sciOnClientChange jareed]', e); }
+  }
 
   // أصناف مضافة يدويًا لهذا العميل (بتنزل تلقائي على تطبيق المنسق)
   _sciManualSet = new Set();
