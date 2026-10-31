@@ -37285,9 +37285,10 @@ async function splSpecialSave(){
     if(!clients.length){ alert('اختر عميلاً واحداً على الأقل'); return; }
     if(!products.length){ alert('أضف صنفاً واحداً على الأقل بسعره'); return; }
     const entry = {id:id||('cpl_'+Date.now()),name,clients,products,active:true};
+    const before=JSON.stringify(_splClientLists);
     if(id){ const i=_splClientLists.findIndex(p=>p.id===id); if(i!==-1) _splClientLists[i]={..._splClientLists[i],...entry}; }
     else _splClientLists.push(entry);
-    await splClientPLPersist();
+    if(!(await splClientPLPersist())){ _splClientLists=JSON.parse(before); return; }
   }
   splSpecialCloseModal();
   splSpecialRender();
@@ -37479,16 +37480,26 @@ function splCPLAddAllMatches(){
   document.querySelectorAll('.spl-cpl-prod-match-cb').forEach(cb=>{ if(!cb.checked){ cb.checked=true; splCPLAddProd(cb.value,0,true); } });
   splCPLSearchProd(); // تحديث نتائج البحث عشان تشيل كل الأصناف اللي اتضافت دلوقتي من القايمة
 }
+// سعر القائمة العادي للصنف (sales_prices) — بيتحط كسعر مبدئي وتعدّل عليه
+function splCPLListPrice(name){
+  const L=(typeof _splPrices!=='undefined'&&_splPrices)||[];
+  let r=L.find(x=>x.snf_name===name);
+  if(!r && typeof sciNormalizeItemKey==='function'){ const k=sciNormalizeItemKey(name); r=L.find(x=>sciNormalizeItemKey(x.snf_name||'')===k); }
+  return r && +r.price>0 ? +r.price : 0;
+}
 function splCPLAddProd(name,price=0,skipRefresh){
   if(_splCPLProdRows[name]!==undefined) return;
-  _splCPLProdRows[name]=price;
+  _splCPLProdRows[name]=(+price>0)?+price:splCPLListPrice(name);
   splCPLRenderProdRows();
   // بعد إضافة صنف، بنعيد بناء نتائج البحث عشان يتشال منها (خلاص اتضاف) وتفضل باقي النتائج ظاهرة
   // ومتاحة للاختيار من غير ما تتقفل القايمة أو يتصفّر مربع البحث - كده تقدر تكمل تحدد أصناف تانية.
   if(!skipRefresh) splCPLSearchProd();
 }
 function splCPLRemoveProd(name){ delete _splCPLProdRows[name]; splCPLRenderProdRows(); }
-function splCPLUpdatePrice(name,val){ _splCPLProdRows[name]=parseFloat(val)||0; }
+function splCPLLpHTML(name,price){ const lp=splCPLListPrice(name); if(!lp) return '<span class="spl-lp" style="display:block;font-size:11px;font-weight:500;color:#aaa">مالوش سعر في قائمة الأسعار</span>';
+  const d=+price&&+price!==lp; return `<span class="spl-lp" style="display:block;font-size:11px;font-weight:500;color:${d?'#B26A00':'#8B6F47'}">سعر القائمة: ${lp} ج${d?` · الفرق ${(+price-lp>0?'+':'')}${Math.round((+price-lp)*100)/100} ج`:''}</span>`; }
+function splCPLUpdatePrice(name,val,el){ _splCPLProdRows[name]=parseFloat(val)||0;
+  const row=el&&el.parentElement, sp=row&&row.querySelector('.spl-lp'); if(sp) sp.outerHTML=splCPLLpHTML(name,_splCPLProdRows[name]); }
 function splCPLRenderProdRows(){
   if(_splCliItems.length) splCPLRenderCliItems();
   const container=document.getElementById('spl-sp-prod-rows');
@@ -37501,9 +37512,9 @@ function splCPLRenderProdRows(){
   if(el) el.textContent=`(${entries.length} صنف)`;
   container.innerHTML=entries.map(([name,price])=>`
     <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:#F9F6F1;border-radius:8px;border:1px solid var(--border)">
-      <span style="flex:1;font-size:12px;font-weight:600">${name}</span>
-      <input type="number" value="${price||''}" placeholder="السعر (ج)" min="0" step="0.5"
-        onchange="splCPLUpdatePrice('${name.replace(/'/g,"\\'")}'  ,this.value)"
+      <span style="flex:1;font-size:12px;font-weight:600">${name}${splCPLLpHTML(name,price)}</span>
+      <input type="number" value="${price||''}" placeholder="السعر (ج)" min="0" step="any"
+        oninput="splCPLUpdatePrice('${name.replace(/'/g,"\\'")}'  ,this.value,this)"
         style="width:90px;padding:5px 8px;border:1.5px solid var(--border);border-radius:6px;font-family:Cairo,sans-serif;font-size:12px;text-align:center"/>
       <span style="font-size:11px;color:#666">ج</span>
       <button onclick="splCPLRemoveProd('${name.replace(/'/g,"\\'")}')"
@@ -37582,13 +37593,16 @@ async function splSpecialPersist(){
   }catch(e){ console.warn('special pricelist save failed',e); }
 }
 async function splClientPLPersist(){
+  // بنتأكد إن الحفظ وصل فعلًا (قبل كده لو الحفظ فشل كان بيقفل الشاشة كأنه اتحفظ)
   try{
     const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=minimal'};
-    await fetch(`${SUPABASE_URL}/rest/v1/products_db?on_conflict=key`,{
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/products_db?on_conflict=key`,{
       method:'POST', headers:H,
       body: JSON.stringify({key:'client_pricelists', value: JSON.stringify(_splClientLists), updated_at: new Date().toISOString()})
     });
-  }catch(e){ console.warn('client pricelist save failed',e); }
+    if(!res.ok) throw new Error(res.status+' '+(await res.text().catch(()=>'')));
+    return true;
+  }catch(e){ console.warn('client pricelist save failed',e); alert('⚠️ قائمة الأسعار ماتحفظتش — جرّب تاني\n'+(e&&e.message||'')); return false; }
 }
 
 function splInitCatDiscTab(){
