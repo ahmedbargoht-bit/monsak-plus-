@@ -15656,6 +15656,7 @@ function addProductToPDB(){
   renderProdDB();
   splSyncProductsFromPDB();
   showToast('✅ تم إضافة الصنف: '+snf);
+  if(window._nicAdding){ window._nicAdding=null; setTimeout(()=>{ try{ nicLoad(); }catch(e){} },1500); }
 }
 
 function openAddProductModal(){
@@ -18143,7 +18144,7 @@ function csNewItemFmt(x,esc){
   if(typeof x==='string') return esc(x);
   const by={}; (x.sites||[]).forEach(s=>{ (by[s.customer||'']=by[s.customer||'']||[]).push(s.name); }); (x.customers||[]).forEach(c=>{ by[c]=by[c]||[]; });
   const where=Object.keys(by).map(c=>esc(c||'—')+(by[c].length?' ('+by[c].slice(0,4).map(esc).join('، ')+(by[c].length>4?' و'+(by[c].length-4)+' كمان':'')+')':'')).join(' · ');
-  const cat=x.in_catalog===false?` <a href="javascript:void 0" onclick="nicGo()" style="background:#FFEBEE;color:#B71C1C;border-radius:6px;padding:1px 6px;font-size:11px;font-weight:700;text-decoration:none">⚠️ مش في كتالوج الأصناف — اضغط عشان تضيفه</a>`:'';
+  const cat=x.in_catalog===false?` <span style="background:#FFEBEE;color:#B71C1C;border-radius:6px;padding:1px 6px;font-size:11px;font-weight:700">⚠️ مش في الكتالوج</span> ${nicBtns(x.name)}`:'';
   const add=(x.clients&&x.clients.length)?'<div style="color:#1A7A4A;font-size:11.5px">✓ اتضاف لأصناف: '+x.clients.map(esc).join('، ')+' — وبيظهر في كل فروعهم</div>':'';
   return '<b>'+esc(x.name)+'</b>'+(where?' <span style="color:#888">— '+where+'</span>':'')+cat+add;
 }
@@ -18155,6 +18156,53 @@ async function nicLoad(){
     _nicData=r.ok?await r.json():null; }catch(e){ _nicData=null; }
   nicRender(); try{ csNewEntRender(); }catch(e){}
 }
+// ── زرار "دمج" (الصنف ده هو صنف موجود في الكتالوج باسم تاني) و"إضافة" (صنف جديد فعلاً) ──
+function nicBtns(name){ const a=String(name).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+  return `<button type="button" data-item="${a}" onclick="nicMergeOpen(this.dataset.item)" style="background:#1565C0;color:#fff;border:none;border-radius:6px;padding:3px 9px;font-family:inherit;font-size:11.5px;font-weight:700;cursor:pointer">🔗 دمج</button> <button type="button" data-item="${a}" onclick="nicAdd(this.dataset.item)" style="background:#1A7A4A;color:#fff;border:none;border-radius:6px;padding:3px 9px;font-family:inherit;font-size:11.5px;font-weight:700;cursor:pointer">➕ إضافة</button>`; }
+async function nicCatalogNames(){
+  let P=(typeof PDB!=='undefined'&&PDB&&Object.keys(PDB).length)?PDB:null;
+  if(!P){ try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/products_db?select=value&key=eq.pdb`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}); const j=r.ok?await r.json():[]; P=j[0]?(typeof j[0].value==='string'?JSON.parse(j[0].value):j[0].value):{}; }catch(e){ P={}; } }
+  const out=new Set(); (function walk(o){ if(Array.isArray(o)) o.forEach(x=>{ const n=typeof x==='object'?x&&x.name:x; if(n) out.add(String(n)); }); else if(o&&typeof o==='object') Object.values(o).forEach(walk); })(P);
+  return [...out];
+}
+function nicNorm(s){ return String(s||'').toLowerCase().replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه').replace(/جرام|gram|جم|g\b/g,'جم').replace(/[^؀-ۿa-z0-9]+/g,' ').trim(); }
+function nicSim(a,b){ const A=nicNorm(a), B=nicNorm(b); const bg=s=>{ const t=s.replace(/\s+/g,''), m={}; for(let i=0;i<t.length-1;i++){ const k=t.substr(i,2); m[k]=(m[k]||0)+1; } return m; };
+  const x=bg(A), y=bg(B); let inter=0, nx=0, ny=0; Object.values(x).forEach(v=>nx+=v); Object.values(y).forEach(v=>ny+=v); Object.keys(x).forEach(k=>{ if(y[k]) inter+=Math.min(x[k],y[k]); });
+  let sc=nx+ny?2*inter/(nx+ny):0; const nA=(A.match(/\d+/g)||[]), nB=(B.match(/\d+/g)||[]); if(nA.length&&nA.some(n=>nB.includes(n))) sc+=0.15; return sc; }
+let _nicMerge={item:'',names:[],q:''};
+async function nicMergeOpen(item){
+  _nicMerge={item,names:await nicCatalogNames(),q:''};
+  let m=document.getElementById('nic-merge-modal');
+  if(!m){ m=document.createElement('div'); m.id='nic-merge-modal'; m.style.cssText='position:fixed;inset:0;z-index:99000;background:rgba(30,20,10,.5);display:flex;align-items:center;justify-content:center;direction:rtl';
+    m.addEventListener('click',e=>{ if(e.target===m) m.style.display='none'; }); document.body.appendChild(m); }
+  m.style.display='flex'; nicMergeRender();
+}
+function nicMergeRender(){
+  const m=document.getElementById('nic-merge-modal'); if(!m) return; const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const q=_nicMerge.q.trim(), it=_nicMerge.item;
+  const list=(q?_nicMerge.names.filter(n=>nicNorm(n).includes(nicNorm(q))):_nicMerge.names.slice()).map(n=>({n,s:nicSim(it,n)})).sort((a,b)=>b.s-a.s).slice(0,q?60:10);
+  m.innerHTML=`<div style="background:#FBF8F2;width:min(620px,95vw);max-height:88vh;border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.35);font-family:Cairo,sans-serif">
+    <div style="background:#1565C0;color:#fff;padding:12px 16px;font-weight:800">🔗 دمج صنف مع صنف موجود في الكتالوج</div>
+    <div style="padding:12px 16px;overflow:auto">
+      <div style="font-size:12px;color:#5B4630">الصنف زي ما هو في جريد:</div><div style="font-weight:800;color:#731E2E;margin-bottom:10px">${esc(it)}</div>
+      <input id="nic-mq" placeholder="ابحث عن الصنف في الكتالوج..." value="${esc(_nicMerge.q)}" oninput="_nicMerge.q=this.value;nicMergeRender();const e=document.getElementById('nic-mq');e.focus();e.setSelectionRange(e.value.length,e.value.length)" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:inherit;margin-bottom:8px"/>
+      <div style="font-size:11.5px;color:#8B6F47;margin-bottom:6px">${q?'نتايج البحث':'أقرب أصناف في الكتالوج للاسم ده'} — اختار الصنف اللي هو نفسه:</div>
+      ${list.map(x=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 6px;border-bottom:1px solid #EFE6D6"><span style="flex:1;font-size:13px">${esc(x.n)}</span>${!q?`<span style="font-size:10.5px;color:#8B6F47">${Math.round(Math.min(1,x.s)*100)}%</span>`:''}<button type="button" data-n="${esc(x.n)}" onclick="nicMergeDo(this.dataset.n)" style="background:#1565C0;color:#fff;border:none;border-radius:6px;padding:4px 12px;font-family:inherit;font-weight:700;cursor:pointer">هو ده</button></div>`).join('')||'<div style="padding:12px;color:#8B6F47">مفيش نتايج</div>'}
+    </div>
+    <div style="padding:10px 16px;border-top:1px solid #E8DCC4;text-align:left"><button class="btn btn-ghost btn-sm" onclick="document.getElementById('nic-merge-modal').style.display='none'">إلغاء</button></div></div>`;
+}
+async function nicMergeDo(canon){
+  const it=_nicMerge.item; if(!confirm(`تأكيد الدمج:\n\n"${it}"\n= هو نفسه\n"${canon}"\n\nكل فواتير جريد بالاسم الأول هتتحسب على الصنف التاني في كل الشاشات والتطبيقات.`)) return;
+  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/rpc/mt_merge_item`,{method:'POST',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({p_alias:it,p_canonical:canon})});
+    const j=r.ok?await r.json():null; if(!j||!j.ok) throw new Error((j&&j.msg)||('HTTP '+r.status)); }
+  catch(e){ alert('⚠️ الدمج ماتمش — جرّب تاني\n'+(e&&e.message||'')); return; }
+  document.getElementById('nic-merge-modal').style.display='none';
+  try{ if(typeof _sciItemAliasMap!=='undefined') _sciItemAliasMap=null; }catch(e){}
+  showToast('✅ اتدمج: '+it+' ← '+canon); nicLoad();
+}
+async function nicAdd(item){ // بنجيب الكتالوج من السيرفر الأول عشان الإضافة ماتكتبش على نسخة قديمة
+  try{ await loadPDBFromSupabase(); }catch(e){}
+  try{ openAddProductModal(); }catch(e){ nicGo(); return; } const e=document.getElementById('np-snf'); if(e) e.value=item; window._nicAdding=item; }
 function nicRender(){
   const box=document.getElementById('nic-box'); if(!box) return;
   const L=Array.isArray(_nicData)?_nicData:[]; if(!L.length){ box.innerHTML=''; return; }
@@ -18164,8 +18212,8 @@ function nicRender(){
       <b style="color:#7A4A00">${_nicOpen?'▾':'▸'} ⚠️ ${L.length} صنف بيتباع في فواتير جريد ومش موجود في كتالوج الأصناف</b>
       <span style="font-size:12px;color:#7A4A00">المندوب مش هيقدر يبيعها لحد ما تتضاف هنا بسعرها وتصنيفها — أو لو هي نفس صنف موجود باسم تاني، ادمجها من تاب "دمج الأصناف" في شاشة تحليل فواتير MT.</span></div>
     ${_nicOpen?`<div style="max-height:300px;overflow:auto;margin-top:8px"><table style="width:100%;border-collapse:collapse;font-size:12px;background:#fff">
-      <tr style="background:#F3EBDD"><th style="padding:5px;text-align:right">الصنف (زي ما هو في جريد)</th><th>أول بيع</th><th>آخر بيع</th><th>عدد العملاء</th><th>قيمة البيع (120 يوم)</th><th style="text-align:right">عملاء</th></tr>
-      ${L.map(x=>`<tr style="border-bottom:1px solid #EFE6D6"><td style="padding:5px;font-weight:700">${esc(x.item)}</td><td style="text-align:center">${esc(x.first)}</td><td style="text-align:center">${esc(x.last)}</td><td style="text-align:center">${x.customers}</td><td style="text-align:center">${Number(x.value||0).toLocaleString('en-US')}</td><td style="font-size:11px;color:#6B5B45">${(x.custs||[]).map(esc).join('، ')}${x.customers>5?' …':''}</td></tr>`).join('')}
+      <tr style="background:#F3EBDD"><th style="padding:5px;text-align:right">الصنف (زي ما هو في جريد)</th><th>أول بيع</th><th>آخر بيع</th><th>عدد العملاء</th><th>قيمة البيع (120 يوم)</th><th style="text-align:right">عملاء</th><th>إجراء</th></tr>
+      ${L.map(x=>`<tr style="border-bottom:1px solid #EFE6D6"><td style="padding:5px;font-weight:700">${esc(x.item)}</td><td style="text-align:center">${esc(x.first)}</td><td style="text-align:center">${esc(x.last)}</td><td style="text-align:center">${x.customers}</td><td style="text-align:center">${Number(x.value||0).toLocaleString('en-US')}</td><td style="font-size:11px;color:#6B5B45">${(x.custs||[]).slice(0,5).map(esc).join('، ')}${x.customers>5?' …':''}</td><td style="white-space:nowrap;text-align:center">${nicBtns(x.item)}</td></tr>`).join('')}
     </table></div>`:''}</div>`;
 }
 function csNewEntDismiss(){ csNewEntSave({customers:[],sites:[],items:[]}); csNewEntRender(); }
