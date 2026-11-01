@@ -3816,12 +3816,26 @@ table.datatable details summary:hover { text-decoration: underline; }
       if (c && !kc.has(normMtName(c)) && !customers.has(normMtName(c))) customers.set(normMtName(c), String(c).trim());
       if (s && !ks.has(normMtName(s)) && !sites.has(normMtName(s))) sites.set(normMtName(s), { name: String(s).trim(), customer: c ? String(c).trim() : '' });
     });
+    // الصنف الجديد بيظهر زي الفرع الجديد: قصاده العملاء والفروع اللي نزل فيها
     (newItemRows || []).forEach(r => {
-      const it = r.item;
-      if (it && !ki.has(normMtName(it)) && !items.has(normMtName(it))) items.set(normMtName(it), String(it).trim());
+      const it = r.item; if (!it || ki.has(normMtName(it))) return;
+      let o = items.get(normMtName(it)); if (!o) { o = { name: String(it).trim(), customers: [], sites: [] }; items.set(normMtName(it), o); }
+      const c = r.customer ? String(r.customer).trim() : '', st = r.site ? String(r.site).trim() : '';
+      if (c && !o.customers.includes(c)) o.customers.push(c);
+      if (st && !o.sites.some(x => x.name === st)) o.sites.push({ name: st, customer: c });
     });
     if (!customers.size && !sites.size && !items.size) return null;
     return { customers: [...customers.values()], sites: [...sites.values()], items: [...items.values()] };
+  }
+  // سطر الصنف الجديد: الاسم — العميل (فروعه) + هل موجود في الكتالوج + اتضاف لأصناف مين
+  function mtNewItemFmt(x, esc) {
+    if (typeof x === 'string') return esc(x);
+    const by = {}; (x.sites || []).forEach(s => { (by[s.customer || ''] = by[s.customer || ''] || []).push(s.name); });
+    (x.customers || []).forEach(c => { by[c] = by[c] || []; });
+    const where = Object.keys(by).map(c => esc(c || '—') + (by[c].length ? ' (' + by[c].slice(0, 4).map(esc).join('، ') + (by[c].length > 4 ? ' و' + (by[c].length - 4) + ' كمان' : '') + ')' : '')).join(' · ');
+    const cat = x.in_catalog === false ? ' <span style="background:#FFEBEE;color:#B71C1C;border-radius:6px;padding:1px 6px;font-size:11px;font-weight:700">⚠️ مش في كتالوج الأصناف — ضيفه من "الأصناف والأسعار"</span>' : '';
+    const add = (x.clients && x.clients.length) ? '<div style="color:#1A7A4A;font-size:11.5px">✓ اتضاف لأصناف: ' + x.clients.map(esc).join('، ') + '</div>' : '';
+    return '<b>' + esc(x.name) + '</b>' + (where ? ' <span style="color:#888">— ' + where + '</span>' : '') + cat + add;
   }
   function showNewMtEntitiesModal(f) {
     const old = document.getElementById('mtNewEntitiesModal'); if (old) old.remove();
@@ -3838,7 +3852,7 @@ table.datatable details summary:hover { text-decoration: underline; }
       <div style="font-size:13px;color:#555;line-height:1.7">الرفعة دي فيها عملاء/فروع/أصناف أول مرة تظهر في النظام. راجعهم وضيفهم أو اربطهم في لوحة التحكم ← تاب <b>الفروع والعملاء</b>.</div>
       ${sec('عملاء جدد', '#185FA5', f.customers, x => esc(x))}
       ${sec('فروع جديدة', '#993C1D', f.sites, x => esc(x.name) + (x.customer ? ' <span style="color:#888">— ' + esc(x.customer) + '</span>' : ''))}
-      ${sec('أصناف جديدة', '#0F6E56', f.items, x => esc(x))}
+      ${sec('أصناف جديدة', '#0F6E56', f.items, x => mtNewItemFmt(x, esc))}
       <div style="text-align:left;margin-top:14px"><button id="mtNewEntitiesClose" style="background:#731E2E;color:#fff;border:none;border-radius:9px;padding:8px 22px;font-weight:700;cursor:pointer;font-family:inherit">تمام</button></div>
     </div>`;
     document.body.appendChild(m);
@@ -3966,6 +3980,14 @@ table.datatable details summary:hover { text-decoration: underline; }
     try {
       const knownNames = await knownNamesP;
       const fresh = detectNewMtEntities(newInvoices, newItemRows, knownNames);
+      // الأصناف الجديدة بتتضاف لوحدها لقائمة "أصناف العملاء" لكل عميل اشتراها (بتظهر في كل فروعه في التطبيقات)
+      if (fresh && fresh.items.length && sb) {
+        try {
+          const { data: ad, error: adErr } = await sb.rpc('mt_new_items_autoadd', { p_items: fresh.items.map(i => ({ item: i.name, customers: i.customers })) });
+          if (adErr) throw adErr;
+          (ad || []).forEach(a => { const o = fresh.items.find(i => i.name === a.item); if (o) { o.in_catalog = a.in_catalog; o.clients = a.clients || []; o.canonical = a.canonical; } });
+        } catch (eAd) { console.warn('new items auto-add failed', eAd); }
+      }
       if (fresh) { logStatus(`تنبيه: الرفعة دي فيها ${fresh.customers.length} عميل جديد و${fresh.sites.length} فرع جديد و${fresh.items.length} صنف جديد`, 'err'); if (window.parent && window.parent !== window) { try { window.parent.postMessage({ type: 'mt-new-entities', data: fresh }, '*'); } catch (eP) { showNewMtEntitiesModal(fresh); } } else showNewMtEntitiesModal(fresh); }
     } catch (eNew) { console.warn('new-entities check failed', eNew); }
 
