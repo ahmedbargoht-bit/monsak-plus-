@@ -4954,6 +4954,7 @@ h2,h3{color:#2C1F0A}
 
           <!-- ── تاب الأصناف ── -->
           <div id="spl-pane-products">
+            <div id="nic-box"></div>
 
             <!-- ══ قسم: قاعدة الأصناف الكاملة (منقول من تاب "قاعدة الأصناف" القديم) ══ -->
             <div class="card" style="margin-bottom:16px">
@@ -18124,29 +18125,79 @@ function csNewEntMerge(d){
   const cur = csNewEntLoad();
   const nm = s => String(s||'').replace(/\s+/g,' ').trim();
   const addStr = (arr, add) => { const seen = new Set(arr.map(nm)); (add||[]).forEach(x=>{ if(!seen.has(nm(x))){ seen.add(nm(x)); arr.push(x); } }); };
-  addStr(cur.customers, d.customers); addStr(cur.items, d.items);
+  addStr(cur.customers, d.customers);
+  // الأصناف: ممكن تيجي نص (قديم) أو {name, customers, sites, in_catalog, clients} — بندمج بالاسم
+  const toObj = x => typeof x==='string' ? {name:x,customers:[],sites:[]} : x;
+  cur.items = (cur.items||[]).map(toObj);
+  (d.items||[]).map(toObj).forEach(x=>{ const o=cur.items.find(y=>nm(y.name)===nm(x.name));
+    if(!o){ cur.items.push(x); return; }
+    (x.customers||[]).forEach(c=>{ if(!(o.customers=o.customers||[]).includes(c)) o.customers.push(c); });
+    (x.sites||[]).forEach(st=>{ if(!(o.sites=o.sites||[]).some(z=>z.name===st.name)) o.sites.push(st); });
+    (x.clients||[]).forEach(c=>{ if(!(o.clients=o.clients||[]).includes(c)) o.clients.push(c); });
+    if(x.in_catalog!=null) o.in_catalog=x.in_catalog; });
   const seenS = new Set(cur.sites.map(x=>nm(x.name))); (d.sites||[]).forEach(x=>{ if(!seenS.has(nm(x.name))){ seenS.add(nm(x.name)); cur.sites.push(x); } });
   csNewEntSave(cur); return cur;
+}
+// سطر الصنف الجديد: الاسم — العميل (فروعه) + هل موجود في الكتالوج + اتضاف لأصناف مين (نفس شكل الفرع الجديد)
+function csNewItemFmt(x,esc){
+  if(typeof x==='string') return esc(x);
+  const by={}; (x.sites||[]).forEach(s=>{ (by[s.customer||'']=by[s.customer||'']||[]).push(s.name); }); (x.customers||[]).forEach(c=>{ by[c]=by[c]||[]; });
+  const where=Object.keys(by).map(c=>esc(c||'—')+(by[c].length?' ('+by[c].slice(0,4).map(esc).join('، ')+(by[c].length>4?' و'+(by[c].length-4)+' كمان':'')+')':'')).join(' · ');
+  const cat=x.in_catalog===false?` <a href="javascript:void 0" onclick="nicGo()" style="background:#FFEBEE;color:#B71C1C;border-radius:6px;padding:1px 6px;font-size:11px;font-weight:700;text-decoration:none">⚠️ مش في كتالوج الأصناف — اضغط عشان تضيفه</a>`:'';
+  const add=(x.clients&&x.clients.length)?'<div style="color:#1A7A4A;font-size:11.5px">✓ اتضاف لأصناف: '+x.clients.map(esc).join('، ')+' — وبيظهر في كل فروعهم</div>':'';
+  return '<b>'+esc(x.name)+'</b>'+(where?' <span style="color:#888">— '+where+'</span>':'')+cat+add;
+}
+// ── تنبيه "أصناف بتتباع ومش في الكتالوج" فوق تاب الأصناف والأسعار (آخر 120 يوم من فواتير جريد) ──
+let _nicOpen=false, _nicData=null;
+function nicGo(){ try{ showPanel('sales-pricelist'); }catch(e){} try{ splShowTab('products'); }catch(e){} setTimeout(()=>{ _nicOpen=true; nicRender(); const b=document.getElementById('nic-box'); if(b) b.scrollIntoView({behavior:'smooth',block:'start'}); },400); }
+async function nicLoad(){
+  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/rpc/mt_items_not_in_catalog`,{method:'POST',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},body:'{}'});
+    _nicData=r.ok?await r.json():null; }catch(e){ _nicData=null; }
+  nicRender(); try{ csNewEntRender(); }catch(e){}
+}
+function nicRender(){
+  const box=document.getElementById('nic-box'); if(!box) return;
+  const L=Array.isArray(_nicData)?_nicData:[]; if(!L.length){ box.innerHTML=''; return; }
+  const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  box.innerHTML=`<div style="background:#FFF6E5;border:1.5px solid #E8B04A;border-radius:12px;padding:10px 14px;margin-bottom:14px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer" onclick="_nicOpen=!_nicOpen;nicRender()">
+      <b style="color:#7A4A00">${_nicOpen?'▾':'▸'} ⚠️ ${L.length} صنف بيتباع في فواتير جريد ومش موجود في كتالوج الأصناف</b>
+      <span style="font-size:12px;color:#7A4A00">المندوب مش هيقدر يبيعها لحد ما تتضاف هنا بسعرها وتصنيفها — أو لو هي نفس صنف موجود باسم تاني، ادمجها من تاب "دمج الأصناف" في شاشة تحليل فواتير MT.</span></div>
+    ${_nicOpen?`<div style="max-height:300px;overflow:auto;margin-top:8px"><table style="width:100%;border-collapse:collapse;font-size:12px;background:#fff">
+      <tr style="background:#F3EBDD"><th style="padding:5px;text-align:right">الصنف (زي ما هو في جريد)</th><th>أول بيع</th><th>آخر بيع</th><th>عدد العملاء</th><th>قيمة البيع (120 يوم)</th><th style="text-align:right">عملاء</th></tr>
+      ${L.map(x=>`<tr style="border-bottom:1px solid #EFE6D6"><td style="padding:5px;font-weight:700">${esc(x.item)}</td><td style="text-align:center">${esc(x.first)}</td><td style="text-align:center">${esc(x.last)}</td><td style="text-align:center">${x.customers}</td><td style="text-align:center">${Number(x.value||0).toLocaleString('en-US')}</td><td style="font-size:11px;color:#6B5B45">${(x.custs||[]).map(esc).join('، ')}${x.customers>5?' …':''}</td></tr>`).join('')}
+    </table></div>`:''}</div>`;
 }
 function csNewEntDismiss(){ csNewEntSave({customers:[],sites:[],items:[]}); csNewEntRender(); }
 function csNewEntRender(){
   const box = document.getElementById('cs-newent-box'); if(!box) return;
   const d = csNewEntLoad();
-  if(!d.customers.length && !d.sites.length && !d.items.length){ box.style.display='none'; box.innerHTML=''; return; }
+  const nm = s => String(s||'').replace(/\s+/g,'').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه');
+  // الأصناف الجديدة = اللي جت في آخر رفع + أي صنف بيتباع في جريد (آخر 120 يوم) ومش في كتالوج الأصناف — اللي التاني بيفضل ظاهر لحد ما يتضاف للكتالوج
+  const items = (d.items||[]).map(x=>typeof x==='string'?{name:x}:x);
+  (Array.isArray(_nicData)?_nicData:[]).forEach(x=>{
+    const o = items.find(y=>nm(y.name)===nm(x.item));
+    const sites=[]; (x.sites||[]).forEach(c=>(c.sites||[]).forEach(st=>sites.push({name:st,customer:c.customer})));
+    if(o){ o.in_catalog=false; o.customers=o.customers&&o.customers.length?o.customers:(x.custs||[]); o.sites=o.sites&&o.sites.length?o.sites:sites; o.first=x.first; o.value=x.value; }
+    else items.push({name:x.item,customers:x.custs||[],sites,in_catalog:false,first:x.first,value:x.value,live:true});
+  });
+  const nUp=(d.items||[]).length;
+  if(!d.customers.length && !d.sites.length && !items.length){ box.style.display='none'; box.innerHTML=''; return; }
   const esc = s => String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  const sec = (t,col,arr,fmt) => !arr.length ? '' :
-    `<details style="margin-top:6px"><summary style="cursor:pointer;font-weight:800;color:${col};font-size:13px">${t} (${arr.length})</summary>
-     <div style="max-height:140px;overflow:auto;background:#fff;border:1px solid #E2D9CC;border-radius:8px;padding:6px 10px;margin-top:4px;font-size:12.5px;line-height:1.9">${arr.slice(0,80).map(x=>'• '+fmt(x)).join('<br>')}${arr.length>80?'<br>… و'+(arr.length-80)+' كمان':''}</div></details>`;
+  const sec = (t,col,arr,fmt,open) => !arr.length ? '' :
+    `<details style="margin-top:6px"${open?' open':''}><summary style="cursor:pointer;font-weight:800;color:${col};font-size:13px">${t} (${arr.length})</summary>
+     <div style="max-height:260px;overflow:auto;background:#fff;border:1px solid #E2D9CC;border-radius:8px;padding:6px 10px;margin-top:4px;font-size:12.5px;line-height:1.9">${arr.slice(0,120).map(x=>'• '+fmt(x)).join('<br>')}${arr.length>120?'<br>… و'+(arr.length-120)+' كمان':''}</div></details>`;
+  const upAny = d.customers.length||d.sites.length||nUp;
   box.style.display='block';
   box.innerHTML = `<div style="background:#FFF6E5;border:1.5px solid #E8B04A;border-radius:12px;padding:12px 16px;margin-bottom:14px">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
-      <div style="font-weight:800;color:#7A4A00;font-size:14px">⚠️ فواتير MT اللي اترفعت فيها ${d.customers.length} عميل جديد و${d.sites.length} فرع جديد و${d.items.length} صنف جديد</div>
-      <div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="unmOpen()"><i class="ti ti-link"></i> فروع غير مصنّفة</button><button class="btn btn-ghost btn-sm" onclick="csNewEntDismiss()">✕ تم، إخفاء</button></div>
+      <div style="font-weight:800;color:#7A4A00;font-size:14px">⚠️ ${upAny?`فواتير MT اللي اترفعت فيها ${d.customers.length} عميل جديد و${d.sites.length} فرع جديد و${items.length} صنف جديد`:`${items.length} صنف جديد أو مش واضح في فواتير جريد (مش موجود في كتالوج الأصناف)`}</div>
+      <div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="unmOpen()"><i class="ti ti-link"></i> فروع غير مصنّفة</button>${upAny?'<button class="btn btn-ghost btn-sm" onclick="csNewEntDismiss()">✕ تم، إخفاء</button>':''}</div>
     </div>
-    <div style="font-size:12.5px;color:#7A4A00;margin-top:4px">راجعهم وضيف/اربط العملاء والفروع الجديدة في تاب <b>الفروع والعملاء</b>.</div>
+    <div style="font-size:12.5px;color:#7A4A00;margin-top:4px">راجعهم وضيف/اربط العملاء والفروع الجديدة في تاب <b>الفروع والعملاء</b>. والأصناف اللي مش في الكتالوج ضيفها من <a href="javascript:void 0" onclick="nicGo()" style="color:#B71C1C;font-weight:700">الأصناف والأسعار</a> — بتفضل ظاهرة هنا لحد ما تتضاف.</div>
     ${sec('عملاء جدد','#185FA5',d.customers,x=>esc(x))}
     ${sec('فروع جديدة','#993C1D',d.sites,x=>esc(x.name)+(x.customer?' <span style="color:#888">— '+esc(x.customer)+'</span>':''))}
-    ${sec('أصناف جديدة','#0F6E56',d.items,x=>esc(x))}
+    ${sec('أصناف جديدة','#0F6E56',items,x=>csNewItemFmt(x,esc)+(x.first?` <span style="color:#8B6F47;font-size:11px">(أول بيع ${esc(x.first)}${x.value?' · '+Number(x.value).toLocaleString('en-US')+' ج':''})</span>`:''))}
   </div>`;
 }
 window.addEventListener('message', ev=>{
@@ -25172,6 +25223,7 @@ async function csRpc(name, body){
 }
 function csShortName(s){ s=(s||'').replace(/\s+/g,' ').trim(); return s.length>46?s.slice(0,46)+'…':s; }
 async function csInit(){
+  try{ nicLoad(); }catch(e){}
   factLoad().then(()=>{ CS.facAll=[...factList(),'بدون مصنع']; csMsRender('fac'); if(CS.rows && CS.rows.length) csRender(); });
   const f=document.getElementById('cs-from'), t=document.getElementById('cs-to');
   if(f && !f.value){ f.value='2026-08-01'; t.value=svmIso(new Date()); }
@@ -34927,6 +34979,7 @@ function splSyncProductsFromPDB(){
 }
 
 async function spLoadAll(){
+  try{ nicLoad(); }catch(e){}
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
 
   // قاعدة الأصناف الكاملة (منقولة هنا من التاب القديم) — تحمّل وترندر مستقلة عن باقي بيانات
