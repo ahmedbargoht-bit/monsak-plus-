@@ -560,6 +560,8 @@ table.datatable details summary:hover { text-decoration: underline; }
     </div>
     <div style="margin-top:16px; display:flex; align-items:center; gap:14px;">
       <button class="btn" id="processBtn" disabled><i class="ti ti-settings"></i> معالجة البيانات وعرض التحليل</button>
+      <label id="replacePeriodLbl" style="display:flex;align-items:center;gap:6px;background:#FFF3E0;border:1.5px solid #E8B04A;border-radius:8px;padding:6px 10px;font-weight:700;color:#7A4A00;cursor:pointer" title="أي فاتورة أو مرتجع في نفس فرع الشركة ونفس مدى التواريخ اللي في الملف ومش موجود في الملف هيتمسح (بيتحفظ نسخة احتياطية)">
+        <input type="checkbox" id="replacePeriodChk" style="width:16px;height:16px"> 🔁 استبدال الفترة بالكامل (الملف يبقى نسخة طبق الأصل من جريد)</label>
       <span class="hint">لو فتح فرع جديد مستقبلًا، يكفي تضيفه في ملف خطوط السير وترفعه تاني - الأداة هتتعرف عليه تلقائيًا.</span>
     </div>
     <div class="status-log" id="statusLog"></div>
@@ -2897,6 +2899,39 @@ table.datatable details summary:hover { text-decoration: underline; }
     saveCloudCache(cloudRawAccum);
   }
 
+  // ── استبدال الفترة بالكامل ── لكل فرع شركة: من أول لآخر تاريخ في الملف، يمسح اللي مش في الملف (نسخة في bak_mt_prune)
+  async function mtReplacePeriod(invRows, itemRows, retRows, custRows) {
+    const groups = (rows, brF, keyF) => { const g = {};
+      (rows || []).forEach(r => { const b = r[brF], d = r.invoice_date; if (!b || !d || r.invoice_no == null) return;
+        const o = g[b] = g[b] || { from: d, to: d, keys: new Set() }; if (d < o.from) o.from = d; if (d > o.to) o.to = d; o.keys.add(keyF(r)); });
+      return g; };
+    const k2 = r => r.invoice_no + '|' + r.invoice_date, k3 = r => r.invoice_no + '|' + r.invoice_date + '|' + r.line_no;
+    const jobs = [];
+    const add = (table, label, g) => Object.keys(g).forEach(b => jobs.push({ table, label, b, ...g[b] }));
+    add('invoices', 'فواتير', groups(invRows, 'branch', k2));
+    add('items', 'سطور أصناف', groups(itemRows, 'branch', k3));
+    add('returns', 'مرتجع', groups(retRows, 'branch', k3));
+    add('custinv', 'فواتير جريد', groups(custRows, 'branch_raw', k2));
+    if (!jobs.length) return;
+    const days = (a, b) => Math.round((new Date(b) - new Date(a)) / 864e5);
+    const bad = jobs.filter(j => days(j.from, j.to) > 62);
+    const ok = jobs.filter(j => days(j.from, j.to) <= 62);
+    const lines = [...new Set(ok.map(j => `• ${j.b}: من ${j.from} لـ ${j.to}`))];
+    if (!ok.length) { logStatus('⚠️ استبدال الفترة اتلغى: الملف بيغطي أكتر من شهرين — ارفع شهر شهر', 'err'); return; }
+    if (!confirm('🔁 استبدال الفترة بالكامل\n\nأي فاتورة أو مرتجع في الفترات دي ومش موجود في الملف هيتمسح من السيستم (ويتحفظ نسخة احتياطية):\n\n' + lines.join('\n') + (bad.length ? '\n\n(فترات أطول من شهرين مش هتتمسح)' : '') + '\n\nتكمل؟')) { logStatus('استبدال الفترة اتلغى — الملف اتحفظ بس من غير مسح'); return; }
+    logStatus('جاري استبدال الفترة...');
+    const res = {};
+    for (const j of ok) {
+      const { data, error } = await sb.rpc('mt_prune_period', { p_table: j.table, p_branch: j.b, p_from: j.from, p_to: j.to, p_keys: [...j.keys] });
+      if (error) throw error; if (!data || !data.ok) throw new Error((data && data.msg) || 'فشل');
+      res[j.label] = (res[j.label] || 0) + (data.deleted || 0);
+      if (data.deleted_lines) res['سطور أصناف'] = (res['سطور أصناف'] || 0) + data.deleted_lines;
+    }
+    const from = ok.reduce((a, j) => j.from < a ? j.from : a, '9999'), to = ok.reduce((a, j) => j.to > a ? j.to : a, '0000');
+    try { await sb.rpc('mt_after_replace', { p_from: from, p_to: to }); } catch (e) { console.warn('mt_after_replace', e); }
+    const msg = Object.keys(res).filter(k => res[k]).map(k => `${res[k]} ${k}`).join(' و');
+    logStatus('🔁 استبدال الفترة خلص: ' + (msg ? 'اتمسح ' + msg + ' مش موجودين في الملف (محفوظين نسخة احتياطية)' : 'مفيش حاجة زيادة — السيستم مطابق للملف') + ' ✓', 'ok');
+  }
   async function syncToCloud(newInvoices, newItemRows, newReturns, newIndirectDiscounts, newChecks, newLedger, newCustomerInvoicesRaw) {
     if (!sb || (!newInvoices.length && !newItemRows.length && !(newReturns && newReturns.length) && !(newIndirectDiscounts && newIndirectDiscounts.length) && !(newChecks && newChecks.length) && !(newLedger && newLedger.length) && !(newCustomerInvoicesRaw && newCustomerInvoicesRaw.length))) return;
     try {
@@ -2937,6 +2972,13 @@ table.datatable details summary:hover { text-decoration: underline; }
 
       await runWithConcurrency(tasks, 3);
       if (errors.length) throw errors[0].error;
+      // استبدال الفترة بالكامل: بعد ما الملف اتحفظ، أي فاتورة/سطر/مرتجع في نفس الفرع ونفس مدى التواريخ مش موجود في الملف بيتمسح
+      const repChk = document.getElementById('replacePeriodChk');
+      if (repChk && repChk.checked) {
+        try { await mtReplacePeriod(invRows, itemRowsDb, retRows, custInvRows); }
+        catch (eR) { logStatus('⚠️ الملف اتحفظ، لكن استبدال الفترة ماكملش (' + (eR.message || eR) + ') — جرّب ترفع تاني', 'err'); }
+        repChk.checked = false;
+      }
 
       const retMsg     = retRows.length     ? ` و${retRows.length} سطر مرتجع` : '';
       const indMsg      = indRows.length      ? ` و${indRows.length} قيد خصم غير مباشر` : '';
