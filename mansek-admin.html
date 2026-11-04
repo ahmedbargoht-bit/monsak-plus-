@@ -63079,9 +63079,28 @@ async function vaHandle(alts){
     // 1) أمر محفوظ (اتعلّمه قبل كده) — نجرب كل البدائل
     for(const a of alts){
       const m=vaMemFind(a);
-      if(m){ m.uses=(m.uses||0)+1; for(const c of m.commands){ await vaRun(c, {fromMem:true}); await vaSleep(250); } return; }
+      if(m){ m.uses=(m.uses||0)+1; vaBubble('▶️ '+m.phrase+': '+m.commands.join(' ← '),'sys'); for(const c of m.commands){ await (typeof vaRunOne==='function'?vaRunOne(c):vaRun(c,{fromMem:true})); await vaSleep(250); } vaSay(vaActivePanel()==='returns'?vaReturnsSummary('summary'):'خلصت '+m.phrase); return; }
     }
-    // 2) فهم مباشر — أول بديل مفهوم
+    // 2) الذكاء الصناعي بيفهم الجملة (والنظام بينفّذ ويحسب)
+    if(VA.aiOn && !document.getElementById('va-noai')?.checked){
+      vaBubble('🧠 بفكّر...','sys');
+      let j=null;
+      try{ j=await vaAI(said, alts); }catch(e){ console.warn('VA AI',e); j=null; }
+      const th=[...document.querySelectorAll('#va-log .va-sys')].pop(); if(th && th.textContent==='🧠 بفكّر...') th.remove();
+      if(j && ((j.actions&&j.actions.length) || j.say)){
+        const r=await vaExecAI(j);
+        if(r.asked) return;
+        const summary = (r.didReturns || r.wantRead) ? vaReturnsSummary(r.wantRead||'summary') : '';
+        const msg=String(j.say||'').trim();
+        vaSay([msg,summary].filter(Boolean).join('. '),{html:
+          (msg?vaEscH(msg):'')+
+          (r.notes.length?`<div style="font-size:11px;color:#4E5C28;margin-top:3px">✅ ${r.notes.map(vaEscH).join(' • ')}</div>`:'')+
+          (summary?`<div style="margin-top:3px"><b>${vaEscH(summary)}</b></div>`:'')});
+        return;
+      }
+      vaBubble('⚙️ الذكاء مش متاح دلوقتي — بفهم بالكلمات','sys');
+    }
+    // 3) فهم بالكلمات (احتياطي) — أول بديل مفهوم
     let ok=false;
     for(const a of alts){ ok = await vaRun(a); if(ok) break; }
     if(ok){
@@ -63282,6 +63301,7 @@ function vaInit(){
     <div class="va-head">
       <div style="display:flex;align-items:center;gap:6px"><i class="ti ti-microphone" style="color:#C8A96E"></i><b>المساعد الصوتي</b></div>
       <div style="display:flex;align-items:center;gap:8px">
+        <label title="اقفل الذكاء الصناعي واشتغل بالكلمات بس" style="display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer"><input type="checkbox" id="va-noai" style="width:13px;height:13px">بدون AI</label>
         <label title="كتم الرد الصوتي" style="display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer"><input type="checkbox" id="va-mute" style="width:13px;height:13px">كتم</label>
         <button class="va-x" onclick="vaHandle(['مساعدة'])" title="أمثلة">؟</button>
         <button class="va-x" onclick="vaTogglePanel(false)" title="إخفاء">✕</button>
@@ -63298,6 +63318,215 @@ function vaInit(){
   vaMemLoad();
 }
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', vaInit); else vaInit();
+
+// ════════════════════════════════════════════════════════════════════════════
+// 🧠 عقل المساعد — الذكاء الصناعي بيفهم الجملة بس، والنظام هو اللي بينفّذ ويجيب الأرقام
+// • بيستخدم نفس مسار تاب "تحليل AI" (ai-proxy على Supabase: Groq ← Gemini ← Claude) — مفيش مفاتيح في الصفحة
+// • اللي بيتبعت للنموذج: الجملة + أسماء التابات والمجموعات وخطوط السير والفروع والأصناف + حالة الفلاتر
+//   مفيش أي أرقام مبيعات أو مرتجعات بتتبعت — الأرقام بتتحسب هنا على الجهاز
+// • لو النموذج وقع أو اتأخر → بيرجع للفهم بالكلمات (vaRun) تلقائيًا
+// ════════════════════════════════════════════════════════════════════════════
+VA.hist=[];        // آخر كام تبادل عشان يفهم "طب واسكندرية؟" و"طلعهولي pdf"
+VA.aiOn=true;
+
+function vaCleanLbl(l){ return String(l||'').replace(/[^؀-ۿa-zA-Z0-9\s()\-]/g,'').replace(/\s+/g,' ').trim(); }
+
+function vaAIContext(said){
+  const panels=vaPanels().map(p=>`${p.v}: ${vaCleanLbl(p.l)}`);
+  const groups=Object.keys(GROUPS).map(k=>`${k}: ${vaCleanLbl(GROUPS[k]?.label||k)}`);
+  const lim=(a,n)=>a.length>n?a.slice(0,n):a;
+  // نبعت بس الأسماء اللي ليها علاقة بالكلام (عشان الطلب يفضل صغير وسريع) — والمطابقة النهائية بتحصل هنا
+  const saidT=new Set(vaTokens(said||'').filter(w=>w.length>=3).map(w=>w.slice(0,4)));
+  const rel=(list,n)=> list.length<=n ? list : list.filter(x=>vaSigTokens(x).some(w=>saidT.has(w.slice(0,4)))).slice(0,n);
+  const ctx={
+    today: localISO(), weekday: new Date().toLocaleDateString('ar-EG',{weekday:'long'}),
+    current_panel: vaActivePanel(),
+    panels, groups,
+    returns_lists_loaded: !!(ARET.routes&&ARET.routes.length),
+    routes: rel(ARET.routes||[],80), branches: rel(ARET.branches||[],60), items: rel(ARET.items||[],60),
+    lists_note: 'القوائم دي متفلترة على الكلمات اللي اتقالت — لو الاسم مش فيها اكتبه زي ما اتقال',
+    reasons: [...(document.getElementById('admin-ret-reason')?.options||[])].map(o=>o.value).filter(v=>v&&v!=='all'),
+    returns_current_filters: {
+      groups:[...ARET.grp], routes:[...ARET.route], branches:[...ARET.branch], items:[...ARET.item],
+      status: document.getElementById('ret-status')?.value||'open',
+      reason: document.getElementById('admin-ret-reason')?.value||'all',
+      from: document.getElementById('admin-ret-from')?.value||'', to: document.getElementById('admin-ret-to')?.value||'',
+      show_superseded: !!document.getElementById('ret-show-old')?.checked
+    },
+    saved_macros: VA.mem.map(m=>({name:m.phrase, steps:m.commands}))
+  };
+  return ctx;
+}
+
+const VA_SYS = `إنت مساعد صوتي جوه لوحة تحكم نظام "منسق بلس" لشركة الطحان. المستخدم بيتكلم مصري (والكلام جاي من التعرف على الصوت فممكن فيه غلطات إملائية أو كلمات متسمعة غلط — خمّن المقصود بذكاء).
+شغلتك تحوّل كلامه لأوامر JSON بس — النظام هو اللي بينفذ وبيحسب الأرقام. **ممنوع تألّف أي رقم أو إحصائية**.
+
+رجّع JSON واحد بس من غير أي كلام قبله أو بعده، بالشكل ده:
+{"say":"رد قصير جدًا بالمصري (جملة واحدة)","actions":[ ... ]}
+
+الأوامر المتاحة (actions بالترتيب اللي يتنفذ):
+1) {"do":"open","panel":"<id من panels>"} — فتح تاب.
+2) {"do":"returns", "clear":false, "groups":null, "routes":null, "branches":null, "items":null, "reason":null, "status":null, "from":null, "to":null}
+   — فلاتر تاب المرتجعات (بيفتحه لوحده). القيمة null = سيبه زي ما هو. [] = شيل الفلتر ده (الكل). clear:true = امسح كل الفلاتر الأول.
+   groups = مفاتيح من groups (زي "giza"). routes/branches/items = أسماء من القوائم بالظبط لو موجودة، ولو القوائم فاضية اكتب الاسم زي ما قاله.
+   status واحدة من: "open" (المفتوح = لسه + عليه مشكلة) ، "pending" (لسه ما اترفعش) ، "issue" (عليه مشكلة: مش موجود/جزء/سبب آخر) ، "pulled" (اترفع) ، "superseded" (الملغي بتقرير أحدث) ، "all".
+   from/to تاريخ YYYY-MM-DD محسوب من today، أو "" لمسح التاريخ. "الشهر اللي فات" = من أول الشهر اللي فات لآخره. "الشهر ده" = من أول الشهر لحد النهارده.
+   الفلاتر بتتراكم على الحالية (returns_current_filters) — لو قال "طب واسكندرية" يبقى غيّر المجموعة بس، ولو قال حاجة جديدة خالص استخدم clear:true.
+3) {"do":"export","format":"pdf"} أو {"do":"export","format":"excel"} — تصدير المعروض في تاب المرتجعات.
+4) {"do":"read","what":"summary"} أو {"do":"read","what":"top_items"} — النظام يقرأ الأرقام بصوته (استخدمها لما يسأل كام/الإجمالي/أكتر صنف، أو بعد أي فلترة عشان يسمع النتيجة).
+5) {"do":"macro","name":"<اسم من saved_macros>"} — تشغيل أمر محفوظ لو كلامه معناه نفس الأمر المحفوظ.
+6) {"do":"teach","phrase":"<الكلمة اللي هيقولها>","steps":["خطوة بالعربي","خطوة"]} — لو قال "لما أقول كذا اعمل كذا" أو "احفظ/علّم".
+7) {"do":"forget","phrase":"..."} — لو قال انسى أمر محفوظ.
+8) {"do":"ask","question":"سؤال قصير","options":["اختيار","اختيار"]} — لو مش متأكد بين أكتر من حاجة (مثلاً اسم ينفع لكذا فرع/صنف). الاختيارات تكون جمل أوامر كاملة يقدر يضغط عليها.
+9) {"do":"help"} — لو سأل بتعرف تعمل ايه.
+لو طلب حاجة مش متاحة لسه (زي أرقام المبيعات أو إيقاف/إضافة أشخاص أو فلاتر تاب غير المرتجعات) افتح التاب المناسب لو موجود وقوله بصراحة في say إن ده جاي في المرحلة الجاية. لو كلام عام/دردشة رد في say بس من غير actions.
+say ما يكررش الأرقام وما يقولش "تم" بس — قول اللي هتعمله باختصار (مثال: "حاضر، مرتجعات إسكندرية اللي عليها مشاكل").`;
+
+function vaParseJSON(t){
+  t=String(t||'').replace(/```json|```/g,'');
+  const a=t.indexOf('{'), b=t.lastIndexOf('}');
+  if(a<0||b<=a) throw new Error('no json');
+  return JSON.parse(t.slice(a,b+1));
+}
+
+async function vaAI(said, alts){
+  if(!VA.aiOn || typeof groqChat!=='function') return null;
+  const ctx=vaAIContext(said);
+  const msgs=[{role:'system',content:VA_SYS}];
+  VA.hist.slice(-6).forEach(h=>msgs.push(h));
+  msgs.push({role:'user',content:`السياق: ${JSON.stringify(ctx)}\n\nكلام المستخدم: «${said}»${alts&&alts.length>1?`\n(بدائل التعرف على الصوت: ${alts.slice(1).map(a=>'«'+a+'»').join(' ، ')})`:''}`});
+  const timeout=new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),15000));
+  const out=await Promise.race([groqChat(msgs,1800), timeout]);
+  const j=vaParseJSON(out);
+  if(!j || !Array.isArray(j.actions)) throw new Error('bad shape');
+  VA.hist.push({role:'user',content:said},{role:'assistant',content:JSON.stringify(j)});
+  if(VA.hist.length>12) VA.hist=VA.hist.slice(-12);
+  return j;
+}
+
+// يحوّل اسم قاله النموذج لاسم موجود فعلاً في القايمة
+function vaResolve(name, list){
+  if(name==null) return null;
+  const n=vaNorm(name);
+  const exact=list.find(x=>vaNorm(x)===n); if(exact) return {v:exact};
+  const mm=vaMatch(vaTokens(name).filter(w=>!VA_STOP.has(w)), list.map(v=>({v,l:v})), {loose:true, partial:true});
+  if(!mm) return null;
+  if(mm.ties.length>1) return {ties:mm.ties.map(t=>t.v)};
+  return {v:mm.best.v};
+}
+
+async function vaExecAI(j){
+  const notes=[]; let wantRead=null, didReturns=false;
+  for(const a of (j.actions||[])){
+    const d=a&&a.do;
+    if(d==='open'){
+      const p=vaPanels().find(x=>x.v===a.panel);
+      if(p){ await vaOpenPanel(p); notes.push('فتحت '+vaCleanLbl(p.l)); }
+    }
+    else if(d==='returns'){
+      const r=await vaApplyReturns(a); if(r.ask) return {asked:true}; notes.push(...r.notes); didReturns=true;
+    }
+    else if(d==='export'){
+      if(vaActivePanel()!=='returns'){ await vaOpenPanel(vaPanels().find(x=>x.v==='returns')||{v:'returns',mode:'coord'}); await vaWaitReturns(); }
+      try{ if(a.format==='excel'){ exportReturnsExcelStyled(); notes.push('📊 طلّعت Excel'); } else { exportReturnsPDF(); notes.push('📄 طلّعت PDF'); } }catch(e){ notes.push('❌ التصدير ما نجحش'); }
+    }
+    else if(d==='read'){ wantRead=a.what||'summary'; }
+    else if(d==='macro'){
+      const m=VA.mem.find(x=>x.phrase===vaNorm(a.name)) || VA.mem.find(x=>vaNorm(x.phrase)===vaNorm(a.name));
+      if(m){ notes.push('▶️ '+m.phrase); for(const c of m.commands){ await vaRunOne(c); await vaSleep(250); } }
+    }
+    else if(d==='teach' && a.phrase && Array.isArray(a.steps) && a.steps.length){
+      await vaMemSave(a.phrase, a.steps.map(String));
+      vaBubble(`🧠 حفظت: لما تقول «${a.phrase}»: ${a.steps.join(' ← ')}`,'sys');
+    }
+    else if(d==='forget' && a.phrase){ const ok=await vaMemForget(a.phrase); notes.push(ok?`نسيت «${a.phrase}»`:`مش لاقي «${a.phrase}»`); }
+    else if(d==='ask'){
+      vaChoices(a.question||'تقصد إيه؟', (a.options||[]).slice(0,8).map(o=>({l:o,cmd:o}))); return {asked:true};
+    }
+    else if(d==='help'){ vaHelp(); return {asked:true}; }
+  }
+  return {notes, wantRead, didReturns};
+}
+
+// خطوة من أمر محفوظ: بالذكاء لو متاح، وإلا بالكلمات
+async function vaRunOne(cmd){
+  try{
+    const j=await vaAI(cmd,[cmd]);
+    if(j){ const r=await vaExecAI(j); if(r && !r.asked && r.didReturns){} return true; }
+  }catch(e){}
+  return await vaRun(cmd,{fromMem:true});
+}
+
+async function vaApplyReturns(a){
+  const notes=[];
+  if(vaActivePanel()!=='returns'){ await vaOpenPanel(vaPanels().find(x=>x.v==='returns')||{v:'returns',mode:'coord'}); notes.push('فتحت المرتجعات'); }
+  await vaWaitReturns();
+  let server=false;
+  const stEl=document.getElementById('ret-status'), rsEl=document.getElementById('admin-ret-reason');
+  const fEl=document.getElementById('admin-ret-from'), tEl=document.getElementById('admin-ret-to'), soEl=document.getElementById('ret-show-old');
+  if(a.clear){
+    ['grp','route','branch','item'].forEach(k=>ARET[k].clear());
+    if(stEl) stEl.value='open'; if(rsEl) rsEl.value='all'; if(fEl) fEl.value=''; if(tEl) tEl.value=''; if(soEl) soEl.checked=false;
+    server=true; notes.push('مسحت الفلاتر');
+  }
+  if(a.status && stEl && [...stEl.options].some(o=>o.value===a.status)){
+    stEl.value=a.status; notes.push('الحالة: '+stEl.options[stEl.selectedIndex].text);
+    if(a.status==='superseded' && soEl && !soEl.checked){ soEl.checked=true; server=true; }
+  }
+  if(a.from!=null && fEl){ fEl.value=a.from||''; server=true; }
+  if(a.to!=null && tEl){ tEl.value=a.to||''; server=true; }
+  if((a.from!=null||a.to!=null)) notes.push((fEl?.value||tEl?.value)?`الفترة: ${fEl?.value||'…'} ← ${tEl?.value||'…'}`:'كل الفترات');
+  if(Array.isArray(a.groups)){
+    const keys=Object.keys(GROUPS);
+    const sel=a.groups.map(g=> keys.includes(g)?g : (vaResolve(g, keys.map(k=>vaCleanLbl(GROUPS[k]?.label||k)))||{}).v ).map(v=> keys.includes(v)?v: keys.find(k=>vaCleanLbl(GROUPS[k]?.label||k)===v)).filter(Boolean);
+    ARET.grp.clear(); sel.forEach(g=>ARET.grp.add(g));
+    ARET.route.clear(); ARET.branch.clear(); ARET.item.clear();
+    server=true; notes.push(sel.length? sel.map(g=>vaCleanLbl(GROUPS[g]?.label||g)).join('، ') : 'كل المجموعات');
+  }
+  if(server) await adminLoadReturns(); else await adminLoadReturns({reuse:true});
+
+  const setFrom=async(key,arr,label)=>{
+    if(!Array.isArray(arr)) return null;
+    ARET[key].clear();
+    const miss=[];
+    for(const n of arr){
+      const r=vaResolve(n, ARET[key+(key==='branch'?'es':'s')]||[]);
+      if(r&&r.v) ARET[key].add(r.v);
+      else if(r&&r.ties){ return {ask:true, label, ties:r.ties}; }
+      else miss.push(n);
+    }
+    if(ARET[key].size) notes.push(label+': '+[...ARET[key]].join('، '));
+    else if(!arr.length) notes.push('كل '+label);
+    if(miss.length) notes.push(`⚠️ ما لقيتش ${label}: ${miss.join('، ')}`);
+    await adminLoadReturns({reuse:true});
+    return null;
+  };
+  for(const [key,arr,label] of [['route',a.routes,'خط السير'],['branch',a.branches,'الفرع']]){
+    const r=await setFrom(key,arr,label);
+    if(r&&r.ask){ vaChoices(`لقيت أكتر من ${label} — أنهي واحد؟`, r.ties.slice(0,8).map(t=>({l:t, cmd:`${label} ${t}`}))); return {ask:true,notes}; }
+  }
+  if(a.reason!=null && rsEl){
+    if(a.reason===''||a.reason==='all'){ rsEl.value='all'; }
+    else{ const r=vaResolve(a.reason,[...rsEl.options].map(o=>o.value).filter(v=>v!=='all')); if(r&&r.v){ rsEl.value=r.v; notes.push('السبب: '+r.v); } }
+    await adminLoadReturns({reuse:true});
+  }
+  const ri=await setFrom('item',a.items,'الصنف');
+  if(ri&&ri.ask){ vaChoices('لقيت أكتر من صنف — أنهي واحد؟', ri.ties.slice(0,8).map(t=>({l:t, cmd:`الصنف ${t}`}))); return {ask:true,notes}; }
+  await adminLoadReturns({reuse:true});
+  return {notes};
+}
+
+function vaReturnsSummary(what){
+  const data=window._retData||[];
+  const qty=data.reduce((s,x)=>s+(+x.qty||0),0);
+  const br=new Set(data.map(x=>x.branch)).size;
+  let s=`${data.length.toLocaleString('en-US')} مرتجع، ${qty.toLocaleString('en-US')} وحدة، في ${br} فرع`;
+  if(what==='top_items'){
+    const cards=[...document.querySelectorAll('#admin-ret-items .mret-item')].slice(0,3).map(c=>({n:c.querySelector('.nm')?.textContent.trim(), q:c.querySelector('.q')?.textContent.trim()}));
+    if(cards.length) s+='. أكتر الأصناف: '+cards.map(c=>`${c.n} ${c.q} وحدة`).join('، ');
+  }
+  return s;
+}
 
 </script>
 </body>
