@@ -62793,9 +62793,11 @@ function sfcExcel(){
 </script>
 <style>
 /* ── المساعد الصوتي ── */
-#va-mic{position:fixed;left:22px;bottom:96px;z-index:9998;width:56px;height:56px;border-radius:50%;border:none;cursor:pointer;
-  background:linear-gradient(135deg,#731E2E,#4B1420);color:#EDE5D8;font-size:26px;box-shadow:0 6px 20px rgba(115,30,46,.45);display:flex;align-items:center;justify-content:center;transition:.2s}
+#va-mic{position:fixed;left:22px;bottom:96px;touch-action:none;user-select:none;z-index:9998;width:56px;height:56px;border-radius:50%;border:none;cursor:pointer;
+  background:linear-gradient(135deg,#731E2E,#4B1420);color:#EDE5D8;font-size:26px;box-shadow:0 6px 20px rgba(115,30,46,.45);display:flex;align-items:center;justify-content:center;transition:transform .2s,background .2s,box-shadow .2s}
 #va-mic:hover{transform:scale(1.06)}
+#va-mic.va-drag{cursor:grabbing;transform:scale(1.12);opacity:.9}
+.va-chip-on{background:#731E2E!important;color:#fff!important;border-color:#731E2E!important}
 #va-mic.va-on{background:linear-gradient(135deg,#C0392B,#8E1B12);animation:vaPulse 1.1s infinite}
 #va-mic.va-busy{background:linear-gradient(135deg,#C8A96E,#8B6F47)}
 @keyframes vaPulse{0%{box-shadow:0 0 0 0 rgba(192,57,43,.55)}70%{box-shadow:0 0 0 18px rgba(192,57,43,0)}100%{box-shadow:0 0 0 0 rgba(192,57,43,0)}}
@@ -62886,23 +62888,97 @@ function vaConsume(tokens, used){ const u=new Set(used); return tokens.filter(w=
 const vaHas = (txt, re) => re.test(' '+txt+' ');
 
 // ── الصوت (الرد) ──
+// ── الصوت: اختيار رجالي/حريمي من الأصوات العربية المتاحة على الجهاز ──
+const VA_VPREF_LS='va_voice_pref_v1';
+VA.vpref=(()=>{ try{ return Object.assign({gender:'male',name:'',rate:0.95}, JSON.parse(localStorage.getItem(VA_VPREF_LS)||'{}')); }catch(e){ return {gender:'male',name:'',rate:0.95}; } })();
+function vaSaveVPref(){ try{ localStorage.setItem(VA_VPREF_LS, JSON.stringify(VA.vpref)); }catch(e){} }
+// المتصفح ما بيقولش نوع الصوت — بنعرفه من اسمه (أسماء أصوات مايكروسوفت/جوجل المعروفة)
+const VA_FEMALE=/(hoda|salma|zariyah|amany|amina|laila|layla|mouna|mona|sana|rana|noura|nora|fatima|aisha|hala|iman|yasmin|reem|dalia|shakira|maryam|female|woman|امرأه|سيده)/i;
+const VA_MALE=/(naayf|nayef|shakir|hamed|omar|moaz|fahed|taim|bassel|rami|hamdan|ali|ahmed|jamal|saleh|male|man\b|رجل)/i;
+function vaVoiceGender(v){ const n=(v.name||'')+' '+(v.voiceURI||''); return VA_FEMALE.test(n)?'female':VA_MALE.test(n)?'male':'?'; }
+function vaArabicVoices(){
+  try{ return (speechSynthesis.getVoices()||[]).filter(v=>/^ar/i.test(v.lang)); }catch(e){ return []; }
+}
+function vaVoiceScore(v){
+  let s=0;
+  if(/ar[-_]EG/i.test(v.lang)) s+=20;                 // مصري الأول
+  if(/natural|online|neural/i.test(v.name)) s+=10;    // الأصوات الطبيعية أوضح بكتير
+  if(/google/i.test(v.name)) s+=3;
+  return s;
+}
 function vaPickVoice(){
-  try{
-    const vs=speechSynthesis.getVoices()||[];
-    VA.voice = vs.find(v=>/ar[-_]EG/i.test(v.lang)) || vs.find(v=>/^ar/i.test(v.lang)) || null;
-  }catch(e){ VA.voice=null; }
+  const vs=vaArabicVoices();
+  let v=null;
+  if(VA.vpref.name) v=vs.find(x=>x.name===VA.vpref.name)||null;
+  if(!v){
+    const want=vs.filter(x=>vaVoiceGender(x)===VA.vpref.gender).sort((a,b)=>vaVoiceScore(b)-vaVoiceScore(a));
+    const any=vs.slice().sort((a,b)=>vaVoiceScore(b)-vaVoiceScore(a));
+    v=want[0]||any[0]||null;
+  }
+  VA.voice=v;
+  vaRenderVoiceSettings();
 }
 try{ if('speechSynthesis' in window){ vaPickVoice(); speechSynthesis.onvoiceschanged=vaPickVoice; } }catch(e){}
+// تنضيف النص قبل ما يتقري: من غير رموز ولا أقواس ولا أسهم، وPDF/Excel تتنطق صح
+function vaSpeakText(t){
+  const MN=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+  return String(t||'')
+    .replace(/(\d{4})-(\d{2})-(\d{2})/g,(m,y,mo,d)=>`${+d} ${MN[+mo-1]||mo}`)
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}️]/gu,' ')
+    .replace(/\s*←\s*/g,' لحد ').replace(/→|•|\||#|\*|_/g,'، ')
+    .replace(/[()\[\]{}«»"]/g,' ')
+    .replace(/\bpdf\b/gi,'بي دي إف').replace(/\bexcel\b/gi,'إكسل').replace(/\bAI\b/g,'الذكاء الصناعي')
+    .replace(/(\d)\s*-\s*(\d)/g,'$1 إلى $2')
+    .replace(/\s*-\s*/g,' ').replace(/(،\s*){2,}/g,'، ').replace(/\s+/g,' ').trim();
+}
 function vaSay(text, opts={}){
   vaBubble(text, opts.kind||'bot', opts.html);
+  vaSpeak(text);
+}
+function vaSpeak(text){
   try{
     if(!('speechSynthesis' in window) || document.getElementById('va-mute')?.checked) return;
+    if(!VA.voice){ vaPickVoice(); }
+    // من غير صوت عربي المتصفح بيقرا العربي بصوت إنجليزي ويطلع كلام مش مفهوم — نسكت ونقول السبب مرة واحدة
+    if(!VA.voice){
+      if(!VA._noVoiceWarned){ VA._noVoiceWarned=true; vaBubble('🔇 مفيش صوت عربي متسطّب على الجهاز ده، فهرد كتابة بس. افتح ⚙️ عشان تعرف تضيفه.','sys'); }
+      return;
+    }
     speechSynthesis.cancel();
-    const u=new SpeechSynthesisUtterance(String(text).replace(/[🎙️✅⚠️❌🔁🗂️⏳📄📊💡🧠]/g,''));
-    u.lang='ar-EG'; if(VA.voice) u.voice=VA.voice; u.rate=1.05;
+    const u=new SpeechSynthesisUtterance(vaSpeakText(text));
+    u.voice=VA.voice; u.lang=VA.voice.lang||'ar-EG'; u.rate=+VA.vpref.rate||0.95; u.pitch=1;
     speechSynthesis.speak(u);
   }catch(e){}
 }
+function vaRenderVoiceSettings(){
+  const box=document.getElementById('va-settings'); if(!box) return;
+  const vs=vaArabicVoices().slice().sort((a,b)=>vaVoiceScore(b)-vaVoiceScore(a));
+  const g=VA.vpref.gender;
+  const gl={male:'رجالي',female:'حريمي','?':'مش معروف'};
+  const hasG=vs.some(v=>vaVoiceGender(v)===g);
+  box.innerHTML=`
+    <div style="font-weight:800;color:#731E2E;margin-bottom:6px">⚙️ إعدادات الصوت</div>
+    <div style="display:flex;gap:6px;margin-bottom:8px">
+      <button class="va-chip ${g==='male'?'va-chip-on':''}" onclick="vaSetGender('male')">👨 صوت رجالي</button>
+      <button class="va-chip ${g==='female'?'va-chip-on':''}" onclick="vaSetGender('female')">👩 صوت حريمي</button>
+    </div>
+    ${vs.length?`<label style="font-size:11px;color:#555">الصوت:</label>
+    <select id="va-voice-sel" onchange="vaSetVoiceName(this.value)" style="width:100%;margin:3px 0 8px;padding:5px;border:1px solid #E0D8CC;border-radius:8px;font-family:Cairo,sans-serif;font-size:12px">
+      <option value="">تلقائي (أوضح صوت ${gl[g]})</option>
+      ${vs.map(v=>`<option value="${vaEscH(v.name)}" ${VA.vpref.name===v.name?'selected':''}>${vaEscH(v.name)} — ${gl[vaVoiceGender(v)]}${/ar[-_]EG/i.test(v.lang)?' — مصري':''}</option>`).join('')}
+    </select>`:''}
+    <label style="font-size:11px;color:#555">السرعة: <b id="va-rate-v">${(+VA.vpref.rate).toFixed(2)}</b></label>
+    <input type="range" min="0.7" max="1.3" step="0.05" value="${VA.vpref.rate}" oninput="VA.vpref.rate=+this.value;document.getElementById('va-rate-v').textContent=(+this.value).toFixed(2);vaSaveVPref()" style="width:100%">
+    <button class="va-chip" style="margin-top:6px" onclick="vaSpeak('أهلاً، أنا المساعد الصوتي بتاع منسق بلس. مرتجعات الجيزة النهارده ألف وخمسمية وسبعة وحدة.')">🔊 جرّب الصوت</button>
+    <div style="font-size:11px;color:#555;margin-top:8px;line-height:1.8">
+      ${VA.voice?`الصوت الحالي: <b>${vaEscH(VA.voice.name)}</b>`:'<b style="color:#B91C1C">مفيش صوت عربي على الجهاز ده.</b>'}
+      ${(!vs.length || !hasG)?`<br>${!vs.length?'':'مفيش صوت '+gl[g]+' عربي متاح. '}لأوضح صوت مصري (رجالي <b>شاكر</b> وحريمي <b>سلمى</b>) افتح لوحة التحكم من متصفح <b>Microsoft Edge</b> — أصواته الطبيعية بالعربي المصري مجانية ومفهومة جدًا. أو من ويندوز: الإعدادات ← الوقت واللغة ← الكلام ← إضافة أصوات ← العربية (مصر).`:''}
+      ${vs.length && !vs.some(v=>/natural|online/i.test(v.name))?'<br>💡 الأصوات الطبيعية (Natural) أوضح بكتير — موجودة في متصفح Edge.':''}
+    </div>`;
+}
+function vaSetGender(g){ VA.vpref.gender=g; VA.vpref.name=''; vaSaveVPref(); vaPickVoice(); vaSpeak(g==='male'?'تمام، ده الصوت الرجالي.':'تمام، ده الصوت الحريمي.'); }
+function vaSetVoiceName(n){ VA.vpref.name=n; vaSaveVPref(); vaPickVoice(); vaSpeak('تمام، ده الصوت الجديد.'); }
+function vaToggleSettings(){ const s=document.getElementById('va-settings'); if(!s) return; const show=s.style.display==='none'; s.style.display=show?'block':'none'; if(show) vaRenderVoiceSettings(); }
 
 // ── الواجهة ──
 function vaBubble(text, kind='bot', html){
@@ -62913,12 +62989,67 @@ function vaBubble(text, kind='bot', html){
   box.appendChild(d);
   while(box.children.length>40) box.removeChild(box.firstChild);
   box.scrollTop=box.scrollHeight;
-  document.getElementById('va-panel').style.display='flex';
+  const pn=document.getElementById('va-panel'); if(pn.style.display==='none'){ pn.style.display='flex'; vaPlacePanel(); }
 }
 function vaTogglePanel(force){
   const p=document.getElementById('va-panel'); if(!p) return;
   const show = force!=null ? force : p.style.display==='none';
   p.style.display = show?'flex':'none';
+  if(show) vaPlacePanel();
+}
+// ── المايك بيتسحب لأي مكان في الشاشة (ماوس أو لمس) ومكانه بيتحفظ ──
+const VA_POS_LS='va_mic_pos_v1';
+function vaClampPos(x,y){
+  const b=document.getElementById('va-mic'); const w=b?.offsetWidth||56, h=b?.offsetHeight||56;
+  return {x:Math.min(Math.max(6,x), window.innerWidth-w-6), y:Math.min(Math.max(6,y), window.innerHeight-h-6)};
+}
+function vaApplyPos(x,y){
+  const b=document.getElementById('va-mic'); if(!b) return;
+  const p=vaClampPos(x,y);
+  b.style.left=p.x+'px'; b.style.top=p.y+'px'; b.style.bottom='auto'; b.style.right='auto';
+  vaPlacePanel();
+}
+// اللوحة بتفتح جنب المايك: فوقه لو فيه مكان وإلا تحته، وجوه الشاشة دايمًا
+function vaPlacePanel(){
+  const b=document.getElementById('va-mic'), p=document.getElementById('va-panel'); if(!b||!p) return;
+  const r=b.getBoundingClientRect();
+  const pw=Math.min(370, window.innerWidth-16);
+  const ph=Math.min(p.offsetHeight||460, window.innerHeight*0.62);
+  let left=r.left + r.width/2 - pw/2;
+  left=Math.min(Math.max(8,left), window.innerWidth-pw-8);
+  let top = (r.top - ph - 10 >= 8) ? r.top - ph - 10 : Math.min(r.bottom + 10, window.innerHeight - ph - 8);
+  top=Math.max(8, top);
+  p.style.left=left+'px'; p.style.top=top+'px'; p.style.bottom='auto'; p.style.right='auto';
+}
+function vaInitDrag(){
+  const b=document.getElementById('va-mic'); if(!b) return;
+  try{ const s=JSON.parse(localStorage.getItem(VA_POS_LS)||'null'); if(s&&isFinite(s.x)&&isFinite(s.y)) vaApplyPos(s.x,s.y); }catch(e){}
+  let st=null;
+  b.addEventListener('pointerdown',e=>{
+    if(e.button!==undefined && e.button!==0) return;
+    const r=b.getBoundingClientRect();
+    st={sx:e.clientX, sy:e.clientY, ox:e.clientX-r.left, oy:e.clientY-r.top, moved:false, id:e.pointerId};
+    try{ b.setPointerCapture(e.pointerId); }catch(_){}
+  });
+  b.addEventListener('pointermove',e=>{
+    if(!st) return;
+    if(!st.moved && Math.hypot(e.clientX-st.sx, e.clientY-st.sy) < 6) return;
+    st.moved=true; b.classList.add('va-drag');
+    vaApplyPos(e.clientX-st.ox, e.clientY-st.oy);
+    e.preventDefault();
+  });
+  const end=e=>{
+    if(!st) return;
+    const moved=st.moved; st=null; b.classList.remove('va-drag');
+    try{ b.releasePointerCapture(e.pointerId); }catch(_){}
+    if(moved){
+      try{ localStorage.setItem(VA_POS_LS, JSON.stringify({x:parseFloat(b.style.left)||0,y:parseFloat(b.style.top)||0})); }catch(_){}
+    }else if(e.type==='pointerup'){ vaStart(); }
+  };
+  b.addEventListener('pointerup',end);
+  b.addEventListener('pointercancel',end);
+  b.addEventListener('dblclick',e=>{ e.preventDefault(); vaTogglePanel(); });
+  window.addEventListener('resize',()=>{ const r=b.getBoundingClientRect(); if(b.style.top) vaApplyPos(r.left,r.top); else vaPlacePanel(); });
 }
 function vaSetState(st){
   const b=document.getElementById('va-mic'); if(!b) return;
@@ -63296,17 +63427,19 @@ function vaInit(){
   if(document.getElementById('va-mic')) return;
   const w=document.createElement('div');
   w.innerHTML=`
-  <button id="va-mic" title="المساعد الصوتي (F2)" onclick="vaStart()">🎙️</button>
+  <button id="va-mic" title="اضغط واتكلم (أو F2) — اسحبه لأي مكان — دبل كليك يفتح/يقفل اللوحة">🎙️</button>
   <div id="va-panel" style="display:none">
     <div class="va-head">
       <div style="display:flex;align-items:center;gap:6px"><i class="ti ti-microphone" style="color:#C8A96E"></i><b>المساعد الصوتي</b></div>
       <div style="display:flex;align-items:center;gap:8px">
         <label title="اقفل الذكاء الصناعي واشتغل بالكلمات بس" style="display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer"><input type="checkbox" id="va-noai" style="width:13px;height:13px">بدون AI</label>
         <label title="كتم الرد الصوتي" style="display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer"><input type="checkbox" id="va-mute" style="width:13px;height:13px">كتم</label>
+        <button class="va-x" onclick="vaToggleSettings()" title="إعدادات الصوت">⚙️</button>
         <button class="va-x" onclick="vaHandle(['مساعدة'])" title="أمثلة">؟</button>
         <button class="va-x" onclick="vaTogglePanel(false)" title="إخفاء">✕</button>
       </div>
     </div>
+    <div id="va-settings" style="display:none;padding:10px 12px;border-bottom:1px solid #E8DCC4;background:#FFF8EC;font-size:12px"></div>
     <div id="va-log"></div>
     <div id="va-live">اضغط 🎙️ أو F2 واتكلم</div>
     <div class="va-foot">
@@ -63315,6 +63448,10 @@ function vaInit(){
     </div>
   </div>`;
   document.body.appendChild(w);
+  vaInitDrag();
+  // المايك يظهر بس بعد الدخول (لما يكون فيه تاب ظاهر) — مش على شاشة تسجيل الدخول
+  const vis=()=>{ const ap=document.querySelector('.panel.active'); const on=!!(ap && ap.getClientRects().length); const m=document.getElementById('va-mic'); if(m) m.style.display=on?'':'none'; if(!on){ const pn=document.getElementById('va-panel'); if(pn) pn.style.display='none'; } };
+  vis(); setInterval(vis,1500);
   vaMemLoad();
 }
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', vaInit); else vaInit();
@@ -63380,7 +63517,7 @@ const VA_SYS = `إنت مساعد صوتي جوه لوحة تحكم نظام "م
 8) {"do":"ask","question":"سؤال قصير","options":["اختيار","اختيار"]} — لو مش متأكد بين أكتر من حاجة (مثلاً اسم ينفع لكذا فرع/صنف). الاختيارات تكون جمل أوامر كاملة يقدر يضغط عليها.
 9) {"do":"help"} — لو سأل بتعرف تعمل ايه.
 لو طلب حاجة مش متاحة لسه (زي أرقام المبيعات أو إيقاف/إضافة أشخاص أو فلاتر تاب غير المرتجعات) افتح التاب المناسب لو موجود وقوله بصراحة في say إن ده جاي في المرحلة الجاية. لو كلام عام/دردشة رد في say بس من غير actions.
-say ما يكررش الأرقام وما يقولش "تم" بس — قول اللي هتعمله باختصار (مثال: "حاضر، مرتجعات إسكندرية اللي عليها مشاكل").`;
+say لازم يكون مصري بسيط وواضح يتقري بصوت: جملة قصيرة من غير رموز ولا أقواس ولا إنجليزي ولا اختصارات. say ما يكررش الأرقام وما يقولش "تم" بس — قول اللي هتعمله باختصار (مثال: "حاضر، مرتجعات إسكندرية اللي عليها مشاكل").`;
 
 function vaParseJSON(t){
   t=String(t||'').replace(/```json|```/g,'');
