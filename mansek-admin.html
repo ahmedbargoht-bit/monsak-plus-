@@ -62998,6 +62998,11 @@ function sfcExcel(){
 .pe-bn{font-size:18px;font-weight:900}.pe-bs{font-size:11px;color:#EDE5D8;letter-spacing:1px}.pe-bt2{font-size:16px;font-weight:800;color:#F5F0E8}
 @media (max-width:1100px){.pe-grid.c4{grid-template-columns:repeat(2,1fr)}.pe-kpis{grid-template-columns:repeat(3,1fr)}}
 @media (max-width:700px){.pe-grid.c2,.pe-grid.c3,.pe-grid.c4{grid-template-columns:1fr}.pe-kpis{grid-template-columns:repeat(2,1fr)}}
+.pe-modal{position:fixed;inset:0;background:rgba(44,31,10,.45);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px}
+.pe-mbox{background:#fff;border-radius:16px;width:420px;max-width:100%;box-shadow:0 20px 50px rgba(0,0,0,.3);overflow:hidden;font-family:Cairo,sans-serif;direction:rtl}
+.pe-mh{display:flex;justify-content:space-between;align-items:center;background:linear-gradient(135deg,#2C1F0A,#4B3C1A);color:#F5F0E8;padding:12px 14px;font-size:14px}
+.pe-mh button{background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:8px;width:28px;height:28px;cursor:pointer}
+.pe-mb{padding:14px}
 </style>
 <script>
 // ════════════════════════════════════════════════════════════════════════════
@@ -63330,20 +63335,136 @@ function peSummaryText(){
   const top=(k,f,d,flt)=>peRank(R.L[k]||[],f,d,3,flt).map((e,i)=>`${i+1}. ${e.lbl} ${f==='net'?peFmt(e.net)+' ج':pePct(e[f],f==='gr')}`).join('\n');
   return `📊 *تقييم الأداء — الطحان جولدن داتس*\n📅 ${pt.txt}${R.brSel!=='all'?' — '+R.brSel:''}\n\n💰 صافي البيع: ${peFmt(T.net)} ج\n🎯 الهدف: ${T.tg?peFmt(T.tg)+' ج':'—'}\n🏆 المحقق: ${pePct(T.ach)}\n📈 النمو: ${typeof T.gr==='number'?pePct(T.gr,1):'—'}\n↩️ المرتجعات: ${pePct(T.rp)}\n\n🏢 *فروع الشركة (المحقق):*\n${top('br','ach','desc')}\n\n👥 *أعلى المجموعات محقق:*\n${top('grp','ach','desc')}\n\n🔻 *أقل المجموعات محقق:*\n${top('grp','ach','asc')}\n\n↩️ *أعلى فروع عملاء مرتجعات:*\n${top('site','rp','desc',peBig)}`;
 }
-async function peSend(){
+// ── الإرسال: ملف PDF أو Excel حقيقي (مش نص) ──
+// خطوتين: 1) نجهّز الملف  2) زرار "ابعت دلوقتي" — لأن الموبايل مش بيسمح بالمشاركة غير من ضغطة مباشرة
+function peSend(){
   if(!PE.res){ showToast('استنى لما البيانات تحمّل'); return; }
-  const text=peSummaryText();
-  let file=null;
-  try{ const wb=peBuildWorkbook(); const buf=XLSX.write(wb,{bookType:'xlsx',type:'array'});
-    file=new File([buf], peFileName('xlsx'), {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}); }catch(e){}
-  // الموبايل وويندوز 11: قايمة المشاركة (واتساب/إيميل/...) بالملف والملخص مع بعض
+  let m=document.getElementById('pe-send-modal');
+  if(!m){ m=document.createElement('div'); m.id='pe-send-modal'; document.body.appendChild(m); }
+  m.className='pe-modal';
+  m.innerHTML=`<div class="pe-mbox">
+    <div class="pe-mh"><b>📲 إرسال تقرير تقييم الأداء</b><button onclick="peSendClose()">✕</button></div>
+    <div class="pe-mb">
+      <div style="font-size:12px;color:#8B7B60;margin-bottom:10px">اختار شكل الملف اللي هيتبعت:</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="pe-btn pdf" style="flex:1;justify-content:center;padding:12px" onclick="pePrepare('pdf')">📄 ملف PDF</button>
+        <button class="pe-btn xls" style="flex:1;justify-content:center;padding:12px" onclick="pePrepare('xlsx')">📊 ملف Excel</button>
+      </div>
+      <div id="pe-send-st" style="margin-top:12px;font-size:12.5px"></div>
+    </div></div>`;
+  m.onclick=e=>{ if(e.target===m) peSendClose(); };
+}
+function peSendClose(){ const m=document.getElementById('pe-send-modal'); if(m) m.remove(); PE.sendFile=null; }
+function peLoadScript(src){
+  return new Promise((res,rej)=>{ const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=()=>rej(new Error('تعذّر تحميل مكتبة الـ PDF — اتأكد من النت')); document.head.appendChild(s); });
+}
+// PDF حقيقي: كل جزء من التقرير بيترسم صورة بمحرك المتصفح نفسه (العربي بيطلع مظبوط)،
+// وبعدين الأجزاء بتترص على صفحات A4 بالعرض من غير ما كارت يتقطع بين صفحتين
+async function peMakePdfBlob(){
+  if(typeof htmlToImage==='undefined') await peLoadScript('https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js');
+  if(!(window.jspdf&&window.jspdf.jsPDF)) await peLoadScript('https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js');
+  const css=document.getElementById('pe-style')?.textContent||'';
+  const W=1120;
+  const host=document.createElement('div');
+  host.style.cssText=`position:absolute;left:0;top:0;width:${W}px;background:#fff;direction:rtl;z-index:-1;pointer-events:none`;
+  const cover=document.createElement('div'); cover.style.cssText='position:fixed;inset:0;background:#F7F5F1;z-index:9999;display:flex;align-items:center;justify-content:center;font:800 16px Cairo,sans-serif;color:#4B3C1A'; cover.textContent='⏳ بجهّز ملف الـ PDF...';
+  const body=document.getElementById('pe-report').innerHTML.replace(/<button class="pe-more"[\s\S]*?<\/button>/g,'');
+  host.innerHTML=`<style>${css}.pe-pdf{font-family:Cairo,Arial,sans-serif;background:#fff;color:#2C1F0A;width:${W}px}.pe-pdf .pe-card{box-shadow:none}.pe-blk{padding:6px 14px;background:#fff}</style>
+    <div class="pe-pdf" id="pe-pdf-root"><div class="pe-blk"><div class="pe-brand"><div><div class="pe-bn">الطحان جولدن داتس</div><div class="pe-bs">Al Tahhan Golden Dates</div></div><div class="pe-bt2">📊 تقييم الأداء</div></div></div>
+    <div id="pe-pdf-body">${body}</div></div>`;
+  // كل عنصر في التقرير = بلوك؛ الأقسام الكبيرة بتتقسم على عناوينها وشبكاتها عشان تترص صح
+  const root=host.querySelector('#pe-pdf-root'), bodyEl=host.querySelector('#pe-pdf-body');
+  const blocks=[root.firstElementChild];
+  [...bodyEl.children].forEach(ch=>{
+    if(ch.classList.contains('pe-sec')){
+      // العناوين بتلزق في اللي بعدها عشان ما يتبقاش عنوان لوحده آخر الصفحة
+      let pend=[];
+      [...ch.children].forEach(x=>{
+        if(x.classList.contains('pe-st')||x.classList.contains('pe-sub')){ pend.push(x); return; }
+        const w=document.createElement('div'); w.className='pe-blk'; pend.forEach(h=>w.appendChild(h.cloneNode(true))); pend=[]; w.appendChild(x.cloneNode(true)); blocks.push(w);
+      });
+      if(pend.length){ const w=document.createElement('div'); w.className='pe-blk'; pend.forEach(h=>w.appendChild(h.cloneNode(true))); blocks.push(w); }
+    }
+    else { const w=document.createElement('div'); w.className='pe-blk'; w.appendChild(ch.cloneNode(true)); blocks.push(w); }
+  });
+  bodyEl.innerHTML=''; blocks.slice(1).forEach(b=>bodyEl.appendChild(b));
+  document.body.appendChild(host); document.body.appendChild(cover);
   try{
-    if(file && navigator.canShare && navigator.canShare({files:[file]})){ await navigator.share({files:[file], title:'تقييم الأداء', text}); return; }
-  }catch(e){ if(e && e.name==='AbortError') return; }
-  // غير كده: الملف بينزل + واتساب بيفتح بالملخص جاهز
-  if(file){ const a=document.createElement('a'); a.href=URL.createObjectURL(file); a.download=file.name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},2000); }
-  window.open('https://wa.me/?text='+encodeURIComponent(text),'_blank');
-  showToast('📲 نزّلت ملف Excel وفتحت واتساب بالملخص — ارفق الملف وابعته');
+    try{ await document.fonts.ready; }catch(e){}
+    // الخطوط بتتجهّز مرة واحدة بس (بدل ما تتحمّل مع كل جزء)
+    let fontEmbedCSS='';
+    try{ fontEmbedCSS=await Promise.race([htmlToImage.getFontEmbedCSS(root), new Promise(r=>setTimeout(()=>r(''),8000))]); }catch(e){ fontEmbedCSS=''; }
+    const { jsPDF } = window.jspdf;
+    const pdf=new jsPDF({orientation:'landscape',unit:'mm',format:'a4'});
+    const PW=297, PH=210, M=7, CW=PW-2*M, CH=PH-2*M;
+    let y=M, first=true;
+    for(const b of blocks){
+      if(!b.offsetHeight) continue;
+      const cv=await htmlToImage.toCanvas(b,{pixelRatio:2,backgroundColor:'#ffffff',width:W,fontEmbedCSS:fontEmbedCSS||undefined,skipFonts:!fontEmbedCSS});
+      const hmm=cv.height*(CW/cv.width);
+      if(hmm<=CH){
+        if(y+hmm>PH-M && !first){ pdf.addPage(); y=M; }
+        pdf.addImage(cv.toDataURL('image/jpeg',0.92),'JPEG',M,y,CW,hmm); y+=hmm; first=false;
+      }else{
+        // بلوك أطول من صفحة (زي جدول طويل): بيتقسم شرايح
+        const sliceH=Math.floor(cv.width*(CH/CW)); let sy=0;
+        while(sy<cv.height){
+          if(!first){ pdf.addPage(); } first=false; y=M;
+          const h=Math.min(sliceH, cv.height-sy);
+          const c2=document.createElement('canvas'); c2.width=cv.width; c2.height=h;
+          c2.getContext('2d').drawImage(cv,0,sy,cv.width,h,0,0,cv.width,h);
+          const hm=h*(CW/cv.width); pdf.addImage(c2.toDataURL('image/jpeg',0.92),'JPEG',M,y,CW,hm); y+=hm; sy+=h;
+        }
+      }
+    }
+    // رقم الصفحة
+    const n=pdf.getNumberOfPages();
+    for(let i=1;i<=n;i++){ pdf.setPage(i); pdf.setFontSize(8); pdf.setTextColor(160,144,122); pdf.text(`${i} / ${n}`, PW/2, PH-2.5, {align:'center'}); }
+    return pdf.output('blob');
+  }finally{ host.remove(); cover.remove(); }
+}
+async function pePrepare(kind){
+  const st=document.getElementById('pe-send-st'); if(!st) return;
+  st.innerHTML=`⏳ بجهّز ملف ${kind==='pdf'?'PDF':'Excel'}...`;
+  try{
+    let file;
+    if(kind==='pdf'){
+      const blob=await peMakePdfBlob();
+      file=new File([blob], peFileName('pdf'), {type:'application/pdf'});
+    }else{
+      const buf=XLSX.write(peBuildWorkbook(),{bookType:'xlsx',type:'array'});
+      file=new File([buf], peFileName('xlsx'), {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    }
+    PE.sendFile=file;
+    const canShare = !!(navigator.canShare && navigator.canShare({files:[file]}));
+    st.innerHTML = `<div style="color:#2E7D32;font-weight:800;margin-bottom:8px">✅ الملف جاهز: ${peEsc(file.name)} (${(file.size/1024).toFixed(0)} KB)</div>
+      ${canShare
+        ? `<button class="pe-btn send" style="width:100%;justify-content:center;padding:12px;font-size:14px" onclick="peShareNow()">📲 ابعته دلوقتي (واتساب / إيميل / ...)</button>`
+        : `<div style="color:#8A4B00;background:#FFF4E5;border-radius:8px;padding:8px;margin-bottom:8px">الجهاز ده مش بيدعم المشاركة المباشرة للملفات، فهنزّل الملف وتفتح واتساب وترفقه.</div>
+           <div style="display:flex;gap:6px;flex-wrap:wrap">
+             <button class="pe-btn xls" style="flex:1;justify-content:center" onclick="peDownloadPrepared()">⬇️ نزّل الملف</button>
+             <button class="pe-btn send" style="flex:1;justify-content:center" onclick="window.open('https://web.whatsapp.com/','_blank')">💬 افتح واتساب</button>
+           </div>`}`;
+  }catch(e){
+    st.innerHTML=`<div style="color:#C62828">❌ ${peEsc(e.message||e)}</div>`;
+  }
+}
+async function peShareNow(){
+  const f=PE.sendFile; if(!f) return;
+  try{
+    await navigator.share({files:[f], title:'تقييم الأداء — الطحان', text:'📊 تقرير تقييم الأداء — '+pePeriodText().txt});
+    peSendClose(); showToast('✅ اتبعت');
+  }catch(e){
+    if(e && e.name==='AbortError') return;
+    // لو المشاركة اترفضت لأي سبب: ننزّل الملف بداله
+    peDownloadPrepared();
+  }
+}
+function peDownloadPrepared(){
+  const f=PE.sendFile; if(!f) return;
+  const a=document.createElement('a'); a.href=URL.createObjectURL(f); a.download=f.name; document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },3000);
+  showToast('⬇️ نزل الملف — ارفقه في واتساب');
 }
 
 </script>
