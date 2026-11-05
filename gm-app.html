@@ -59778,7 +59778,7 @@ async function archiveLoadList(){
         <td style="font-size:11px;color:var(--text-secondary);white-space:nowrap">${dt}</td>
         <td style="font-size:11px">${kb}</td>
         <td>
-          <button onclick="archiveDownload('${safeN}')"
+          <button onclick="archiveDownload('${safeN}', decodeURIComponent('${encodeURIComponent(label).replace(/'/g,'%27')}'))"
             style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:#1E3A5F;color:#fff;border-radius:6px;border:none;font-size:11px;font-weight:700;font-family:Cairo,sans-serif;cursor:pointer">
             <i class="ti ti-download"></i> تنزيل
           </button>
@@ -59850,36 +59850,29 @@ async function archiveSaveNote(fileName, notes){
   }catch(e){ /* صامت */ }
 }
 
-async function archiveDownload(name){
+// التنزيل: بنجيب الملف نفسه (blob) وبعدين ننزّله — كده بيشتغل في التطبيق المتسطّب والموبايل
+// (التنزيل المباشر من رابط على دومين تاني كان المتصفح بيتجاهله في التطبيق المتسطّب)
+async function archiveDownload(name, label){
+  const pub=`${SUPABASE_URL}/storage/v1/object/public/letters-archive/${encodeURIComponent(name)}`;
+  const fname=(String(label||'').trim() ? String(label).trim().replace(/[\\/:*?"<>|]+/g,'-').replace(/\.pdf$/i,'') : name.replace(/\.pdf$/i,''))+'.pdf';
   try{
-    const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
-    // طلب Signed URL صالحة لمدة ساعة
-    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/letters-archive/${encodeURIComponent(name)}`,{
-      method:'POST', headers:H, body:JSON.stringify({expiresIn:3600})
-    });
-    const json = await res.json().catch(()=>({}));
-    if(!res.ok) throw new Error(json.message||json.error||`HTTP ${res.status}`);
-
-    const signedPath = json.signedURL || json.signedUrl || json.signed_url;
-    if(!signedPath) throw new Error('لم يتم إنشاء رابط التنزيل');
-
-    // signedURL قد يكون كامل URL أو مسار فقط (المسار يكون بدون بادئة storage/v1)
-    let fullUrl;
-    if(signedPath.startsWith('http')) fullUrl = signedPath;
-    else if(signedPath.startsWith('/storage/v1')) fullUrl = `${SUPABASE_URL}${signedPath}`;
-    else fullUrl = `${SUPABASE_URL}/storage/v1${signedPath.startsWith('/')?'':'/'}${signedPath}`;
-
-    // تنزيل الملف
-    const a = document.createElement('a');
-    a.href = fullUrl;
-    a.download = name;
-    a.target = '_blank';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    showToast('⏳ جاري تنزيل الخطاب...');
+    const res=await fetch(pub,{cache:'no-store'});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const blob=await res.blob();
+    const file=new File([blob], fname, {type:'application/pdf'});
+    const url=URL.createObjectURL(file);
+    const a=document.createElement('a'); a.href=url; a.download=fname; a.rel='noopener';
+    document.body.appendChild(a); a.click(); a.remove();
+    // آيفون/آيباد: التنزيل بيفتح الملف في عارض الـ PDF، وكمان نفتحه في تاب لو التنزيل اتمنع
+    if(/iPad|iPhone|iPod/.test(navigator.userAgent)) setTimeout(()=>{ try{ window.open(url,'_blank'); }catch(e){} },300);
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
+    showToast('✅ اتنزل: '+fname);
   }catch(e){
-    showToast('❌ فشل التنزيل: ' + e.message);
     console.error('archiveDownload error:', e);
+    // آخر حل: افتح الرابط العام مباشرة
+    try{ window.open(pub,'_blank'); showToast('📄 فتحت الخطاب في تاب جديد — احفظه من هناك'); }
+    catch(_){ showToast('❌ فشل التنزيل: '+e.message); }
   }
 }
 
