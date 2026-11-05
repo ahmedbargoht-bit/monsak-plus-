@@ -8340,6 +8340,28 @@ function setBadge(id,count){
 }
 
 // ══════════════════════════════════════════════════════════════
+
+// ── تاريخ الإنتاج في تقرير المنسق: الكمية متقسمة على شهور الإنتاج (رف ومخزن) ──
+function pdFmtM(ym){ const m=String(ym||'').match(/^(\d{4})-(\d{1,2})/); return m?`${+m[2]}/${m[1]}`:(ym||''); }
+function pdAdd(o,r){ // o = {snf,shelf,stock,pdS:{},pdK:{}}
+  const sq=+r.shelf_qty||0, kq=+r.stock_qty||0;
+  o.shelf+=sq; o.stock+=kq;
+  if(!o.pdS) o.pdS={}; if(!o.pdK) o.pdK={};
+  if(sq>0){ const d=(r.date_shelf||'').trim()||'—'; o.pdS[d]=(o.pdS[d]||0)+sq; }
+  if(kq>0){ const d=(r.date_stock||'').trim()||'—'; o.pdK[d]=(o.pdK[d]||0)+kq; }
+}
+function pdParts(map){ return Object.entries(map||{}).sort((a,b)=>a[0].localeCompare(b[0])).map(([d,q])=>({q, d:d==='—'?'من غير تاريخ':pdFmtM(d), old: d!=='—' && pdMonthsOld(d)>=6})); }
+function pdMonthsOld(ym){ const m=String(ym).match(/^(\d{4})-(\d{1,2})/); if(!m) return 0; const n=new Date(); return (n.getFullYear()-+m[1])*12+(n.getMonth()+1-+m[2]); }
+function pdHtml(x){
+  const chip=(p)=>`<span style="display:inline-block;background:${p.old?'#FFF1E6':'#F3EBDD'};color:${p.old?'#B45309':'#4B3C1A'};border-radius:10px;padding:1px 7px;margin:1px 2px;font-size:11px;white-space:nowrap"><b>${p.q}</b> ← ${p.d}</span>`;
+  const s=pdParts(x.pdS), k=pdParts(x.pdK);
+  if(!s.length && !k.length) return '<span style="color:#aaa">—</span>';
+  return (s.length?s.map(chip).join(''):'')+(k.length?`<div style="margin-top:2px;font-size:10.5px;color:#777">مخزن: ${k.map(chip).join('')}</div>`:'');
+}
+function pdText(x){
+  const s=pdParts(x.pdS).map(p=>`${p.q} ← ${p.d}`).join(' + '), k=pdParts(x.pdK).map(p=>`${p.q} ← ${p.d}`).join(' + ');
+  return [s, k?('مخزن: '+k):''].filter(Boolean).join(' | ')||'—';
+}
 // تقرير الفرع — آخر تقرير للمنسق + آخر زيارة (تسليم) للمندوب
 // ══════════════════════════════════════════════════════════════
 let _rptBranchRows = [], _rptLast = null;
@@ -8421,7 +8443,7 @@ async function rptPreview(){
     const enc=encodeURIComponent, H={headers:_rHdr()};
     const coords=(()=>{ const b=_rptBranchRows.find(x=>x.branch_name===bn); return b?[b.rep_name,b.rep_name2,b.rep_name3].filter(Boolean):[]; })();
     const [pr, dr]=await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/products?select=name,snf,shelf_qty,stock_qty,visit_id,created_at&branch=eq.${enc(bn)}&order=created_at.desc&limit=600`,H),
+      fetch(`${SUPABASE_URL}/rest/v1/products?select=name,snf,shelf_qty,stock_qty,date_shelf,date_stock,visit_id,created_at&branch=eq.${enc(bn)}&order=created_at.desc&limit=600`,H),
       fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?select=rep_name,delivery_date,items&deleted_at=is.null&branch_name=eq.${enc(bn)}&order=delivery_date.desc&limit=60`,H),
     ]);
     const prod=pr.ok?await pr.json():[]; let dels=dr.ok?await dr.json():[];
@@ -8436,7 +8458,7 @@ async function rptPreview(){
       const top=prod[0]; date=cd(top.created_at); by=top.name||'';
       const m={};
       prod.filter(r=>top.visit_id?r.visit_id===top.visit_id:(cd(r.created_at)===date&&(r.name||'')===(top.name||''))).forEach(r=>{
-        const k=(r.snf||'').trim(); if(!k) return; if(!m[k]) m[k]={snf:k,shelf:0,stock:0}; m[k].shelf+=+r.shelf_qty||0; m[k].stock+=+r.stock_qty||0; });
+        const k=(r.snf||'').trim(); if(!k) return; if(!m[k]) m[k]={snf:k,shelf:0,stock:0}; pdAdd(m[k],r); });
       items=Object.values(m).sort((a,b)=>a.snf.localeCompare(b.snf,'ar'));
     }
     let rep=null;
@@ -8466,8 +8488,8 @@ function _rptHtml(r){
   const coord=`<div class="card" style="border-right:4px solid #8B5A2B"><div class="card-title"><i class="ti ti-clipboard-list"></i> آخر تقرير للمنسق</div>
     <div style="font-size:13px">المنسق: <b>${_rEsc(r.coord)}</b></div>
     ${r.items.length?`<div style="font-size:13px;margin:4px 0 8px">تاريخ التقرير: <b>${_rEsc(r.date)}</b>${r.by?' — بواسطة '+_rEsc(r.by):''}</div>
-    <table style="width:100%;border-collapse:collapse;font-size:12px"><tr><th style="${th};text-align:right">الصنف</th><th style="${th}">رف</th><th style="${th}">مخزن</th></tr>
-    ${r.items.map((x,i)=>`<tr style="background:${i%2?'#FDF8F0':'#fff'}"><td style="padding:5px 8px;font-weight:600">${_rEsc(x.snf)}</td><td style="padding:5px 8px;text-align:center;${x.shelf<3?'color:#C0392B;font-weight:700':''}">${x.shelf}</td><td style="padding:5px 8px;text-align:center">${x.stock>0?x.stock:'—'}</td></tr>`).join('')}</table>`
+    <table style="width:100%;border-collapse:collapse;font-size:12px"><tr><th style="${th};text-align:right">الصنف</th><th style="${th}">رف</th><th style="${th}">مخزن</th><th style="${th}">تاريخ الإنتاج</th></tr>
+    ${r.items.map((x,i)=>`<tr style="background:${i%2?'#FDF8F0':'#fff'}"><td style="padding:5px 8px;font-weight:600">${_rEsc(x.snf)}</td><td style="padding:5px 8px;text-align:center;${x.shelf<3?'color:#C0392B;font-weight:700':''}">${x.shelf}</td><td style="padding:5px 8px;text-align:center">${x.stock>0?x.stock:'—'}</td><td style="padding:5px 8px">${pdHtml(x)}</td></tr>`).join('')}</table>`
     :'<div style="color:#C0392B;font-size:13px;margin-top:6px">لا يوجد تقرير لهذا الفرع</div>'}</div>`;
   const rep=`<div class="card" style="border-right:4px solid #1D4ED8"><div class="card-title"><i class="ti ti-truck-delivery"></i> آخر زيارة للمندوب</div>
     ${r.rep?`<div style="font-size:13px">المندوب: <b>${_rEsc(r.rep.name)}</b></div><div style="font-size:13px;margin:4px 0 8px">تاريخ آخر زيارة (تسليم): <b>${_rEsc(r.rep.date)}</b></div>
@@ -8481,9 +8503,9 @@ async function rptExport(){
   const r=await _rptEnsure(); if(!r) return;
   if(typeof XLSX==='undefined'){ showToast('جاري تحميل مكتبة Excel...'); return; }
   const aoa=[['الطحان جولدن داتس — تقرير الفرع'],[`الفرع: ${r.branch}`,`خط السير: ${r.route}`],[],
-    ['آخر تقرير للمنسق'],[`المنسق: ${r.coord}`,`التاريخ: ${r.date||'—'}`],['الصنف','رف','مخزن'],...r.items.map(x=>[x.snf,x.shelf,x.stock]),[],
+    ['آخر تقرير للمنسق'],[`المنسق: ${r.coord}`,`التاريخ: ${r.date||'—'}`],['الصنف','رف','مخزن','تاريخ الإنتاج'],...r.items.map(x=>[x.snf,x.shelf,x.stock,pdText(x)]),[],
     ['آخر زيارة للمندوب'],[`المندوب: ${r.rep?r.rep.name:'—'}`,`التاريخ: ${r.rep?r.rep.date:'لا توجد زيارة'}`],['الصنف المُسلَّم','الكمية'],...(r.rep?r.rep.items.map(x=>[x[0],x[1]]):[])];
-  const ws=XLSX.utils.aoa_to_sheet(aoa); ws['!cols']=[{wch:42},{wch:14},{wch:12}]; ws['!views']=[{RTL:true}];
+  const ws=XLSX.utils.aoa_to_sheet(aoa); ws['!cols']=[{wch:42},{wch:14},{wch:12},{wch:44}]; ws['!views']=[{RTL:true}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'تقرير الفرع');
   XLSX.writeFile(wb,`تقرير_الفرع_${r.branch}.xlsx`);
 }
@@ -8493,7 +8515,7 @@ async function rptExportPDF(){
   <div class="hd"><div>الطحان جولدن داتس — تقرير الفرع</div><div>${new Date().toLocaleDateString('en-GB')}</div></div>
   <h2>${_rEsc(r.branch)} <small style="color:#4E5A2B;font-size:13px">— ${_rEsc(r.route)}</small></h2>
   <h3>آخر تقرير للمنسق</h3><div style="font-size:13px">المنسق: <b>${_rEsc(r.coord)}</b> · التاريخ: <b>${_rEsc(r.date||'—')}</b></div>
-  ${r.items.length?`<table><tr><th>الصنف</th><th>رف</th><th>مخزن</th></tr>${r.items.map(x=>`<tr><td>${_rEsc(x.snf)}</td><td style="${x.shelf<3?'color:#C0392B;font-weight:700':''}">${x.shelf}</td><td>${x.stock>0?x.stock:'—'}</td></tr>`).join('')}</table>`:'<div style="color:#C0392B">لا يوجد تقرير</div>'}
+  ${r.items.length?`<table><tr><th>الصنف</th><th>رف</th><th>مخزن</th><th>تاريخ الإنتاج</th></tr>${r.items.map(x=>`<tr><td>${_rEsc(x.snf)}</td><td style="${x.shelf<3?'color:#C0392B;font-weight:700':''}">${x.shelf}</td><td>${x.stock>0?x.stock:'—'}</td><td style="text-align:right">${pdHtml(x)}</td></tr>`).join('')}</table>`:'<div style="color:#C0392B">لا يوجد تقرير</div>'}
   <h3>آخر زيارة للمندوب</h3>
   ${r.rep?`<div style="font-size:13px">المندوب: <b>${_rEsc(r.rep.name)}</b> · التاريخ: <b>${_rEsc(r.rep.date)}</b></div><table><tr><th>الصنف المُسلَّم</th><th>الكمية</th></tr>${r.rep.items.map(x=>`<tr><td>${_rEsc(x[0])}</td><td>${x[1]}</td></tr>`).join('')}</table>`:'<div style="color:#C0392B">لا توجد زيارة للمندوب</div>'}
   <div style="text-align:center;font-size:10px;color:#aaa;margin-top:14px">Al Tahhan Golden Dates © ${new Date().getFullYear()}</div></body></html>`;
@@ -13640,14 +13662,14 @@ async function mkDetailHTML(bn){
   const rep = (MK.rep[bn]||{}).rep_name || (MK.branches.find(b=>b.branch_name===bn)||{}).rep_name || '';
 
   // آخر تقرير منسق: أصناف الرف/المخزن
-  const prod = await mkJ(`products?select=name,snf,shelf_qty,stock_qty,visit_id,created_at&branch=eq.${enc}&order=created_at.desc&limit=600`);
+  const prod = await mkJ(`products?select=name,snf,shelf_qty,stock_qty,date_shelf,date_stock,visit_id,created_at&branch=eq.${enc}&order=created_at.desc&limit=600`);
   let rDate = '', rName = '', items = [];
   if(prod.length){
     const cdt = t=>t?new Date(new Date(t).getTime()+2*3600000).toISOString().slice(0,10):'';
     const top = prod[0]; rDate = cdt(top.created_at); rName = top.name||'';
     const rows = prod.filter(r=>top.visit_id ? r.visit_id===top.visit_id : (cdt(r.created_at)===rDate && (r.name||'')===rName));
     const m = {};
-    rows.forEach(r=>{ const k=(r.snf||'').trim(); if(!k) return; if(!m[k]) m[k]={snf:k,shelf:0,stock:0}; m[k].shelf+=+r.shelf_qty||0; m[k].stock+=+r.stock_qty||0; });
+    rows.forEach(r=>{ const k=(r.snf||'').trim(); if(!k) return; if(!m[k]) m[k]={snf:k,shelf:0,stock:0}; pdAdd(m[k],r); });
     items = Object.values(m);
   }
   const shelfT = items.reduce((s,x)=>s+x.shelf,0), stockT = items.reduce((s,x)=>s+x.stock,0);
