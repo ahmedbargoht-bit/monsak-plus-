@@ -7039,6 +7039,11 @@ html.th-calm input:focus,html.th-calm select:focus,html.th-calm textarea:focus{o
             • ✏️ في شهور التقسيم = إشعارات من ملف الفرع نفسه (بتتضاف على نصيبه). ✏️ من أكتوبر = تعديل يدوي بيحل محل رقم التقرير.<br>
           </div>
           <div id="idc-upload-box" style="display:none;margin-bottom:10px"></div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+            <span style="font-size:12px;font-weight:800;color:#4B3C1A">🏢 الفرع:</span>
+            <span id="idc-reg-chips"></span>
+          </div>
+          <div id="idc-cards" style="margin-bottom:12px"></div>
           <div id="idc-table" style="overflow-x:auto"></div>
         </div>
 
@@ -11519,7 +11524,8 @@ async function idcLoad(){
   const year = +(document.getElementById('idc-year')?.value || new Date().getFullYear());
   box.innerHTML = '<div style="font-size:12px;color:#888;padding:10px">جاري التحميل...</div>';
   try{
-    IDC.rows = await srrRpc('indirect_disc_monthly',{p_year:year});
+    IDC.rows = await srrRpc('indirect_disc_monthly',{p_year:year}); IDC.year=year;
+    idcRenderCards();
     const REG = [['cairo','سلاسل القاهرة'],['alex','سلاسل إسكندرية'],['others','باقي الفروع']];
     const by = {}; IDC.rows.forEach(r=>{ (by[r.month]=by[r.month]||{})[r.region]=r; });
     const months = Object.keys(by).sort();
@@ -11566,6 +11572,34 @@ async function idcLoad(){
         • باقي الفروع = الغردقة والدلتا والصعيد وتمراتي. النسبة في الإجمالي محسوبة على الشهور اللي ليها أرقام بس.
       </div>`;
   }catch(e){ box.innerHTML = `<div style="color:#A32D2D;font-size:12px;padding:10px">❌ تعذر التحميل: ${srrEsc(e.message)}</div>`; }
+}
+// ── كروت الملخص: إجمالي المبيعات / إجمالي الخصم / الصافي بعد الخصم / نسبة الخصم ──
+// المحسوب على الشهور اللي ليها إشعارات بس (عشان النسبة تبقى صح). المبيعات = صافي فواتير MT (بعد الخصم المباشر − المرتجع)
+const IDC_REGS=[['all','كل الفروع'],['cairo','سلاسل القاهرة'],['alex','سلاسل إسكندرية'],['others','باقي الفروع']];
+function idcSetReg(r){ IDC.reg=r; idcRenderCards(); }
+function idcRenderCards(){
+  const box=document.getElementById('idc-cards'), chips=document.getElementById('idc-reg-chips'); if(!box) return;
+  const reg=IDC.reg||'all';
+  if(chips) chips.innerHTML=IDC_REGS.map(([k,l])=>`<button onclick="idcSetReg('${k}')" style="border:1px solid ${k===reg?'#731E2E':'#E0D8CC'};background:${k===reg?'#731E2E':'#fff'};color:${k===reg?'#fff':'#4B3C1A'};border-radius:16px;padding:4px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">${l}</button>`).join(' ');
+  const rows=(IDC.rows||[]).filter(r=>reg==='all'||r.region===reg);
+  const withD=rows.filter(r=>r.amount!=null);
+  const months=[...new Set(withD.map(r=>r.month))].sort();
+  let sales=0, elig=0, disc=0;
+  withD.forEach(r=>{ const e=+(r.base_net||0), x=+(r.excluded_net||0); elig+=e; sales+=e+x; disc+=+r.amount||0; });
+  const net=sales-disc, pctE=elig>0?disc/elig:null, pctT=sales>0?disc/sales:null;
+  const mlbl=months.length?(months.length===1?`${IDC_MON[+months[0].slice(5,7)-1]} ${months[0].slice(0,4)}`:`${IDC_MON[+months[0].slice(5,7)-1]} – ${IDC_MON[+months[months.length-1].slice(5,7)-1]} ${months[0].slice(0,4)} (${months.length} شهور)`):'—';
+  const card=(ic,lbl,val,col,sub)=>`<div style="background:#fff;border:1px solid #ECE6DA;border-top:4px solid ${col};border-radius:14px;padding:14px;text-align:center;box-shadow:0 1px 3px rgba(44,31,10,.05)">
+      <div style="font-size:12px;color:#8B7B60;font-weight:700">${ic} ${lbl}</div>
+      <div style="font-size:24px;font-weight:900;color:${col};margin-top:4px;direction:ltr">${val}</div>
+      ${sub?`<div style="font-size:11px;color:#8B7B60;margin-top:3px">${sub}</div>`:''}</div>`;
+  if(!months.length){ box.innerHTML=`<div style="background:#fff;border:1px dashed #E0D8CC;border-radius:12px;padding:14px;text-align:center;color:#8B7B60;font-size:12.5px">مفيش إشعارات خصم متسجلة ${reg==='all'?'':'للفرع ده '}في ${IDC.year||''} لسه — ارفع تقرير شهر.</div>`; return; }
+  box.innerHTML=`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px">
+      ${card('💰','إجمالي المبيعات',idcMoney(sales),'#2C1F0A','صافي فواتير MT (بعد الخصم المباشر − المرتجع)')}
+      ${card('🧾','إجمالي الخصم',idcMoney(disc),'#B45309','إشعارات الخصم')}
+      ${card('✅','الصافي بعد الخصم',idcMoney(net),'#2E7D32','المبيعات − الخصم')}
+      ${card('📊','نسبة الخصم',pctE!=null?(pctE*100).toFixed(1)+'%':'—','#731E2E',`من مبيعات العملاء المستحقين (${idcMoney(elig)})${pctT!=null?` • ${(pctT*100).toFixed(1)}% من كل المبيعات`:''}`)}
+    </div>
+    <div style="font-size:11px;color:#8B7B60;margin-top:6px">📅 محسوب على الشهور اللي ليها إشعارات: <b>${mlbl}</b>${reg!=='all'?' • '+IDC_REGS.find(x=>x[0]===reg)[1]:''} • العملاء المستحقين = كل العملاء ما عدا جمله ماركت / فتح الله / بيت الجمله / الفار</div>`;
 }
 async function idcEdit(month, region){
   const r = (IDC.rows||[]).find(x=>x.month===month && x.region===region) || {};
