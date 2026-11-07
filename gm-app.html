@@ -1463,6 +1463,9 @@ html.th-calm input:focus,html.th-calm select:focus,html.th-calm textarea:focus{o
           <div class="nav-item" onclick="showPanel('indirect-disc')">
             <i class="ti ti-receipt-tax" style="color:#B45309"></i> خصومات العملاء الغير مباشره
           </div>
+          <div class="nav-item" onclick="showPanel('stmt')">
+            <i class="ti ti-file-invoice" style="color:#731E2E"></i> كشوفات الحساب
+          </div>
           <div class="nav-item" onclick="showPanel('sales-goals')">
             <i class="ti ti-target" style="color:#C55B48"></i> الأهداف
           </div>
@@ -7052,6 +7055,26 @@ html.th-calm input:focus,html.th-calm select:focus,html.th-calm textarea:focus{o
           <div id="idc-table" style="overflow-x:auto"></div>
         </div>
 
+        <div id="panel-stmt" class="panel">
+          <div class="page-header">
+            <div>
+              <h2 style="color:#6B1E2E"><i class="ti ti-file-invoice"></i> كشوفات الحساب</h2>
+              <p>كشف حساب العملاء من الحسابات: المبيعات والمرتجع والخصومات (بالشهر اللي يخصه) والتحصيل والرصيد</p>
+            </div>
+          </div>
+          <div class="stm-bar">
+            <button class="stm-btn" onclick="stmPick()"><i class="ti ti-upload"></i> رفع كشف حساب (Excel)</button>
+            <input type="file" id="stm-file" accept=".xlsx,.xls" multiple style="display:none" onchange="stmOnFiles(this)"/>
+            <span id="stm-uploads-line" class="stm-hint" style="flex:1"></span>
+            <select id="stm-year" onchange="stmLoad()" style="width:auto!important;flex:0 0 auto;padding:6px 10px;border:1.5px solid #E0D5C0;border-radius:8px"></select>
+            <button class="stm-btn gh" onclick="stmPdf(false)"><i class="ti ti-file-type-pdf"></i> PDF</button>
+            <button class="stm-btn gh" onclick="stmXlsx(false)"><i class="ti ti-file-spreadsheet"></i> Excel</button>
+            <button class="stm-btn gh" onclick="stmPdf(true)"><i class="ti ti-send"></i> إرسال</button>
+          </div>
+          <div id="stm-upload-box" style="display:none;margin-bottom:12px"></div>
+          <div id="stm-body"></div>
+        </div>
+
                 <div id="panel-sales-dashboard" class="panel">
           <div class="page-header">
             <div>
@@ -11530,6 +11553,7 @@ async function idcLoad(){
   box.innerHTML = '<div style="font-size:12px;color:#888;padding:10px">جاري التحميل...</div>';
   try{
     IDC.rows = await srrRpc('indirect_disc_monthly',{p_year:year}); IDC.year=year;
+    try{ IDC.st = await srrRpc('stmt_disc_monthly',{p_year:year}); }catch(e){ console.warn('[idc stmt]',e); IDC.st=[]; }
     idcRenderCards();
     const REG = [['cairo','سلاسل القاهرة'],['alex','سلاسل إسكندرية'],['others','باقي الفروع']];
     const by = {}; IDC.rows.forEach(r=>{ (by[r.month]=by[r.month]||{})[r.region]=r; });
@@ -11587,28 +11611,40 @@ function idcRenderCards(){
   const reg=IDC.reg||'all';
   if(chips) chips.innerHTML=IDC_REGS.map(([k,l])=>`<button onclick="idcSetReg('${k}')" style="border:1px solid ${k===reg?'#731E2E':'#E0D8CC'};background:${k===reg?'#731E2E':'#fff'};color:${k===reg?'#fff':'#4B3C1A'};border-radius:16px;padding:4px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:Cairo,sans-serif">${l}</button>`).join(' ');
   const rows=(IDC.rows||[]).filter(r=>reg==='all'||r.region===reg);
-  const withD=rows.filter(r=>r.amount!=null);
-  const months=[...new Set(withD.map(r=>r.month))].sort();
-  let sales=0, elig=0, disc=0, whole=0;
-  withD.forEach(r=>{ const e=+(r.base_net||0), x=+(r.excluded_net||0); elig+=e; whole+=x; sales+=e+x; disc+=+r.amount||0; });
-  const net=sales-disc, pctE=elig>0?disc/elig:null, pctT=sales>0?disc/sales:null;
-  const mlbl=months.length?(months.length===1?`${IDC_MON[+months[0].slice(5,7)-1]} ${months[0].slice(0,4)}`:`${IDC_MON[+months[0].slice(5,7)-1]} – ${IDC_MON[+months[months.length-1].slice(5,7)-1]} ${months[0].slice(0,4)} (${months.length} شهور)`):'—';
+  // الخصم: من كشوفات الحساب للشهور اللي الكشوفات مغطياها (بالشهر اللي يخصه الخصم) — والتقرير الشهري للباقي وللمراجعة
+  const stBy={}; (IDC.st||[]).forEach(x=>{ stBy[x.month+'|'+x.region]=x; });
+  const use=rows.map(r=>{ const st=stBy[r.month+'|'+r.region]; const cov=!!(st&&st.covered);
+      return {r, cov, disc: cov ? +st.ded : (r.amount!=null ? +r.amount : null), rep: r.amount!=null ? +r.amount : null, direct: cov ? +st.direct : 0}; })
+    .filter(u=>u.disc!=null);
+  const months=[...new Set(use.map(u=>u.r.month))].sort();
+  const covM=[...new Set(use.filter(u=>u.cov).map(u=>u.r.month))].sort(), repM=months.filter(m=>!covM.includes(m));
+  let sales=0, elig=0, disc=0, whole=0, direct=0, repSame=0, stSame=0, repSameN=0;
+  use.forEach(u=>{ const e=+(u.r.base_net||0), x=+(u.r.excluded_net||0); elig+=e; whole+=x; sales+=e+x; disc+=u.disc; direct+=u.direct;
+    if(u.cov && u.rep!=null){ repSame+=u.rep; stSame+=u.disc; repSameN++; } });
+  const net=sales-disc, pctE=elig>0?disc/elig:null, pctT=sales>0?disc/sales:null, pctAll=(sales+direct)>0?(disc+direct)/(sales+direct):null;
+  const ml=m=>`${IDC_MON[+m.slice(5,7)-1]} ${m.slice(0,4)}`;
+  const rng=L=>!L.length?'':(L.length===1?ml(L[0]):`${IDC_MON[+L[0].slice(5,7)-1]} – ${ml(L[L.length-1])}`);
+  const mlbl=months.length?`${rng(months)} (${months.length} شهور)`:'—';
   const card=(ic,lbl,val,col,sub)=>`<div style="background:#fff;border:1px solid #ECE6DA;border-top:4px solid ${col};border-radius:14px;padding:14px;text-align:center;box-shadow:0 1px 3px rgba(44,31,10,.05)">
       <div style="font-size:12px;color:#8B7B60;font-weight:700">${ic} ${lbl}</div>
       <div style="font-size:24px;font-weight:900;color:${col};margin-top:4px;direction:ltr">${val}</div>
       ${sub?`<div style="font-size:11px;color:#8B7B60;margin-top:3px">${sub}</div>`:''}</div>`;
-  if(!months.length){ box.innerHTML=`<div style="background:#fff;border:1px dashed #E0D8CC;border-radius:12px;padding:14px;text-align:center;color:#8B7B60;font-size:12.5px">مفيش إشعارات خصم متسجلة ${reg==='all'?'':'للفرع ده '}في ${IDC.year||''} لسه — ارفع تقرير شهر.</div>`; return; }
+  if(!months.length){ box.innerHTML=`<div style="background:#fff;border:1px dashed #E0D8CC;border-radius:12px;padding:14px;text-align:center;color:#8B7B60;font-size:12.5px">مفيش خصومات متسجلة ${reg==='all'?'':'للفرع ده '}في ${IDC.year||''} لسه — ارفع تقرير شهر أو كشف حساب.</div>`; return; }
+  const src = covM.length ? (repM.length ? `كشوفات الحساب (${rng(covM)}) + التقرير الشهري (${rng(repM)})` : 'من كشوفات الحساب — بالشهر اللي يخصه الخصم') : 'إشعارات الخصم (التقرير الشهري)';
   box.innerHTML=`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px">
       ${card('💰','إجمالي المبيعات',idcMoney(sales),'#2C1F0A','صافي فواتير MT (بعد الخصم المباشر − المرتجع)')}
-      ${card('🧾','إجمالي الخصم',idcMoney(disc),'#B45309','إشعارات الخصم')}
+      ${card('🧾','إجمالي الخصم',idcMoney(disc),'#B45309',src)}
       ${card('✅','الصافي بعد الخصم',idcMoney(net),'#2E7D32','المبيعات − الخصم')}
       ${card('📊','نسبة الخصم (المستحقين)',pctE!=null?(pctE*100).toFixed(1)+'%':'—','#731E2E',`الخصم ÷ مبيعات العملاء المستحقين (${idcMoney(elig)})`)}
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-top:10px">
       ${card('🏬','مبيعات عملاء الخصم المباشر',idcMoney(whole),'#4B3C1A',`جمله ماركت + بيت الجمله + فتح الله + الفار${sales>0?` • ${(whole/sales*100).toFixed(1)}% من كل المبيعات`:''}`)}
       ${card('📉','نسبة الخصم شاملة عملاء الخصم المباشر',pctT!=null?(pctT*100).toFixed(1)+'%':'—','#1565C0',`الخصم ÷ كل المبيعات ومعاها عملاء الخصم المباشر (${idcMoney(sales)})`)}
+      ${covM.length?card('🏷️','خصم على الفاتورة (مباشر)',idcMoney(direct),'#7E22CE','عملاء الخصم المباشر — بالنسبة الفعلية من فواتير المناديب'):''}
+      ${covM.length?card('🧮','إجمالي الخصومات (مباشر + غير مباشر)',pctAll!=null?(pctAll*100).toFixed(1)+'%':'—','#003049',`${idcMoney(disc+direct)} ÷ المبيعات قبل الخصم المباشر (${idcMoney(sales+direct)})`):''}
     </div>
-    <div style="font-size:11px;color:#8B7B60;margin-top:6px">📅 محسوب على الشهور اللي ليها إشعارات: <b>${mlbl}</b>${reg!=='all'?' • '+IDC_REGS.find(x=>x[0]===reg)[1]:''} • العملاء المستحقين = كل العملاء ما عدا جمله ماركت / فتح الله / بيت الجمله / الفار</div>`;
+    <div style="font-size:11px;color:#8B7B60;margin-top:6px;line-height:1.9">📅 محسوب على: <b>${mlbl}</b>${reg!=='all'?' • '+IDC_REGS.find(x=>x[0]===reg)[1]:''} • العملاء المستحقين = كل العملاء ما عدا جمله ماركت / فتح الله / بيت الجمله / الفار
+    ${repSameN?`<br>🔍 مراجعة: التقرير الشهري لنفس شهور الكشوفات = <b>${idcMoney(repSame)}</b> مقابل <b>${idcMoney(stSame)}</b> من الكشوفات (الفرق ${idcMoney(stSame-repSame)}). الكشوفات بتحسب كل خصم على الشهر اللي يخصه، والتقرير بيحسبه على شهر تسجيله — والشهور الأخيرة خصوماتها لسه ماتسجلتش في الكشوفات.`:''}</div>`;
 }
 async function idcEdit(month, region){
   const r = (IDC.rows||[]).find(x=>x.month===month && x.region===region) || {};
@@ -16582,7 +16618,7 @@ async function salesArchiveLoad(){
 }
 
 // تابات تقارير المبيعات/MT — بتجيب بياناتها بنفسها من السيرفر ومابتستخدمش بيانات المنسقين اللحظية
-const BG_SKIP_PANELS = new Set(['perf-eval','chain-sales','branch-items','sales-forecast','item-plan','sales-outlook','indirect-disc','sales-returns','sector-strength']);
+const BG_SKIP_PANELS = new Set(['perf-eval','chain-sales','branch-items','sales-forecast','item-plan','sales-outlook','indirect-disc','stmt','sales-returns','sector-strength']);
 let _bgLast = 0, _bgBusy = false, _bgPending = false, _bgStaticPending = false;
 function bgActivePanel(){ const a=document.querySelector('.panel.active'); return a ? a.id.replace('panel-','') : ''; }
 async function bgRefresh(kind){
@@ -16679,7 +16715,7 @@ function updateBadges(){
 // ══════════════════════════════════════════════════════════════
 // NAV
 // ══════════════════════════════════════════════════════════════
-const PANEL_TITLES={'perf-eval':'تقييم الأداء','monthly-promos':'العروض الشهرية','item-plan':'خطة الأصناف','tv-settings':'ضبط شاشة TV','sup-visits-monitor':'متابعة زيارات المشرفين','brand-settings':'تعديلات جوهرية','gm-visits':'زيارة gm','sector-strength':'قوة القطاع','chain-sales':'مبيعات عملاء السلاسل','sales-forecast':'فوركاست المبيعات','sup-monitor':'خطط مشرفي التنسيق',dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'الموقع الحالي','rep-detail':'تفاصيل المنسق',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',returns:'المرتجعات',attendance:'الحضور والانصراف','expiry-alert':'تنبيهات الصلاحية','shelf-expiry':'صلاحيات السوق',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',supervisors:'المشرفون والمديرون','sales-users':'مشرفو المبيعات','rep-users':'مناديب البيع',branches:'الفروع والعملاء',settings:'الإعدادات','promo-banner':'بانر العرض الترويجي','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام','sales-dashboard':'Sales Dashboard','indirect-disc':'خصومات العملاء الغير مباشره','sales-outlook':'التوقع البيعي','sales-invoices':'فواتير المناديب','sales-goals':'الأهداف الشهرية','target-dist':'توزيع الهدف',heatmap:'خريطة حرارة الفروع','sales-products':'أصناف المبيعات','sales-returns':'مرتجعات المبيعات','sales-missing':'نواقص المبيعات','sales-archive':'أرشيف البيانات القديمة','ai-analysis':'تحليل AI — مبيعات السلاسل','letters-archive':'أرشيف الخطابات الموقّعة','field-support-report':'تقارير دعم الميدان','field-monitor':'مراقبة الميدان','competitors':'تقارير المنافسين','contract-analysis':'تحليل عقود العملاء','sup-eval':'تقييم مشرفي التنسيق','rep-eval':'تقييم المناديب','sales-sup-eval':'تقييم مشرفي المبيعات','mt-invoices':'تحليل فواتير عملاء MT','display-tools':'أدوات العرض','date-benefits':'فوائد التمر','spt':'الأهداف الخاصة','stock-compare':'مقارنة أرصدة','rep-balance':'رصيد مخزن المندوب','rep-inventory':'الجرد','rep-requests':'طلب بضاعة','visits-heatmap':'خريطة حرارة زيارات المنسقين','company-letters':'خطابات وقرارات'};
+const PANEL_TITLES={'perf-eval':'تقييم الأداء','monthly-promos':'العروض الشهرية','item-plan':'خطة الأصناف','tv-settings':'ضبط شاشة TV','sup-visits-monitor':'متابعة زيارات المشرفين','brand-settings':'تعديلات جوهرية','gm-visits':'زيارة gm','sector-strength':'قوة القطاع','chain-sales':'مبيعات عملاء السلاسل','sales-forecast':'فوركاست المبيعات','sup-monitor':'خطط مشرفي التنسيق',dashboard:'الداشبورد',leaderboard:'الليدربورد',location:'الموقع الحالي','rep-detail':'تفاصيل المنسق',visits:'سجل الزيارات',products:'الأصناف',missing:'النواقص',returns:'المرتجعات',attendance:'الحضور والانصراف','expiry-alert':'تنبيهات الصلاحية','shelf-expiry':'صلاحيات السوق',orders:'الطلبيات',messages:'الرسائل',users:'المنسقون',supervisors:'المشرفون والمديرون','sales-users':'مشرفو المبيعات','rep-users':'مناديب البيع',branches:'الفروع والعملاء',settings:'الإعدادات','promo-banner':'بانر العرض الترويجي','rep-report':'تقرير المنسق التفصيلي','checkout-exceptions':'استثناءات الانصراف',reset:'ريستارت النظام','sales-dashboard':'Sales Dashboard','indirect-disc':'خصومات العملاء الغير مباشره','stmt':'كشوفات الحساب','sales-outlook':'التوقع البيعي','sales-invoices':'فواتير المناديب','sales-goals':'الأهداف الشهرية','target-dist':'توزيع الهدف',heatmap:'خريطة حرارة الفروع','sales-products':'أصناف المبيعات','sales-returns':'مرتجعات المبيعات','sales-missing':'نواقص المبيعات','sales-archive':'أرشيف البيانات القديمة','ai-analysis':'تحليل AI — مبيعات السلاسل','letters-archive':'أرشيف الخطابات الموقّعة','field-support-report':'تقارير دعم الميدان','field-monitor':'مراقبة الميدان','competitors':'تقارير المنافسين','contract-analysis':'تحليل عقود العملاء','sup-eval':'تقييم مشرفي التنسيق','rep-eval':'تقييم المناديب','sales-sup-eval':'تقييم مشرفي المبيعات','mt-invoices':'تحليل فواتير عملاء MT','display-tools':'أدوات العرض','date-benefits':'فوائد التمر','spt':'الأهداف الخاصة','stock-compare':'مقارنة أرصدة','rep-balance':'رصيد مخزن المندوب','rep-inventory':'الجرد','rep-requests':'طلب بضاعة','visits-heatmap':'خريطة حرارة زيارات المنسقين','company-letters':'خطابات وقرارات'};
 
 // ══════════════════════════════════════════════════════════════
 // الأهداف الخاصة (special targets) — تخصيص أصناف معيّنة لمنسق في فرع خلال
@@ -18739,6 +18775,7 @@ function showPanel(id){
   if(id==='sales-sup-eval') mseRefresh();
   if(id==='sales-dashboard'){ sdInit(); sdBuildDaysDropdown(); sdLoad(); loadCoordNotes(); }
   if(id==='indirect-disc'){ idcInit(); idcLoad(); }
+  if(id==='stmt'){ stmInit(); }
   if(id==='sales-outlook'){ sfcInit(); }
   if(id==='monthly-promos'){ promosInit(); }
   if(id==='sales-targets'){ stInitMonth(); stLoad(); }
@@ -64621,6 +64658,366 @@ function vaReturnsSummary(what){
   }
   return s;
 }
+
+</script>
+<style id="stm-style">
+#panel-stmt .stm-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#fff;border:1px solid #EADFCB;border-radius:14px;padding:10px 12px;margin-bottom:12px}
+#panel-stmt .stm-btn{background:#C05621;color:#fff;border:none;border-radius:10px;padding:8px 14px;font-weight:800;font-size:13px;cursor:pointer;font-family:Cairo,sans-serif}
+#panel-stmt .stm-btn.gh{background:#fff;color:#5C4A2A;border:1px solid #D9CBB0}
+#panel-stmt .stm-btn.sm{padding:4px 10px;font-size:12px}
+#panel-stmt .stm-btn[disabled]{opacity:.5;cursor:default}
+#panel-stmt select,#panel-stmt input{font-family:Cairo,sans-serif}
+#panel-stmt .stm-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+#panel-stmt .stm-card{background:#fff;border:1px solid #EADFCB;border-top:4px solid var(--c);border-radius:14px;padding:12px;text-align:center}
+#panel-stmt .stm-card .l{font-size:12px;color:#7A6A4A;font-weight:700}
+#panel-stmt .stm-card .v{font-size:22px;font-weight:900;color:var(--c);margin-top:3px;direction:ltr}
+#panel-stmt .stm-card .s{font-size:11px;color:#8B6F47;margin-top:2px}
+#panel-stmt .stm-notes{font-size:12px;color:#6B5A3A;margin:10px 2px;line-height:1.9}
+#panel-stmt .stm-tabs{display:flex;gap:4px;margin-top:14px;border-bottom:2px solid #E6D9C1;flex-wrap:wrap}
+#panel-stmt .stm-tab{padding:9px 14px;font-weight:800;color:#8B6F47;border-radius:10px 10px 0 0;cursor:pointer;font-size:13.5px}
+#panel-stmt .stm-tab.on{background:#731E2E;color:#fff}
+#panel-stmt .stm-tab .n{background:#C05621;color:#fff;border-radius:10px;padding:0 7px;font-size:11.5px;margin-left:4px}
+#panel-stmt .stm-panel{background:#fff;border:1px solid #EADFCB;border-top:none;border-radius:0 0 14px 14px;padding:12px;overflow-x:auto}
+#panel-stmt .stm-tools{display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+#panel-stmt .stm-tools input{border:1.5px solid #E0D5C0;border-radius:10px;padding:7px 12px;min-width:240px;font-size:13px}
+#panel-stmt .stm-hint{font-size:11.5px;color:#8B7B60}
+#panel-stmt .stm-empty{padding:22px;text-align:center;color:#8B7B60;font-size:13px}
+#panel-stmt table.stm-t{width:100%;border-collapse:collapse;font-size:13px}
+#panel-stmt table.stm-t th{background:#3D2E12;color:#fff;padding:9px 7px;font-weight:700;white-space:nowrap}
+#panel-stmt table.stm-t th.srt{cursor:pointer}#panel-stmt table.stm-t th.srt.on{background:#731E2E}
+#panel-stmt table.stm-t td{padding:8px 7px;text-align:center;border-bottom:1px solid #F0E8D6}
+#panel-stmt table.stm-t tbody tr:nth-child(even) td{background:#FBF8F1}
+#panel-stmt table.stm-t tfoot td{background:#F5F0E8;font-weight:800;color:#731E2E;border-top:2px solid #C8A96E}
+#panel-stmt table.stm-t td.nm{text-align:right;font-weight:800}
+#panel-stmt table.stm-t tr.cl{cursor:pointer}#panel-stmt table.stm-t tr.cl:hover td{background:#FFF6E6}
+#panel-stmt table.stm-t tr.det>td{background:#FFFCF6!important;padding:10px}
+#panel-stmt table.stm-t.sm{font-size:12px}#panel-stmt table.stm-t.sm th{padding:6px;background:#5C4A2A}#panel-stmt table.stm-t.sm td{padding:5px 6px}
+#panel-stmt .g{color:#1A7A4A;font-weight:800}#panel-stmt .o{color:#C05621;font-weight:700}#panel-stmt .m{color:#731E2E;font-weight:800}#panel-stmt .b{color:#003049;font-weight:800}#panel-stmt .pu{color:#7E22CE;font-weight:700}
+#panel-stmt .pb{display:inline-block;height:8px;border-radius:4px;background:#731E2E;vertical-align:middle;margin-left:6px}
+#panel-stmt .stm-tag{font-size:11px;border-radius:6px;padding:2px 8px;font-weight:700;white-space:nowrap}
+#panel-stmt .stm-tag.red{background:#FDECEC;color:#B71C1C}#panel-stmt .stm-tag.amb{background:#FFF4E0;color:#A15C00}#panel-stmt .stm-tag.grn{background:#E8F5EC;color:#1A7A4A}#panel-stmt .stm-tag.pur{background:#F3E8FF;color:#7E22CE}
+#panel-stmt .stm-det{display:grid;grid-template-columns:minmax(300px,1fr) minmax(420px,1.5fr);gap:14px}
+#panel-stmt .stm-det .h,#panel-stmt .stm-up .h{font-weight:800;color:#731E2E;margin-bottom:6px}
+#panel-stmt .stm-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:5px}
+#panel-stmt .stm-up{background:#fff;border:1px solid #EADFCB;border-radius:14px;padding:12px}
+#panel-stmt input[type=month]{border:1px solid #D9CBB0;border-radius:6px;padding:2px 4px;font-size:12px}
+@media(max-width:768px){#panel-stmt .stm-det{grid-template-columns:1fr}#panel-stmt .stm-card .v{font-size:18px}}
+</style>
+<script>
+// ══ كشوفات الحساب — قراءة ملف "كشف حساب عملاء فرع معين خلال فترة" ══
+const STM_MONTHS={'يناير':1,'فبراير':2,'مارس':3,'ابريل':4,'مايو':5,'يونيو':6,'يونيه':6,'يوليو':7,'يوليه':7,'اغسطس':8,'سبتمبر':9,'اكتوبر':10,'نوفمبر':11,'ديسمبر':12};
+function stmN(t){ return String(t==null?'':t).replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/ـ/g,'').replace(/[٠-٩]/g,d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/\s+/g,' ').trim(); }
+function stmYM(y,m){ return `${y}-${String(m).padStart(2,'0')}-01`; }
+// الشهر/الفترة اللي يخصها الخصم من الوصف. docDate = تاريخ التسجيل 'YYYY-MM-DD'
+function stmParsePeriod(descr, docDate){
+  const t=stmN(descr); if(!t) return null;
+  const dy=+docDate.slice(0,4), dm=+docDate.slice(5,7);
+  // 1) فترة صريحة: من شهر 6/2025 حتى شهر 12/2025
+  let r=t.match(/من\s*(?:شهر)?\s*(\d{1,2})\s*[\/.]\s*(20\d{2})\s*(?:حتي|الي|لحد|ل|-)\s*(?:شهر)?\s*(\d{1,2})\s*[\/.]\s*(20\d{2})/);
+  if(r && +r[1]>=1 && +r[1]<=12 && +r[3]>=1 && +r[3]<=12){ const a=stmYM(+r[2],+r[1]), b=stmYM(+r[4],+r[3]); return a<=b?{from:a,to:b}:{from:b,to:a}; }
+  // 2) الجزء اللي يخص الفترة: فواتير > مسحوبات > "عن ..." > استحقاق > الوصف كله
+  const cut=word=>{ const i=t.indexOf(word); if(i<0) return null; let s=t.slice(i+word.length); const k=s.indexOf('استحقاق'); if(k>=0) s=s.slice(0,k); return s; };
+  const segs=[];
+  const fw=cut('فواتير'); if(fw!=null) segs.push([fw,true]);
+  const ms=cut('مسحوبات'); if(ms!=null) segs.push([ms,true]);
+  const an=t.search(/(^|\s)عن\s/), ai=t.indexOf('استحقاق');
+  if(an>=0 && (ai<0||an<ai)) segs.push([ai>an?t.slice(an,ai):t.slice(an),false]);
+  if(ai>=0) segs.push([t.slice(ai+7),true]);
+  segs.push([t,false]);
+  let abs=null;
+  for(const [sg,bare] of segs){ const a=stmMonthsIn(sg,bare,dy,dm); if(a.length){ abs=a; break; } }
+  if(!abs){ const yy=t.match(/(?:عام|سنه)\s*(20\d{2})/); if(yy) return {from:stmYM(+yy[1],1), to:stmYM(+yy[1],12)}; return null; }
+  abs=[...new Set(abs)].sort((a,b)=>a-b);
+  for(let i=1;i<abs.length;i++) if(abs[i]!==abs[i-1]+1) return null; // مش متصلين ← مراجعة
+  const f=abs[0], l=abs[abs.length-1];
+  return {from:stmYM(Math.floor(f/12),f%12+1), to:stmYM(Math.floor(l/12),l%12+1)};
+}
+// الشهور كأرقام مطلقة (سنة×12 + شهر−1)
+function stmMonthsIn(seg, bareNums, dy, dm){
+  const out=[], bare=[]; let year=null;
+  Object.keys(STM_MONTHS).forEach(n=>{ if(new RegExp('(^|[\\s/+و\\-(])'+n+'($|[\\s/+و\\-)])').test(seg)) bare.push(STM_MONTHS[n]); });
+  const Q={'الاول':1,'الثاني':2,'الثالث':3,'الرابع':4}; let qm, qre=/الربع\s*(الاول|الثاني|الثالث|الرابع)/g;
+  while((qm=qre.exec(seg))){ const q=Q[qm[1]]; bare.push(q*3-2,q*3-1,q*3); }
+  const takeRun=run=>{
+    run=run.replace(/(\d{1,2})\s*[\/.]\s*(20\d{2})/g,(x,m,y)=>{ m=+m; if(m>=1&&m<=12){ out.push(+y*12+m-1); year=year||+y; } return ' '; });
+    (run.match(/\d+/g)||[]).forEach(x=>{ const v=+x; if(x.length===4&&v>=2015&&v<=2040) year=year||v; else if(x.length<=2&&v>=1&&v<=12) bare.push(v); });
+  };
+  let re=/شه(?:ر|ور)\s*([\d\s\/.+و]+)/g, mm, hit=false;
+  while((mm=re.exec(seg))){ hit=true; takeRun(mm[1]); }
+  if(!hit){ const p=/(\d{1,2})\s*[\/.]\s*(20\d{2})/g; while((mm=p.exec(seg))){ const v=+mm[1]; if(v>=1&&v<=12){ hit=true; out.push(+mm[2]*12+v-1); } } }
+  if(!hit && bareNums && !bare.length && !out.length){ const m2=seg.match(/^\s*([\d\s\/.+و]+)/); if(m2) takeRun(m2[1]); }
+  if(!year && bare.length){ const y=seg.match(/(?:^|\D)(20\d{2})(?:\D|$)/); if(y) year=+y[1]; }
+  // شهر من غير سنة: لو فيه سنة واحدة مذكورة ومفيش أزواج تانية ← هي؛ غير كده: الشهر ≤ شهر التسجيل = نفس السنة، أكبر = السنة اللي فاتت
+  const oneYear = year && !out.length;
+  bare.forEach(m=>out.push(((oneYear?year:(m<=dm?dy:dy-1))*12)+m-1));
+  return out;
+}
+function stmDedType(descr){
+  const t=stmN(descr);
+  if(/مرتجع/.test(t)) return 'returns';
+  if(/فرق|فروق|خطا|مكرر|عدم توريد|المتسبب/.test(t)) return 'ops';
+  if(/دعم|مناسب|مجلات|مجله|افتتاح|رسوم|صور|صفحات|عرض|اعلان/.test(t)) return 'marketing';
+  if(/عقد|استحقاق|استقطاع|خصم|شرائح|سنوي|شيك|مسحوبات|اشعار/.test(t)) return 'contract';
+  return 'other';
+}
+function stmDate(v){
+  if(v==null||v==='') return null;
+  if(v instanceof Date && !isNaN(v)) return new Date(v.getTime()-v.getTimezoneOffset()*60000+12*3600e3).toISOString().slice(0,10);
+  if(typeof v==='number'){ const d=new Date(Math.round((v-25569)*864e5)+12*3600e3); return d.toISOString().slice(0,10); }
+  const m=String(v).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/); if(m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  const m2=String(v).match(/(\d{4})-(\d{2})-(\d{2})/); return m2?m2[0]:null;
+}
+function stmHash(s){ let h=5381; for(let i=0;i<s.length;i++) h=((h<<5)+h+s.charCodeAt(i))|0; return (h>>>0).toString(36); }
+// rows = مصفوفة صفوف (header:1). بيرجع {branch, from, to, lines, err}
+function stmParseRows(rows){
+  const num=v=>typeof v==='number'?v:(v==null||v===''?0:(+String(v).replace(/,/g,'')||0));
+  let branch=null, from=null, to=null, cust=null, code=null; const lines=[];
+  for(const r of rows){
+    if(!r || !r.length) continue;
+    const c0=r[0];
+    if(typeof c0==='string' && c0.indexOf('كشف حساب عملاء')>=0){
+      const m=c0.match(/-\s*اجل\s*-\s*(.+?)\s*-\s*جني/); if(m) branch=m[1].replace(/\s+$/,'');
+      to=stmDate(r[1]); from=stmDate(r[3]); continue;
+    }
+    if(r[7]==='إسم العميل :' || r[7]==='اسم العميل :'){ cust=String(r[6]||'').trim(); code=String(r[4]||''); if(!branch&&r[0]) branch=String(r[0]); continue; }
+    if(!cust || typeof c0!=='string' || !c0.trim()) continue;
+    const descr=c0.trim(); let date=stmDate(r[12]);
+    const L={customer:cust, cust_code:code, descr, doc_date:date, inv_branch:String(r[9]||'').trim(), doc_no:String(r[10]||'').trim(), permit_no:String(r[11]==null?'':r[11]),
+      balance:num(r[1]), deducted:num(r[2]), added:num(r[3]), bounced_col:num(r[4]), bounced:num(r[5]), chq:num(r[6]), cash:num(r[7]), net:num(r[8]), seq:num(r[13])};
+    if(/^رصيد\s*إ?افتتاح/.test(descr.replace('إ','ا'))||descr.indexOf('رصيد إفتتاحى')===0){ L.kind='open'; L.doc_date=from; }
+    else if(descr.indexOf('فاتورة مبيعات')===0) L.kind='inv';
+    else if(descr.indexOf('مرتجع فاتورة')===0) L.kind='ret';
+    else if(L.deducted) L.kind='ded';
+    else if(L.cash||L.chq||L.bounced||L.bounced_col) L.kind='pay';
+    else L.kind='other';
+    if(!L.doc_date) continue;
+    if(L.kind==='ded'||(L.deducted&&L.kind!=='inv'&&L.kind!=='ret')){
+      const p=stmParsePeriod(descr, L.doc_date);
+      L.ded_type=stmDedType(descr);
+      if(p){ L.p_from=p.from; L.p_to=p.to; L.p_src='auto'; }
+      else if(L.ded_type==='ops'||L.ded_type==='returns'||L.ded_type==='other'||Math.abs(L.deducted)<500){ L.p_from=L.p_to=L.doc_date.slice(0,8)+'01'; L.p_src='date'; } // غلطات تشغيل/مبالغ صغيرة ← على شهر التسجيل
+      else { L.p_from=L.p_to=null; L.p_src='none'; }
+    }
+    L.line_key=stmHash([branch,cust,L.permit_no,L.doc_date,Math.round(L.deducted*100),descr].join('|'));
+    lines.push(L);
+  }
+  if(!branch||!from||!to) return {err:'الملف مش بشكل "كشف حساب عملاء فرع معين خلال فترة"'};
+  return {branch, from, to, lines};
+}
+if(typeof module!=='undefined') module.exports={stmParseRows,stmParsePeriod,stmDedType,stmN};
+
+// ══ تاب كشوفات الحساب (stm) ══
+const STM={year:null, rep:null, tab:'cust', q:'', open:{}, det:{}, pending:null, sort:'sales'};
+const STM_TYPES={contract:['خصومات عقد واستحقاقات','#731E2E'],marketing:['دعم تسويق ومناسبات ورسوم','#B45309'],ops:['غلطات تشغيل (فروق أسعار / أصناف خطأ / عدم توريد)','#B71C1C'],returns:['مرتجع ماتسجلش أو فرق مرتجعات','#C05621'],other:['أخرى','#6B7280']};
+const STM_MON=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+function stmE(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function stmM(v){ v=+v||0; const a=Math.abs(v); return (v<0?'-':'')+(a>=1e6?(a/1e6).toFixed(2)+'M':a>=1e3?Math.round(a/1e3).toLocaleString('en-US')+'K':Math.round(a).toLocaleString('en-US')); }
+function stmF(v){ return Math.round(+v||0).toLocaleString('en-US'); }
+function stmP(a,b){ return b>0?(a/b*100).toFixed(1)+'%':'—'; }
+function stmMonLbl(d){ if(!d) return '—'; return STM_MON[+d.slice(5,7)-1]+' '+d.slice(0,4); }
+function stmPer(f,t){ if(!f) return '<span style="color:#B71C1C">مش محدد</span>'; return f===t||!t?stmMonLbl(f):`${stmMonLbl(f)} ← ${stmMonLbl(t)}`; }
+function stmDays(a,b){ if(!a||!b) return null; return Math.round((new Date(b)-new Date(a))/864e5); }
+function stmShort(n){ return String(n||'').replace(/شركة|ش\.?م\.?م|ش\.ذ\.م\.م|\(ش\.ذ\.م\.م\)|للتجارة والتوزيع|لتجهيز وادارة الهايبر ماركت/g,'').replace(/[()]/g,' ').replace(/\s+/g,' ').trim().slice(0,46); }
+
+function stmInit(){
+  const sel=document.getElementById('stm-year');
+  if(sel && !sel.options.length){ const y=new Date(Date.now()+2*3600e3).getFullYear(); [y,y-1].forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o); }); }
+  stmLoad();
+}
+async function stmLoad(){
+  const y=+(document.getElementById('stm-year')?.value||new Date().getFullYear()); STM.year=y; STM.det={};
+  const box=document.getElementById('stm-body'); if(box) box.innerHTML='<div class="stm-empty">⏳ جاري التحميل...</div>';
+  try{ STM.rep=await srrRpc('stmt_report',{p_year:y}); stmRender(); }
+  catch(e){ if(box) box.innerHTML=`<div class="stm-empty" style="color:#B71C1C">❌ تعذر التحميل: ${stmE(e.message)}</div>`; }
+}
+function stmTotals(){
+  const C=(STM.rep&&STM.rep.customers)||[]; const t={sales:0,ret:0,ded:0,direct:0,paid:0,bal:0,prev:0,unres:0,open:0};
+  C.forEach(c=>{ t.sales+=+c.sales; t.ret+=+c.ret; t.ded+=+c.ded; t.direct+=+c.direct; t.paid+=+c.paid; t.bal+=+c.bal; t.prev+=+c.ded_prev; t.unres+=+c.ded_unres; t.open+=+c.open; });
+  t.net=t.sales+t.ret; t.real=t.net-t.ded; return t;
+}
+function stmPayTag(c){
+  const cov=STM.rep.coverage; const d=stmDays(c.last_pay,cov);
+  if(!c.last_pay) return +c.bal>0?'<span class="stm-tag red">مفيش سداد</span>':'—';
+  const yStart=`${STM.year}-01-01`;
+  if(c.last_pay<yStart && +c.bal>0) return `<span class="stm-tag red">ماسددش من ${stmMonLbl(c.last_pay)}</span>`;
+  const cls=d>60?'red':d>30?'amb':'grn';
+  return `<span class="stm-tag ${cls}">${d===0?'آخر يوم':d===1?'من يوم':d===2?'من يومين':'من '+d+' يوم'}</span>`;
+}
+function stmRender(){
+  const R=STM.rep, box=document.getElementById('stm-body'); if(!R||!box) return;
+  const up=document.getElementById('stm-uploads-line');
+  if(up) up.innerHTML=R.uploads.length?('الكشوفات المرفوعة: '+R.uploads.map(u=>`<b>${stmE(u.branch.replace(/\s+/g,' '))}</b> (${u.from.slice(5).split('-').reverse().join('/')} ← ${u.to.slice(5).split('-').reverse().join('/')}/${u.to.slice(0,4)})`).join(' · ')):'لسه مفيش كشوفات مرفوعة';
+  if(!R.customers.length){ box.innerHTML=`<div class="stm-empty">مفيش بيانات لسنة ${R.year} — ارفع كشف حساب (Excel) من الزرار اللي فوق.</div>`; return; }
+  const t=stmTotals(), nRev=R.review.filter(x=>!x.op).length;
+  const card=(c,l,v,s)=>`<div class="stm-card" style="--c:${c}"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s}</div></div>`;
+  const lastDedM=Object.keys(R.months||{}).sort().pop();
+  let h=`<div class="stm-cards">
+    ${card('#1A7A4A','💰 إجمالي المبيعات',stmM(t.sales),'صافي الفواتير في الكشوفات')}
+    ${card('#C05621','↩️ المرتجع',stmM(-t.ret),stmP(-t.ret,t.sales)+' من المبيعات')}
+    ${card('#731E2E','🧾 خصومات تخص '+R.year,stmM(t.ded),stmP(t.ded,t.net)+' من صافي المبيعات')}
+    ${card('#7E22CE','🏷️ خصم على الفاتورة',stmM(t.direct),'جمله ماركت · بيت الجمله · فتح الله · الفار')}
+    ${card('#003049','✅ الصافي الحقيقي',stmM(t.real),'المبيعات − المرتجع − الخصومات')}
+    ${card('#15803D','💵 المحصّل',stmM(t.paid),'شيكات + نقدي')}
+    ${card('#B71C1C','📌 الرصيد المستحق',stmM(t.bal),'لحد '+(R.coverage||'').split('-').reverse().join('/'))}
+  </div>
+  <div class="stm-notes">
+    ${t.prev?`<div>↩ خصومات اتسجلت في ${R.year} بس تخص سنين قبلها: <b>${stmF(t.prev)}</b> — اتحسبت على السنة اللي تخصها، مش على ${R.year}.</div>`:''}
+    <div>📅 كل خصم محسوب على <b>الشهر اللي يخصه</b> (من الوصف)، ومتوزّع على فروع الشركة حسب مبيعات العميل من كل فرع في نفس الشهر.${lastDedM?` آخر شهر ليه خصومات متسجلة: <b>${stmMonLbl(lastDedM+'-01')}</b> — الشهور الأخيرة غالبًا خصوماتها لسه ماتسجلتش.`:''}</div>
+    ${t.unres?`<div style="color:#B71C1C">⚠️ ${stmF(t.unres)} ج خصومات شهرها مش واضح (محسوبة مؤقتًا على شهر تسجيلها) — حددها من تاب "سطور محتاجة تحديد".</div>`:''}
+  </div>`;
+  const tabs=[['cust','👥 العملاء'],['br','🏢 فروع الشركة'],['types','🏷️ أنواع الخصم'],['coll','💵 التحصيل'],['rev',`${nRev?`<span class="n">${nRev}</span>`:''}⚠️ سطور محتاجة تحديد الشهر`],['ups','📂 الكشوفات المرفوعة']];
+  h+=`<div class="stm-tabs">${tabs.map(([k,l])=>`<div class="stm-tab${STM.tab===k?' on':''}" onclick="stmTab('${k}')">${l}</div>`).join('')}</div><div class="stm-panel" id="stm-panel">${stmPanel()}</div>`;
+  box.innerHTML=h;
+}
+function stmTab(k){ STM.tab=k; stmRender(); }
+function stmCustRows(){
+  const q=stmN(STM.q||'');
+  let C=(STM.rep.customers||[]).filter(c=>!q||stmN(c.name).indexOf(q)>=0);
+  const key={sales:c=>+c.sales,ded:c=>+c.ded,pct:c=>stmCustPct(c),bal:c=>+c.bal}[STM.sort]||(c=>+c.sales);
+  return C.slice().sort((a,b)=>key(b)-key(a));
+}
+function stmCustPct(c){ const g=(+c.sales)+(+c.ret)+(+c.direct); return g>0?((+c.ded)+(+c.direct))/g*100:0; }
+function stmPanel(){
+  const R=STM.rep, k=STM.tab;
+  if(k==='cust'){
+    const C=stmCustRows(); const th=(l,s)=>`<th${s?` class="srt${STM.sort===s?' on':''}" onclick="STM.sort='${s}';stmRender()"`:''}>${l}</th>`;
+    return `<div class="stm-tools"><input id="stm-q" placeholder="🔍 دوّر على عميل..." value="${stmE(STM.q)}" oninput="STM.q=this.value;stmRefreshPanel()"><span class="stm-hint">اضغط على أي عميل يفتح تفاصيله · اضغط على العنوان يرتّب</span></div>
+    <table class="stm-t"><thead><tr><th style="text-align:right">العميل</th>${th('المبيعات','sales')}<th>المرتجع</th><th>خصم الفاتورة</th>${th('خصومات '+R.year,'ded')}${th('نسبة الخصم','pct')}<th>الصافي الحقيقي</th>${th('الرصيد','bal')}<th>آخر سداد</th></tr></thead><tbody>
+    ${C.map(c=>{ const p=stmCustPct(c), hot=p>=35; const real=(+c.sales)+(+c.ret)-(+c.ded); const op=STM.open[c.ck];
+      return `<tr class="cl" onclick="stmToggle('${encodeURIComponent(c.ck)}')"><td class="nm"><i class="ti ti-chevron-${op?'up':'down'}"></i> ${stmE(stmShort(c.name))}${c.is_direct?' <span class="stm-tag pur">خصم مباشر</span>':''}</td>
+        <td class="g">${stmM(c.sales)}</td><td class="o">${stmM(-c.ret)}</td><td class="pu">${c.is_direct?(c.dpct!=null?stmM(c.direct)+` <small>(${(c.dpct*100).toFixed(1)}%)</small>`:'<small>مفيش فواتير مناديب</small>'):'—'}</td>
+        <td class="m">${stmM(c.ded)}${+c.ded_unres?' <span title="جزء شهره مش واضح" style="color:#B71C1C">*</span>':''}</td>
+        <td><span class="pb" style="width:${Math.min(120,p*3)}px;${hot?'background:#B71C1C':''}"></span>${hot?`<b style="color:#B71C1C">${p.toFixed(1)}%</b>`:p.toFixed(1)+'%'}</td>
+        <td class="b">${stmM(real)}</td><td>${+c.bal>0?stmM(c.bal):'<span style="color:#888">'+stmM(c.bal)+'</span>'}</td><td>${stmPayTag(c)}</td></tr>
+        ${op?`<tr class="det"><td colspan="9" id="stm-det-${encodeURIComponent(c.ck)}">${stmDetHtml(c)}</td></tr>`:''}`; }).join('')}
+    </tbody><tfoot>${(()=>{ const t=stmTotals(); return `<tr><td class="nm">الإجمالي (${C.length} عميل)</td><td>${stmM(t.sales)}</td><td>${stmM(-t.ret)}</td><td>${stmM(t.direct)}</td><td>${stmM(t.ded)}</td><td>${stmP(t.ded+t.direct,t.net+t.direct)}</td><td>${stmM(t.real)}</td><td>${stmM(t.bal)}</td><td></td></tr>`; })()}</tfoot></table>
+    <div class="stm-hint" style="margin-top:6px">نسبة الخصم = (خصومات السنة + خصم الفاتورة) ÷ المبيعات قبل الخصم بعد المرتجع · الأحمر = 35% أو أكتر · خصم الفاتورة محسوب بالنسبة الفعلية من فواتير المناديب</div>`;
+  }
+  if(k==='br'){
+    const B=R.branches||[]; let T={s:0,d:0,x:0};
+    const rows=B.map(b=>{ const n=(+b.sales)+(+b.ret); T.s+=n; T.d+=+b.ded; T.x+=+b.direct; return `<tr><td class="nm">${stmE(b.br.replace(/\s+/g,' '))}</td><td class="g">${stmM(n)}</td><td class="pu">${+b.direct?stmM(b.direct):'—'}</td><td class="m">${stmM(b.ded)}</td><td>${stmP(+b.ded+(+b.direct),n+(+b.direct))}</td><td class="b">${stmM(n-b.ded)}</td></tr>`; }).join('');
+    return `<table class="stm-t"><thead><tr><th style="text-align:right">فرع الشركة (اللي طلّع الفاتورة)</th><th>صافي المبيعات</th><th>خصم الفاتورة</th><th>نصيبه من الخصومات</th><th>نسبة الخصم</th><th>الصافي الحقيقي</th></tr></thead><tbody>${rows}</tbody>
+      <tfoot><tr><td class="nm">الإجمالي</td><td>${stmM(T.s)}</td><td>${stmM(T.x)}</td><td>${stmM(T.d)}</td><td>${stmP(T.d+T.x,T.s+T.x)}</td><td>${stmM(T.s-T.d)}</td></tr></tfoot></table>
+      <div class="stm-hint" style="margin-top:6px">مثال: خصم كارفور عن شهر مايو بيتوزع على الفروع حسب اللي كل فرع باعه لكارفور في مايو. لو الخصم يخص شهور مالهاش مبيعات في الكشوفات (زي 2025) بيتوزع بنسب العميل في كل الكشوفات.</div>`;
+  }
+  if(k==='types'){
+    const T=R.types||{}; const tot=Object.values(T).reduce((a,b)=>a+(+b),0);
+    return `<table class="stm-t"><thead><tr><th style="text-align:right">نوع الخصم</th><th>القيمة</th><th>النسبة</th><th style="width:40%"></th></tr></thead><tbody>
+      ${Object.keys(STM_TYPES).filter(x=>T[x]).map(x=>`<tr><td class="nm" style="color:${STM_TYPES[x][1]}">${STM_TYPES[x][0]}</td><td class="m">${stmF(T[x])}</td><td>${stmP(+T[x],tot)}</td><td style="text-align:right"><span class="pb" style="width:${Math.max(2,+T[x]/tot*100)}%;background:${STM_TYPES[x][1]}"></span></td></tr>`).join('')}
+      </tbody><tfoot><tr><td class="nm">الإجمالي</td><td>${stmF(tot)}</td><td>100%</td><td></td></tr></tfoot></table>
+      <div class="stm-hint" style="margin-top:6px">التصنيف من وصف السطر في الكشف. "غلطات التشغيل" و"المرتجع اللي ماتسجلش" = فلوس اتخصمت بسبب أخطاء عندنا — تفاصيلها في تفاصيل كل عميل.</div>`;
+  }
+  if(k==='coll'){
+    const C=(R.customers||[]).filter(c=>+c.bal||+c.paid).slice().sort((a,b)=>b.bal-a.bal);
+    return `<table class="stm-t"><thead><tr><th style="text-align:right">العميل</th><th>رصيد أول السنة</th><th>صافي المبيعات</th><th>خصومات وتسويات</th><th>المحصّل</th><th>الرصيد</th><th>آخر سداد</th></tr></thead><tbody>
+      ${C.map(c=>`<tr><td class="nm">${stmE(stmShort(c.name))}</td><td>${stmF(c.open)}</td><td class="g">${stmF((+c.sales)+(+c.ret))}</td><td class="m">${stmF((+c.open)+(+c.sales)+(+c.ret)-(+c.paid)-(+c.bal))}</td><td style="color:#15803D;font-weight:800">${stmF(c.paid)}</td><td class="b">${stmF(c.bal)}</td><td>${stmPayTag(c)}</td></tr>`).join('')}
+      </tbody></table><div class="stm-hint" style="margin-top:6px">الخصومات المسجلة هنا = اللي اتسجل في حساب العميل خلال السنة (بتاريخ تسجيله) · الأحمر = آخر سداد من أكتر من 60 يوم أو ماسددش السنة دي.</div>`;
+  }
+  if(k==='rev'){
+    const L=R.review||[];
+    if(!L.length) return '<div class="stm-empty">✅ كل الخصومات شهرها اتحدد.</div>';
+    return `<div class="stm-hint" style="margin-bottom:8px">السطور دي وصفها مش بيقول الخصم يخص أنهي شهر. لحد ما تحددها بتتحسب على شهر تسجيلها. اختار من شهر لشهر واضغط حفظ.</div>
+      <table class="stm-t"><thead><tr><th style="text-align:right">العميل</th><th style="text-align:right">الوصف</th><th>المبلغ</th><th>تاريخ التسجيل</th><th>يخص الفترة</th><th></th></tr></thead><tbody>
+      ${L.map((x,i)=>`<tr><td class="nm">${stmE(stmShort(x.cust))}</td><td style="text-align:right;font-size:12.5px;max-width:420px">${stmE(x.descr)}</td><td class="m">${stmF(x.amt)}</td><td>${(x.date||'').split('-').reverse().join('/')}</td>
+        <td><input type="month" id="stm-rf-${i}" value="${x.op?x.op.slice(0,7):''}"> ← <input type="month" id="stm-rt-${i}" value="${x.opt?x.opt.slice(0,7):''}"></td>
+        <td><button class="stm-btn sm" onclick="stmSavePeriod(${i})">${x.op?'✓ تعديل':'حفظ'}</button>${x.op?` <button class="stm-btn sm gh" onclick="stmSavePeriod(${i},true)">مسح</button>`:''}</td></tr>`).join('')}
+      </tbody></table>`;
+  }
+  if(k==='ups'){
+    const U=R.uploads||[];
+    return `<table class="stm-t"><thead><tr><th style="text-align:right">الكشف</th><th>الفترة</th><th>السطور</th><th>اتعرف</th><th></th></tr></thead><tbody>
+      ${U.map(u=>`<tr><td class="nm">${stmE(u.branch.replace(/\s+/g,' '))}<div class="stm-hint">${stmE(u.file||'')}</div></td><td>${u.from.split('-').reverse().join('/')} ← ${u.to.split('-').reverse().join('/')}</td><td>${stmF(u.lines)}</td><td>${new Date(u.at).toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'})}</td><td><button class="stm-btn sm gh" onclick="stmDelUpload(${u.id})">🗑️ حذف</button></td></tr>`).join('')}
+      </tbody></table><div class="stm-hint" style="margin-top:6px">لو رفعت نفس الكشف تاني لفترة متداخلة، السطور القديمة في نفس الفترة بتتشال وتتحط الجديدة مكانها (مفيش تكرار).</div>`;
+  }
+  return '';
+}
+function stmRefreshPanel(){ const p=document.getElementById('stm-panel'); if(!p) return; const a=document.activeElement&&document.activeElement.id; p.innerHTML=stmPanel(); if(a==='stm-q'){ const i=document.getElementById('stm-q'); i.focus(); i.setSelectionRange(i.value.length,i.value.length); } }
+async function stmToggle(eck){
+  const ck=decodeURIComponent(eck); STM.open[ck]=!STM.open[ck];
+  if(STM.open[ck] && !STM.det[ck]){ STM.det[ck]='loading'; stmRefreshPanel();
+    try{ STM.det[ck]=await srrRpc('stmt_cust_detail',{p_ck:ck,p_year:STM.year}); }catch(e){ STM.det[ck]={err:e.message}; } }
+  stmRefreshPanel();
+}
+function stmDetHtml(c){
+  const d=STM.det[c.ck]; if(!d||d==='loading') return '<div class="stm-empty">⏳ جاري التحميل...</div>'; if(d.err) return `<div class="stm-empty" style="color:#B71C1C">${stmE(d.err)}</div>`;
+  const B=d.branches||[], D=d.ded||[], M=d.months||[];
+  return `<div class="stm-det">
+    <div class="stm-det-col"><div class="h">🏢 توزيعه على فروع الشركة</div>
+      <table class="stm-t sm"><thead><tr><th style="text-align:right">الفرع</th><th>صافي المبيعات</th><th>نصيبه من الخصم</th><th>%</th></tr></thead><tbody>
+      ${B.map(b=>`<tr><td class="nm">${stmE(b.br.replace(/\s+/g,' '))}</td><td class="g">${stmF(b.sales)}</td><td class="m">${stmF(b.ded)}</td><td>${stmP(+b.ded,+b.sales)}</td></tr>`).join('')}</tbody></table>
+      <div class="h" style="margin-top:10px">📅 شهر بشهر</div>
+      <table class="stm-t sm"><thead><tr><th>الشهر</th><th>المبيعات</th><th>المرتجع</th><th>الخصم</th><th>%</th></tr></thead><tbody>
+      ${M.map(m=>`<tr><td>${stmMonLbl(m.mo+'-01')}</td><td class="g">${stmF(m.s)}</td><td class="o">${stmF(-m.r)}</td><td class="m">${stmF(m.d)}</td><td>${stmP(+m.d,(+m.s)+(+m.r))}</td></tr>`).join('')}</tbody></table></div>
+    <div class="stm-det-col"><div class="h">🧾 الخصومات (${D.length} سطر)</div>
+      <table class="stm-t sm"><thead><tr><th>اتسجل</th><th style="text-align:right">الوصف</th><th>المبلغ</th><th>يخص</th><th>محسوب على ${STM.year}</th></tr></thead><tbody>
+      ${D.map(x=>`<tr><td>${(x.date||'').split('-').reverse().join('/')}</td><td style="text-align:right;font-size:12px"><span class="stm-dot" style="background:${(STM_TYPES[x.type]||STM_TYPES.other)[1]}"></span>${stmE(x.descr)}</td><td class="m">${stmF(x.amt)}</td><td style="font-size:12px">${stmPer(x.pf,x.pt)}${x.manual?' ✍️':''}</td><td>${+x.in_y?stmF(x.in_y):'<span style="color:#888">سنة تانية</span>'}</td></tr>`).join('')}</tbody></table></div>
+  </div>`;
+}
+async function stmSavePeriod(i, clear){
+  const x=STM.rep.review[i]; const f=document.getElementById('stm-rf-'+i)?.value, t=document.getElementById('stm-rt-'+i)?.value;
+  if(!clear && !f){ showToast('اختار الشهر الأول'); return; }
+  try{ await srrRpc('stmt_set_period',{p_key:x.key,p_from:clear?null:f+'-01',p_to:clear?null:((t||f)<f?f:(t||f))+'-01'}); showToast(clear?'اتمسح':'✅ اتحفظ'); await stmLoad(); STM.tab='rev'; stmRender(); }
+  catch(e){ showToast('❌ '+e.message); }
+}
+async function stmDelUpload(id){
+  if(!confirm('حذف الكشف ده وكل سطوره؟')) return;
+  try{ await srrRpc('stmt_delete_upload',{p_upload:id}); showToast('اتحذف'); stmLoad(); }catch(e){ showToast('❌ '+e.message); }
+}
+// ── الرفع ──
+function stmPick(){ const f=document.getElementById('stm-file'); if(f){ f.value=''; f.click(); } }
+async function stmOnFiles(input){
+  const files=[...(input.files||[])]; if(!files.length) return;
+  const box=document.getElementById('stm-upload-box'); box.style.display='block'; box.innerHTML='<div class="stm-empty">⏳ بقرا الملفات...</div>';
+  const out=[];
+  for(const f of files){
+    try{ const wb=XLSX.read(await f.arrayBuffer(),{type:'array',cellDates:true}); const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:true,defval:null});
+      const r=stmParseRows(rows); r.file=f.name; out.push(r); }
+    catch(e){ out.push({file:f.name, err:e.message}); }
+  }
+  STM.pending=out;
+  box.innerHTML=`<div class="stm-up"><div class="h">📂 مراجعة قبل الرفع</div>
+    <table class="stm-t sm"><thead><tr><th style="text-align:right">الملف</th><th>الكشف</th><th>الفترة</th><th>العملاء</th><th>فواتير</th><th>مرتجعات</th><th>صافي المبيعات</th><th>خصومات</th><th>شهرها اتعرف</th></tr></thead><tbody>
+    ${out.map(r=>{ if(r.err) return `<tr><td class="nm">${stmE(r.file)}</td><td colspan="8" style="color:#B71C1C">❌ ${stmE(r.err)}</td></tr>`;
+      const L=r.lines, inv=L.filter(l=>l.kind==='inv'), ret=L.filter(l=>l.kind==='ret'), dd=L.filter(l=>l.deducted);
+      const net=inv.reduce((a,l)=>a+l.net,0)+ret.reduce((a,l)=>a+l.net,0), ded=dd.reduce((a,l)=>a+l.deducted,0), ok=dd.filter(l=>l.p_src!=='none').length;
+      return `<tr><td class="nm">${stmE(r.file)}</td><td>${stmE(r.branch.replace(/\s+/g,' '))}</td><td>${r.from.split('-').reverse().join('/')} ← ${r.to.split('-').reverse().join('/')}</td><td>${new Set(L.map(l=>l.customer)).size}</td><td>${stmF(inv.length)}</td><td>${stmF(ret.length)}</td><td class="g">${stmF(net)}</td><td class="m">${stmF(ded)}</td><td>${ok} من ${dd.length}</td></tr>`; }).join('')}
+    </tbody></table>
+    <div style="display:flex;gap:8px;margin-top:10px;align-items:center"><button class="stm-btn" onclick="stmUpload()" ${out.some(r=>!r.err)?'':'disabled'}>⬆ رفع وحفظ</button><button class="stm-btn gh" onclick="document.getElementById('stm-upload-box').style.display='none'">إلغاء</button><span id="stm-up-prog" class="stm-hint"></span></div></div>`;
+}
+async function stmUpload(){
+  const P=(STM.pending||[]).filter(r=>!r.err); const prog=document.getElementById('stm-up-prog');
+  try{
+    for(const r of P){
+      const id=await srrRpc('stmt_begin',{p_branch:r.branch,p_from:r.from,p_to:r.to,p_file:r.file});
+      const N=1000;
+      for(let i=0;i<r.lines.length;i+=N){ if(prog) prog.textContent=`${r.branch.replace(/\s+/g,' ')}: ${Math.min(i+N,r.lines.length)} من ${r.lines.length}...`; await srrRpc('stmt_chunk',{p_upload:id,p_lines:r.lines.slice(i,i+N)}); }
+      await srrRpc('stmt_commit',{p_upload:id});
+    }
+    document.getElementById('stm-upload-box').style.display='none'; STM.pending=null; showToast('✅ اترفعت الكشوفات'); await stmLoad();
+  }catch(e){ if(prog) prog.innerHTML=`<span style="color:#B71C1C">❌ ${stmE(e.message)}</span>`; }
+}
+// ── التصدير ──
+function stmReportData(){
+  const R=STM.rep, t=stmTotals(), N=stmF;
+  const title=`كشوفات الحساب — ${R.year}`;
+  const kpis=[['المبيعات',stmM(t.sales)],['المرتجع',stmM(-t.ret)],['خصومات '+R.year,stmM(t.ded)],['خصم الفاتورة',stmM(t.direct)],['الصافي الحقيقي',stmM(t.real)],['الرصيد',stmM(t.bal)]];
+  const C=stmCustRows();
+  const secs=[{title:'العملاء',head:['#','العميل','المبيعات','المرتجع','خصم الفاتورة','خصومات '+R.year,'نسبة الخصم','الصافي الحقيقي','الرصيد'],
+      rows:C.map((c,i)=>[i+1,stmShort(c.name),N(c.sales),N(-c.ret),c.is_direct?N(c.direct):'—',N(c.ded),stmCustPct(c).toFixed(1)+'%',N((+c.sales)+(+c.ret)-(+c.ded)),N(c.bal)]),
+      total:['','الإجمالي',N(t.sales),N(-t.ret),N(t.direct),N(t.ded),stmP(t.ded+t.direct,t.net+t.direct),N(t.real),N(t.bal)]},
+    {title:'فروع الشركة',head:['#','فرع الشركة','صافي المبيعات','خصم الفاتورة','نصيبه من الخصومات','نسبة الخصم','الصافي الحقيقي'],
+      rows:(R.branches||[]).map((b,i)=>{ const n=(+b.sales)+(+b.ret); return [i+1,b.br.replace(/\s+/g,' '),N(n),N(b.direct),N(b.ded),stmP(+b.ded+(+b.direct),n+(+b.direct)),N(n-b.ded)]; })},
+    {title:'أنواع الخصم',head:['#','النوع','القيمة'],rows:Object.keys(STM_TYPES).filter(x=>(R.types||{})[x]).map((x,i)=>[i+1,STM_TYPES[x][0],N(R.types[x])])},
+    {title:'التحصيل',head:['#','العميل','رصيد أول السنة','صافي المبيعات','المحصّل','الرصيد','آخر سداد'],
+      rows:(R.customers||[]).filter(c=>+c.bal||+c.paid).slice().sort((a,b)=>b.bal-a.bal).map((c,i)=>[i+1,stmShort(c.name),N(c.open),N((+c.sales)+(+c.ret)),N(c.paid),N(c.bal),c.last_pay?c.last_pay.split('-').reverse().join('/'):'—'])}];
+  return {title,kpis,secs};
+}
+function stmPdf(send){ if(!STM.rep||!STM.rep.customers.length){ showToast('مفيش بيانات'); return; } const d=stmReportData();
+  rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,d.secs,`<span>المصدر: <b style="color:#731E2E">كشوفات حساب العملاء</b></span><span>لحد: <b style="color:#731E2E"><bdi>${STM.rep.coverage||''}</bdi></b></span>`); return pdf?pdf.output('blob'):null; },`AlTahhan_Statements_${STM.year}.pdf`,d.title,send); }
+function stmXlsx(send){ if(!STM.rep||!STM.rep.customers.length){ showToast('مفيش بيانات'); return; } const d=stmReportData();
+  rpxDeliver('xlsx',async()=>{ const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]}; const num=v=>typeof v==='string'&&/^[+\-]?[\d,]+(\.\d+)?$/.test(v)?+v.replace(/,/g,''):v;
+    d.secs.forEach((s,i)=>rpxSheet(wb,s.title,d.title+' — '+s.title,i===0?d.kpis.map(k=>k[0]+': '+k[1]).join(' · '):'',s.head,s.rows.map(r=>r.map(num)),s.total&&s.total.map(num)));
+    const arr=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true}); return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}); },`AlTahhan_Statements_${STM.year}.xlsx`,d.title,send); }
 
 </script>
 <!-- ══════════════════════════════════════════════════════════════
