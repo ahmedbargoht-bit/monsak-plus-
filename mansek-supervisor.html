@@ -7007,7 +7007,7 @@ async function supVerifyVisitLocation(branchName){
   const dist = Math.round(haversineMeters(lat,lng,bc.lat,bc.lng));
   const allowed = GEO_VISIT_RADIUS_M + Math.min(acc, GEO_ACC_TOLERANCE_M);
   if(dist > allowed){
-    return {ok:false, far:true, fields:{...base, geo_status:'outside', geo_distance_m:dist}, msg:`🚫 مينفعش تسجّل الزيارة — إنت بعيد عن الفرع.\n\nالمسافة بينك وبين "${branchName}": ${dist>=1000?(dist/1000).toFixed(1)+' كم':dist+' متر'}\nالمسموح: ${GEO_VISIT_RADIUS_M} متر.\n\nروح الفرع وسجّل الزيارة من هناك.`};
+    return {ok:false, far:true, acc, fields:{...base, geo_status:'outside', geo_distance_m:dist}, msg:`🚫 مينفعش تسجّل الزيارة — إنت بعيد عن الفرع.\n\nالمسافة بينك وبين "${branchName}": ${dist>=1000?(dist/1000).toFixed(1)+' كم':dist+' متر'}\nالمسموح: ${GEO_VISIT_RADIUS_M} متر.\n\nروح الفرع وسجّل الزيارة من هناك.`};
   }
   return {ok:true, fields:{...base, geo_status:'inside', geo_distance_m:dist}};
 }
@@ -7019,6 +7019,8 @@ function supGeoBadgeHTML(item){
   } else if(item.check_in_at && item.geo_status==='inside'){
     const t = new Date(item.check_in_at).toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'});
     h = `<div style="font-size:10px;color:#1A7A4A;font-weight:700;margin-top:2px">📍 موثّقة بلوكيشن الفرع${item.geo_distance_m!=null?' · '+item.geo_distance_m+' م':''} · ${t}</div>`;
+  } else if(item.geo_status==='pending_loc'){
+    h = `<div style="font-size:10px;color:#9A5B00;font-weight:700;margin-top:2px">⏳ مستنية مراجعة لوكيشن الفرع${item.geo_distance_m!=null?' · '+item.geo_distance_m+' م عن الموقع المتسجّل':''}</div>`;
   } else if(item.check_in_at && item.geo_status==='no_branch_loc'){
     h = `<div style="font-size:10px;color:#B8860B;font-weight:700;margin-top:2px">⚠️ غير موثّقة بالموقع — لوكيشن الفرع غير مسجّل (بلّغ الإدارة)</div>`;
   } else if(item.geo_status==='not_verified' || item.geo_status==='outside'){
@@ -7141,6 +7143,41 @@ function vrLastVisitCardHTML(bn){
     ${lv.notes?`<div style="margin-top:3px"><b>ملاحظات:</b> ${vrEsc(lv.notes)}</div>`:''}`;
 }
 
+// ── المشرف في الفرع والسيستم شايفه بعيد: لوكيشن الفرع غالبًا متسجّل غلط ← طلب تصحيح للإدارة ──
+function supAskBranchLocFix(v, item){
+  return new Promise(resolve=>{
+    const d = v.fields.geo_distance_m, f = n=>n>=1000?(n/1000).toFixed(1)+' كم':n+' متر';
+    let m = document.getElementById('blf-modal'); if(m) m.remove();
+    m = document.createElement('div'); m.id='blf-modal';
+    m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10050;display:flex;align-items:center;justify-content:center;padding:16px;direction:rtl;font-family:Cairo,sans-serif';
+    m.innerHTML = `<div style="background:#fff;border-radius:16px;max-width:420px;width:100%;padding:18px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
+      <div style="font-size:16px;font-weight:900;color:#731E2E;margin-bottom:8px">📍 السيستم شايفك بعيد عن الفرع</div>
+      <div style="font-size:13px;line-height:1.9;color:#2C1F0A">المسافة بينك وبين الموقع المتسجّل لـ <b>${vrEsc(item.branch_name)}</b>: <b>${f(d)}</b> (المسموح ${GEO_VISIT_RADIUS_M} متر).</div>
+      <div style="font-size:12.5px;line-height:1.8;color:#5C4A2A;background:#FBF8F1;border-radius:10px;padding:10px;margin:10px 0">
+        • لو إنت <b>مش في الفرع</b>: روح الفرع وسجّل من هناك.<br>
+        • لو إنت <b>في الفرع فعلًا</b>: يبقى لوكيشن الفرع متسجّل غلط. ابعت طلب تصحيح بموقعك الحالي — الزيارة هتتسجّل "مستنية مراجعة"، ولما الإدارة تعتمد هتبقى موثّقة.</div>
+      <div style="font-size:11px;color:#8B7B60;margin-bottom:10px">⚠️ موقعك الحالي هيتبعت مع الطلب، والإدارة بتقارنه بمكان زيارات المنسقين للفرع.</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <button type="button" id="blf-yes" style="padding:12px;border:none;border-radius:10px;background:#731E2E;color:#fff;font-family:inherit;font-size:14px;font-weight:800;cursor:pointer">✅ أنا في الفرع — ابعت طلب تصحيح الموقع</button>
+        <button type="button" id="blf-no" style="padding:11px;border:1.5px solid #D4C4A8;border-radius:10px;background:#fff;color:#4B3C1A;font-family:inherit;font-size:13.5px;font-weight:700;cursor:pointer">لا — هروح الفرع الأول</button>
+      </div></div>`;
+    document.body.appendChild(m);
+    const done = r=>{ m.remove(); resolve(r); };
+    m.querySelector('#blf-no').onclick = ()=>done(false);
+    m.querySelector('#blf-yes').onclick = async ()=>{
+      const b = m.querySelector('#blf-yes'); b.disabled=true; b.textContent='⏳ جاري الإرسال...';
+      try{
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/branch_loc_request`,{method:'POST',
+          headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`},
+          body:JSON.stringify({p_branch:item.branch_name,p_by:cu?.name||'',p_level:cu?.level||'',p_lat:v.fields.visit_lat,p_lng:v.fields.visit_lng,p_acc:v.acc||null,p_dist:d,p_item:item.id})});
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        showToast('✅ اتبعت طلب تصحيح لوكيشن الفرع للإدارة');
+        done(true);
+      }catch(e){ b.disabled=false; b.textContent='✅ أنا في الفرع — ابعت طلب تصحيح الموقع'; alert('❌ مقدرناش نبعت الطلب — اتأكد من النت وجرّب تاني.\n'+(e.message||e)); }
+    };
+  });
+}
+
 async function openVisitReview(itemId, prefillNotes){
   if(_geoVerifying) return;
   const item = planItems.find(i=>i.id===itemId);
@@ -7160,7 +7197,12 @@ async function openVisitReview(itemId, prefillNotes){
   if(!v.ok){
     // مدير التنسيق فقط: الموقع اختياري — يقدر يكمل الزيارة بدون توثيق
     // الموقع بيتسجّل بصمت (الحالة الحقيقية: inside/outside/...) من غير ما يظهر له أي تنبيه أو مسافة
-    if(cu?.level!=='dm'){ alert(v.msg); return; }
+    if(cu?.level!=='dm'){
+      if(!v.far){ alert(v.msg); return; }
+      const fixed = await supAskBranchLocFix(v, item);
+      if(!fixed) return;
+      v = {ok:true, pendingLoc:true, fields:{...v.fields, geo_status:'pending_loc'}};
+    } else
     v = {ok:true, fields: v.far ? v.fields : {geo_status:'not_verified', geo_distance_m:null, check_in_at:null, visit_lat:null, visit_lng:null}};
   }
   _vrCtx = {itemId, fields:v.fields, branch:item.branch_name, r:{coord:'',display:'',clean:''}};
@@ -7181,6 +7223,8 @@ async function openVisitReview(itemId, prefillNotes){
     <div style="font-size:11px;color:var(--text2);text-align:center;margin-bottom:8px">${vrEsc(_vrRouteMap[item.branch_name]||'')}</div>
     ${cu?.level==='dm'
       ? ''
+      : v.pendingLoc
+      ? `<div style="background:#FFF4E5;color:#9A5B00;border-radius:8px;padding:8px 10px;font-size:11.5px;font-weight:700">⏳ اتبعت طلب تصحيح لوكيشن الفرع للإدارة — الزيارة هتتسجل "مستنية مراجعة الموقع"، ولما الإدارة تعتمد الطلب هتبقى موثّقة وتتحسب في التقييم.</div>`
       : noLoc
       ? `<div style="background:#FFF8E1;color:#B8860B;border-radius:8px;padding:8px 10px;font-size:11.5px;font-weight:700">⚠️ لوكيشن الفرع مش مسجّل — الزيارة هتتسجل "غير موثّقة بالموقع" ومش هتتحسب في معيار الحضور الشخصي.</div>`
       : `<div style="background:#E8F5E9;color:#1A7A4A;border-radius:8px;padding:8px 10px;font-size:11.5px;font-weight:700">✅ تم التحقق من موقعك — إنت داخل نطاق الفرع (${v.fields.geo_distance_m} م)</div>`}
@@ -13267,6 +13311,7 @@ async function svmLoad(){
       let geoLbl = '—', geoClr = '#888';
       if(done){
         if(geoOK){ geoLbl='موثّقة بالموقع'; geoClr='#1A7A4A'; }
+        else if(x.geo_status==='pending_loc'){ geoLbl='مستنية مراجعة لوكيشن الفرع'; geoClr='#9A5B00'; }
         else if(x.check_in_at && x.geo_status==='no_branch_loc'){ geoLbl='لوكيشن الفرع غير مسجّل'; geoClr='#B8860B'; }
         else { geoLbl = isNew ? 'غير موثّقة' : 'غير موثّقة (قديمة)'; geoClr='#B71C1C'; }
       }
