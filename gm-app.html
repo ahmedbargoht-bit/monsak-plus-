@@ -65501,6 +65501,13 @@ async function dbhAutoPopup(){
 #panel-branch-loc .blf-lnk{font-size:11.5px;color:#1565C0;text-decoration:none;white-space:nowrap}
 #panel-branch-loc .blf-btn{padding:6px 10px;border:none;border-radius:8px;background:#1A7A4A;color:#fff;font-family:inherit;font-weight:800;font-size:12px;cursor:pointer;margin:2px}
 #panel-branch-loc .blf-btn.gh{background:#fff;color:#731E2E;border:1.5px solid #D4C4A8}
+#blf-pop{position:fixed;inset:0;background:rgba(44,31,10,.45);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px;direction:rtl;font-family:Cairo,sans-serif}
+#blf-pop .blf-pop-in{background:#FFFCF6;border-radius:16px;max-width:560px;width:100%;padding:18px;border-top:6px solid #B45309;box-shadow:0 12px 40px rgba(0,0,0,.25);max-height:88vh;overflow:auto}
+#blf-pop .blf-pop-h{font-size:18px;font-weight:900;color:#731E2E;margin-bottom:4px}
+#blf-pop .blf-pop-sub{font-size:12.5px;color:#8B6F47;margin-bottom:8px}
+#blf-pop ul{margin:0;padding:0 18px 0 0;font-size:13.5px;line-height:2;color:#2C1F0A}
+#blf-pop .blf-pop-b{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+
 </style>
 <script>
 // ══ مواقع الفروع (blf) — طلبات تصحيح اللوكيشن من تطبيق المشرف + الفروع اللي موقعها المتسجّل بعيد عن مكان زيارات المنسقين ══
@@ -65575,7 +65582,36 @@ async function blfSetSuspect(i){
   catch(e){ showToast('❌ '+e.message); }
 }
 // عدّاد الطلبات في القائمة بعد الدخول (من غير ما نغيّر setupApp)
-(function(){ try{ if(typeof setupApp==='function'){ const o=setupApp; setupApp=async function(){ const r=await o.apply(this,arguments); setTimeout(()=>{ blfFetch().then(blfBadge).catch(()=>{}); },6000); return r; }; } }catch(e){ console.warn('[blf hook]',e); } })();
+// ── بوب أب: لو فيه حاجة عايزة تصحيح ──
+// طلبات مشرفين مستنية ← يظهر أول مرة كل يوم، وفورًا لو جه طلب جديد بعد آخر مرة شفته
+// فروع مشكوك فيها بس (من غير طلبات) ← مرة في الأسبوع عشان ما يبقاش مزعج
+async function blfAutoPopup(force){
+  try{
+    if(typeof CU!=='undefined' && CU && CU.level && CU.level!=='gm' && !force) return;
+    const D=await blfFetch(); blfBadge();
+    const R=D.requests||[], S=D.suspects||[];
+    if(!R.length && !S.length){ if(force) showToast('✅ مواقع الفروع كلها تمام'); return; }
+    const day=new Date(Date.now()+2*3600e3).toISOString().slice(0,10);
+    const wk=(()=>{ const d=new Date(day+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-((d.getUTCDay()+1)%7)); return d.toISOString().slice(0,10); })(); // أسبوع بيبدأ السبت
+    let seenDay=null, seenMax=0, seenWk=null; try{ seenDay=localStorage.getItem('blf_day'); seenMax=+localStorage.getItem('blf_max')||0; seenWk=localStorage.getItem('blf_wk'); }catch(e){}
+    const maxId=Math.max(0,...R.map(r=>+r.id||0)), newOnes=R.filter(r=>+r.id>seenMax).length;
+    const show = force || (R.length && (seenDay!==day || newOnes>0)) || (!R.length && S.length && seenWk!==wk);
+    if(!show) return;
+    for(let i=0;i<120 && (document.getElementById('vc-pop')||document.getElementById('dbh-pop'));i++) await new Promise(r=>setTimeout(r,1000));
+    try{ localStorage.setItem('blf_day',day); localStorage.setItem('blf_max',String(maxId)); localStorage.setItem('blf_wk',wk); }catch(e){}
+    const li=[];
+    R.slice(0,6).forEach(r=>li.push(`📨 <b>${blfE(r.branch)}</b> — ${blfE(r.by)} كان في الفرع وبعيد ${blfM(r.dist)} عن الموقع المتسجّل${r.coord_dist!=null&&r.coord_dist<=150?' <span style="color:#1A7A4A">(✅ متطابق مع مكان المنسقين)</span>':''}${+r.id>seenMax&&seenMax?' <span style="color:#B71C1C;font-weight:800">جديد</span>':''}`));
+    if(R.length>6) li.push(`و${R.length-6} طلب كمان...`);
+    if(S.length) li.push(`🧭 ${S.length} فرع موقعه المتسجّل بعيد عن مكان زيارات المنسقين${S.filter(s=>+s.pct150>=75).length?` — منهم ${S.filter(s=>+s.pct150>=75).length} مكان زياراتهم ثابت وجاهز للاعتماد`:''}`);
+    const m=document.createElement('div'); m.id='blf-pop';
+    m.innerHTML=`<div class="blf-pop-in"><div class="blf-pop-h">📍 مواقع فروع محتاجة تصحيح${R.length?` — ${R.length} طلب مستني`:''}</div>
+      <div class="blf-pop-sub">${R.length?'الزيارات المرتبطة بالطلبات دي مش بتتحسب في تقييم المشرفين لحد ما تعتمدها أو ترفضها.':'لوكيشن الفرع الغلط بيمنع المشرف يسجّل زيارته وهو في الفرع.'}</div>
+      <ul>${li.map(x=>`<li>${x}</li>`).join('')}</ul>
+      <div class="blf-pop-b"><button class="vc-btn" onclick="document.getElementById('blf-pop').remove();showPanel('branch-loc')">افتح مواقع الفروع</button><button class="vc-btn gh" onclick="document.getElementById('blf-pop').remove()">بعدين</button></div></div>`;
+    document.body.appendChild(m);
+  }catch(e){ console.warn('[blf popup]',e); }
+}
+(function(){ try{ if(typeof setupApp==='function'){ const o=setupApp; setupApp=async function(){ const r=await o.apply(this,arguments); setTimeout(()=>blfAutoPopup(false),5000); return r; }; } }catch(e){ console.warn('[blf hook]',e); } })();
 </script>
 <!-- ══════════════════════════════════════════════════════════════
      GM MOBILE LAYER — تطبيق المدير العام = نسخة من لوحة التحكم بشكل موبايل
