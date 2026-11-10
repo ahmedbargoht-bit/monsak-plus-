@@ -65942,46 +65942,59 @@ async function ibxLoadHol(){
 }
 function ibxHolOf(day){ return (IBX.hol||[]).find(h=>h.day===day)||null; }
 
-// ── المناديب اللي مسجلوش النهارده ──
+// ── المناديب اللي مسجلوش: النهارده + آخر يومين شغل قبله (الجمعة والإجازات بتتخطّى) ──
+// الافتراضي = آخر يوم شغل (امبارح) — عشان أول اليوم النهارده بيبقى كله فاضي.
+function ibxPrevWork(day){ let t=new Date(day+'T12:00:00Z'); for(let i=0;i<20;i++){ t.setUTCDate(t.getUTCDate()-1); const d=t.toISOString().slice(0,10); if(ibxDow(d)!==5 && !ibxHolOf(d)) return d; } return t.toISOString().slice(0,10); }
+function ibxOffOf(day){ if(ibxDow(day)===5) return {kind:'fri', name:'الجمعة'}; const h=ibxHolOf(day); return h?{kind:'hol', name:h.name}:null; }
 async function ibxLoadReps(){
-  const day=ibxDay(); IBX.today=day;
-  const st={day, off:null, list:[], total:0, err:null};
-  if(ibxDow(day)===5) st.off={kind:'fri', name:'الجمعة'};
-  else { const h=ibxHolOf(day); if(h) st.off={kind:'hol', name:h.name}; }
-  if(st.off){ IBX.reps=st; return st; }
+  const today=ibxDay(); IBX.today=today;
+  const w1=ibxPrevWork(today), w2=ibxPrevWork(w1);
+  const yest=(()=>{ const t=new Date(today+'T12:00:00Z'); t.setUTCDate(t.getUTCDate()-1); return t.toISOString().slice(0,10); })();
+  const st={today, total:0, err:null, days:[
+    {day:today, lbl:'النهارده', off:ibxOffOf(today), list:[]},
+    {day:w1, lbl:w1===yest?'امبارح':'آخر يوم شغل', off:null, list:[]},
+    {day:w2, lbl:'اللي قبله', off:null, list:[]}]};
   try{
     const [U,D,R]=await Promise.all([
       ibxGet('users?select=name,grp,groups&role=eq.sales&level=eq.rep&status=eq.active&order=name.asc&limit=1000'),
-      ibxGet(`sales_deliveries?select=rep_name&delivery_date=eq.${day}&deleted_at=is.null&limit=5000`),
-      ibxGet(`sales_returns?select=rep_name&return_date=eq.${day}&deleted_at=is.null&limit=5000`)]);
-    const done=new Set([...D,...R].map(x=>String(x.rep_name||'').trim()));
+      ibxGet(`sales_deliveries?select=rep_name,delivery_date&delivery_date=gte.${w2}&delivery_date=lte.${today}&deleted_at=is.null&limit=20000`),
+      ibxGet(`sales_returns?select=rep_name,return_date&return_date=gte.${w2}&return_date=lte.${today}&deleted_at=is.null&limit=20000`)]);
+    const done={}; const mark=(n,d)=>{ d=String(d||'').slice(0,10); (done[d]=done[d]||new Set()).add(String(n||'').trim()); };
+    (D||[]).forEach(x=>mark(x.rep_name,x.delivery_date)); (R||[]).forEach(x=>mark(x.rep_name,x.return_date));
     const reps=(U||[]).filter(u=>u.name && !/^مندوب تحت التع/.test(u.name));
-    st.total=reps.length; st.list=reps.filter(u=>!done.has(String(u.name).trim()));
+    st.total=reps.length;
+    st.days.forEach(D=>{ const s=done[D.day]||new Set(); D.list=D.off?[]:reps.filter(u=>!s.has(String(u.name).trim())); });
   }catch(e){ st.err=e.message; }
   IBX.reps=st; return st;
 }
 function ibxGrpLbl(g){ return (typeof vcG==='function')?vcG(g):g; }
+function ibxRepsView(i){ IBX.rv=i; IBX.open.reps=true; ibxBuild(); ibxRender(); }
 
 // ── بناء الرسايل ──
 function ibxBuild(){
   const M=[], R=IBX.reps;
   if(R){
-    let m={id:'reps', ic:'🧾', c:'#731E2E', sig:'d'+R.day};
-    if(R.off){ m.title= R.off.kind==='fri'?'النهارده الجمعة — مفيش متابعة فواتير':`النهارده إجازة رسمية — ${R.off.name}`; m.sub='رسالة المناديب اللي مسجلوش فواتير متوقفة النهارده.'; m.c='#1A7A4A'; m.sig='off'+R.day;
-      m.body=`<div class="ibx-acts">${R.off.kind==='hol'?`<button class="ibx-btn gh" onclick="ibxTodayOff(false)">↩ النهارده مش إجازة</button>`:''}<button class="ibx-btn gh" onclick="ibxHolOpen()">📅 الإجازات الرسمية</button></div>`; }
-    else if(R.err){ m.title='مناديب مسجلوش فواتير النهارده'; m.sub='❌ تعذر التحميل — هيتجرّب تاني بعد دقيقة'; m.body=`<div style="color:#B71C1C;font-size:12px">${ibxE(R.err)}</div>`; }
+    if(IBX.rv==null) IBX.rv=1;
+    const V=R.days[IBX.rv]||R.days[1], nx=R.days[IBX.rv+1]; // nx = اليوم اللي قبله (عشان نعلّم اللي مسجلش يومين ورا بعض)
+    let m={id:'reps', ic:'🧾', c:'#731E2E', sig:'d'+R.today};
+    const tabs=`<div class="ibx-acts" style="margin:0 0 6px">${R.days.map((d,i)=>`<button class="ibx-btn${i===IBX.rv?'':' gh'}" onclick="ibxRepsView(${i})">${d.lbl} <span style="opacity:.75">${ibxDayAr(d.day).split(' ')[0]}</span> (${d.off?'إجازة':d.list.length})</button>`).join('')}</div>`;
+    const offBtns=`<div class="ibx-acts">${IBX.rv===0?(V.off&&V.off.kind==='hol'?`<button class="ibx-btn gh" onclick="ibxTodayOff(false)">↩ النهارده مش إجازة</button>`:(!V.off?`<button class="ibx-btn gh" onclick="ibxTodayOff(true)">🏖️ النهارده إجازة</button>`:'')):''}<button class="ibx-btn gh" onclick="ibxHolOpen()">📅 الإجازات الرسمية</button></div>`;
+    const when=IBX.rv===0?'النهارده':V.lbl==='امبارح'?'امبارح':'يوم '+ibxDayAr(V.day).split(' ')[0];
+    if(R.err){ m.title='مناديب مسجلوش فواتير'; m.sub='❌ تعذر التحميل — هيتجرّب تاني بعد دقيقة'; m.body=`<div style="color:#B71C1C;font-size:12px">${ibxE(R.err)}</div>`; }
+    else if(V.off){ m.title=V.off.kind==='fri'?'النهارده الجمعة — مفيش متابعة فواتير':`${V.lbl} إجازة رسمية — ${V.off.name}`; m.sub='شوف امبارح أو اللي قبله من الزراير تحت.'; m.c='#1A7A4A';
+      m.body=tabs+offBtns; }
     else {
-      const n=R.list.length;
-      m.title= n?`${n} مندوب مسجلوش فواتير توريد ولا مرتجعات النهارده`:'✅ كل المناديب سجّلوا فواتير النهارده';
-      m.sub=`${ibxDayAr(R.day)} — ${R.total-n} من ${R.total} سجّلوا · بتتحدّث لوحدها كل دقيقة`;
+      const n=V.list.length, miss2=new Set(nx&&!nx.off?nx.list.map(u=>u.name):[]);
+      m.title= n?`${n} مندوب مسجلوش فواتير توريد ولا مرتجعات ${when}`:`✅ كل المناديب سجّلوا فواتير ${when}`;
+      m.sub=`${ibxDayAr(V.day)} — ${R.total-n} من ${R.total} سجّلوا${IBX.rv===0?' · بتتحدّث لوحدها كل دقيقة':''}`;
       if(!n) m.c='#1A7A4A';
-      const G={}; R.list.forEach(u=>{ const g=String(u.grp||u.groups||'').split(',')[0]||''; (G[g]=G[g]||[]).push(u.name); });
-      const gk=Object.keys(G).sort((a,b)=>G[b].length-G[a].length);
-      m.body=(n?gk.map(g=>`<div class="ibx-g"><div class="ibx-gl">${ibxE(g?ibxGrpLbl(g):'من غير مجموعة')} (${G[g].length})</div><div class="ibx-chips">${G[g].map(x=>`<span class="ibx-chip">${ibxE(x)}</span>`).join('')}</div></div>`).join(''):'')
-        +`<div style="font-size:11.5px;color:#8B7B60;margin-top:8px">المندوب بيتشال من القايمة أول ما يسجّل فاتورة توريد أو مرتجع بتاريخ النهارده. الجمعة والإجازات الرسمية مش بتتحسب.</div>`
-        +`<div class="ibx-acts"><button class="ibx-btn gh" onclick="ibxTodayOff(true)">🏖️ النهارده إجازة</button><button class="ibx-btn gh" onclick="ibxHolOpen()">📅 الإجازات الرسمية</button></div>`;
+      const G={}; V.list.forEach(u=>{ const g=String(u.grp||u.groups||'').split(',')[0]||''; (G[g]=G[g]||[]).push(u.name); });
+      const gk=Object.keys(G).sort((a,b)=>G[b].length-G[a].length), n2=V.list.filter(u=>miss2.has(u.name)).length;
+      m.body=tabs+(n2?`<div style="font-size:12px;color:#B71C1C;font-weight:800">🔴 ${n2} منهم مسجلوش كمان في اليوم اللي قبله (${ibxDayAr(nx.day).split(' ')[0]})</div>`:'')
+        +(n?gk.map(g=>`<div class="ibx-g"><div class="ibx-gl">${ibxE(g?ibxGrpLbl(g):'من غير مجموعة')} (${G[g].length})</div><div class="ibx-chips">${G[g].map(x=>miss2.has(x)?`<span class="ibx-chip" style="background:#FDECEC;border-color:#E8B4A8;color:#B71C1C">🔴 ${ibxE(x)}</span>`:`<span class="ibx-chip">${ibxE(x)}</span>`).join('')}</div></div>`).join(''):'')
+        +`<div style="font-size:11.5px;color:#8B7B60;margin-top:8px">المندوب بيتشال أول ما يسجّل فاتورة توريد أو مرتجع بتاريخ اليوم ده (حتى لو سجّلها متأخر). الجمعة والإجازات الرسمية بتتخطّى.</div>`+offBtns;
     }
-    if(IBX.holErr) m.body+=`<div class="warn" style="background:#FFF6E5;border:1px solid #F0D9A8;border-radius:10px;padding:6px 10px;font-size:11.5px;color:#7A5300;margin-top:8px">⚠️ جدول الإجازات مش متاح لسه (لازم يتشغّل SQL بتاع public_holidays) — الجمعة بس اللي بتتستبعد دلوقتي.</div>`;
+    if(IBX.holErr) m.body+=`<div class="warn" style="background:#FFF6E5;border:1px solid #F0D9A8;border-radius:10px;padding:6px 10px;font-size:11.5px;color:#7A5300;margin-top:8px">⚠️ جدول الإجازات مش متاح — الجمعة بس اللي بتتخطّى دلوقتي.</div>`;
     M.push(m);
   }
   // مواقع الفروع
