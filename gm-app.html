@@ -66249,6 +66249,7 @@ async function ibxHolSaveSug(y){
 #ip-root .ip-cat{font-size:11px;background:#F6EFE2;border-radius:10px;padding:1px 8px;color:#5C4A2A;white-space:nowrap}
 #ip-root .ip-empty{text-align:center;padding:40px;color:var(--ipm);font-weight:700}
 #ip-root .ip-note{font-size:11.5px;color:var(--ipm);line-height:1.8;margin-top:6px}
+#ip-root .ip-cs{font-family:inherit;font-size:11.5px;padding:3px 6px;border:1.5px solid #F0C27A;border-radius:7px;background:#FFF8EA;color:#9A5B00;font-weight:800;max-width:190px}
 #ip-root .ip-q{padding:6px 10px;border:1.5px solid var(--ipl);border-radius:8px;font-family:inherit;width:220px}
 #ip-send{position:fixed;inset:0;background:rgba(30,15,5,.5);z-index:100050;display:flex;align-items:center;justify-content:center;direction:rtl;font-family:Cairo,sans-serif}
 #ip-send .in{background:#FFFCF6;border-radius:16px;padding:18px;width:min(420px,92vw);border-top:6px solid #731E2E;box-shadow:0 12px 40px rgba(0,0,0,.3)}
@@ -66274,9 +66275,32 @@ function ipLbl(k,v){ return k==='grp'?csGrpLbl(v):v; }
 function ipArr(k){ return IP.sel[k].size?[...IP.sel[k]]:null; }
 function ipShiftY(d){ const y=+d.slice(0,4)-1; let md=d.slice(5); if(md==='02-29') md='02-28'; return y+'-'+md; }
 function ipToday(){ try{ return new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Cairo'}).format(new Date()); }catch(e){ return new Date().toISOString().slice(0,10); } }
-function ipCat(n){ n=String(n||''); if(/تمرات/.test(n)) return 'تمراتي'; if(/مجدول/.test(n)) return 'مجدول'; if(/عرض/.test(n)) return 'العروض'; if(/دبس/.test(n)) return 'دبس'; if(/رطب/.test(n)) return 'رطب';
-  if(/عجو|عجين/.test(n)) return 'عجوة وعجينة'; if(/شيكو|مغلف|حشو|لوز|كاجو|مكسرات|بندق/.test(n)) return 'محشي ومغلف'; return 'علب وأكياس تمر'; }
-function ipRange(){ const f=document.getElementById('ip-from')?.value, t=document.getElementById('ip-to')?.value; return [f,t]; }
+function ipNorm(x){ return String(x||'').replace(/\s+/g,' ').trim(); }
+function ipCat(n){ const k=ipNorm(n), M=IP.catMap||{}; return M[k]||M[(IP.alias||{})[k]]||'غير مصنّف'; } // الفئة من كتالوج الأصناف (tamr_sales_item_catalog.category) + الأسماء البديلة
+async function ipLoadCats(){ if(IP.catMap) return;
+  try{ const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const [c,a]=await Promise.all([fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?select=item_name,category&limit=5000`,{headers:H}).then(r=>r.ok?r.json():[]),
+      fetch(`${SUPABASE_URL}/rest/v1/item_name_aliases?select=alias_name,canonical_name&limit=5000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[])]);
+    const M={}, A={}; (c||[]).forEach(x=>{ if(x.category) M[ipNorm(x.item_name)]=String(x.category).trim(); }); (a||[]).forEach(x=>{ A[ipNorm(x.alias_name)]=ipNorm(x.canonical_name); });
+    IP.catMap=M; IP.alias=A; IP.catRows=c||[]; IP.cats=[...new Set(Object.values(M))].sort((x,y)=>x.localeCompare(y,'ar')); }catch(e){ IP.catMap={}; IP.alias={}; IP.cats=[]; } }
+// تصنيف صنف مش في الكتالوج: لو ليه اسم بديل موجود في الكتالوج بيتحدّث تصنيف الاسم ده، غير كده بيتضاف للكتالوج باسمه ده
+async function ipSetCat(name,cat){ if(!cat) return;
+  const k=ipNorm(name), canon=(IP.alias||{})[k], row=(IP.catRows||[]).find(r=>ipNorm(r.item_name)===canon)||(IP.catRows||[]).find(r=>ipNorm(r.item_name)===k);
+  const target=row?row.item_name:name;
+  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?on_conflict=item_name`,{method:'POST',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=minimal'},body:JSON.stringify([{item_name:target,category:cat}])});
+    if(!r.ok) throw new Error('HTTP '+r.status+' '+(await r.text()).slice(0,120));
+    IP.catMap[ipNorm(target)]=cat; IP.catMap[k]=cat; if(!row) (IP.catRows=IP.catRows||[]).push({item_name:name,category:cat});
+    showToast(`✅ ${name.slice(0,30)} ← ${cat}`); if(IP.raw){ IP.D=ipBuild(...IP.raw); ipRender(); } }
+  catch(e){ showToast('❌ تعذر الحفظ: '+e.message,5000); } }
+function ipRange(){ // من (شهر/سنة) → إلى (شهر/سنة) — الشهر الحالي بيقف عند النهارده
+  const v=id=>document.getElementById(id)?.value; const fy=v('ip-fy'), fm=v('ip-fm'), ty=v('ip-ty'), tm=v('ip-tm'); if(!fy||!fm||!ty||!tm) return [null,null];
+  const f=`${fy}-${fm}-01`, last=new Date(Date.UTC(+ty,+tm,0)).toISOString().slice(0,10), td=ipToday(); return [f, last>td?td:last]; }
+function ipSelHtml(){ const td=ipToday(), cy=+td.slice(0,4), cm=td.slice(5,7), ys=[]; for(let y=2025;y<=cy;y++) ys.push(y);
+  const SS='padding:6px 8px;border-radius:8px;border:none;font-family:inherit;font-weight:700;width:auto;height:auto';
+  const mo=sel=>IP_MON.map((n,i)=>{ const v=String(i+1).padStart(2,'0'); return `<option value="${v}"${v===sel?' selected':''}>${n}</option>`; }).join('');
+  const yo=sel=>ys.map(y=>`<option${y===sel?' selected':''}>${y}</option>`).join('');
+  return `<label>من شهر<select id="ip-fm" style="${SS}" onchange="ipLoad()">${mo('01')}</select></label><label>سنة<select id="ip-fy" style="${SS}" onchange="ipLoad()">${yo(cy)}</select></label>
+    <label>إلى شهر<select id="ip-tm" style="${SS}" onchange="ipLoad()">${mo(cm)}</select></label><label>سنة<select id="ip-ty" style="${SS}" onchange="ipLoad()">${yo(cy)}</select></label>`; }
 function ipBody(f,t,noItems){ return {p_from:f,p_to:t,p_branches:ipArr('br'),p_grps:ipArr('grp'),p_routes:ipArr('route'),p_customers:ipArr('cust'),p_sites:ipArr('site'),...(noItems?{}:{p_items:ipArr('item')})}; }
 function ipMonths(f,t){ const out=[]; let d=new Date(f.slice(0,7)+'-01T00:00:00Z'); while(d.toISOString().slice(0,10)<=t){ const s=d.toISOString().slice(0,10), e=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,0)).toISOString().slice(0,10);
   out.push({ym:s.slice(0,7),f:s<f?f:s,t:e>t?t:e}); d=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1)); } return out; }
@@ -66289,7 +66313,7 @@ function ipInit(){
     const t=ipToday();
     root.innerHTML=`<div class="ip-hd">${logo?`<img class="ip-logo" src="${logo}" alt="الطحان">`:''}
       <div class="ip-tt"><h2>🌴 أداء الأصناف</h2><div id="ip-sub">بيع السلاسل من تقرير الشركة — مقارنة بنفس الفترة من السنة اللي فاتت</div></div>
-      <div class="ip-dt"><label>من تاريخ<input type="date" id="ip-from" value="${t.slice(0,4)}-01-01" onchange="ipLoad()"></label><label>إلى تاريخ<input type="date" id="ip-to" value="${t}" onchange="ipLoad()"></label>
+      <div class="ip-dt">${ipSelHtml()}
         <button class="ip-bt" onclick="ipPdf()">📄 PDF</button><button class="ip-bt" onclick="ipExcel()">📊 Excel</button><button class="ip-bt gd" onclick="ipSendOpen()">📤 إرسال</button></div></div>
       <div class="ip-flt" id="ip-filters"></div><div id="ip-body"></div>`;
     document.addEventListener('click',()=>{ if(IP.open) ipMsClose(); });
@@ -66335,7 +66359,7 @@ const IP_NOITEM='فواتير بدون تفاصيل أصناف';
 async function ipLoad(){
   const my=++IP.req, body=document.getElementById('ip-body'); if(!body) return;
   const [f,t]=ipRange();
-  if(!f||!t||f>t){ body.innerHTML='<div class="ip-empty" style="color:#B71C1C">اختار الفترة صح (من تاريخ قبل إلى تاريخ)</div>'; return; }
+  if(!f||!t||f>t){ body.innerHTML='<div class="ip-empty" style="color:#B71C1C">اختار الفترة صح: (من شهر/سنة) لازم يكون قبل (إلى شهر/سنة)</div>'; return; }
   body.innerHTML='<div class="ip-empty"><div class="spinner" style="margin:0 auto 12px"></div>جاري تحميل أداء الأصناف... (الفترات الطويلة بتاخد لحد نص دقيقة)</div>';
   try{
     const f1=ipShiftY(f), t1=ipShiftY(t);
@@ -66348,9 +66372,9 @@ async function ipLoad(){
     document.getElementById('ip-filters').innerHTML=ipMsBar();
     const MS=ipMonths(f,t);
     const ordersOf=(a,b)=>csRpc('item_perf_orders',ipBody(a,b)).then(x=>x&&x.n!=null?+x.n:null).catch(()=>null);
-    const [cur,prev,o2,o1,tg]=await Promise.all([csRpc('item_perf_agg',ipBody(f,t)),csRpc('item_perf_agg',ipBody(f1,t1)).catch(()=>null),ordersOf(f,t),ordersOf(f1,t1),ipTargets(MS)]);
+    const [cur,,prev,o2,o1,tg]=await Promise.all([csRpc('item_perf_agg',ipBody(f,t)),ipLoadCats(),csRpc('item_perf_agg',ipBody(f1,t1)).catch(()=>null),ordersOf(f,t),ordersOf(f1,t1),ipTargets(MS)]);
     if(my!==IP.req) return;
-    IP.D=ipBuild(f,t,f1,t1,MS,cur||{},prev||{},o2,o1,tg); ipRender();
+    IP.raw=[f,t,f1,t1,MS,cur||{},prev||{},o2,o1,tg]; IP.D=ipBuild(...IP.raw); ipRender();
   }catch(e){ if(my!==IP.req) return; console.error('[ipLoad]',e); body.innerHTML='<div class="ip-empty" style="color:#B71C1C">تعذر التحميل: '+ipE(e&&e.message||e)+'</div>'; }
 }
 async function ipTargets(MS){ // هدف المجموعات من rep_targets (بنسبة الأيام لو الشهر جزئي) — {m:{ym:{grp:هدف}}}
@@ -66422,18 +66446,21 @@ function ipGaugeSvg(D){ const p=D.target>0?D.actual/D.target:0, cx=120,cy=120,r=
     ${p>0?`<path d="M${x0} ${y0}A${r} ${r} 0 0 1 ${x1} ${y1}" fill="none" stroke="${p>=1?'#1A7A4A':'#731E2E'}" stroke-width="${w}"/>`:''}
     <text x="${cx}" y="${cy-18}" text-anchor="middle" font-size="30" font-weight="900" fill="#2C1F0A">${D.target>0?(p*100).toFixed(1)+'%':'—'}</text><text x="${cx}" y="${cy+2}" text-anchor="middle" font-size="11.5" font-weight="700" fill="#8B6F47">من الهدف</text></svg>`; }
 function ipTrend(o){ return o.tr>0?'<span class="up">⬆️ طالع</span>':o.tr<0?'<span class="dn">⬇️ نازل</span>':'<span style="color:#8B6F47">➖ ثابت</span>'; }
-function ipRows(L,n0){ const mx=Math.max(1,...L.map(o=>o.net)); return L.map((o,i)=>`<tr class="${o.joker?'jk':''}"><td>${n0+i+1}</td><td class="nm">${o.joker?'⭐ ':''}${ipE(o.n)}</td><td><span class="ip-cat">${ipE(o.cat)}</span></td>
+function ipCatCell(o,pdf){ if(pdf||o.noitem||o.cat!=='غير مصنّف') return `<span class="ip-cat">${ipE(o.cat)}</span>`;
+  return `<select class="ip-cs" data-n="${ipE(o.n)}" onchange="ipSetCat(this.dataset.n,this.value)"><option value="">⚠️ غير مصنّف — اختار</option>${(IP.cats||[]).map(c=>`<option>${ipE(c)}</option>`).join('')}</select>`; }
+function ipRows(L,n0,pdf){ const mx=Math.max(1,...L.map(o=>o.net)); return L.map((o,i)=>`<tr class="${o.joker?'jk':''}"><td>${n0+i+1}</td><td class="nm">${o.joker?'⭐ ':''}${ipE(o.n)}</td><td>${ipCatCell(o,pdf)}</td>
   <td>${ipN(o.net)}</td><td><div style="display:flex;align-items:center;gap:6px"><div class="ip-bar" style="flex:1"><i style="width:${Math.max(0,o.net/mx*100).toFixed(1)}%"></i></div><span style="white-space:nowrap">${(o.sh*100).toFixed(1)}%</span></div></td>
   <td>${ipN(o.q-o.qr)}</td><td>${o.s?(o.r/o.s*100).toFixed(1)+'%':'—'}</td><td>${o.nm} من ${IP.D.MS.length}</td><td>${ipTrend(o)}</td><td>${o.yoy==null?'<span class="up">جديد</span>':`<span class="${o.yoy>=0?'up':'dn'}">${o.yoy>=0?'+':''}${(o.yoy*100).toFixed(1)}%</span>`}</td></tr>`).join(''); }
-const IP_TH='<tr><th>#</th><th style="text-align:right">الصنف</th><th>الفئة</th><th>صافي المبيعات</th><th style="min-width:140px">النسبة</th><th>الكمية</th><th>المرتجع</th><th>شهور البيع</th><th>الاتجاه</th><th>مقابل السنة اللي فاتت</th></tr>';
+const IP_TH='<tr><th>#</th><th style="text-align:right">الصنف</th><th>التصنيف</th><th>صافي المبيعات</th><th style="min-width:140px">النسبة</th><th>الكمية</th><th>المرتجع</th><th>شهور البيع</th><th>الاتجاه</th><th>مقابل السنة اللي فاتت</th></tr>';
 function ipRender(){
   const body=document.getElementById('ip-body'), D=IP.D; if(!body||!D) return;
   if(!D.items.length&&!D.net){ body.innerHTML='<div class="ip-empty">مفيش مبيعات في الفترة والفلاتر دي</div>'; return; }
-  const J=D.items.filter(o=>o.joker), q=IP.q.trim(), R=D.items.filter(o=>!o.joker&&(!q||o.n.includes(q)));
+  const J=D.items.filter(o=>o.joker), q=IP.q.trim(), R=D.items.filter(o=>!o.joker&&(!q||o.n.includes(q))&&(!IP.onlyUnc||o.cat==='غير مصنّف'));
+  const UN=D.items.filter(o=>!o.noitem&&o.cat==='غير مصنّف'), unV=UN.reduce((a,o)=>a+o.net,0);
   document.getElementById('ip-sub').textContent=`${D.f.split('-').reverse().join('/')} → ${D.t.split('-').reverse().join('/')} · مقارنة بـ ${D.f1.split('-').reverse().join('/')} → ${D.t1.split('-').reverse().join('/')}`;
   body.innerHTML=`<div class="ip-kpis">${ipKpis(D)}</div>
   <div class="ip-g2"><div class="ip-c"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px"><h3>صافي المبيعات شهر بشهر</h3><div class="ip-leg"><span><i style="background:#731E2E"></i>${D.f.slice(0,4)}</span><span><i style="background:#E3AE62;height:4px"></i>نفس الشهر السنة اللي فاتت</span></div></div>${ipTrendSvg(D)}</div>
-    <div class="ip-c"><h3>المبيعات حسب فئة الصنف</h3><div style="display:flex;align-items:center;gap:10px">${ipDonutSvg(D)}<div style="flex:1">${ipDonutLeg(D)}</div></div></div></div>
+    <div class="ip-c"><h3>المبيعات حسب التصنيف</h3><div style="display:flex;align-items:center;gap:10px">${ipDonutSvg(D)}<div style="flex:1">${ipDonutLeg(D)}</div></div></div></div>
   <div class="ip-g2" style="grid-template-columns:1.6fr 1fr"><div class="ip-c"><h3>المبيعات حسب المجموعة</h3>${ipGrpHtml(D)}</div>
     <div class="ip-c" style="text-align:center"><h3 style="text-align:right">المبيعات مقابل الهدف</h3>${ipGaugeSvg(D)}
       <div style="display:flex;justify-content:space-around;font-size:12.5px;font-weight:800;color:#8B6F47"><div>المحقق<b style="display:block;font-size:18px;color:#2C1F0A">${ipM(D.actual)}</b></div><div>الهدف<b style="display:block;font-size:18px;color:#2C1F0A">${D.target?ipM(D.target):'—'}</b></div></div>
@@ -66441,10 +66468,10 @@ function ipRender(){
   <div class="ip-c" style="margin-bottom:12px"><h3>⭐ أصناف الجواكر <small>(${J.length} صنف — ${(J.reduce((a,o)=>a+o.sh,0)*100).toFixed(1)}% من البيع)</small></h3>
     <div class="ip-note" style="margin:-2px 0 8px">الأصناف اللي من الأعلى مبيعًا (عاملين 80% من البيع) وباعت في كل شهر من شهور الفترة.</div>
     ${J.length?`<div class="ip-tw"><table class="ip-t"><thead>${IP_TH}</thead><tbody>${ipRows(J,0)}</tbody></table></div>`:'<div class="ip-empty">مفيش صنف باع في كل الشهور ومن الأعلى مبيعًا</div>'}</div>
-  <div class="ip-c"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px"><h3 style="margin:0">باقي الأصناف <small>(${D.items.length-J.length} صنف)</small></h3>
+  <div class="ip-c"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px"><h3 style="margin:0">باقي الأصناف <small>(${D.items.length-J.length} صنف)</small></h3>${UN.length?`<button class="ip-bt" style="background:${IP.onlyUnc?'#731E2E':'#FFF4DC'};color:${IP.onlyUnc?'#fff':'#9A5B00'};border:1px solid #F0D9A8" onclick="IP.onlyUnc=!IP.onlyUnc;ipRender()">${IP.onlyUnc?'↩ اعرض الكل':`⚠️ ${UN.length} صنف غير مصنّف (${ipM(unV)}) — صنّفهم`}</button>`:''}
     <input class="ip-q" placeholder="🔍 دوّر على صنف..." value="${ipE(IP.q)}" oninput="IP.q=this.value;clearTimeout(IP._qt);IP._qt=setTimeout(ipRender,250)"></div>
     <div class="ip-tw"><table class="ip-t"><thead>${IP_TH}</thead><tbody>${ipRows(R,J.length)}</tbody></table></div></div>
-  <div class="ip-note">📌 المبيعات من تقرير مبيعات السلاسل (بعد الخصم، من غير ضريبة). فئة الصنف متحسوبة من اسمه. الاتجاه = متوسط النص التاني من الفترة مقابل النص الأول (±10%).</div>`;
+  <div class="ip-note">📌 المبيعات من تقرير مبيعات السلاسل (بعد الخصم، من غير ضريبة). التصنيف من كتالوج الأصناف (الأصناف اللي مش في الكتالوج = غير مصنّف). الاتجاه = متوسط النص التاني من الفترة مقابل النص الأول (±10%).</div>`;
   if(q){ const e=document.querySelector('#ip-root .ip-q'); if(e){ e.focus(); e.setSelectionRange(e.value.length,e.value.length); } }
 }
 
@@ -66459,8 +66486,8 @@ async function ipPdfBlob(){
     <div style="font-size:10.5px;color:#F0D9B0;text-align:left">الطحان جولدن داتس<br>${new Date().toLocaleDateString('en-GB')}</div></div>
     <div style="background:#F3EBDD;border-radius:0 0 10px 10px;padding:5px 12px;font-size:10.5px;color:#5C4A2A;margin-bottom:10px">${ipE(D.filters)}</div>`;
   const page=(inner)=>`<div style="width:${W}px;height:${H}px;padding:18px 22px;box-sizing:border-box;background:#FFFCF6;direction:rtl;font-family:Cairo,sans-serif;color:#2C1F0A;overflow:hidden">${inner}</div>`;
-  const tbl=(L,n0)=>`<table class="ip-t" style="font-size:11px"><thead>${IP_TH}</thead><tbody>${ipRows(L,n0)}</tbody></table>`;
-  const pages=[page(head('')+`<div class="ip-kpis">${ipKpis(D)}</div><div class="ip-g2"><div class="ip-c"><h3>صافي المبيعات شهر بشهر</h3>${ipTrendSvg(D)}</div><div class="ip-c"><h3>حسب فئة الصنف</h3><div style="display:flex;align-items:center;gap:8px">${ipDonutSvg(D)}<div style="flex:1">${ipDonutLeg(D)}</div></div></div></div>
+  const tbl=(L,n0)=>`<table class="ip-t" style="font-size:11px"><thead>${IP_TH}</thead><tbody>${ipRows(L,n0,1)}</tbody></table>`;
+  const pages=[page(head('')+`<div class="ip-kpis">${ipKpis(D)}</div><div class="ip-g2"><div class="ip-c"><h3>صافي المبيعات شهر بشهر</h3>${ipTrendSvg(D)}</div><div class="ip-c"><h3>حسب التصنيف</h3><div style="display:flex;align-items:center;gap:8px">${ipDonutSvg(D)}<div style="flex:1">${ipDonutLeg(D)}</div></div></div></div>
     <div class="ip-g2"><div class="ip-c"><h3>حسب المجموعة</h3>${ipGrpHtml(D)}</div><div class="ip-c" style="text-align:center"><h3 style="text-align:right">مقابل الهدف</h3>${ipGaugeSvg(D)}<div style="font-size:12px;font-weight:800">المحقق ${ipM(D.actual)} · الهدف ${D.target?ipM(D.target):'—'}</div></div></div>`)];
   const per=17; for(let i=0;i<J.length;i+=per) pages.push(page(head('⭐ أصناف الجواكر')+`<div class="ip-c">${tbl(J.slice(i,i+per),i)}</div>`));
   for(let i=0;i<R.length;i+=per) pages.push(page(head('باقي الأصناف')+`<div class="ip-c">${tbl(R.slice(i,i+per),J.length+i)}</div>`));
@@ -66509,10 +66536,10 @@ async function ipExcelBlob(){
   sheet('الشهور','صافي المبيعات شهر بشهر',['الشهر','مبيعات','مرتجع','صافي','صافي السنة اللي فاتت','التغيير'],
     D.months.map(m=>({v:[IP_MON[+m.ym.slice(5)-1]+' '+m.ym.slice(0,4),Math.round(m.s),Math.round(m.r),Math.round(m.s-m.r),Math.round(m.ps-m.pr),ch(m.s-m.r,m.ps-m.pr)]})).concat([{v:['الإجمالي',Math.round(D.tot.s),Math.round(D.tot.r),Math.round(D.net),Math.round(D.pnet),ch(D.net,D.pnet)],t:1}]),[20,16,14,16,22,12],{pct:[6],colorCol:6,boldCol:1});
   const ct=D.cats.reduce((a,c)=>a+c[1],0)||1;
-  sheet('الفئات','المبيعات حسب فئة الصنف',['الفئة','صافي المبيعات','النسبة'],D.cats.map(c=>({v:[c[0],Math.round(c[1]),c[1]/ct]})),[24,18,12],{pct:[3],boldCol:1});
+  sheet('التصنيفات','المبيعات حسب التصنيف',['التصنيف','صافي المبيعات','النسبة'],D.cats.map(c=>({v:[c[0],Math.round(c[1]),c[1]/ct]})),[24,18,12],{pct:[3],boldCol:1});
   sheet('المجموعات','المبيعات حسب المجموعة',['المجموعة','صافي المبيعات','السنة اللي فاتت','التغيير','النسبة'],
     D.grp.filter(g=>Math.abs(g.s-g.r)>0.5||Math.abs(g.ps-g.pr)>0.5).map(g=>({v:[csGrpLbl(g.g),Math.round(g.s-g.r),Math.round(g.ps-g.pr),ch(g.s-g.r,g.ps-g.pr),D.net?(g.s-g.r)/D.net:0]})),[28,18,18,12,12],{pct:[4,5],colorCol:4,boldCol:1});
-  const ih=['#','الصنف','الفئة','صافي المبيعات','النسبة','الكمية','نسبة المرتجع','شهور البيع','الاتجاه','مقابل السنة اللي فاتت'];
+  const ih=['#','الصنف','التصنيف','صافي المبيعات','النسبة','الكمية','نسبة المرتجع','شهور البيع','الاتجاه','مقابل السنة اللي فاتت'];
   const ir=(L,n0)=>L.map((o,i)=>({j:o.joker,v:[n0+i+1,o.n,o.cat,Math.round(o.net),o.sh,Math.round(o.q-o.qr),o.s?o.r/o.s:0,`${o.nm} من ${D.MS.length}`,o.tr>0?'⬆️ طالع':o.tr<0?'⬇️ نازل':'➖ ثابت',o.yoy]}));
   const J=D.items.filter(o=>o.joker), R=D.items.filter(o=>!o.joker), iw=[6,44,16,16,10,12,12,12,12,16], io={txt:2,pct:[5,7,10],colorCol:10,boldCol:2};
   sheet('أصناف الجواكر','⭐ أصناف الجواكر — الأعلى مبيعًا وباعت في كل شهور الفترة',ih,ir(J,0),iw,io);
