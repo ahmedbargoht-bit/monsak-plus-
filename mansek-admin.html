@@ -66251,6 +66251,7 @@ async function ibxHolSaveSug(y){
 #ip-root table.ip-dt2 th{background:#8B5A3C;position:static}
 #ip-root tr.ip-dc:hover td{background:#FBF4E6}
 #ip-root tr.ip-ds td{background:#FAF6EE;font-size:12px;color:#5C4A2A}
+#ip-root .ip-pp{width:92px;font-family:inherit;font-size:11.5px;padding:3px 6px;border:1.5px solid #F0C27A;border-radius:7px;background:#FFF8EA;text-align:center}
 #ip-root .ip-q{padding:6px 10px;border:1.5px solid var(--ipl);border-radius:8px;font-family:inherit;width:220px}
 #ip-send{position:fixed;inset:0;background:rgba(30,15,5,.5);z-index:100050;display:flex;align-items:center;justify-content:center;direction:rtl;font-family:Cairo,sans-serif}
 #ip-send .in{background:#FFFCF6;border-radius:16px;padding:18px;width:min(420px,92vw);border-top:6px solid #731E2E;box-shadow:0 12px 40px rgba(0,0,0,.3)}
@@ -66288,10 +66289,23 @@ function ipNorm(x){ return String(x||'').replace(/\s+/g,' ').trim(); }
 function ipCat(n){ const k=ipNorm(n), M=IP.catMap||{}; return M[k]||M[(IP.alias||{})[k]]||'غير مصنّف'; } // الفئة من كتالوج الأصناف (tamr_sales_item_catalog.category) + الأسماء البديلة
 async function ipLoadCats(){ if(IP.catMap) return;
   try{ const H={'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const [c,a]=await Promise.all([fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?select=item_name,category&limit=5000`,{headers:H}).then(r=>r.ok?r.json():[]),
+    const [c,a]=await Promise.all([fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?select=item_name,category,pieces_per_carton&limit=5000`,{headers:H}).then(r=>r.ok?r.json():[]),
       fetch(`${SUPABASE_URL}/rest/v1/item_name_aliases?select=alias_name,canonical_name&limit=5000`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[])]);
     const M={}, A={}; (c||[]).forEach(x=>{ if(x.category) M[ipNorm(x.item_name)]=String(x.category).trim(); }); (a||[]).forEach(x=>{ A[ipNorm(x.alias_name)]=ipNorm(x.canonical_name); });
-    IP.catMap=M; IP.alias=A; IP.catRows=c||[]; IP.cats=[...new Set([...Object.values(M),...IP_EXTRA_CATS])].sort((x,y)=>x.localeCompare(y,'ar')); }catch(e){ IP.catMap={}; IP.alias={}; IP.cats=[]; } }
+    const P={}; (c||[]).forEach(x=>{ const v=+x.pieces_per_carton; if(v>0) P[ipNorm(x.item_name)]=v; }); IP.ppcMap=P;
+    IP.catMap=M; IP.alias=A; IP.catRows=c||[]; IP.cats=[...new Set([...Object.values(M),...IP_EXTRA_CATS])].sort((x,y)=>x.localeCompare(y,'ar')); }catch(e){ IP.catMap={}; IP.alias={}; IP.cats=[]; IP.ppcMap={}; } }
+// عدد القطع في الكرتونة (من الكتالوج) — الكمية في البيانات بالقطعة
+function ipPpc(n){ const k=ipNorm(n), M=IP.ppcMap||{}; return M[k]||M[(IP.alias||{})[k]]||null; }
+function ipCtn(n,q){ const p=ipPpc(n); return p?q/p:null; }
+function ipCtnCell(o,pdf){ const c=ipCtn(o.n,o.q-o.qr); if(c!=null) return ipN(c); if(pdf) return '—';
+  return `<input class="ip-pp" type="number" min="1" placeholder="قطع/كرتونة" title="عدد القطع في الكرتونة — بيتحفظ في الكتالوج" data-n="${ipE(o.n)}" onclick="event.stopPropagation()" onchange="ipSetPpc(this.dataset.n,this.value)">`; }
+async function ipSetPpc(name,v){ v=Math.round(+v); if(!(v>0)){ showToast('اكتب رقم صحيح'); return; }
+  const k=ipNorm(name), canon=(IP.alias||{})[k], row=(IP.catRows||[]).find(r=>ipNorm(r.item_name)===canon)||(IP.catRows||[]).find(r=>ipNorm(r.item_name)===k), target=row?row.item_name:name;
+  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_item_catalog?on_conflict=item_name`,{method:'POST',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=minimal'},body:JSON.stringify([{item_name:target,pieces_per_carton:v}])});
+    if(!r.ok) throw new Error('HTTP '+r.status+' '+(await r.text()).slice(0,120));
+    (IP.ppcMap=IP.ppcMap||{})[ipNorm(target)]=v; IP.ppcMap[k]=v; if(!row) (IP.catRows=IP.catRows||[]).push({item_name:name});
+    showToast(`✅ ${name.slice(0,30)}: ${v} قطعة في الكرتونة`); ipKeepScroll(ipRender); }
+  catch(e){ showToast('❌ تعذر الحفظ: '+e.message,5000); } }
 // تصنيف صنف مش في الكتالوج: لو ليه اسم بديل موجود في الكتالوج بيتحدّث تصنيف الاسم ده، غير كده بيتضاف للكتالوج باسمه ده
 async function ipSetCat(name,cat){ if(cat==='__new'){ cat=(prompt(`اسم التصنيف الجديد لـ "${name}":`,'')||'').trim(); if(!cat){ ipRender(); return; } } if(!cat) return;
   const k=ipNorm(name), canon=(IP.alias||{})[k], row=(IP.catRows||[]).find(r=>ipNorm(r.item_name)===canon)||(IP.catRows||[]).find(r=>ipNorm(r.item_name)===k);
@@ -66459,7 +66473,7 @@ function ipCatCell(o,pdf){ if(pdf||o.noitem||o.cat!=='غير مصنّف') return
   return `<select class="ip-cs" data-n="${ipE(o.n)}" onclick="event.stopPropagation()" onchange="ipSetCat(this.dataset.n,this.value)"><option value="">⚠️ غير مصنّف — اختار</option>${(IP.cats||[]).map(c=>`<option>${ipE(c)}</option>`).join('')}<option value="__new">➕ تصنيف جديد...</option></select>`; }
 function ipRows(L,n0,pdf){ const mx=Math.max(1,...L.map(o=>o.net)); return L.map((o,i)=>`<tr class="${o.joker?'jk':''}${!pdf&&IP.openItem===o.n?' op':''}"${pdf?'':` style="cursor:pointer" title="اضغط تشوف العملاء اللي خدوا الصنف ده" data-n="${ipE(o.n)}" onclick="ipItemToggle(this.dataset.n)"`}><td>${n0+i+1}</td><td class="nm">${pdf?'':`<span style="color:#C9A46A;font-size:11px">${IP.openItem===o.n?'▼':'◀'}</span> `}${o.joker?'⭐ ':''}${ipE(o.n)}</td><td>${ipCatCell(o,pdf)}</td>
   <td>${ipN(o.net)}</td><td><div style="display:flex;align-items:center;gap:6px"><div class="ip-bar" style="flex:1"><i style="width:${Math.max(0,o.net/mx*100).toFixed(1)}%"></i></div><span style="white-space:nowrap">${(o.sh*100).toFixed(1)}%</span></div></td>
-  <td>${ipN(o.q-o.qr)}</td><td>${o.s?(o.r/o.s*100).toFixed(1)+'%':'—'}</td><td>${o.nm} من ${IP.D.MS.length}</td><td>${ipTrend(o)}</td><td>${o.yoy==null?'<span class="up">جديد</span>':`<span class="${o.yoy>=0?'up':'dn'}">${o.yoy>=0?'+':''}${(o.yoy*100).toFixed(1)}%</span>`}</td></tr>${!pdf&&IP.openItem===o.n?ipDetRow(o):''}`).join(''); }
+  <td>${ipN(o.q-o.qr)}</td><td>${ipCtnCell(o,pdf)}</td><td>${o.s?(o.r/o.s*100).toFixed(1)+'%':'—'}</td><td>${o.nm} من ${IP.D.MS.length}</td><td>${ipTrend(o)}</td><td>${o.yoy==null?'<span class="up">جديد</span>':`<span class="${o.yoy>=0?'up':'dn'}">${o.yoy>=0?'+':''}${(o.yoy*100).toFixed(1)}%</span>`}</td></tr>${!pdf&&IP.openItem===o.n?ipDetRow(o):''}`).join(''); }
 // ── تفاصيل الصنف: العملاء اللي خدوه ← فروع كل عميل ──
 function ipItemToggle(n){ IP.openItem=IP.openItem===n?null:n; IP.openCust=new Set();
   if(IP.openItem&&!IP.det[n]){ IP.det[n]='loading'; const [f,t]=ipRange(), my=IP.req;
@@ -66468,7 +66482,7 @@ function ipItemToggle(n){ IP.openItem=IP.openItem===n?null:n; IP.openCust=new Se
   ipKeepScroll(ipRender); }
 function ipCustToggle(c){ if(IP.openCust.has(c)) IP.openCust.delete(c); else IP.openCust.add(c); ipKeepScroll(ipRender); }
 function ipDetRow(o){
-  const d=IP.det[o.n], wrap=x=>`<tr class="ip-det"><td colspan="10" onclick="event.stopPropagation()">${x}</td></tr>`;
+  const d=IP.det[o.n], wrap=x=>`<tr class="ip-det"><td colspan="11" onclick="event.stopPropagation()">${x}</td></tr>`;
   if(!d||d==='loading') return wrap('<div style="padding:14px;text-align:center;color:#8B6F47">⏳ جاري تحميل العملاء...</div>');
   if(d.err) return wrap(`<div style="padding:10px;color:#B71C1C">❌ ${ipE(d.err)}</div>`);
   const C=(d.cust||[]).map(x=>({c:x[0],q:(+x[1]||0)-(+x[3]||0),s:+x[2]||0,r:+x[4]||0})).map(x=>(x.net=x.s-x.r,x)).filter(x=>Math.abs(x.net)>0.5||x.r>0.5).sort((a,b)=>b.net-a.net);
@@ -66476,11 +66490,11 @@ function ipDetRow(o){
   const tot=C.reduce((a,x)=>a+x.net,0)||1, mx=Math.max(1,...C.map(x=>x.net));
   const row=(x,i)=>{ const op=IP.openCust.has(x.c), sites=(S[x.c]||[]).filter(y=>Math.abs(y.net)>0.5||y.r>0.5).sort((a,b)=>b.net-a.net);
     return `<tr class="ip-dc" style="cursor:pointer" data-c="${ipE(x.c)}" onclick="ipCustToggle(this.dataset.c)"><td>${i+1}</td><td class="nm"><span style="color:#C9A46A;font-size:11px">${op?'▼':'◀'}</span> ${ipE(x.c)} <small style="color:#8B6F47">(${sites.length} فرع)</small></td><td>${ipN(x.net)}</td>
-      <td><div style="display:flex;align-items:center;gap:6px"><div class="ip-bar" style="flex:1"><i style="width:${Math.max(0,x.net/mx*100).toFixed(1)}%"></i></div><span style="white-space:nowrap">${(x.net/tot*100).toFixed(1)}%</span></div></td><td>${ipN(x.q)}</td><td>${x.s?(x.r/x.s*100).toFixed(1)+'%':'—'}</td></tr>`
-      +(op?sites.map(y=>`<tr class="ip-ds"><td></td><td class="nm">↳ ${ipE(y.st)}</td><td>${ipN(y.net)}</td><td>${x.net?(y.net/x.net*100).toFixed(1)+'% <small style="color:#8B6F47">من العميل</small>':'—'}</td><td>${ipN(y.q)}</td><td>${y.s?(y.r/y.s*100).toFixed(1)+'%':'—'}</td></tr>`).join(''):''); };
+      <td><div style="display:flex;align-items:center;gap:6px"><div class="ip-bar" style="flex:1"><i style="width:${Math.max(0,x.net/mx*100).toFixed(1)}%"></i></div><span style="white-space:nowrap">${(x.net/tot*100).toFixed(1)}%</span></div></td><td>${ipN(x.q)}</td><td>${ipCtn(o.n,x.q)==null?'—':ipN(ipCtn(o.n,x.q))}</td><td>${x.s?(x.r/x.s*100).toFixed(1)+'%':'—'}</td></tr>`
+      +(op?sites.map(y=>`<tr class="ip-ds"><td></td><td class="nm">↳ ${ipE(y.st)}</td><td>${ipN(y.net)}</td><td>${x.net?(y.net/x.net*100).toFixed(1)+'% <small style="color:#8B6F47">من العميل</small>':'—'}</td><td>${ipN(y.q)}</td><td>${ipCtn(o.n,y.q)==null?'—':ipN(ipCtn(o.n,y.q))}</td><td>${y.s?(y.r/y.s*100).toFixed(1)+'%':'—'}</td></tr>`).join(''):''); };
   return wrap(`<div class="ip-detbox"><div style="font-weight:900;color:#731E2E;margin-bottom:6px">👥 العملاء اللي خدوا "${ipE(o.n)}" <small style="color:#8B6F47;font-weight:700">(${C.length} عميل — اضغط على العميل تشوف فروعه)</small></div>
-    ${C.length?`<table class="ip-t ip-dt2"><thead><tr><th>#</th><th style="text-align:right">العميل</th><th>صافي المبيعات</th><th style="min-width:140px">النسبة</th><th>الكمية</th><th>المرتجع</th></tr></thead><tbody>${C.map(row).join('')}</tbody></table>`:'<div style="color:#8B6F47">مفيش عملاء في الفترة دي</div>'}</div>`); }
-const IP_TH='<tr><th>#</th><th style="text-align:right">الصنف</th><th>التصنيف</th><th>صافي المبيعات</th><th style="min-width:140px">النسبة</th><th>الكمية</th><th>المرتجع</th><th>شهور البيع</th><th>الاتجاه</th><th>مقابل السنة اللي فاتت</th></tr>';
+    ${C.length?`<table class="ip-t ip-dt2"><thead><tr><th>#</th><th style="text-align:right">العميل</th><th>صافي المبيعات</th><th style="min-width:140px">النسبة</th><th>الكمية (قطعة)</th><th>الكمية (كرتونة)</th><th>المرتجع</th></tr></thead><tbody>${C.map(row).join('')}</tbody></table>`:'<div style="color:#8B6F47">مفيش عملاء في الفترة دي</div>'}</div>`); }
+const IP_TH='<tr><th>#</th><th style="text-align:right">الصنف</th><th>التصنيف</th><th>صافي المبيعات</th><th style="min-width:140px">النسبة</th><th>الكمية (قطعة)</th><th>الكمية (كرتونة)</th><th>المرتجع</th><th>شهور البيع</th><th>الاتجاه</th><th>مقابل السنة اللي فاتت</th></tr>';
 function ipRender(){
   const body=document.getElementById('ip-body'), D=IP.D; if(!body||!D) return;
   if(!D.items.length&&!D.net){ body.innerHTML='<div class="ip-empty">مفيش مبيعات في الفترة والفلاتر دي</div>'; return; }
@@ -66568,9 +66582,9 @@ async function ipExcelBlob(){
   sheet('التصنيفات','المبيعات حسب التصنيف',['التصنيف','صافي المبيعات','النسبة'],D.cats.map(c=>({v:[c[0],Math.round(c[1]),c[1]/ct]})),[24,18,12],{pct:[3],boldCol:1});
   sheet('المجموعات','المبيعات حسب المجموعة',['المجموعة','صافي المبيعات','السنة اللي فاتت','التغيير','النسبة'],
     D.grp.filter(g=>Math.abs(g.s-g.r)>0.5||Math.abs(g.ps-g.pr)>0.5).map(g=>({v:[csGrpLbl(g.g),Math.round(g.s-g.r),Math.round(g.ps-g.pr),ch(g.s-g.r,g.ps-g.pr),D.net?(g.s-g.r)/D.net:0]})),[28,18,18,12,12],{pct:[4,5],colorCol:4,boldCol:1});
-  const ih=['#','الصنف','التصنيف','صافي المبيعات','النسبة','الكمية','نسبة المرتجع','شهور البيع','الاتجاه','مقابل السنة اللي فاتت'];
-  const ir=(L,n0)=>L.map((o,i)=>({j:o.joker,v:[n0+i+1,o.n,o.cat,Math.round(o.net),o.sh,Math.round(o.q-o.qr),o.s?o.r/o.s:0,`${o.nm} من ${D.MS.length}`,o.tr>0?'⬆️ طالع':o.tr<0?'⬇️ نازل':'➖ ثابت',o.yoy]}));
-  const J=D.items.filter(o=>o.joker), R=D.items.filter(o=>!o.joker), iw=[6,44,16,16,10,12,12,12,12,16], io={txt:2,pct:[5,7,10],colorCol:10,boldCol:2};
+  const ih=['#','الصنف','التصنيف','صافي المبيعات','النسبة','الكمية (قطعة)','الكمية (كرتونة)','نسبة المرتجع','شهور البيع','الاتجاه','مقابل السنة اللي فاتت'];
+  const ir=(L,n0)=>L.map((o,i)=>({j:o.joker,v:[n0+i+1,o.n,o.cat,Math.round(o.net),o.sh,Math.round(o.q-o.qr),ipCtn(o.n,o.q-o.qr)==null?null:Math.round(ipCtn(o.n,o.q-o.qr)),o.s?o.r/o.s:0,`${o.nm} من ${D.MS.length}`,o.tr>0?'⬆️ طالع':o.tr<0?'⬇️ نازل':'➖ ثابت',o.yoy]}));
+  const J=D.items.filter(o=>o.joker), R=D.items.filter(o=>!o.joker), iw=[6,44,16,16,10,13,13,12,12,12,16], io={txt:2,pct:[5,8,11],colorCol:11,boldCol:2};
   sheet('أصناف الجواكر','⭐ أصناف الجواكر — الأعلى مبيعًا وباعت في كل شهور الفترة',ih,ir(J,0),iw,io);
   sheet('باقي الأصناف','باقي الأصناف',ih,ir(R,J.length),iw,io);
   const buf=await wb.xlsx.writeBuffer();
