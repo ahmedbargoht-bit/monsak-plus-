@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal
 set "FILE=%~dp0mt-admin.html"
 set "URL=file:///%FILE:\=/%"
