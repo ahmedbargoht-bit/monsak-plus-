@@ -19,6 +19,93 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
+<script>/* MT-DIGITS v1 (12/11/2026) — كل الأرقام في السيستم إنجليزي 0-9 (الشهور والأيام تفضل بالعربي: "12 نوفمبر 2026")
+   1) المصدر: أي تنسيق بلغة عربية (ar / ar-EG ...) بياخد -u-nu-latn تلقائي — toLocaleString / toLocaleDateString / toLocaleTimeString / Intl.NumberFormat / Intl.DateTimeFormat
+   2) شبكة أمان: أي رقم عربي (٠-٩ / ۰-۹) يظهر في الصفحة أو يتكتب في خانة بيتحوّل — وكمان نوافذ الطباعة، والملفات النصية (CSV)، والمشاركة
+   window.mtEnDigits(نص) متاحة لأي كود محتاجها. ماتشيلش البلوك ده — لازم يفضل أول سكريبت في الصفحة. */
+(function(){
+  if(window.__mtDigits) return; window.__mtDigits=1;
+  var RE=/[٠-٬۰-۹]/, REG=/[٠-٬۰-۹]/g;
+  var MAP={'٪':'%','٫':'.','٬':','};
+  function en(s){
+    if(typeof s!=='string' || !RE.test(s)) return s;
+    return s.replace(REG,function(c){ var k=c.charCodeAt(0); if(MAP[c]) return MAP[c]; return String.fromCharCode(48+(k>=0x6F0?k-0x6F0:k-0x660)); });
+  }
+  window.mtEnDigits=en;
+  function fixOne(l){
+    if(typeof l!=='string' || !/^ar\b/i.test(l) || /-nu-/i.test(l)) return l;
+    return /-u-/i.test(l) ? l+'-nu-latn' : l+'-u-nu-latn';
+  }
+  function fixLoc(l){ return Array.isArray(l) ? l.map(fixOne) : fixOne(l); }
+  function fixOpt(o){ if(o && typeof o==='object' && o.numberingSystem && o.numberingSystem!=='latn'){ o=Object.assign({},o); o.numberingSystem='latn'; } return o; }
+  // (1) toLocale*String
+  function wrap(proto,name){
+    var f=proto[name]; if(!f) return;
+    proto[name]=function(l,o){ return en(f.call(this,fixLoc(l),fixOpt(o))); };
+  }
+  wrap(Number.prototype,'toLocaleString'); wrap(Date.prototype,'toLocaleString');
+  wrap(Date.prototype,'toLocaleDateString'); wrap(Date.prototype,'toLocaleTimeString');
+  try{ if(typeof BigInt!=='undefined') wrap(BigInt.prototype,'toLocaleString'); }catch(e){}
+  // (1) Intl.NumberFormat / Intl.DateTimeFormat
+  function wrapCtor(name){
+    var O=Intl[name]; if(!O) return;
+    var W=function(l,o){ return new O(fixLoc(l),fixOpt(o)); };
+    W.prototype=O.prototype; W.supportedLocalesOf=O.supportedLocalesOf.bind(O);
+    try{ Intl[name]=W; }catch(e){}
+  }
+  wrapCtor('NumberFormat'); wrapCtor('DateTimeFormat');
+  // (2) شبكة أمان على الصفحة
+  function fixNode(n){
+    if(!n) return;
+    if(n.nodeType===3){ if(RE.test(n.nodeValue)) n.nodeValue=en(n.nodeValue); return; }
+    if(n.nodeType!==1 || n.tagName==='SCRIPT' || n.tagName==='STYLE') return;
+    if((n.tagName==='INPUT'||n.tagName==='TEXTAREA') && n.value && RE.test(n.value)) n.value=en(n.value);
+    var t=n.textContent; if(!t || !RE.test(t)) return;
+    var w=document.createTreeWalker(n,4,null), x; while((x=w.nextNode())){ if(RE.test(x.nodeValue)) x.nodeValue=en(x.nodeValue); }
+  }
+  function start(){
+    fixNode(document.body);
+    new MutationObserver(function(ms){
+      for(var i=0;i<ms.length;i++){ var m=ms[i];
+        if(m.type==='characterData') fixNode(m.target);
+        else for(var j=0;j<m.addedNodes.length;j++) fixNode(m.addedNodes[j]);
+      }
+    }).observe(document.body,{childList:true,subtree:true,characterData:true});
+  }
+  if(document.body) start(); else document.addEventListener('DOMContentLoaded',start);
+  // الكتابة في الخانات (بحث، مبالغ، تليفونات ...)
+  document.addEventListener('input',function(e){
+    var el=e.target; if(!el || !('value' in el) || typeof el.value!=='string' || !RE.test(el.value)) return;
+    var p=null; try{ p=el.selectionStart; }catch(_){}
+    el.value=en(el.value);
+    try{ if(p!=null) el.setSelectionRange(p,p); }catch(_){}
+  },true);
+  // (3) نوافذ الطباعة/التقارير (window.open + document.write)
+  var oOpen=window.open;
+  window.open=function(){
+    var w=oOpen.apply(window,arguments);
+    try{ if(w && w.document && !w.__mtDigits){ w.__mtDigits=1; var d=w.document, dw=d.write, dwl=d.writeln;
+      d.write=function(){ return dw.apply(d,[].map.call(arguments,en)); };
+      d.writeln=function(){ return dwl.apply(d,[].map.call(arguments,en)); }; } }catch(_){}
+    return w;
+  };
+  // (3) الملفات النصية (CSV / TXT / HTML) والمشاركة
+  try{
+    var OB=window.Blob;
+    var NB=function(parts,opt){
+      var tp=(opt&&opt.type)||'';
+      if(Array.isArray(parts) && /^text\/|csv|html/i.test(tp)) parts=parts.map(en);
+      return new OB(parts,opt);
+    };
+    NB.prototype=OB.prototype; window.Blob=NB;
+  }catch(_){}
+  try{
+    if(navigator.share){ var sh=navigator.share.bind(navigator);
+      navigator.share=function(d){ if(d && typeof d==='object'){ d=Object.assign({},d); if(d.text) d.text=en(d.text); if(d.title) d.title=en(d.title); } return sh(d); }; }
+  }catch(_){}
+})();
+</script>
+
 <meta charset="UTF-8"/>
 
 <script id="sb-guard">
@@ -65916,7 +66003,8 @@ function sdvRender(){
 // لوحة التحكم بتفتح من غير بوب أب. كل التنبيهات بقت رسايل جوه الصندوق، والشارة = عدد الرسايل الجديدة.
 // الرسايل: (1) مناديب مسجلوش فواتير توريد ولا مرتجعات النهارده — بتتحدّث كل دقيقة، ومتوقفة الجمعة والإجازات الرسمية
 //          (2) مواقع الفروع — branch_loc_overview   (3) الأماكن الشاغرة — vacancy_overview   (4) صحة السيرفر — db_health
-// الإجازات: جدول public_holidays (day, name) — بيتعدّل من زرار "الإجازات الرسمية" جوه رسالة المناديب.
+// الإجازات: جدول holidays (date, name, type, month, grp) — نفس جدول تاب "الإجازات" في الضبط. الصندوق بيقرا الإجازات العامة بس (grp فاضي)
+// وبيتعدّل من زرار "الإجازات الرسمية" جوه رسالة المناديب. (جدول public_holidays القديم اتلغى 12/11/2026)
 // "جديدة" = بصمة الرسالة (sig) اتغيرت عن آخر مرة الصندوق اتفتح (localStorage ibx_seen).
 const IBX={msgs:[], open:{}, reps:null, hol:null, holErr:null, today:null, timer:null, slowAt:0, busy:false, upd:null};
 const IBX_POLL_MS=60*1000, IBX_SLOW_MS=15*60*1000;
@@ -65935,7 +66023,7 @@ function ibxGet(path){ return fetch(`${SUPABASE_URL}/rest/v1/${path}`,{headers:s
 
 // ── الإجازات ──
 async function ibxLoadHol(){
-  try{ IBX.hol=await ibxGet('public_holidays?select=day,name,added_by&order=day.asc&limit=1000'); IBX.holErr=null; }
+  try{ IBX.hol=(await ibxGet('holidays?select=id,date,name,type&grp=is.null&order=date.asc&limit=2000')).map(h=>({id:h.id,day:h.date,name:h.name||h.type||'إجازة'})); IBX.holErr=null; }
   catch(e){ IBX.hol=IBX.hol||[]; IBX.holErr=e.message; }
   return IBX.hol;
 }
@@ -66108,15 +66196,21 @@ async function ibxTodayOff(on){
 }
 async function ibxHolUpsert(rows){
   try{
-    const who=(typeof CU!=='undefined'&&CU&&CU.name)||'admin';
-    const r=await fetch(`${SUPABASE_URL}/rest/v1/public_holidays?on_conflict=day`,{method:'POST',headers:{...srrH(true),'Prefer':'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(rows.map(x=>({day:x.day,name:x.name,added_by:who})))});
-    if(!r.ok) throw new Error('HTTP '+r.status+' '+(await r.text()).slice(0,120));
+    // جدول holidays مالوش unique على التاريخ — اليوم الموجود (إجازة عامة) بيتعدّل اسمه، والجديد بيتضاف
+    const days=rows.map(x=>x.day);
+    const ex=await ibxGet(`holidays?select=id,date&grp=is.null&date=in.(${days.join(',')})`);
+    const has={}; ex.forEach(h=>{ if(!has[h.date]) has[h.date]=h.id; });
+    const add=rows.filter(x=>!has[x.day]).map(x=>({date:x.day,name:x.name,type:'رسمية',month:x.day.slice(0,7)}));
+    if(add.length){ const r=await fetch(`${SUPABASE_URL}/rest/v1/holidays`,{method:'POST',headers:{...srrH(true),'Prefer':'return=minimal'},body:JSON.stringify(add)});
+      if(!r.ok) throw new Error('HTTP '+r.status+' '+(await r.text()).slice(0,120)); }
+    for(const x of rows.filter(x=>has[x.day])){ const r=await fetch(`${SUPABASE_URL}/rest/v1/holidays?id=eq.${has[x.day]}`,{method:'PATCH',headers:{...srrH(true),'Prefer':'return=minimal'},body:JSON.stringify({name:x.name})});
+      if(!r.ok) throw new Error('HTTP '+r.status+' '+(await r.text()).slice(0,120)); }
     showToast(`✅ اتحفظ (${rows.length})`); return true;
-  }catch(e){ showToast('❌ '+(/42P01|does not exist|404/.test(e.message)?'جدول الإجازات مش موجود — شغّل SQL بتاع public_holidays الأول':e.message),5000); return false; }
+  }catch(e){ showToast('❌ '+e.message,5000); return false; }
 }
 async function ibxHolDelete(day){
   try{
-    const r=await fetch(`${SUPABASE_URL}/rest/v1/public_holidays?day=eq.${day}`,{method:'DELETE',headers:{...srrH(),'Prefer':'return=minimal'}});
+    const r=await fetch(`${SUPABASE_URL}/rest/v1/holidays?date=eq.${day}&grp=is.null`,{method:'DELETE',headers:{...srrH(),'Prefer':'return=minimal'}});
     if(!r.ok) throw new Error('HTTP '+r.status+' '+(await r.text()).slice(0,120));
     showToast('🗑️ اتشالت'); return true;
   }catch(e){ showToast('❌ '+e.message,5000); return false; }
@@ -66156,7 +66250,7 @@ function ibxHolRender(sugY){
   const today=ibxDay(), y=+today.slice(0,4), H=IBX.hol||[], up=H.filter(h=>h.day>=today), past=H.filter(h=>h.day<today && h.day.slice(0,4)==String(y));
   const row=(h,cls)=>`<tr class="${cls||''}"><td style="white-space:nowrap">${ibxDayAr(h.day)}</td><td>${ibxE(h.name)}</td><td style="width:30px"><button class="del" title="شيل" onclick="ibxHolDel('${h.day}')">🗑️</button></td></tr>`;
   let h=`<div class="hint">رسالة "المناديب اللي مسجلوش فواتير" مابتظهرش الجمعة ولا في الأيام دي. لو الحكومة رحّلت إجازة لخميس أو أحد، عدّل التاريخ هنا.</div>`;
-  if(IBX.holErr) h+=`<div class="warn">⚠️ جدول الإجازات مش موجود لسه في قاعدة البيانات — لازم يتشغّل ملف SQL بتاع public_holidays الأول.</div>`;
+  if(IBX.holErr) h+=`<div class="warn">⚠️ مقدرتش أقرا جدول الإجازات: ${ibxE(IBX.holErr)}</div>`;
   h+=`<div class="row"><input type="date" id="ibx-hd" value="${today}"><input type="text" id="ibx-hn" placeholder="اسم الإجازة" style="flex:1;min-width:140px"><button class="ibx-btn" onclick="ibxHolAdd()">+ ضيف</button></div>`;
   h+=`<div class="sec">الجاية (${up.length})</div>`+(up.length?`<table>${up.map(x=>row(x)).join('')}</table>`:'<div class="hint">مفيش إجازات جاية متسجلة.</div>');
   h+=`<div class="sec">اقتراح إجازات سنة كاملة</div><div class="row"><select id="ibx-sy">${[y,y+1].map(v=>`<option${v===(sugY||(new Date().getMonth()>=9?y+1:y))?' selected':''}>${v}</option>`).join('')}</select><button class="ibx-btn gh" onclick="ibxHolSuggest()">اقترح</button></div><div id="ibx-sug"></div>`;

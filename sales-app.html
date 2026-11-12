@@ -1,6 +1,93 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
+<script>/* MT-DIGITS v1 (12/11/2026) — كل الأرقام في السيستم إنجليزي 0-9 (الشهور والأيام تفضل بالعربي: "12 نوفمبر 2026")
+   1) المصدر: أي تنسيق بلغة عربية (ar / ar-EG ...) بياخد -u-nu-latn تلقائي — toLocaleString / toLocaleDateString / toLocaleTimeString / Intl.NumberFormat / Intl.DateTimeFormat
+   2) شبكة أمان: أي رقم عربي (٠-٩ / ۰-۹) يظهر في الصفحة أو يتكتب في خانة بيتحوّل — وكمان نوافذ الطباعة، والملفات النصية (CSV)، والمشاركة
+   window.mtEnDigits(نص) متاحة لأي كود محتاجها. ماتشيلش البلوك ده — لازم يفضل أول سكريبت في الصفحة. */
+(function(){
+  if(window.__mtDigits) return; window.__mtDigits=1;
+  var RE=/[٠-٬۰-۹]/, REG=/[٠-٬۰-۹]/g;
+  var MAP={'٪':'%','٫':'.','٬':','};
+  function en(s){
+    if(typeof s!=='string' || !RE.test(s)) return s;
+    return s.replace(REG,function(c){ var k=c.charCodeAt(0); if(MAP[c]) return MAP[c]; return String.fromCharCode(48+(k>=0x6F0?k-0x6F0:k-0x660)); });
+  }
+  window.mtEnDigits=en;
+  function fixOne(l){
+    if(typeof l!=='string' || !/^ar\b/i.test(l) || /-nu-/i.test(l)) return l;
+    return /-u-/i.test(l) ? l+'-nu-latn' : l+'-u-nu-latn';
+  }
+  function fixLoc(l){ return Array.isArray(l) ? l.map(fixOne) : fixOne(l); }
+  function fixOpt(o){ if(o && typeof o==='object' && o.numberingSystem && o.numberingSystem!=='latn'){ o=Object.assign({},o); o.numberingSystem='latn'; } return o; }
+  // (1) toLocale*String
+  function wrap(proto,name){
+    var f=proto[name]; if(!f) return;
+    proto[name]=function(l,o){ return en(f.call(this,fixLoc(l),fixOpt(o))); };
+  }
+  wrap(Number.prototype,'toLocaleString'); wrap(Date.prototype,'toLocaleString');
+  wrap(Date.prototype,'toLocaleDateString'); wrap(Date.prototype,'toLocaleTimeString');
+  try{ if(typeof BigInt!=='undefined') wrap(BigInt.prototype,'toLocaleString'); }catch(e){}
+  // (1) Intl.NumberFormat / Intl.DateTimeFormat
+  function wrapCtor(name){
+    var O=Intl[name]; if(!O) return;
+    var W=function(l,o){ return new O(fixLoc(l),fixOpt(o)); };
+    W.prototype=O.prototype; W.supportedLocalesOf=O.supportedLocalesOf.bind(O);
+    try{ Intl[name]=W; }catch(e){}
+  }
+  wrapCtor('NumberFormat'); wrapCtor('DateTimeFormat');
+  // (2) شبكة أمان على الصفحة
+  function fixNode(n){
+    if(!n) return;
+    if(n.nodeType===3){ if(RE.test(n.nodeValue)) n.nodeValue=en(n.nodeValue); return; }
+    if(n.nodeType!==1 || n.tagName==='SCRIPT' || n.tagName==='STYLE') return;
+    if((n.tagName==='INPUT'||n.tagName==='TEXTAREA') && n.value && RE.test(n.value)) n.value=en(n.value);
+    var t=n.textContent; if(!t || !RE.test(t)) return;
+    var w=document.createTreeWalker(n,4,null), x; while((x=w.nextNode())){ if(RE.test(x.nodeValue)) x.nodeValue=en(x.nodeValue); }
+  }
+  function start(){
+    fixNode(document.body);
+    new MutationObserver(function(ms){
+      for(var i=0;i<ms.length;i++){ var m=ms[i];
+        if(m.type==='characterData') fixNode(m.target);
+        else for(var j=0;j<m.addedNodes.length;j++) fixNode(m.addedNodes[j]);
+      }
+    }).observe(document.body,{childList:true,subtree:true,characterData:true});
+  }
+  if(document.body) start(); else document.addEventListener('DOMContentLoaded',start);
+  // الكتابة في الخانات (بحث، مبالغ، تليفونات ...)
+  document.addEventListener('input',function(e){
+    var el=e.target; if(!el || !('value' in el) || typeof el.value!=='string' || !RE.test(el.value)) return;
+    var p=null; try{ p=el.selectionStart; }catch(_){}
+    el.value=en(el.value);
+    try{ if(p!=null) el.setSelectionRange(p,p); }catch(_){}
+  },true);
+  // (3) نوافذ الطباعة/التقارير (window.open + document.write)
+  var oOpen=window.open;
+  window.open=function(){
+    var w=oOpen.apply(window,arguments);
+    try{ if(w && w.document && !w.__mtDigits){ w.__mtDigits=1; var d=w.document, dw=d.write, dwl=d.writeln;
+      d.write=function(){ return dw.apply(d,[].map.call(arguments,en)); };
+      d.writeln=function(){ return dwl.apply(d,[].map.call(arguments,en)); }; } }catch(_){}
+    return w;
+  };
+  // (3) الملفات النصية (CSV / TXT / HTML) والمشاركة
+  try{
+    var OB=window.Blob;
+    var NB=function(parts,opt){
+      var tp=(opt&&opt.type)||'';
+      if(Array.isArray(parts) && /^text\/|csv|html/i.test(tp)) parts=parts.map(en);
+      return new OB(parts,opt);
+    };
+    NB.prototype=OB.prototype; window.Blob=NB;
+  }catch(_){}
+  try{
+    if(navigator.share){ var sh=navigator.share.bind(navigator);
+      navigator.share=function(d){ if(d && typeof d==='object'){ d=Object.assign({},d); if(d.text) d.text=en(d.text); if(d.title) d.title=en(d.title); } return sh(d); }; }
+  }catch(_){}
+})();
+</script>
+
 <meta charset="UTF-8"/>
 
 <script id="sb-guard">
