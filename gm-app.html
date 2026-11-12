@@ -65390,9 +65390,10 @@ function stmPaysHtml(){
   const tot=m=>(STM.pays||[]).filter(p=>p.d.slice(0,7)===m).reduce((s,p)=>s+p.a,0);
   const asof=(STM.rep&&STM.rep.coverage)||'';
   const card=(l,v,c)=>`<div style="flex:1;min-width:150px;background:#fff;border:1px solid #EDE3D3;border-radius:12px;padding:10px 14px"><div style="font-size:12px;color:#8B6F47;font-weight:700">${l}</div><div style="font-size:20px;font-weight:900;color:${c}">${v}</div></div>`;
-  let h=`<div class="stm-tools" style="flex-wrap:wrap;gap:10px;align-items:center;justify-content:flex-start"><label style="font-weight:800;color:#4B3C1A">الشهر:</label>
+  let h=stmUploadsHtml()+`<div class="stm-tools" style="flex-wrap:wrap;gap:10px;align-items:center;justify-content:flex-start"><label style="font-weight:800;color:#4B3C1A">الشهر:</label>
     <select id="stm-pay-m" onchange="STM.payM=this.value;STM.payOpen={};stmRefreshPanel()" style="flex:0 0 auto;width:auto;min-width:230px;padding:7px 10px;border-radius:10px;border:1px solid #D9CBB3;font-weight:800;font-family:inherit">
     ${Ms.map(m=>`<option value="${m}"${m===ym?' selected':''}>${stmMonLbl(m+'-01')} — ${stmF(tot(m))}</option>`).join('')}</select>
+    <button class="stm-btn gh" onclick="stmPayPdf(false)"><i class="ti ti-file-type-pdf"></i> PDF</button><button class="stm-btn gh" onclick="stmPayXlsx(false)"><i class="ti ti-file-spreadsheet"></i> Excel</button><button class="stm-btn gh" onclick="stmPayPdf(true)"><i class="ti ti-send"></i> إرسال</button>
     <span class="stm-hint">التحصيل بتاريخ الاستلام في الكشف · اضغط على أي عميل يفتح شيكاته${asof&&ym===asof.slice(0,7)?` · الشهر ده لسه مكملش (الكشوفات لحد ${stmDayLbl(asof)})`:''}</span></div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 12px">${Ms.slice(0,12).reverse().map(m=>`<span onclick="STM.payM='${m}';STM.payOpen={};stmRefreshPanel()" style="cursor:pointer;padding:5px 10px;border-radius:20px;font-size:12px;font-weight:800;border:1px solid ${m===ym?'#731E2E':'#E5D9C5'};background:${m===ym?'#731E2E':'#FFFBF4'};color:${m===ym?'#fff':'#4B3C1A'}">${STM_MON[+m.slice(5,7)-1]} ${m.slice(2,4)} · ${stmF(tot(m))}</span>`).join('')}</div>
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">${card('إجمالي التحصيل',stmF(T.a),'#15803D')}${card('عدد الشيكات',T.nChq,'#731E2E')}${card('نقدي / تحويل',T.nCash,'#B45309')}${card('عدد العملاء',R.filter(g=>g.a>0).length,'#4B3C1A')}</div>`;
@@ -65412,6 +65413,42 @@ function stmPayDetHtml(g){
     </tbody></table>`;
 }
 function stmPayToggle(ck){ ck=decodeURIComponent(ck); STM.payOpen=STM.payOpen||{}; STM.payOpen[ck]=!STM.payOpen[ck]; stmRefreshPanel(); }
+// ── آخر رفع للكشوفات (لكل فرع) + تصدير شاشة التحصيلات (12/11/2026) ──
+function stmUploadsInfo(){
+  const B={}; ((STM.rep&&STM.rep.uploads)||[]).forEach(u=>{ const k=String(u.branch||'').replace(/\s+/g,' ').trim(); const o=B[k]=B[k]||{br:k,at:'',to:''};
+    if((u.at||'')>o.at) o.at=u.at||''; if((u.to||'')>o.to) o.to=u.to||''; });
+  return Object.values(B).sort((a,b)=>a.br<b.br?-1:1);
+}
+function stmAtLbl(at){ if(!at) return '—'; try{ return new Date(at).toLocaleString('ar-EG',{timeZone:'Africa/Cairo',day:'numeric',month:'long',year:'numeric',hour:'numeric',minute:'2-digit'}); }catch(e){ return at.slice(0,16).replace('T',' '); } }
+function stmUploadsHtml(){
+  const U=stmUploadsInfo(); if(!U.length) return '';
+  return `<div style="background:#FFFBF4;border:1px solid #EDE3D3;border-radius:10px;padding:8px 12px;margin:0 0 10px;font-size:12.5px;line-height:1.9">📂 <b style="color:#731E2E">آخر رفع لكشوفات التحصيل:</b> ${U.map(u=>`<span style="margin-inline-end:14px"><b>${stmE(u.br)}</b> — ${stmE(stmAtLbl(u.at))} <span style="color:#8B6F47">(الكشف لحد ${stmDayLbl(u.to)})</span></span>`).join('')}</div>`;
+}
+function stmPayReport(){
+  const Ms=stmPayMonths(), ym=(STM.payM&&Ms.indexOf(STM.payM)>=0)?STM.payM:Ms[0]; if(!ym) return null;
+  const R=stmPayRows(ym).filter(g=>g.a>0), T=R.reduce((t,g)=>({a:t.a+g.a,c:t.c+g.nChq,k:t.k+g.nCash}),{a:0,c:0,k:0}), N=stmF;
+  const mon=g=>stmPayMonLbl([...new Set(g.lines.flatMap(p=>p.P.months))].sort())||'مش محدد';
+  const L=R.flatMap(g=>g.lines.filter(p=>p.a>0).map(p=>({g,p}))).sort((x,y)=>x.p.d<y.p.d?-1:x.p.d>y.p.d?1:y.p.a-x.p.a);
+  const B=R.reduce((s,g)=>s+g.b,0);
+  const secs=[{title:'العملاء',head:['#','العميل','شيكات','نقدي / تحويل','القيمة','عن شهر'],rows:R.map((g,i)=>[i+1,g.name,g.nChq,g.nCash,N(g.a),mon(g)]),total:['','الإجمالي ('+R.length+' عميل)',T.c,T.k,N(T.a),'']},
+    {title:'تفاصيل الشيكات والدفعات',alignR:[2],head:['#','تاريخ الاستلام','العميل','النوع','رقم الشيك','البنك','الاستحقاق','عن شهر','القيمة'],
+      rows:L.map(({g,p},i)=>[i+1,stmDayLbl(p.d),g.name,p.t==='chq'?'شيك':'نقدي / تحويل',p.P.no||'—',p.P.bank||'—',p.P.due?stmDayLbl(p.P.due):'—',stmPayMonLbl(p.P.months)||'مش محدد',N(p.a)]),
+      total:['','','الإجمالي','','','','','',N(T.a)]}];
+  if(B) secs[0].total=['','الإجمالي ('+R.length+' عميل) — مرتد: '+N(B),T.c,T.k,N(T.a),''];
+  return {ym, title:`تقرير التحصيلات — ${stmMonLbl(ym+'-01')}`, kpis:[['إجمالي التحصيل',N(T.a)],['عدد الشيكات',String(T.c)],['نقدي / تحويل',String(T.k)],['عدد العملاء',String(R.length)]], secs};
+}
+function stmPayMeta(){
+  const U=stmUploadsInfo();
+  return `<span>المصدر: <b style="color:#731E2E">كشوفات حساب العملاء — بتاريخ الاستلام</b></span>`+(U.length?`<span>آخر رفع: ${U.map(u=>`<b style="color:#731E2E">${stmE(u.br)}</b> ${stmE(stmAtLbl(u.at))} (لحد <bdi>${stmDayLbl(u.to)}</bdi>)`).join(' · ')}</span>`:'');
+}
+function stmPayPdf(send){ const d=stmPayReport(); if(!d){ showToast('مفيش تحصيلات'); return; }
+  rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,d.secs,stmPayMeta()); return pdf?pdf.output('blob'):null; },`AlTahhan_Collections_${d.ym}.pdf`,d.title,send); }
+function stmPayXlsx(send){ const d=stmPayReport(); if(!d){ showToast('مفيش تحصيلات'); return; }
+  rpxDeliver('xlsx',async()=>{ const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]}; const num=v=>typeof v==='string'&&/^-?\d+(\.\d+)?$/.test(v)?+v:v;
+    const sub=stmUploadsInfo().map(u=>`آخر رفع ${u.br}: ${stmAtLbl(u.at)} (لحد ${stmDayLbl(u.to)})`).join(' · ');
+    d.secs.forEach((s,i)=>rpxSheet(wb,s.title,d.title+' — '+s.title,i===0?d.kpis.map(k=>k[0]+': '+k[1]).join(' · ')+(sub?' · '+sub:''):sub,s.head,s.rows.map(r=>r.map(num)),s.total&&s.total.map(num)));
+    wb.SheetNames.forEach(n=>{ const ws=wb.Sheets[n]; Object.keys(ws).forEach(k=>{ if(k[0]!=='!'&&ws[k]&&typeof ws[k].v==='number') ws[k].z=Number.isInteger(ws[k].v)?'0':'0.00'; }); }); // من غير فواصل
+    const arr=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true}); return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}); },`AlTahhan_Collections_${d.ym}.xlsx`,d.title,send); }
 // ── التصدير ──
 function stmReportData(){
   const R=STM.rep, t=stmTotals(), N=stmF;
