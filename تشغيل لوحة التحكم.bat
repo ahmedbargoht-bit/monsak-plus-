@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-set "FILE=%~dp0mansek-admin.html"
+set "FILE=%~dp0mt-admin.html"
 set "TITLE=لوحة التحكم - الطحان للتمور"
 
 :: ── جرب Chrome أولاً ──
