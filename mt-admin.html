@@ -58343,7 +58343,8 @@ async function rpxBuildPdf(title, kpis, sections, metaHtml){
     <div style="background:#F5F0E8;padding:8px 14px;border-radius:0 0 8px 8px;margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:11px">
       ${metaHtml!=null ? metaHtml : `<span>الفترة المرجعية: من <b style="color:#731E2E"><bdi>${RPI.refFrom}</bdi></b> إلى <b style="color:#731E2E"><bdi>${RPI.refTo}</bdi></b></span><span>المصدر: <b style="color:#731E2E">توزيع الهدف + مسحوبات عملاء MT</b></span>`}<span>تاريخ الإصدار: <b style="color:#731E2E">${now}</b></span></div>
     <div style="display:grid;grid-template-columns:repeat(${kpis.length},1fr);gap:8px;margin-bottom:12px">${kpis.map(([l,v])=>`<div style="border:1px solid #E8DCC4;border-top:4px solid #731E2E;border-radius:9px;padding:7px;text-align:center;background:#FFFDF8"><div style="font-size:10.5px;color:#8B6F47;font-weight:700">${E(l)}</div><div style="font-size:16px;font-weight:800;color:#731E2E">${E(v)}</div></div>`).join('')}</div>`;
-  const footer=`<div style="margin-top:12px;border-top:2px solid #C8A96E;padding-top:5px;display:flex;justify-content:space-between;font-size:9.5px;color:#8B6F47"><span>الطحان جولدن داتس — منظومة MT Plus</span><span>إعداد: AHMED BARGOHT</span></div>`;
+  const footerP=(p,n)=>`<div style="margin-top:auto;border-top:2px solid #C8A96E;padding-top:5px;display:flex;justify-content:space-between;font-size:9.5px;color:#8B6F47"><span>الطحان جولدن داتس — منظومة MT Plus</span><span>${n?`صفحة ${p} من ${n}`:''}</span><span>إعداد: AHMED BARGOHT</span></div>`;
+  const footer=footerP(1,1);
   const td='padding:4px 5px;border:1px solid #E8DCC4;text-align:center;';
   const secTitle=(s,cont)=>`<div style="background:#731E2E;color:#fff;font-weight:800;font-size:12.5px;padding:6px 12px;border-radius:7px 7px 0 0;margin-top:10px">${E(s.title)}${cont?' <span style="font-size:10px;color:#E8D3A2">(تكملة)</span>':''}${s.sub?` <span style="font-size:10px;color:#E8D3A2;font-weight:600">${E(s.sub)}</span>`:''}</div>`;
   const thead=s=>`<thead><tr>${s.head.map((h,i)=>`<th style="${td}background:#F3EBDD;color:#5B1622;font-weight:800;${i===1||(s.alignR||[]).includes(i)?'text-align:right;':''}${s.widths&&s.widths[i]?'width:'+s.widths[i]:''}">${E(h)}</th>`).join('')}</tr></thead>`;
@@ -58356,21 +58357,29 @@ async function rpxBuildPdf(title, kpis, sections, metaHtml){
   const meas=mk(`<div id="x-h">${header}</div><div id="x-f">${footer}</div>`+sections.map((s,si)=>`<div data-s="${si}">${secTitle(s)}<table style="width:100%;border-collapse:collapse;font-size:10.5px">${thead(s)}<tbody>${s.rows.map((r,k)=>trow(s,r,k)).join('')}${ttot(s)}</tbody></table></div>`).join(''));
   const hH=meas.querySelector('#x-h').offsetHeight, fH=meas.querySelector('#x-f').offsetHeight;
   const sm=sections.map((s,si)=>{ const el=meas.querySelector(`[data-s="${si}"]`); const trs=[...el.querySelectorAll('tbody tr')].map(t=>t.getBoundingClientRect().height);
-    return {tH:el.firstElementChild.offsetHeight+el.querySelector('thead').offsetHeight+10, rows:trs}; });
+    return {ttl:el.firstElementChild.offsetHeight, th:el.querySelector('thead').offsetHeight, rows:trs}; });
   meas.remove();
-  const pages=[]; let cur='', used=hH, first=true;
+  // تقسيم الصفحات: مساحة الفوتر محجوزة في كل صفحة، الجدول بيكمل في الصفحة اللي بعدها بنفس عناوين الأعمدة (من غير "تكملة")،
+  // ومفيش صفحة تبدأ بأقل من 3 صفوف من الجدول (ولا سطر إجمالي لوحده)
+  const capB=cap-fH-6, pages=[]; let cur='', used=hH, first=true;
   const flush=()=>{ pages.push((first?header:'')+cur); cur=''; used=0; first=false; };
-  sections.forEach((s,si)=>{ const m=sm[si]; let k=0, total=s.rows.length+(s.total?1:0);
+  sections.forEach((s,si)=>{ const m=sm[si], total=s.rows.length+(s.total?1:0), rh=i=>m.rows[i]||24; let k=0;
     while(k<total){
-      if(used+m.tH+(m.rows[k]||24)>cap) flush();
-      let html=secTitle(s,k>0)+`<table style="width:100%;border-collapse:collapse;font-size:10.5px">${thead(s)}<tbody>`; used+=m.tH;
-      while(k<total && used+(m.rows[k]||24)<=cap){ html+= k<s.rows.length?trow(s,s.rows[k],k):ttot(s); used+=(m.rows[k]||24); k++; }
-      cur+=html+'</tbody></table>';
+      const cont=k>0, head=(cont?0:m.ttl)+m.th+(cont?4:10);
+      let need=head; for(let i=k;i<Math.min(total,k+3);i++) need+=rh(i);
+      if(used>0 && used+need>capB){ flush(); }
+      let j=k, u=used+head; while(j<total && u+rh(j)<=capB){ u+=rh(j); j++; }
+      if(j===k) j=k+1;
+      const left=total-j; if(left>0 && left<3 && j-k>3) j-=Math.min(3-left, j-k-3);
+      let html=(cont?'':secTitle(s))+`<table style="width:100%;border-collapse:collapse;font-size:10.5px${cont?';margin-top:4px':''}">${thead(s)}<tbody>`; used+=head;
+      for(let i=k;i<j;i++){ html+= i<s.rows.length?trow(s,s.rows[i],i):ttot(s); used+=rh(i); }
+      cur+=html+'</tbody></table>'; k=j;
       if(k<total) flush();
     } });
-  if(used+fH>cap) flush(); cur+=footer; flush();
+  flush();
+  const pageHpx=Math.floor(pageH*(HW/pageW));
   for(let p=0;p<pages.length;p++){
-    const holder=mk(pages[p]);
+    const holder=mk(`<div style="display:flex;flex-direction:column;min-height:${pageHpx-20}px">${pages[p]}${footerP(p+1,pages.length)}</div>`);
     try{ if(document.fonts&&document.fonts.ready) await document.fonts.ready; await ssWaitImages(holder);
       const canvas=await html2canvas(holder,{scale:2,useCORS:true,backgroundColor:'#ffffff'});
       if(p>0) pdf.addPage(); pdf.addImage(canvas.toDataURL('image/jpeg',0.92),'JPEG',0,0,pageW,Math.min(canvas.height*pageW/canvas.width,pageH));
@@ -65427,7 +65436,7 @@ function stmPayReport(){
   const B=R.reduce((s,g)=>s+g.b,0);
   const secs=[{title:'العملاء',head:['#','العميل','شيكات','نقدي / تحويل','القيمة','عن شهر'],rows:R.map((g,i)=>[i+1,g.name,g.nChq,g.nCash,N(g.a),mon(g)]),total:['','الإجمالي ('+R.length+' عميل)',T.c,T.k,N(T.a),'']},
     {title:'تفاصيل الشيكات والدفعات',alignR:[2],head:['#','تاريخ الاستلام','العميل','النوع','رقم الشيك','البنك','الاستحقاق','عن شهر','القيمة'],
-      rows:L.map(({g,p},i)=>[i+1,stmDayLbl(p.d),g.name,p.t==='chq'?'شيك':'نقدي / تحويل',p.P.no||'—',p.P.bank||'—',p.P.due?stmDayLbl(p.P.due):'—',stmPayMonLbl(p.P.months)||'مش محدد',N(p.a)]),
+      rows:L.map(({g,p},i)=>[i+1,stmDayLbl(p.d),g.name,p.t==='chq'?'شيك':'نقدي/تحويل',p.P.no||'—',p.P.bank||'—',p.P.due?stmDayLbl(p.P.due):'—',stmPayMonLbl(p.P.months)||'مش محدد',N(p.a)]),
       total:['','','الإجمالي','','','','','',N(T.a)]}];
   if(B) secs[0].total=['','الإجمالي ('+R.length+' عميل) — مرتد: '+N(B),T.c,T.k,N(T.a),''];
   return {ym, title:`تقرير التحصيلات — ${stmMonLbl(ym+'-01')}`, kpis:[['إجمالي التحصيل',N(T.a)],['عدد الشيكات',String(T.c)],['نقدي / تحويل',String(T.k)],['عدد العملاء',String(R.length)]], secs};
