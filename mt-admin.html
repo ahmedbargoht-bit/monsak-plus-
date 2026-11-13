@@ -67133,16 +67133,17 @@ async function mtsLoad(){
   try{
     const f=`${m}-01`, t=mtsMonthEnd(m);
     const [inv,items,rets,dels,aret,brs,als,users,map,lastS,lastR]=await Promise.all([
-      mtsAll(`tamr_sales_invoices?select=invoice_no,branch,invoice_date,rep,customer_site,customer,net,tax&month_key=eq.${m}&order=id`),
+      mtsAll(`tamr_sales_invoices?select=invoice_no,branch,invoice_date,rep,customer_site,customer,gross,net,tax,discount_pct&month_key=eq.${m}&order=id`),
       mtsAll(`tamr_sales_items?select=invoice_no,branch,invoice_date,item,qty_carton,qty_piece,price_piece,total&month_key=eq.${m}&order=id`),
       mtsAll(`tamr_sales_returns?select=invoice_no,branch,invoice_date,customer,warehouse,item,qty_carton,qty_piece,price_piece,total&invoice_date=gte.${f}&invoice_date=lte.${t}&order=id`),
-      mtsAll(`sales_deliveries?select=id,invoice_number,rep_name,branch_name,client_name,total_net,total_tax,delivery_date,items&delivery_date=gte.${f}&delivery_date=lte.${t}&deleted_at=is.null&order=id`),
-      mtsAll(`sales_returns?select=id,invoice_number,rep_name,branch_name,client_name,total_before_discount,total_net,total_tax,return_date,items&return_date=gte.${f}&return_date=lte.${t}&deleted_at=is.null&order=id`),
-      mtsAll(`branches?select=branch_name`), mtsAll(`branch_name_aliases?select=alias_name,branch_name`),
-      mtsAll(`users?select=name,status&role=eq.sales&order=name`), mtsAll(`mt_rep_map?select=mt_name,app_rep,note`),
+      mtsAll(`sales_deliveries?select=id,invoice_number,rep_name,branch_name,client_name,total_net,total_tax,delivery_date,items,mt_status&delivery_date=gte.${f}&delivery_date=lte.${t}&deleted_at=is.null&order=id`),
+      mtsAll(`sales_returns?select=id,invoice_number,rep_name,branch_name,client_name,total_before_discount,total_net,total_tax,return_date,items,mt_status&return_date=gte.${f}&return_date=lte.${t}&deleted_at=is.null&order=id`),
+      mtsAll(`branches?select=branch_name,route`), mtsAll(`branch_name_aliases?select=alias_name,branch_name`),
+      mtsAll(`users?select=name,status,grp&role=eq.sales&order=name`), mtsAll(`mt_rep_map?select=mt_name,app_rep,note`),
       fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_invoices?select=invoice_date&order=invoice_date.desc&limit=1`,{headers:srrH()}).then(r=>r.json()),
       fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_returns?select=invoice_date&order=invoice_date.desc&limit=1`,{headers:srrH()}).then(r=>r.json())]);
-    MTS.data={m,inv,items,rets,dels,aret,brs,als,users,map,cutS:(lastS[0]||{}).invoice_date||'',cutR:(lastR[0]||{}).invoice_date||''};
+    const [ials,runs]=await Promise.all([mtsAll(`item_name_aliases?select=alias_name,canonical_name`), mtsAll(`mt_sync_runs?select=id,month,cut_s,cut_r,created_by,created_at,status,summary,undone_by,undone_at&month=eq.${m}&order=id.desc`)]);
+    MTS.data={m,inv,items,rets,dels,aret,brs,als,users,map,ials,runs,cutS:(lastS[0]||{}).invoice_date||'',cutR:(lastR[0]||{}).invoice_date||''};
     mtsCompute(); mtsRender();
   }catch(e){ box.innerHTML=`<div class="mts-empty" style="color:#B71C1C">❌ ${mtsE(e.message)}</div>`; }
   finally{ MTS.busy=false; }
@@ -67169,7 +67170,7 @@ function mtsCompute(){
   const cutS=D.cutS, cutR=D.cutR;
   // ── البيع ──
   const itBy={}; D.items.forEach(l=>(itBy[l.branch+'|'+l.invoice_no]=itBy[l.branch+'|'+l.invoice_no]||[]).push(l));
-  const MT=D.inv.filter(x=>x.invoice_date<=cutS).map(x=>{ const r=mtsRepOf(x.rep); return {no:x.invoice_no,key:x.branch+'|'+x.invoice_no,rep:r.rep,mtRep:x.rep,br:brOf(x.customer_site),site:x.customer_site,cust:x.customer,d:x.invoice_date,v:+x.net||0,tax:+x.tax||0,used:false}; });
+  const MT=D.inv.filter(x=>x.invoice_date<=cutS).map(x=>{ const r=mtsRepOf(x.rep); return {no:x.invoice_no,key:x.branch+'|'+x.invoice_no,rep:r.rep,mtRep:x.rep,br:brOf(x.customer_site),site:x.customer_site,cust:x.customer,d:x.invoice_date,v:+x.net||0,tax:+x.tax||0,gross:+x.gross||0,used:false}; });
   const MTin=MT.filter(m=>m.rep), MTout=MT.filter(m=>!m.rep);
   const APP=D.dels.filter(a=>a.delivery_date<=cutS).map(a=>({id:a.id,rep:a.rep_name,br:a.branch_name,cl:a.client_name,d:a.delivery_date,v:(+a.total_net||0)-(+a.total_tax||0),items:a.items||[],used:false}));
   const acts=[]; // {kind, side:'s'|'r', rep, mts:[], apps:[], dv}
@@ -67216,10 +67217,12 @@ function mtsRender(){
   const box=document.getElementById('mts-body'); const X=MTS.res, D=MTS.data; if(!box||!X) return;
   const T=X.T, card=(l,v,s,c)=>`<div class="mts-card"><div class="l">${l}</div><div class="v" style="color:${c}">${v}</div>${s?`<div class="s">${s}</div>`:''}</div>`;
   const pct=X.mtS>0?((T.s_ok.v+T.s_ok_group.v)/X.mtS*100).toFixed(0):'—';
-  let h=`<div class="mts-note">📌 <b>معاينة بس</b> — مفيش أي فاتورة اتعدلت. المطابقة لحد آخر يوم مرفوع من جريد: البيع لحد <b>${mtsDay(X.cutS)}</b> والمرتجع لحد <b>${mtsDay(X.cutR)}</b>. الأيام اللي بعدها فواتير التطبيق زي ما هي. المبالغ من غير ضريبة.</div>`;
+  let h=`<div class="mts-note">📌 <b>دي معاينة</b> — مفيش حاجة بتتعدل غير لما تدوس "نفّذ المطابقة". المطابقة لحد آخر يوم مرفوع من جريد: البيع لحد <b>${mtsDay(X.cutS)}</b> والمرتجع لحد <b>${mtsDay(X.cutR)}</b>. الأيام اللي بعدها فواتير التطبيق زي ما هي. المبالغ من غير ضريبة.</div>`;
   h+=`<div class="mts-cards">${card('بيع MT للمناديب',mtsF(X.mtS),'التطبيق قبل المطابقة: '+mtsF(X.appS),'#731E2E')}${card('متطابق من غير تعديل',pct+'%',mtsF(T.s_ok.v+T.s_ok_group.v)+' من قيمة MT','#1A7A4A')}${card('بيع هيتضاف',T.s_add.n,mtsF(T.s_add.v),'#15803D')}${card('بيع هيتصلح',T.s_fix.n+T.s_fix_branch.n+T.s_move.n,'مبلغ '+T.s_fix.n+' · فرع '+T.s_fix_branch.n+' · مندوب '+T.s_move.n,'#B26A00')}${card('بيع مش في MT',T.s_drop.n,mtsF(T.s_drop.v),'#B71C1C')}</div>`;
   h+=`<div class="mts-cards">${card('مرتجع MT للمناديب',mtsF(X.mtR),'التطبيق قبل المطابقة: '+mtsF(X.appR),'#731E2E')}${card('مرتجع متطابق',T.r_ok.n,mtsF(T.r_ok.v),'#1A7A4A')}${card('مرتجع هيتضاف',T.r_add.n,mtsF(T.r_add.v)+' (فرع غير محدد)','#15803D')}${card('مرتجع هيتصلح',T.r_fix.n+T.r_move.n,'مبلغ '+T.r_fix.n+' · مندوب '+T.r_move.n,'#B26A00')}${card('مرتجع مش في MT',T.r_drop.n,mtsF(T.r_drop.v),'#B71C1C')}</div>`;
   const nUn=Object.keys(X.unm).length;
+  const todo=T.s_add.n+T.s_fix.n+T.s_fix_branch.n+T.s_move.n+T.s_drop.n+T.r_add.n+T.r_fix.n+T.r_move.n+T.r_drop.n;
+  h+=`<div class="mts-tools"><button class="mts-btn on" style="background:#1A7A4A;border-color:#1A7A4A" onclick="mtsApply()" ${todo?'':'disabled'}>✅ نفّذ المطابقة (${todo} تعديل)</button></div>`+mtsRunsHtml();
   h+=`<div class="mts-tools"><button class="mts-btn${MTS.showMap?' on':''}" onclick="MTS.showMap=!MTS.showMap;mtsRender()">🔗 ربط أسامي MT بالمناديب (${X.names.length})</button><span class="mts-hint">${nUn?`⚠️ ${nUn} اسم في MT مش متربط بمندوب على التطبيق (${mtsF(X.outS+X.outR)}) — برا المطابقة`:''}</span></div>`;
   if(MTS.showMap) h+=mtsMapHtml();
   const k=(r,key)=>{ const o=r.k[key]; return o&&o.n?`<span title="${mtsF(o.v)}">${o.n}</span>`:'<span style="color:#C9BBA3">—</span>'; };
@@ -67259,6 +67262,75 @@ async function mtsSaveMap(){
     if(!r.ok) throw new Error('HTTP '+r.status+' '+(await r.text()).slice(0,120));
     showToast(`✅ اتحفظ ربط ${rows.length} اسم`); MTS.data.map=rows; mtsCompute(); mtsRender(); }
   catch(e){ showToast('❌ '+e.message,5000); }
+}
+
+// ══ التنفيذ والتراجع ══
+// كل تشغيل بيتسجل (mt_sync_runs) وكل فاتورة اتعدلت/اتضافت/اتشالت بيتحفظ نسختها قبل التعديل (mt_sync_log) — "تراجع" بيرجّع التشغيل كله.
+function mtsHash(s){ let h=0; for(const c of String(s)) h=(h*31+c.charCodeAt(0))|0; return Math.abs(h).toString(36).slice(0,5); }
+function mtsR2(v){ return Math.round((+v||0)*100)/100; }
+function mtsPlan(){
+  const D=MTS.data, X=MTS.res; const ops=[];
+  const grpOf={}; D.users.forEach(u=>grpOf[u.name]=u.grp||null);
+  const routeOf={}; D.brs.forEach(b=>{ if(b.branch_name) routeOf[b.branch_name]=b.route||null; });
+  const canon={}; (D.ials||[]).forEach(a=>canon[mtsN(a.alias_name)]=a.canonical_name);
+  const itemName=n=>canon[mtsN(n)]||n;
+  const head={}; D.inv.forEach(x=>head[x.branch+'|'+x.invoice_no]=x);
+  const cst={}; D.inv.forEach(x=>{ const k=mtsN(x.customer); const o=cst[k]=cst[k]||{g:0,n:0,t:0}; o.g+=+x.gross||0; o.n+=+x.net||0; o.t+=+x.tax||0; });
+  const typ=r=>r>0.1?'tax_14':r>0.03?'tax_5':'no_tax';
+  const saleItems=key=>(X.itBy[key]||[]).map(l=>{ const p=+l.price_piece||0, t=+l.total||0; const q=p>0?Math.round(t/p*100)/100:((+l.qty_piece||0)+(+l.qty_carton||0)); return {qty:q,name:itemName(l.item),price:p,total:t}; });
+  const saleTotals=m=>{ const h=head[m.key]||{}; const after=mtsR2(m.v), before=Math.max(mtsR2(+h.gross||m.gross||after),after), tax=mtsR2(m.tax);
+    return {total_before_discount:before,total_after_discount:after,discount_pct:before>0?Math.min(100,Math.max(0,mtsR2((1-after/before)*100))):0,total_tax:tax,total_net:mtsR2(after+tax),invoice_type:typ(after>0?tax/after:0)}; };
+  const retTotals=m=>{ const c=cst[mtsN(m.cust)]||{g:0,n:0,t:0}; const disc=c.g>0?Math.max(0,Math.min(0.9,1-c.n/c.g)):0, tr0=c.n>0?c.t/c.n:0, tr=tr0>0.1?0.14:tr0>0.03?0.05:0;
+    const before=mtsR2(m.v), after=mtsR2(before*(1-disc)), tax=mtsR2(after*tr);
+    return {total_before_discount:before,total_after_discount:after,discount_pct:mtsR2(disc*100),total_tax:tax,total_net:mtsR2(after+tax),invoice_type:typ(tr)}; };
+  const retItems=m=>m.lines.map(l=>{ const p=+l.price_piece||0, t=+l.total||0; const q=p>0?Math.round(t/p*100)/100:((+l.qty_piece||0)+(+l.qty_carton||0)); return {qty:q,name:itemName(l.item),price:p,total:t}; });
+  const refOf=ms=>ms.map(m=>m.key).join(',');
+  X.acts.forEach(x=>{
+    const t=x.side==='s'?'d':'r', m=x.mts[0];
+    if(x.kind==='ok'||x.kind==='ok_group'){ x.apps.forEach(a=>ops.push({t,a:'mark',id:a.id,st:'ok',ref:refOf(x.mts)})); return; }
+    if(x.kind==='drop'){ x.apps.forEach(a=>ops.push({t,a:'drop',id:a.id})); return; }
+    if(x.kind==='add'){
+      const s=x.side==='s'?{...saleTotals(m),invoice_number:'MT-'+m.no+'-'+mtsHash(m.key),rep_name:m.rep,branch_name:m.br||m.site,client_name:m.cust,items:saleItems(m.key),date:m.d,grp:grpOf[m.rep]||null,route:routeOf[m.br]||null}
+                         :{...retTotals(m),invoice_number:'MTR-'+m.no+'-'+mtsHash(m.key),rep_name:m.rep,branch_name:'غير محدد',client_name:m.cust,items:retItems(m),date:m.d,grp:grpOf[m.rep]||null,route:null};
+      ops.push({t,a:'insert',ref:m.key,s}); return; }
+    const a=x.apps[0], s={};
+    if(x.kind==='fix_branch'||(x.side==='s'&&m.br&&m.br!==a.br)){ s.branch_name=m.br; s.route=routeOf[m.br]||null; }
+    if(x.kind==='move'){ s.rep_name=m.rep; s.grp=grpOf[m.rep]||null; }
+    if(x.kind==='fix'){ Object.assign(s, x.side==='s'?{...saleTotals(m),items:saleItems(m.key)}:{...retTotals(m),items:retItems(m)}); }
+    ops.push({t,a:'update',id:a.id,st:'fixed',ref:m.key,s});
+  });
+  return ops;
+}
+async function mtsRpc(fn,body){ const r=await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`,{method:'POST',headers:srrH(true),body:JSON.stringify(body)}); const t=await r.text(); if(!r.ok){ let m=t; try{ m=JSON.parse(t).message||t; }catch(e){} throw new Error(m.slice(0,200)); } return t?JSON.parse(t):null; }
+async function mtsApply(){
+  const X=MTS.res, T=X.T; if(!X||MTS.busy) return;
+  const ops=mtsPlan(); const c=k=>ops.filter(o=>o.a===k).length;
+  const msg=`تنفيذ مطابقة ${MTS.month} (لحد ${mtsDay(X.cutS)} بيع / ${mtsDay(X.cutR)} مرتجع):\n\n➕ إضافة ${c('insert')} فاتورة من MT\n✏️ تصحيح ${c('update')} فاتورة\n❌ شيل ${c('drop')} فاتورة مش في MT (مش بتتمسح — تقدر ترجعها)\n✅ تعليم ${c('mark')} فاتورة متطابقة\n\nكل حاجة بتتسجل وتقدر تعمل "تراجع" للتشغيل كله. تكمل؟`;
+  if(!confirm(msg)) return;
+  MTS.busy=true; const who=(typeof CU!=='undefined'&&CU&&CU.name)||'admin'; let rid=null;
+  try{
+    rid=await mtsRpc('mt_sync_begin',{p_month:MTS.month,p_cut_s:X.cutS,p_cut_r:X.cutR,p_by:who});
+    const N=120; for(let i=0;i<ops.length;i+=N){ showToast(`⏳ جاري التنفيذ… ${Math.min(i+N,ops.length)} / ${ops.length}`); await mtsRpc('mt_sync_ops',{p_run:rid,p_ops:ops.slice(i,i+N)}); }
+    const sum={}; ['s','r'].forEach(sd=>['ok','ok_group','fix_branch','move','fix','add','drop'].forEach(k=>{ const o=T[sd+'_'+k]; if(o&&o.n) sum[sd+'_'+k]={n:o.n,v:Math.round(o.v)}; }));
+    await mtsRpc('mt_sync_finish',{p_run:rid,p_summary:{...sum,ops:ops.length}});
+    showToast(`✅ المطابقة اتنفذت (تشغيل رقم ${rid})`,5000);
+  }catch(e){ showToast('❌ '+e.message+(rid?` — التشغيل رقم ${rid} وقف في النص، اعمل "تراجع" ليه`:''),9000); }
+  finally{ MTS.busy=false; mtsLoad(); }
+}
+async function mtsUndo(rid){
+  if(!confirm(`تراجع عن تشغيل المطابقة رقم ${rid}؟\nكل الفواتير هترجع زي ما كانت قبل التشغيل، واللي اتضاف من MT هيتشال.`)) return;
+  if(MTS.busy) return; MTS.busy=true;
+  try{ const r=await mtsRpc('mt_sync_undo',{p_run:rid,p_by:(typeof CU!=='undefined'&&CU&&CU.name)||'admin'}); showToast(`↩ اتراجعنا (${r&&r.undone||0} عملية)`,5000); }
+  catch(e){ showToast('❌ '+e.message,8000); }
+  finally{ MTS.busy=false; mtsLoad(); }
+}
+function mtsRunsHtml(){
+  const R=(MTS.data&&MTS.data.runs)||[]; if(!R.length) return '';
+  const st={applied:['✅ متنفذ','#1A7A4A'],running:['⚠️ وقف في النص','#B26A00'],undone:['↩ اتراجع عنه','#8B7B60']};
+  const lastActive=R.find(r=>r.status==='applied'||r.status==='running');
+  return `<div class="mts-map" style="max-height:none"><div style="font-weight:900;color:#731E2E;margin-bottom:6px">🗂️ تشغيلات المطابقة للشهر ده</div><table class="mts-t in"><thead><tr><th>#</th><th>الحالة</th><th>لحد (بيع/مرتجع)</th><th>إمتى</th><th>مين</th><th>➕ إضافة</th><th>✏️ تصحيح</th><th>❌ شيل</th><th></th></tr></thead><tbody>
+    ${R.map(r=>{ const s=r.summary||{}, g=k=>(s['s_'+k]?.n||0)+(s['r_'+k]?.n||0), S=st[r.status]||[r.status,'#555'];
+      return `<tr><td>${r.id}</td><td style="color:${S[1]};font-weight:800">${S[0]}</td><td>${mtsDay(r.cut_s)} / ${mtsDay(r.cut_r)}</td><td>${mtsE(new Date(r.created_at).toLocaleString('ar-EG',{timeZone:'Africa/Cairo',day:'numeric',month:'short',hour:'numeric',minute:'2-digit'}))}</td><td>${mtsE(r.created_by||'')}</td><td>${g('add')}</td><td>${g('fix')+g('fix_branch')+g('move')}</td><td>${g('drop')}</td><td>${lastActive&&lastActive.id===r.id?`<button class="mts-btn" onclick="mtsUndo(${r.id})">↩ تراجع</button>`:''}</td></tr>`; }).join('')}</tbody></table></div>`;
 }
 
 </script>
