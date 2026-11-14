@@ -67476,6 +67476,7 @@ function cstCd(c){ const t=CST.terms[c.ck]; if(t&&t.cd>0) return t.cd; const n=S
 // دورة التحصيل: 'm' شهري (المسحوبات بالشهر) · 'h' نصف شهري (1–15 و16–آخر الشهر، لكل نص شيك) — كارفور
 const CST_CY_SEED=[[/ماف|كارفـ*ور/,'h']];
 function cstCy(c){ const t=CST.terms[c.ck]; if(t&&t.cy) return t.cy; const n=String(c.name||''); for(const [re,v] of CST_CY_SEED) if(re.test(n)) return v; return 'm'; }
+function cstRP(c){ const t=CST.terms[c.ck]; if(t&&t.rp!=null) return !!t.rp; return /سبينيس/.test(String(c.name||'')); }
 function cstIsH(k){ return k.length>7; }           // '2026-09/A'
 function cstKM(k){ return k==='open'?'open':k.slice(0,7); }
 function cstKEnd(k){ return k.slice(-2)==='/A' ? k.slice(0,7)+'-15' : cstMEnd(cstKM(k)); }
@@ -67512,18 +67513,18 @@ async function cstLoad(){
 
 async function cstLoadTerms(){
   CST.terms={}; CST.termsOk=false;
-  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/cust_credit_terms?select=ck,credit_days,note,cycle`,{headers:srrH()}); if(!r.ok) return;
-    (await r.json()).forEach(t=>CST.terms[t.ck]={cd:+t.credit_days||0,note:t.note||'',cy:t.cycle||'m'}); CST.termsOk=true; }catch(e){}
+  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/cust_credit_terms?select=ck,credit_days,note,cycle,ret_prev`,{headers:srrH()}); if(!r.ok) return;
+    (await r.json()).forEach(t=>CST.terms[t.ck]={cd:+t.credit_days||0,note:t.note||'',cy:t.cycle||'m',rp:!!t.ret_prev}); CST.termsOk=true; }catch(e){}
 }
 async function cstSaveTerm(ck,f,v){
   ck=decodeURIComponent(ck); const x=CST.res&&CST.res.C.find(y=>y.c.ck===ck); if(!x) return;
-  const cur=CST.terms[ck]||{cd:cstCd(x.c),note:'',cy:cstCy(x.c)}; const nx={...cur,cy:cur.cy||cstCy(x.c)};
+  const cur=CST.terms[ck]||{cd:cstCd(x.c),note:'',cy:cstCy(x.c),rp:cstRP(x.c)}; const nx={...cur,cy:cur.cy||cstCy(x.c),rp:cur.rp==null?cstRP(x.c):cur.rp};
   if(f==='cd'){ const d=Math.round(+v); if(!(d>0&&d<=365)){ showToast('اكتب عدد أيام صح'); cstRender(); return; } nx.cd=d; }
   else if(f==='cy'){ nx.cy=(v==='h'?'h':'m'); if(!cur.cd) nx.cd=(nx.cy==='h'?40:30); }
   else nx.note=String(v||'').trim();
   const who=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER&&CURRENT_USER.name)||'admin';
   try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/cust_credit_terms?on_conflict=ck`,{method:'POST',headers:{...srrH(true),'Prefer':'resolution=merge-duplicates,return=minimal'},
-      body:JSON.stringify({ck,name:x.c.name,credit_days:nx.cd,note:nx.note||null,cycle:nx.cy,updated_by:who,updated_at:new Date().toISOString()})});
+      body:JSON.stringify({ck,name:x.c.name,credit_days:nx.cd,note:nx.note||null,cycle:nx.cy,ret_prev:!!nx.rp,updated_by:who,updated_at:new Date().toISOString()})});
     if(!r.ok) throw new Error('HTTP '+r.status);
     CST.terms[ck]=nx; showToast(f==='cd'?'✅ اتحفظت مدة الائتمان':f==='cy'?'✅ اتحفظت دورة التحصيل':'✅ اتحفظ موقف السداد'); if(f!=='note'){ cstCompute(); cstRender(); }
   }catch(e){ showToast('❌ ماتحفظش: '+e.message); }
@@ -67602,6 +67603,11 @@ function cstCompute(){
       aM:aOpen.map(r=>r.k), aV:arr.reduce((s,r)=>s+r.remS,0), aP:arr.reduce((s,r)=>s+pd(r),0), aLeft:aOpen.reduce((s,r)=>s+Math.max(0,r.rem),0),
       aPaidM:arr.filter(closed).map(r=>r.k)};
     c.left=c.dLeft+c.aLeft; c.paid=c.dP+c.aP; c.has=c.dV>0||c.aV>0;
+    // الإشعارات اللي لسه متسجلتش على الفترات المطلوبة + (لسبينيس) مرتجع الشهر اللي قبل شهر الشيك
+    const crs=[...dRows,...aOpen];
+    c.expDed=Math.min(c.left,crs.reduce((s,r)=>s+(r.st==='ok'?0:r.expDed),0));
+    x.rp=cstRP(x.c); c.retM=cstAddM(cm,-1); c.retPrev=x.rp?Math.round(+((x.c.r||{})[c.retM])||0):0;
+    c.expChq=Math.max(0,c.left-c.expDed-c.retPrev);
     c.st=c.left<=0?'paid':(c.paid>100?'part':'none');
     x.col=c;
   });
@@ -67610,7 +67616,7 @@ function cstCompute(){
   const sum=(f,v)=>all.filter(f).reduce((s,o)=>s+v(o),0);
   const CL=C.filter(x=>x.col.has), cs=f=>CL.reduce((s,x)=>s+f(x.col),0);
   CST.res={C,MS,today,gLag,cm,CL,
-    colTot:{dV:cs(c=>c.dV),dP:cs(c=>c.dP),dLeft:cs(c=>c.dLeft),aLeft:cs(c=>c.aLeft),aP:cs(c=>c.aP),left:cs(c=>c.left),paid:cs(c=>c.paid),
+    colTot:{dV:cs(c=>c.dV),dP:cs(c=>c.dP),dLeft:cs(c=>c.dLeft),aLeft:cs(c=>c.aLeft),aP:cs(c=>c.aP),left:cs(c=>c.left),paid:cs(c=>c.paid),expChq:cs(c=>c.expChq),retPrev:cs(c=>c.retPrev),
       nPaid:CL.filter(x=>x.col.st==='paid').length,nPart:CL.filter(x=>x.col.st==='part').length,nNone:CL.filter(x=>x.col.st==='none').length},
     bal:C.reduce((s,x)=>s+x.balCalc,0), balStmt:C.reduce((s,x)=>s+(x.balStmt||0),0), nOk:C.filter(x=>x.match).length, nChk:C.filter(x=>x.match!=null).length, bad:C.filter(x=>x.match===false),
     thism:all.filter(o=>o.r.st==='thism'), late:all.filter(o=>o.r.st==='late'),
@@ -67630,7 +67636,7 @@ function cstRender(){
     <span style="color:${X.bad.length?'#B26A00':'#1A7A4A'};font-weight:900">${X.bad.length?'⚠️':'✅'} التطابق مع الكشف: ${X.nOk} عميل من ${X.nChk} رصيدهم المحسوب = رصيد الكشف بالجنيه</span>${X.bad.length?` · فرق عند: ${X.bad.slice(0,6).map(x=>`<a href="#" onclick="cstOpen('${encodeURIComponent(x.c.ck)}');return false">${cstE(cstShort(x.c.name))} (${cstF(x.balCalc-x.balStmt)})</a>`).join(' · ')}`:''}</div>`;
   const card=(l,v,s,c)=>`<div class="cst-card" style="--c:${c}"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s}</div></div>`;
   const T=X.colTot, pc=(a,b)=>b>0?Math.round(a/b*100)+'%':'0%', ml=cstKL(X.cm);
-  h+=`<div class="cst-cards">${card('📌 الرصيد النهارده',cstF(X.bal),'رصيد الكشف: '+cstF(X.balStmt),'#731E2E')}${card('📅 المطلوب في '+ml,cstF(T.dV),'اتدفع '+cstF(T.dP)+' ('+pc(T.dP,T.dV)+') · الباقي '+cstF(T.dLeft),'#B26A00')}${card('⏰ المتأخرات',cstF(T.aLeft),T.aP>1?'اتدفع منها الشهر ده '+cstF(T.aP):'شهور قديمة لسه مادفعتش','#B71C1C')}${card('💰 الباقي للتحصيل',cstF(T.left),'المطلوب + المتأخرات','#1A5E8A')}${card('👥 العملاء',`<span style="color:#1A7A4A">${T.nPaid}</span> · <span style="color:#B26A00">${T.nPart}</span> · <span style="color:#B71C1C">${T.nNone}</span>`,'✅ دفع كله · 🟡 دفع جزء · 🔴 مادفعش','#4A5B70')}</div>`;
+  h+=`<div class="cst-cards">${card('📌 الرصيد النهارده',cstF(X.bal),'رصيد الكشف: '+cstF(X.balStmt),'#731E2E')}${card('📅 المطلوب في '+ml,cstF(T.dV),'اتدفع '+cstF(T.dP)+' ('+pc(T.dP,T.dV)+') · الباقي '+cstF(T.dLeft),'#B26A00')}${card('⏰ المتأخرات',cstF(T.aLeft),T.aP>1?'اتدفع منها الشهر ده '+cstF(T.aP):'شهور قديمة لسه مادفعتش','#B71C1C')}${card('💰 الباقي للتحصيل',cstF(T.left),'الشيك المتوقع بعد الإشعارات'+(T.retPrev>1?' والمرتجع':'')+': '+cstF(T.expChq),'#1A5E8A')}${card('👥 العملاء',`<span style="color:#1A7A4A">${T.nPaid}</span> · <span style="color:#B26A00">${T.nPart}</span> · <span style="color:#B71C1C">${T.nNone}</span>`,'✅ دفع كله · 🟡 دفع جزء · 🔴 مادفعش','#4A5B70')}</div>`;
   const tabs=[['coll','📋 موقف التحصيل'],['late','⏰ المتأخرين'],['grid','🗓️ تصفية الشهور'],['pat','📈 نمط العملاء']];
   h+=`<div class="cst-tabs">${tabs.map(([k,l])=>`<div class="cst-tab${CST.tab===k?' on':''}" onclick="CST.tab='${k}';cstRender()">${l}</div>`).join('')}</div><div class="cst-panel">${cstPanel()}</div>`;
   if(CST.open) h+=cstCardHtml();
@@ -67662,7 +67668,7 @@ function cstColPanel(){
       <td><select class="cst-in" style="width:84px" onclick="event.stopPropagation()" onchange="cstSaveTerm('${encodeURIComponent(x.c.ck)}','cy',this.value)"><option value="m"${x.cy==='m'?' selected':''}>شهري</option><option value="h"${x.cy==='h'?' selected':''}>نص شهر</option></select></td>
       <td>${inp(x,'cd',x.cd,'46px')}</td><td>${cstF(x.balCalc)}</td>
       <td>${c.dV?cstDueLbl(c):'—'}</td><td>${c.dV?cstF(c.dV):'—'}</td><td class="${c.dP>1?'pd':''}">${c.dV?cstF(c.dP):'—'}</td>
-      <td><b>${c.dV?cstF(c.dLeft):'—'}</b>${c.dDiff?`<div class="g">${c.dDiffDed?'فاضل إشعارات':'فرق'} ${cstF(c.dDiff)}</div>`:''}</td>
+      <td><b>${c.dV?cstF(c.dLeft):'—'}</b>${c.dDiff?`<div class="g">${c.dDiffDed?'فاضل إشعارات':'فرق'} ${cstF(c.dDiff)}</div>`:''}${c.retPrev>1?`<div class="g" style="color:#B45309">− مرتجع ${cstKL(c.retM,true)} ${cstF(c.retPrev)}</div>`:''}</td>
       <td class="red">${c.aLeft>1?`${cstMLbl(c.aM)}: <b>${cstF(c.aLeft)}</b>`:'—'}${c.aP>1?`<div class="g">اتدفع منها ${cstF(c.aP)}</div>`:''}</td>
       <td><span class="cst-tag" style="color:${S[2]};background:${S[3]}">${S[0]} ${S[1]}</span></td><td>${inp(x,'note',t&&t.note||'','150px')}</td></tr>`; }).join('')}
     </tbody><tfoot><tr><td></td><td class="n">الإجمالي (${L.length} عميل)</td><td></td><td></td><td>${sum(x=>x.balCalc)}</td><td></td><td>${sum(x=>x.col.dV)}</td><td>${sum(x=>x.col.dP)}</td><td>${sum(x=>x.col.dLeft)}</td><td>${sum(x=>x.col.aLeft)}</td><td></td><td></td></tr></tfoot></table></div>
@@ -67679,12 +67685,12 @@ function cstGridCells(x){ // عمود لكل شهر؛ العميل نص الشه
 }
 function cstColReport(){
   const X=CST.res, L=cstColRows(), T=X.colTot, N=cstF, pc=(a,b)=>b>0?Math.round(a/b*100)+'%':'0%';
-  const rows=L.map((x,i)=>{ const c=x.col, t=CST.terms[x.c.ck]; return [i+1,cstShort(x.c.name),x.cy==='h'?'نص شهر':'شهري',x.cd,N(x.balCalc),c.dV?cstDueLbl(c):'',c.dV?N(c.dV):'',c.dV?N(c.dP):'',c.dV?N(c.dLeft)+(c.dDiff?' ('+(c.dDiffDed?'فاضل إشعارات ':'فرق ')+N(c.dDiff)+')':''):'',c.aLeft>1?cstMLbl(c.aM)+': '+N(c.aLeft):'',CST_CS[c.st][1],t&&t.note||'']; });
+  const rows=L.map((x,i)=>{ const c=x.col, t=CST.terms[x.c.ck]; return [i+1,cstShort(x.c.name),x.cy==='h'?'نص شهر':'شهري',x.cd,N(x.balCalc),c.dV?cstDueLbl(c):'',c.dV?N(c.dV):'',c.dV?N(c.dP):'',c.dV?N(c.dLeft)+(c.dDiff?' ('+(c.dDiffDed?'فاضل إشعارات ':'فرق ')+N(c.dDiff)+')':''):'',c.aLeft>1?cstMLbl(c.aM)+': '+N(c.aLeft):'',N(c.expChq),CST_CS[c.st][1],t&&t.note||'']; });
   const S=f=>N(L.reduce((s,x)=>s+f(x),0));
   return {ym:X.cm,title:`موقف مديونية عملاء مودرن تريد — شهر التحصيل ${cstKL(X.cm)}`,
-    kpis:[['الرصيد النهارده',N(X.bal)],['المطلوب',N(T.dV)],['اتدفع',N(T.dP)+' ('+pc(T.dP,T.dV)+')'],['المتأخرات',N(T.aLeft)],['الباقي للتحصيل',N(T.left)],['دفع كله / جزء / مادفعش',T.nPaid+' / '+T.nPart+' / '+T.nNone]],
-    secs:[{title:'موقف التحصيل',alignR:[1],nowrap:[0,2,3,4,5,6,7,10],head:['#','العميل','الدورة','مدة الائتمان','الرصيد النهارده','مطلوب عن','المطلوب','اتدفع','الباقي','المتأخرات','الحالة','موقف السداد'],
-      rows,total:['','الإجمالي ('+L.length+' عميل)','','',S(x=>x.balCalc),'',S(x=>x.col.dV),S(x=>x.col.dP),S(x=>x.col.dLeft),S(x=>x.col.aLeft),'','']}]};
+    kpis:[['الرصيد النهارده',N(X.bal)],['المطلوب',N(T.dV)],['اتدفع',N(T.dP)+' ('+pc(T.dP,T.dV)+')'],['المتأخرات',N(T.aLeft)],['الباقي للتحصيل',N(T.left)],['الشيك المتوقع',N(T.expChq)],['دفع كله / جزء / مادفعش',T.nPaid+' / '+T.nPart+' / '+T.nNone]],
+    secs:[{title:'موقف التحصيل',alignR:[1],nowrap:[0,2,3,4,5,6,7,9,10],head:['#','العميل','الدورة','مدة الائتمان','الرصيد النهارده','مطلوب عن','المطلوب','اتدفع','الباقي','المتأخرات','الشيك المتوقع','الحالة','موقف السداد'],
+      rows,total:['','الإجمالي ('+L.length+' عميل)','','',S(x=>x.balCalc),'',S(x=>x.col.dV),S(x=>x.col.dP),S(x=>x.col.dLeft),S(x=>x.col.aLeft),S(x=>x.col.expChq),'','']}]};
 }
 function cstColMeta(){ const D=CST.data, up={}; (D.uploads||[]).forEach(u=>{ const k=String(u.branch).replace(/\s+/g,' ').trim(); if(!up[k]||u.to>up[k]) up[k]=u.to; });
   return `<span>المصدر: <b style="color:#731E2E">كشوفات حساب العملاء</b></span><span>الكشوفات لحد: ${Object.entries(up).map(([b,t])=>`<b style="color:#731E2E">${cstE(b)}</b> <bdi>${cstDL(t)}</bdi>`).join(' · ')}</span>`; }
@@ -67730,7 +67736,7 @@ function cstCardHtml(){
     :`💵 ${a.k==='chq'?'شيك':'نقدي'} ${cstDL(a.d)}${a.no?' رقم '+cstE(a.no):''}: <b>${cstF(a.a)}</b>${a.all&&Math.abs(a.all-a.a)>1?` <span class="g">(من ${cstF(a.all)})</span>`:''} <span class="g">${cstE(a.ds||'')}</span>`;
   const rows=x.rows.filter(r=>r.st!=='none');
   return `<div id="cst-card" class="cst-cust"><div class="hd"><span>👤 ${cstE(x.c.name)}</span><button onclick="CST.open=null;CST.cell=null;cstRender()">✕</button></div>
-    <div class="cst-note" style="margin:0 0 8px">${x.cy==='h'?`دورة نص شهرية (1–15 و16–آخر الشهر، لكل نص شيك) · الشيك بعد آخر النص بـ ${x.cd} يوم`:`مدة الائتمان ${x.cd} يوم (الشهر بيتحصّل بعده بـ ${x.gap} ${x.gap>2?'شهور':x.gap===2?'شهرين':'شهر'})`} · نسبة إشعاراته ${(x.rate*100).toFixed(1)}% · بيدفع فعليًا بعد آخر الشهر بـ ${x.lag} يوم · بيكتب الشهر على ${x.style==null?'—':Math.round(x.style*100)+'%'} من شيكاته${x.credit>1?` · رصيد دائن ${cstF(x.credit)}`:''}</div>
+    <div class="cst-note" style="margin:0 0 8px">${x.cy==='h'?`دورة نص شهرية (1–15 و16–آخر الشهر، لكل نص شيك) · الشيك بعد آخر النص بـ ${x.cd} يوم`:`مدة الائتمان ${x.cd} يوم (الشهر بيتحصّل بعده بـ ${x.gap} ${x.gap>2?'شهور':x.gap===2?'شهرين':'شهر'})`} · نسبة إشعاراته ${(x.rate*100).toFixed(1)}% · بيدفع فعليًا بعد آخر الشهر بـ ${x.lag} يوم · بيكتب الشهر على ${x.style==null?'—':Math.round(x.style*100)+'%'} من شيكاته${x.rp?' · بيخصم مرتجع الشهر اللي قبل الشيك من الشيك':''}${x.credit>1?` · رصيد دائن ${cstF(x.credit)}`:''}</div>
     <table class="cst-t"><thead><tr><th>الفترة</th><th>المسحوبات</th><th>اتقفل بـ (شيكات + إشعارات)</th><th>الباقي</th><th>إشعارات متوقعة</th><th>شيك متوقع</th><th>الحالة</th></tr></thead><tbody>
     ${rows.map(r=>`<tr id="cst-cell-${r.k}" class="${CST.cell===r.k?'sel':''}" onclick="CST.cell=CST.cell==='${r.k}'?null:'${r.k}';cstRender()" style="cursor:pointer"><td class="n">${cstKL(r.k)}</td><td>${cstF(r.due)}</td><td>${cstF(r.cov)}</td><td><b>${cstF(r.rem)}</b></td><td>${r.st==='ok'?'—':cstF(r.expDed)}</td><td>${r.st==='ok'?'—':cstF(r.expChq)}</td><td>${cstTag(r)}</td></tr>
       ${CST.cell===r.k?`<tr class="det"><td colspan="7" style="text-align:right">${r.al.length?r.al.map(a=>`<div>${alTxt(a)}</div>`).join(''):'<div class="g">مفيش أي شيكات أو إشعارات اتسجلت عن الشهر ده لسه.</div>'}${r.dd?`<div class="g">ميعاده حسب مدة الائتمان: لحد ${cstDL(r.dd)}</div>`:''}</td></tr>`:''}`).join('')}
