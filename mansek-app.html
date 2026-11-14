@@ -2309,6 +2309,13 @@ async function doLogin(){
     return;
   }
 
+  // ══ ربط الحساب بالموبايل (MDV) — مايفتحش غير على موبايل وافقت عليه الإدارة ══
+  if(navigator.onLine===false){
+    if(!mdvOkFor(name)){ err.textContent='أنت offline — والموبايل ده لسه متوافقش عليه'; err.style.display='block'; btn.disabled=false; btn.innerHTML='<i class="ti ti-login"></i> دخول'; return; }
+  } else if(!(await mdvGate(name))){
+    btn.disabled=false; btn.innerHTML='<i class="ti ti-login"></i> دخول'; return;
+  }
+
   err.style.display='none';
   btn.disabled=false;
   btn.innerHTML='<i class="ti ti-login"></i> دخول';
@@ -7887,6 +7894,7 @@ window.addEventListener('DOMContentLoaded', () => {
       // خط سير (فوري من لوحة التحكم، أو نقل مجدول اتنفذ تلقائي) وهو مسجل دخول بالفعل، مكانش
       // هيوصله أبداً من غير الدالة دي
       syncRouteInBackground(s);
+      mdvSessionCheck(); // الجلسة المفتوحة لازم تكون على الموبايل المتوافق عليه
 
       // شبكة أمان: لو لأي سبب الـ callbacks فوق ما اتنفذتش (مثلاً fetch مش بيرجع promise)
       setTimeout(restoreVisitStateIndependently, 2000);
@@ -8335,5 +8343,99 @@ function checkWeeklyMotivationalPopup(){
   </div>
 </div>
 
+<style id="mdv-css">
+#mdv-ov{position:fixed;inset:0;z-index:99999;background:rgba(30,18,6,.82);display:none;align-items:center;justify-content:center;padding:18px;font-family:Cairo,Tahoma,sans-serif;direction:rtl}
+#mdv-ov .mdv-box{background:#fff;border-radius:20px;max-width:380px;width:100%;padding:22px 18px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.35)}
+#mdv-ov .mdv-ic{font-size:46px;line-height:1.2}
+#mdv-ov .mdv-t{font-size:19px;font-weight:900;color:#7C2D12;margin:6px 0 8px}
+#mdv-ov .mdv-s{font-size:14px;color:#4A3B28;line-height:1.9}
+#mdv-ov .mdv-dev{font-size:12px;color:#8B7B60;margin:10px 0 14px}
+#mdv-ov .mdv-b{display:block;width:100%;border:none;border-radius:12px;padding:12px;font-size:15px;font-weight:800;font-family:inherit;background:#7C2D12;color:#fff;margin-top:8px;cursor:pointer}
+#mdv-ov .mdv-b.gh{background:#F3ECE1;color:#5B4630}
+#mdv-ov .mdv-b:disabled{opacity:.6}
+</style>
+<script>
+// ══ ربط حساب المنسق بموبايله (MDV — 14/11/2026، بطلب أحمد) ══
+// الحساب مايفتحش غير على موبايل وافق عليه الأدمن. كل موبايل بياخد رقم عشوائي (mt_dev_id) أول مرة —
+// بيتحفظ في التطبيق على الموبايل ده (نفس المكان للأيقونة وكروم). RPC: rep_device_check → ok | pending | rejected.
+// من غير نت: بيشتغل لو الموبايل ده اتوافق عليه قبل كده لنفس المنسق (mt_dev_ok).
+function mdvId(){
+  let id=null; try{ id=localStorage.getItem('mt_dev_id'); }catch(e){}
+  if(!id||id.length<16){
+    try{ id=(crypto.randomUUID?crypto.randomUUID():'')||''; }catch(e){ id=''; }
+    if(!id) id='d'+Date.now().toString(36)+Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2);
+    try{ localStorage.setItem('mt_dev_id',id); }catch(e){}
+  }
+  return id;
+}
+async function mdvModel(){
+  try{ if(navigator.userAgentData&&navigator.userAgentData.getHighEntropyValues){
+      const v=await navigator.userAgentData.getHighEntropyValues(['model','platform','platformVersion']);
+      if(v.model) return [v.model,(v.platform||'')+(v.platformVersion?' '+String(v.platformVersion).split('.')[0]:'')].filter(Boolean).join(' · '); } }catch(e){}
+  const ua=navigator.userAgent||''; const a=ua.match(/Android [\d.]+;\s*([^;)]+)/); if(a) return a[1].trim()+' · Android';
+  if(/iPhone/.test(ua)) return 'iPhone'; if(/iPad/.test(ua)) return 'iPad'; return (navigator.platform||'جهاز');
+}
+function mdvOkFor(name){ try{ return localStorage.getItem('mt_dev_ok')===name; }catch(e){ return false; } }
+async function mdvCheck(name){
+  try{
+    const r=await fetch(`${SUPABASE_URL}/rest/v1/rpc/rep_device_check`,{method:'POST',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body:JSON.stringify({p_name:name,p_device:mdvId(),p_model:await mdvModel(),p_ua:(navigator.userAgent||'').slice(0,300)})});
+    if(!r.ok) return 'err';
+    const st=((await r.json())||{}).st||'err';
+    try{ if(st==='ok') localStorage.setItem('mt_dev_ok',name); else if(st==='pending'||st==='rejected') localStorage.removeItem('mt_dev_ok'); }catch(e){}
+    return st;
+  }catch(e){ return 'err'; }
+}
+// قرار الدخول: true = يدخل
+async function mdvGate(name){
+  const st=await mdvCheck(name);
+  if(st==='ok') return true;
+  if(st==='err'&&mdvOkFor(name)) return true;   // النت/السيرفر واقع والموبايل ده متوافق عليه قبل كده
+  mdvShow(name,st); return false;
+}
+function mdvShow(name,st){
+  let o=document.getElementById('mdv-ov');
+  if(!o){ o=document.createElement('div'); o.id='mdv-ov'; document.body.appendChild(o); }
+  const rej=st==='rejected', err=st==='err';
+  o.innerHTML=`<div class="mdv-box"><div class="mdv-ic">${rej?'⛔':err?'📶':'⏳'}</div>
+    <div class="mdv-t">${rej?'الموبايل ده مرفوض':err?'تعذر التحقق من الموبايل':'مستني موافقة الإدارة'}</div>
+    <div class="mdv-s">${rej?`حساب <b>${mdvE(name)}</b> مش مسموح يشتغل من الموبايل ده. لو ده موبايلك فعلًا كلّم الإدارة.`
+      :err?'اتأكد إن النت شغال وجرّب تاني.'
+      :`حساب <b>${mdvE(name)}</b> بيشتغل على موبايل واحد بس.<br>طلب تشغيل الموبايل ده اتبعت للإدارة — أول ما يتوافق عليه اضغط "اتأكد تاني".`}</div>
+    <div class="mdv-dev">📱 ${mdvE(localStorage.getItem('mt_dev_model')||'')}</div>
+    <button class="mdv-b" onclick="mdvRetry('${mdvE(name)}',this)">🔄 اتأكد تاني</button>
+    <button class="mdv-b gh" onclick="mdvClose()">رجوع لشاشة الدخول</button></div>`;
+  mdvModel().then(m=>{ try{ localStorage.setItem('mt_dev_model',m); }catch(e){} const d=o.querySelector('.mdv-dev'); if(d) d.textContent='📱 '+m; });
+  o.style.display='flex';
+}
+function mdvE(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function mdvClose(){ const o=document.getElementById('mdv-ov'); if(o) o.style.display='none'; }
+async function mdvRetry(name,btn){
+  if(btn){ btn.disabled=true; btn.textContent='⏳ بيتأكد...'; }
+  const st=await mdvCheck(name);
+  if(st==='ok'){ mdvClose(); if(typeof showToast==='function') showToast('✅ اتوافق على الموبايل — ادخل بالباسورد');
+    try{ const n=document.getElementById('l-name'); if(n&&!n.value) n.value=name; document.getElementById('l-pass')?.focus(); }catch(e){} return; }
+  mdvShow(name,st);
+}
+// جلسة مفتوحة على موبايل مش متوافق عليه ← تتقفل
+function mdvKick(name,st){
+  try{ if(typeof locInterval!=='undefined'&&locInterval) clearInterval(locInterval); }catch(e){}
+  try{ if(window._notifInterval) clearInterval(window._notifInterval); }catch(e){}
+  try{ if(typeof shiftTimerInterval!=='undefined'&&shiftTimerInterval) clearInterval(shiftTimerInterval); }catch(e){}
+  try{ localStorage.removeItem('cu_session'); sessionStorage.removeItem('cu_session'); }catch(e){}
+  try{ cu=null; }catch(e){}
+  if(typeof showScreen==='function') showScreen('s-login');
+  mdvShow(name,st);
+}
+async function mdvSessionCheck(){
+  try{ if(typeof cu==='undefined'||!cu||!cu.name) return; const name=cu.name;
+    const st=await mdvCheck(name);
+    if(st==='pending'||st==='rejected') mdvKick(name,st);
+  }catch(e){}
+}
+(function(){ let last=0;
+  document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&Date.now()-last>5*60*1000){ last=Date.now(); mdvSessionCheck(); } });
+})();
+</script>
 </body>
 </html>
