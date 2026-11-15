@@ -63002,7 +63002,8 @@ async function svmShareExcel(){
 const SFC={sel:{br:new Set(),grp:new Set(),route:new Set(),cust:new Set(),site:new Set(),item:new Set()},
   months:{},tgt:{},annual:{total:0,from:null,to:null},ov:{},keep:new Set(),view:'all',plan:null,plans:[],base:{},meta:null,metaKey:'',itemOpts:[],itemKey:'',
   open:null,msq:{},dirty:false,req:0,tab:'grp',q:'',openSite:{},res:{},saveT:null,saved:true,showStopped:false,stopQ:'',
-  isrc:[], ib:null, isrcOpen:false};
+  isrc:[], ib:null, isrcOpen:false,
+  mode:'hij', avgN:3};  // mode: 'hij' = نفس الأيام الهجرية السنة اللي فاتت · 'avg' = متوسط آخر N شهور (الأساس بالصافي بعد المرتجع)
 const SFC_LEVELS=[['br','فروع الشركة','b'],['grp','المجموعات','g'],['route','خطوط السير','r'],['cust','العملاء','c'],['site','فروع العملاء','s'],['item','الأصناف',null]];
 const SFC_HM=['محرم','صفر','ربيع الأول','ربيع الآخر','جمادى الأولى','جمادى الآخرة','رجب','شعبان','رمضان','شوال','ذو القعدة','ذو الحجة'];
 function sfcLbl(k,v){ return k==='grp'||k==='g'?csGrpLbl(v):v; }
@@ -63024,7 +63025,14 @@ function sfcHLabel(f,t){ const a=sfcHij(f), b=sfcHij(t); if(!a||!b) return '';
   return a.m===b.m&&a.y===b.y?`${SFC_HM[a.m-1]} ${a.y}`:`${a.d} ${SFC_HM[a.m-1]}${a.y!==b.y?' '+a.y:''} – ${b.d} ${SFC_HM[b.m-1]} ${b.y}`; }
 function sfcLastData(){ return sfcAdd(ccToday(),-1); }
 function sfcMonthRange(ym){ const y=+ym.slice(0,4), m=+ym.slice(5,7); return [ym+'-01', sfcS(new Date(Date.UTC(y,m,0)))]; }
+function sfcAddM(ym,k){ let y=+ym.slice(0,4), m=+ym.slice(5,7)+k; while(m>12){m-=12;y++;} while(m<1){m+=12;y--;} return y+'-'+String(m).padStart(2,'0'); }
 function sfcBaseOf(ym){ // فترة الأساس للشهر: نفس الأيام الهجرية من السنة الهجرية اللي فاتت (أو اللي قبلها لو لسه مالهاش بيع)
+  if(SFC.mode==='avg'){ // توقع شهري: آخر N شهور قبل الشهر المستهدف — بالصافي بعد المرتجع
+    const n=Math.max(1,+SFC.avgN||3), L=sfcLastData(), lm=L.slice(0,7);
+    const lastFull=(L===sfcMonthRange(lm)[1])?lm:sfcAddM(lm,-1);   // آخر شهر كامل عندنا بيعه
+    let z=sfcAddM(ym,-1); if(z>lastFull) z=lastFull;               // الشهور اللي قبل المستهدف واللي خلصت فعلاً
+    const a=sfcAddM(z,-(n-1)), f=sfcMonthRange(a)[0], t=sfcMonthRange(z)[1];
+    return {f,t,back:0,avg:n,lbl:`متوسط آخر ${n} شهور (${sfcMonLbl(a)} – ${sfcMonLbl(z)})`}; }
   let [f,t]=sfcMonthRange(ym), back=0;
   do{ f=sfcHijBack(f); t=sfcHijBack(t); back++; } while(t>sfcLastData() && back<3);
   return {f,t,back,lbl:sfcHLabel(f,t)}; }
@@ -63167,7 +63175,8 @@ async function sfcLoad(){
     const full={...args,p_items:SFC.isrc.length?null:sfcArr('item')};
     const need=ms.map(ym=>{ const b=sfcBaseOf(ym); return {ym,b,key:JSON.stringify({...full,f:b.f,t:b.t})}; }).filter(x=>!SFC.base[x.ym]||SFC.base[x.ym].key!==x.key);
     let done=0; const q=need.slice(), got={};
-    const worker=async()=>{ while(q.length){ const x=q.shift(); const r=await csRpc('fc_base',{p_from:x.b.f,p_to:x.b.t,...full});
+    const RPC=SFC.mode==='avg'?'fc_base_net':'fc_base';
+    const worker=async()=>{ while(q.length){ const x=q.shift(); const r=await csRpc(RPC,{p_from:x.b.f,p_to:x.b.t,...full});
       got[x.ym]={key:x.key,b:x.b,rows:((r&&r.rows)||[]).map(a=>({b:a[0],g:a[1],r:a[2],c:a[3],s:a[4],i:a[5],w:+a[6]||0,q:+a[7]||0}))};
       done++; if(my===SFC.req&&need.length>1) body.innerHTML=`<div style="text-align:center;padding:50px;color:#8B6F47"><div class="spinner" style="margin:0 auto 12px"></div>جاري تحميل بيع فترات الأساس (${done} من ${need.length} شهر)...</div>`; } };
     await Promise.all([worker(),worker(),worker()]); if(my!==SFC.req) return; Object.assign(SFC.base,got);
@@ -63264,7 +63273,20 @@ function sfcRenderIsrc(){
   const box=document.getElementById('sfc-isrc'); if(!box) return;
   const on=SFC.isrc.length>0, L=sfcIsrcMonths(), lv=SFC.ib&&SFC.ib.lv;
   const lbl=on?SFC.isrc.slice().sort().map(sfcMonLbl).join('، '):'نفس الأيام الهجرية السنة اللي فاتت (الافتراضي)';
-  box.innerHTML=`<div style="background:#fff;border:1.5px solid ${on?'#2E7D32':'#E8DCC4'};border-radius:12px;padding:10px 14px">
+  const avg=SFC.mode==='avg';
+  const modeBar=`<div style="background:#fff;border:1.5px solid ${avg?'#1A5E8A':'#E8DCC4'};border-radius:12px;padding:10px 14px;margin-bottom:10px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <b style="color:#4B3C1A"><i class="ti ti-calendar-stats" style="color:#C8A96E"></i> أساس التوقع:</b>
+      <button type="button" class="cs-mode-btn${avg?'':' on'}" onclick="sfcSetMode('hij')">🌙 توقع سنوي — نفس الأيام الهجرية السنة اللي فاتت</button>
+      <button type="button" class="cs-mode-btn${avg?' on':''}" onclick="sfcSetMode('avg')">📅 توقع بيع شهري — متوسط آخر شهور</button>
+      ${avg?`<span style="font-weight:800;color:#1A5E8A">آخر</span>
+        <select onchange="sfcSetAvgN(this.value)" style="padding:6px 10px;border-radius:9px;border:1.5px solid #1A5E8A;font-family:inherit;font-weight:800;color:#1A5E8A">
+          ${[2,3,4,6].map(n=>`<option value="${n}"${+SFC.avgN===n?' selected':''}>${n} شهور</option>`).join('')}</select>`:''}
+    </div>
+    <div style="font-size:11.5px;color:#8B7B60;margin-top:6px;line-height:1.8">${avg
+      ?`هدف كل شهر بيتوزع على الفروع بنسبة <b>متوسط توريداتها في آخر ${SFC.avgN} شهور قبله</b> — <b>بالصافي بعد المرتجع</b>. الفرع اللي اتورد له في شهر واحد بس من الشهور دي بياخد نصيب بقد اللي اتورد له.`
+      :'هدف كل شهر بيتوزع بنسبة بيع نفس الأيام الهجرية من السنة اللي فاتت (مناسب للتوقع السنوي والمواسم).'}</div></div>`;
+  box.innerHTML=modeBar+`<div style="background:#fff;border:1.5px solid ${on?'#2E7D32':'#E8DCC4'};border-radius:12px;padding:10px 14px">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <b style="color:#4B3C1A"><i class="ti ti-package" style="color:#C8A96E"></i> أصناف التوقع:</b>
       <div style="position:relative" onclick="event.stopPropagation()">
@@ -63282,6 +63304,10 @@ function sfcRenderIsrc(){
       :'الأصناف دلوقتي بتتاخد من بيع نفس الأيام الهجرية السنة اللي فاتت. لو عايز تبني على الأصناف اللي بتبيعها دلوقتي، اختار شهور (مثلاً أغسطس–أكتوبر 2026).'}</div>
   </div>`;
 }
+function sfcSetMode(m){ m=(m==='avg'?'avg':'hij'); if(SFC.mode===m) return; SFC.mode=m; SFC.base={}; SFC.metaKey=''; SFC.itemKey=''; SFC.ib=null;
+  sfcRenderIsrc(); sfcChanged(); sfcLoad(); }
+function sfcSetAvgN(n){ n=Math.max(1,+n||3); if(+SFC.avgN===n) return; SFC.avgN=n; SFC.base={}; SFC.metaKey=''; SFC.itemKey='';
+  sfcRenderIsrc(); sfcChanged(); sfcLoad(); }
 function sfcIsrcPick(ym,on){ const s=new Set(SFC.isrc); if(on) s.add(ym); else s.delete(ym); sfcIsrcSet([...s].sort(),true); }
 function sfcIsrcSet(arr,keepOpen){ SFC.isrc=arr.slice().sort(); SFC.ib=null; SFC.itemKey=''; if(!keepOpen) SFC.isrcOpen=false; sfcRenderIsrc(); sfcChanged(); clearTimeout(SFC.isrcT); SFC.isrcT=setTimeout(()=>sfcLoad(),keepOpen?700:0); }
 document.addEventListener('click',()=>{ if(SFC.isrcOpen){ SFC.isrcOpen=false; sfcRenderIsrc(); } });
@@ -63414,7 +63440,7 @@ function sfcTblModel(){
   const kpis=[['الهدف',N(T)],['بيع فترة الأساس',N(W)],['الهدف ÷ بيع الأساس',W?(T/W*100).toFixed(1)+'%':'—'],['إجمالي التوقع',N(S)]];
   if(SR) kpis.push(['خصم الشيك المتوقع',N(DK)],['الصافي بعد الخصم',N(S-DK)]);
   const pl=(SFC.plans||[]).find(p=>p.id===SFC.plan);
-  return {title:'التوقع البيعي — '+tabLbl+' — '+per, kpis, per, plan:pl?pl.name:'',
+  return {title:(SFC.mode==='avg'?'توقع بيع شهري':'التوقع البيعي')+' — '+tabLbl+' — '+per, kpis, per, plan:pl?pl.name:'',
     secs:[{title:tabLbl, alignR, nowrap:[0], head, rows:out, total:tot}],
     fname:'AlTahhan_Forecast_'+tab+'_'+(one?SFC.view:'all')};
 }
@@ -63446,8 +63472,8 @@ function sfcSetOv(k,v){ const ym=SFC.view; if(ym==='all') return; const n=sfcNum
 function sfcClearOv(){ if(!confirm('إلغاء كل الأرقام المثبتة في الشهر ده؟')) return; delete SFC.ov[SFC.view]; sfcChanged(); sfcComputeAll(); sfcRender(); }
 
 // ── الحفظ ──
-function sfcCfg(){ const sel={}; SFC_LEVELS.forEach(([k])=>sel[k]=[...SFC.sel[k]]); return {v:2,months:SFC.months,annual:SFC.annual,ov:SFC.ov,keep:[...SFC.keep],sel,isrc:SFC.isrc.slice()}; }
-function sfcApplyCfg(c){ c=c||{}; SFC.months=(c.v===2&&c.months)||{}; SFC.annual=Object.assign({total:0,from:null,to:null},(c.v===2&&c.annual)||{}); SFC.tgt={}; SFC.ov=(c.v===2&&c.ov)||{}; SFC.keep=new Set(c.keep||[]); SFC.isrc=Array.isArray(c.isrc)?c.isrc.slice().sort():[]; SFC.ib=null;
+function sfcCfg(){ const sel={}; SFC_LEVELS.forEach(([k])=>sel[k]=[...SFC.sel[k]]); return {v:2,months:SFC.months,annual:SFC.annual,ov:SFC.ov,keep:[...SFC.keep],sel,isrc:SFC.isrc.slice(),mode:SFC.mode,avgN:SFC.avgN}; }
+function sfcApplyCfg(c){ c=c||{}; SFC.months=(c.v===2&&c.months)||{}; SFC.annual=Object.assign({total:0,from:null,to:null},(c.v===2&&c.annual)||{}); SFC.tgt={}; SFC.ov=(c.v===2&&c.ov)||{}; SFC.keep=new Set(c.keep||[]); SFC.mode=(c.mode==='avg'?'avg':'hij'); SFC.avgN=+c.avgN>0?+c.avgN:3; SFC.isrc=Array.isArray(c.isrc)?c.isrc.slice().sort():[]; SFC.ib=null;
   SFC_LEVELS.forEach(([k])=>SFC.sel[k]=new Set((c.sel&&c.sel[k])||[])); SFC.metaKey=''; SFC.itemKey=''; SFC.base={}; SFC.res={}; SFC.openSite={}; SFC.view='all'; }
 function sfcSaveSt(t,col){ const e=document.getElementById('sfc-savest'); if(e) e.innerHTML=`<span style="color:${col||'#E8D3A2'};font-weight:700">${t}</span>`; }
 function sfcChanged(){ SFC.saved=false; if(SFC.plan){ sfcSaveSt('جاري الحفظ...'); clearTimeout(SFC.saveT); SFC.saveT=setTimeout(()=>sfcSave(false),1200); } else sfcSaveSt('مش محفوظ — دوس "حفظ"','#FFD54F'); }
