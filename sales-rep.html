@@ -1538,6 +1538,45 @@ async function passMatches(stored, input){
   }catch(e){ return false; }
 }
 
+// ══ ربط حساب المندوب بموبايله (SDV — 17/11/2026) — نفس نظام المنسق، kind='sales' ══
+function sdvId(){ let id=null; try{ id=localStorage.getItem('mt_dev_id'); }catch(e){}
+  if(!id||id.length<16){ try{ id=(crypto.randomUUID?crypto.randomUUID():'')||''; }catch(e){ id=''; }
+    if(!id) id='d'+Date.now().toString(36)+Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2);
+    try{ localStorage.setItem('mt_dev_id',id); }catch(e){} } return id; }
+async function sdvModel(){
+  try{ if(navigator.userAgentData&&navigator.userAgentData.getHighEntropyValues){ const v=await navigator.userAgentData.getHighEntropyValues(['model','platform','platformVersion']);
+    if(v.model) return [v.model,(v.platform||'')+(v.platformVersion?' '+String(v.platformVersion).split('.')[0]:'')].filter(Boolean).join(' · '); } }catch(e){}
+  const ua=navigator.userAgent||''; const a=ua.match(/Android [\d.]+;\s*([^;)]+)/); if(a) return a[1].trim()+' · Android';
+  if(/iPhone/.test(ua)) return 'iPhone'; if(/iPad/.test(ua)) return 'iPad'; return (navigator.platform||'جهاز'); }
+function sdvOkFor(name){ try{ return localStorage.getItem('mt_dev_ok_s')===name; }catch(e){ return false; } }
+async function sdvCheck(name){
+  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/rpc/rep_device_check`,{method:'POST',headers:SB_HEADERS,
+      body:JSON.stringify({p_name:name,p_device:sdvId(),p_model:await sdvModel(),p_ua:(navigator.userAgent||'').slice(0,300),p_kind:'sales'})});
+    if(!r.ok) return 'err'; const j=(await r.json())||{}; const st=j.st||'err';
+    try{ if(st==='ok') localStorage.setItem('mt_dev_ok_s',name); else if(st==='pending'||st==='rejected') localStorage.removeItem('mt_dev_ok_s');
+      localStorage.setItem('mt_dev_test_s', j.test?'1':''); }catch(e){}
+    return st;
+  }catch(e){ return 'err'; } }
+async function sdvGate(name){ const st=await sdvCheck(name); if(st==='ok') return true; if(st==='err'&&sdvOkFor(name)) return true; sdvShow(name,st); return false; }
+function sdvE(x){ return String(x==null?'':x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function sdvShow(name,st){
+  let o=document.getElementById('sdv-ov'); if(!o){ o=document.createElement('div'); o.id='sdv-ov'; document.body.appendChild(o); }
+  const rej=st==='rejected', err=st==='err';
+  o.style.cssText='position:fixed;inset:0;z-index:99999;background:rgba(20,30,15,.86);display:flex;align-items:center;justify-content:center;padding:18px;direction:rtl;font-family:Cairo,sans-serif';
+  o.innerHTML=`<div style="background:#fff;border-radius:18px;max-width:360px;width:100%;padding:22px 18px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.35)">
+    <div style="font-size:44px">${rej?'⛔':err?'📶':'⏳'}</div>
+    <div style="font-size:18px;font-weight:900;color:#276749;margin:6px 0 8px">${rej?'الموبايل ده مرفوض':err?'تعذر التحقق من الموبايل':'مستني موافقة الإدارة'}</div>
+    <div style="font-size:14px;color:#4A3B28;line-height:1.9">${rej?`حساب <b>${sdvE(name)}</b> مش مسموح يشتغل من الموبايل ده.`:err?'اتأكد إن النت شغال وجرّب تاني.':`حساب <b>${sdvE(name)}</b> بيشتغل على موبايل واحد بس.<br>طلب تشغيل الموبايل ده اتبعت للإدارة — أول ما يتوافق عليه اضغط "اتأكد تاني".`}</div>
+    <div style="font-size:12px;color:#8B7B60;margin:10px 0 14px">📱 ${sdvE(localStorage.getItem('mt_dev_model_s')||'')}</div>
+    <button onclick="sdvRetry('${sdvE(name)}',this)" style="display:block;width:100%;border:none;border-radius:12px;padding:12px;font-size:15px;font-weight:800;font-family:inherit;background:#276749;color:#fff;margin-top:8px">🔄 اتأكد تاني</button>
+    <button onclick="document.getElementById('sdv-ov').style.display='none'" style="display:block;width:100%;border:none;border-radius:12px;padding:12px;font-size:15px;font-weight:800;font-family:inherit;background:#F3ECE1;color:#5B4630;margin-top:8px">رجوع لشاشة الدخول</button></div>`;
+  sdvModel().then(m=>{ try{ localStorage.setItem('mt_dev_model_s',m); }catch(e){} const d=o.querySelector('div[style*="8B7B60"]'); if(d) d.textContent='📱 '+m; });
+  o.style.display='flex'; }
+async function sdvRetry(name,btn){ if(btn){ btn.disabled=true; btn.textContent='⏳ بيتأكد...'; }
+  const st=await sdvCheck(name);
+  if(st==='ok'){ const o=document.getElementById('sdv-ov'); if(o) o.style.display='none'; showToast('✅ اتوافق على الموبايل — ادخل بالباسورد'); return; }
+  sdvShow(name,st); }
+
 async function doLogin(){
   const sel=$('rep-sel');
   const passVal=$('pass-inp').value.trim();
@@ -1553,6 +1592,10 @@ async function doLogin(){
     if(!data.length) throw new Error('not found');
     const user=data[0];
     if(!(await passMatches(user.pass_hash,passVal))) throw new Error('wrong pass');
+    // ══ ربط الموبايل (SDV) — مايفتحش غير على موبايل وافقت عليه الإدارة ══
+    if(navigator.onLine===false){
+      if(!sdvOkFor(user.name)){ errEl.classList.add('on'); errEl.textContent='أنت offline — والموبايل ده لسه متوافقش عليه'; return; }
+    } else if(!(await sdvGate(user.name))){ return; }
     // فحص يوم الإجازة الأسبوعية
     const dayOffVal = user.day_off||'none';
     if(dayOffVal && dayOffVal !== 'none'){
