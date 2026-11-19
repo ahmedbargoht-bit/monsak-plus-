@@ -5966,6 +5966,7 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape' && document.queryS
                   <div>
                     <span class="pm-badge pm-badge-ok" id="pm-confirmed-count"></span>
                     <span class="pm-badge pm-badge-wait" id="pm-pending-count"></span>
+                    <span class="pm-badge" style="background:#EFF6FF;color:#2563EB" id="pm-sent-count"></span>
                   </div>
                 </div>
                 <div style="background:var(--bg2,#F0F1F4);border-radius:20px;height:8px;overflow:hidden;margin-bottom:12px">
@@ -5974,6 +5975,7 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape' && document.queryS
                 <div id="pm-clients-list"></div>
                 <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
                   <button class="btn" onclick="pmConfirmAllClients()" style="font-size:12px;background:#D97706;color:#fff;border:none">⚡ تأكيد الكل دفعة واحدة</button>
+                  <button class="btn" onclick="pmMarkAllSent()" style="font-size:12px;background:#2563EB;color:#fff;border:none">📤 إرسال الكل</button>
                 </div>
               </div>
             </div>
@@ -66745,7 +66747,11 @@ async function pmLoadPending(){
   var cdd = document.getElementById('pm-pending-client');
   if(cdd){
     var prev = cdd.value;
-    var clients = (_splClients||[]).filter(c=>!c.deleted_at).map(c=>c.name).sort();
+    // \u0639\u0631\u0636 \u0627\u0644\u0639\u0645\u0644\u0627\u0621 \u0627\u0644\u0644\u064a \u0639\u0646\u062f\u0647\u0645 \u062a\u0639\u062f\u064a\u0644\u0627\u062a \u0641\u0639\u0644\u064a\u0629 \u0641\u0642\u0637 (\u0645\u0646 price_mod_client_status)
+    var activeModIds = _pmMods.filter(m=>m.status==='active').map(m=>m.id);
+    var activeClientNames = new Set();
+    _pmClientStatus.forEach(function(s){ if(activeModIds.indexOf(s.mod_id)!==-1) activeClientNames.add(s.client_name); });
+    var clients = [...activeClientNames].sort();
     cdd.innerHTML = '<option value="all">\u0643\u0644 \u0627\u0644\u0639\u0645\u0644\u0627\u0621</option>' + clients.map(c=>'<option value="'+c+'"'+(c===prev?' selected':'')+'>'+c+'</option>').join('');
     var pdfBtn = document.getElementById('pm-client-pdf-btn');
     var xlsBtn = document.getElementById('pm-client-xls-btn');
@@ -66804,14 +66810,35 @@ async function pmActivateMod(modId){
   var mod = _pmMods.find(m=>m.id===modId);
   if(!mod) return;
   var H = PM_H();
-  var clients = (_splClients||[]).filter(c=>!c.deleted_at);
-  if(!clients.length){ alert('لا يوجد عملاء!'); return; }
+  // ── فلترة العملاء حسب بيانات البيع الفعلية (آخر 6 شهور من tamr_sales_items) ──
+  var sixMonthsAgo = new Date(); sixMonthsAgo.setMonth(sixMonthsAgo.getMonth()-6);
+  var ymd = sixMonthsAgo.toISOString().slice(0,10);
+  var itemClients = new Set();
+  try{
+    var sH = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY};
+    var encItem = encodeURIComponent('eq.'+mod.snf_name);
+    var salesRows = await fetchAllRows(
+      SUPABASE_URL+'/rest/v1/tamr_sales_items?select=customer&item='+encItem+'&invoice_date=gte.'+ymd,
+      sH
+    );
+    (salesRows||[]).forEach(function(r){ if(r.customer) itemClients.add(r.customer.trim()); });
+  }catch(e){ console.error('[pm] fetch sales clients error', e); }
+  // مطابقة أسماء العملاء من فواتير MT مع sales_clients
+  var allClients = (_splClients||[]).filter(c=>!c.deleted_at);
+  var norm = function(s){ return String(s||'').replace(/[إأآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/\s+/g,' ').trim().toLowerCase(); };
+  var matchedClients = allClients.filter(function(c){
+    if(itemClients.has(c.name)) return true;
+    var nk = norm(c.name);
+    for(var v of itemClients){ if(nk===norm(v)) return true; }
+    return false;
+  });
+  if(!matchedClients.length){ alert('لا يوجد عملاء اشتروا هذا الصنف في آخر 6 شهور!'); return; }
   try{
     await fetch(SUPABASE_URL+'/rest/v1/price_modifications?id=eq.'+modId,{
       method:'PATCH', headers:H,
       body:JSON.stringify({status:'active', activated_at:new Date().toISOString()})
     });
-    var rows = clients.map(c=>({mod_id:modId, client_name:c.name, status:'pending'}));
+    var rows = matchedClients.map(c=>({mod_id:modId, client_name:c.name, status:'pending'}));
     await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status',{
       method:'POST', headers:Object.assign({},H,{'Prefer':'return=minimal'}),
       body:JSON.stringify(rows)
@@ -66819,6 +66846,30 @@ async function pmActivateMod(modId){
     await pmLoadExistingMods();
     pmLoadPending();
   }catch(e){ console.error('[pm] activate error', e); alert('حصل خطأ أثناء التفعيل'); }
+}
+
+// ── إضافة عميل يدوي لتعديل سعر مفعّل ──
+async function pmAddManualClient(modId){
+  var mod = _pmMods.find(m=>m.id===modId);
+  if(!mod) return;
+  var existing = _pmClientStatus.filter(s=>s.mod_id===modId).map(s=>s.client_name);
+  var available = (_splClients||[]).filter(c=>!c.deleted_at && existing.indexOf(c.name)===-1).map(c=>c.name).sort();
+  if(!available.length){ alert('كل العملاء مضافين بالفعل!'); return; }
+  var picked = prompt('اختر اسم العميل لإضافته:\n\n'+available.map(function(n,i){return (i+1)+'. '+n;}).join('\n')+'\n\nاكتب الرقم:');
+  if(!picked) return;
+  var idx = parseInt(picked)-1;
+  if(isNaN(idx) || idx<0 || idx>=available.length){ alert('رقم غير صحيح'); return; }
+  var clientName = available[idx];
+  var H = PM_H();
+  try{
+    await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status',{
+      method:'POST', headers:Object.assign({},H,{'Prefer':'return=minimal'}),
+      body:JSON.stringify({mod_id:modId, client_name:clientName, status:'pending'})
+    });
+    await pmLoadExistingMods();
+    pmRenderClients();
+    pmMsg('✅ تمت إضافة '+clientName,'#16A34A');
+  }catch(e){ console.error('[pm] add manual client error', e); alert('حصل خطأ أثناء الإضافة'); }
 }
 
 async function pmCancelMod(modId){
@@ -66866,12 +66917,22 @@ function pmRenderClients(){
   document.getElementById('pm-progress').style.width = pct.toFixed(1)+'%';
   var sorted = confirmedArr.concat(pendingArr);
   var html = '';
+  var sentArr = statuses.filter(s=>s.sent_at);
+  document.getElementById('pm-sent-count').textContent = '📤 تم الإرسال: '+sentArr.length;
   sorted.forEach(s=>{
     var isOk = s.status==='confirmed';
     var dateStr = s.confirmed_at ? new Date(s.confirmed_at).toLocaleDateString('ar-EG') : '';
+    var isSent = !!s.sent_at;
+    var sentDateStr = s.sent_at ? new Date(s.sent_at).toLocaleDateString('ar-EG') : '';
     html += '<div class="pm-row '+(isOk?'ok':'wait')+'">';
     html += '<div class="pm-row-hd">';
     html += '<span class="pm-name">🏪 '+s.client_name+'</span>';
+    // ── حالة الإرسال ──
+    html += '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;margin:0 6px" title="'+(isSent?'تم الإرسال '+sentDateStr:'اضغط لتسجيل الإرسال')+'">';
+    html += '<input type="checkbox" '+(isSent?'checked':'')+' onchange="pmToggleSent('+s.id+','+mod.id+',this.checked)" style="accent-color:#2563EB;width:16px;height:16px;cursor:pointer">';
+    html += isSent ? '<span style="color:#2563EB;font-weight:600">📤 تم الإرسال <span style="font-size:10px;color:var(--text2)">'+sentDateStr+'</span></span>' : '<span style="color:var(--text2)">📤 إرسال</span>';
+    html += '</label>';
+    // ── حالة التأكيد ──
     if(isOk){
       html += '<span class="pm-badge pm-badge-ok">✓ تم التأكيد</span>';
       html += '<span style="font-size:11px;color:var(--text2)">'+dateStr+'</span>';
@@ -66885,6 +66946,10 @@ function pmRenderClients(){
   listEl.innerHTML = html || '<div style="text-align:center;padding:20px;color:var(--text2)">لا يوجد عملاء</div>';
   if(total>0 && confirmedArr.length===total){
     listEl.innerHTML += '<div style="text-align:center;padding:16px;background:#F0FDF4;border-radius:10px;margin-top:12px;color:#16A34A;font-weight:700">🎉 تم تأكيد التعديل لكل العملاء!</div>';
+  }
+  // زر إضافة عميل يدوي
+  if(mod.status==='active'){
+    listEl.innerHTML += '<div style="text-align:center;padding:12px;margin-top:8px"><button class="btn" onclick="pmAddManualClient('+mod.id+')" style="font-size:12px;background:#EFF6FF;color:#2563EB;border:1px solid #BFDBFE">➕ إضافة عميل</button></div>';
   }
 }
 
@@ -66949,6 +67014,48 @@ async function pmConfirmAllClients(){
   });
   await pmLoadExistingMods();
   pmRenderClients();
+}
+
+// ── تسجيل / إلغاء إرسال تعديل السعر للعميل ──
+async function pmToggleSent(statusId, modId, checked){
+  var H = PM_H();
+  try{
+    var body = checked
+      ? {sent_at:new Date().toISOString(), sent_by:'admin'}
+      : {sent_at:null, sent_by:null};
+    await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status?id=eq.'+statusId,{
+      method:'PATCH', headers:H,
+      body:JSON.stringify(body)
+    });
+    var st = _pmClientStatus.find(s=>s.id===statusId);
+    if(st){
+      st.sent_at = checked ? new Date().toISOString() : null;
+      st.sent_by = checked ? 'admin' : null;
+    }
+    pmRenderClients();
+  }catch(e){ console.error('[pm] toggle sent error', e); alert('حصل خطأ أثناء تحديث حالة الإرسال'); }
+}
+
+// ── تسجيل إرسال لكل العملاء دفعة واحدة ──
+async function pmMarkAllSent(){
+  if(!_pmCurrentMod) return;
+  var mod = _pmCurrentMod;
+  var unsent = _pmClientStatus.filter(s=>s.mod_id===mod.id && !s.sent_at);
+  if(!unsent.length){ pmMsg('✅ كل العملاء تم إرسالهم بالفعل','#16A34A'); return; }
+  if(!confirm('تسجيل إرسال التعديل لـ '+unsent.length+' عميل؟')) return;
+  var H = PM_H();
+  var now = new Date().toISOString();
+  for(var i=0;i<unsent.length;i++){
+    try{
+      await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status?id=eq.'+unsent[i].id,{
+        method:'PATCH', headers:H,
+        body:JSON.stringify({sent_at:now, sent_by:'admin'})
+      });
+      unsent[i].sent_at=now; unsent[i].sent_by='admin';
+    }catch(e){ console.error('[pm] batch sent error', unsent[i].client_name, e); }
+  }
+  pmRenderClients();
+  pmMsg('✅ تم تسجيل إرسال التعديل لـ '+unsent.length+' عميل','#16A34A');
 }
 
 function pmBackToItems(){
@@ -67111,6 +67218,9 @@ function pmRenderPendingList(clientFilter){
         clientBadge = cSt.status==='confirmed'
           ? ' <span class="pm-badge pm-badge-ok">✓ '+clientFilter+' أكد</span>'
           : ' <span class="pm-badge pm-badge-wait">⏳ '+clientFilter+' لسه</span>';
+        if(cSt.sent_at){
+          clientBadge += ' <span class="pm-badge" style="background:#EFF6FF;color:#2563EB;font-size:10px">📤 تم الإرسال '+new Date(cSt.sent_at).toLocaleDateString('ar-EG')+'</span>';
+        }
       }
     }
     html += '<div class="pm-pending-card">';
