@@ -66587,6 +66587,7 @@ async function pmInit(){
   }
   await pmLoadExistingMods();
   pmFilterItems();
+  if(!_pmBuyers || _pmBuyers.err) pmLoadBuyers().then(function(){ pmRenderItems(); });
 }
 
 async function pmLoadExistingMods(){
@@ -66603,6 +66604,67 @@ async function pmLoadExistingMods(){
 
 function pmGetModForProduct(snfName){
   return _pmMods.find(m => m.snf_name === snfName && (m.status==='draft'||m.status==='active'));
+}
+
+// ── PM-BUYERS: العملاء اللي اشتروا كل صنف فعلاً (tamr_sales_items آخر 6 شهور) ──
+// نفس منطق pmActivateMod: الصنف بالاسم بالظبط، والعميل بيتطابق مع sales_clients.name بمقارنة عربية موحّدة.
+// تحميل واحد لكل الأصناف (صفحات 1000 بالتوازي على دفعات) وبيتكاش للجلسة — بيستخدمه عمود "عدد العملاء" ودروب داون التعديلات المعلقة.
+var _pmBuyers = null;      // {ymd, byItem:{snf_name:[أسماء sales_clients]}} أو {err:true}
+var _pmBuyersP = null;
+function pmNormAr(s){ return String(s||'').replace(/[إأآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/\s+/g,' ').trim().toLowerCase(); }
+function pmLoadBuyers(force){
+  if(_pmBuyers && !_pmBuyers.err && !force) return Promise.resolve(_pmBuyers);
+  if(_pmBuyersP) return _pmBuyersP;
+  _pmBuyersP = (async function(){
+    var d = new Date(); d.setMonth(d.getMonth()-6);
+    var ymd = d.toISOString().slice(0,10);
+    var H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY};
+    var base = SUPABASE_URL+'/rest/v1/tamr_sales_items?select=item,customer&invoice_date=gte.'+ymd+'&order=id.asc';
+    var PS = 1000, BATCH = 8, rows = [], page = 0, done = false, failed = false;
+    async function getPage(p){
+      for(var a=0;a<3;a++){
+        try{ var r = await fetch(base+'&limit='+PS+'&offset='+(p*PS), {headers:H}); if(r.ok) return await r.json(); }catch(e){}
+        await new Promise(function(res){ setTimeout(res, 700*(a+1)); });
+      }
+      throw new Error('page '+p);
+    }
+    try{
+      while(!done && page < 300){
+        var jobs = [];
+        for(var b=0;b<BATCH;b++) jobs.push(getPage(page+b));
+        var pages = await Promise.all(jobs);
+        for(var k=0;k<pages.length;k++){
+          var pg = Array.isArray(pages[k]) ? pages[k] : [];
+          rows = rows.concat(pg);
+          if(pg.length < PS){ done = true; break; }
+        }
+        page += BATCH;
+      }
+    }catch(e){ console.error('[pm] buyers load error', e); failed = true; }
+    if(failed){ _pmBuyers = {err:true}; return _pmBuyers; }
+    // العملاء النشطين بمفتاح موحّد
+    var cKey = {};
+    (_splClients||[]).forEach(function(c){ if(!c.deleted_at && c.name){ var k = pmNormAr(c.name); (cKey[k] = cKey[k]||[]).push(c.name); } });
+    var byItem = {};
+    rows.forEach(function(r){
+      if(!r.item || !r.customer) return;
+      var names = cKey[pmNormAr(r.customer)];
+      if(!names) return;
+      var it = String(r.item).trim();
+      var set = byItem[it] || (byItem[it] = new Set());
+      names.forEach(function(n){ set.add(n); });
+    });
+    var out = {};
+    Object.keys(byItem).forEach(function(it){ out[it] = [...byItem[it]].sort(); });
+    _pmBuyers = {ymd:ymd, rows:rows.length, byItem:out};
+    return _pmBuyers;
+  })();
+  _pmBuyersP.finally(function(){ _pmBuyersP = null; });
+  return _pmBuyersP;
+}
+function pmBuyersOf(snfName){
+  if(!_pmBuyers || _pmBuyers.err) return null;
+  return _pmBuyers.byItem[String(snfName||'').trim()] || [];
 }
 
 function pmFilterItems(){
@@ -66657,7 +66719,10 @@ function pmRenderItems(){
     }
     var taxPct = pr ? (pr.tax_pct || 0) : 0;
     html += '<td style="padding:8px;text-align:center;font-size:12px">'+(taxPct>0?'<span style="color:#D97706;font-weight:600">'+taxPct+'%</span>':'<span style="color:var(--text2)">\u2014</span>')+'</td>';
-    html += '<td style="padding:8px;text-align:center;font-size:12px">'+clientCount+'</td>';
+    var buyers = pmBuyersOf(p.name);
+    var buyersCell = buyers ? (buyers.length ? '<span title="'+buyers.join('، ').replace(/"/g,'&quot;')+'">'+buyers.length+'</span>' : '<span style="color:var(--text2)">0</span>')
+      : (_pmBuyers && _pmBuyers.err ? '<span style="color:#B45309" title="تعذّر تحميل المبيعات">⚠️</span>' : '<span style="color:var(--text2)">…</span>');
+    html += '<td style="padding:8px;text-align:center;font-size:12px">'+buyersCell+'</td>';
     if(mod&&mod.status==='active'){
       html += '<td style="padding:8px;text-align:center"><span style="cursor:pointer" onclick="pmViewClients('+mod.id+')" title="اضغط لعرض العملاء">'+statusHtml+'</span></td>';
     } else {
@@ -66742,12 +66807,22 @@ async function pmLoadPending(){
   var cdd = document.getElementById('pm-pending-client');
   if(cdd){
     var prev = cdd.value;
-    // \u0639\u0631\u0636 \u0627\u0644\u0639\u0645\u0644\u0627\u0621 \u0627\u0644\u0644\u064a \u0639\u0646\u062f\u0647\u0645 \u062a\u0639\u062f\u064a\u0644\u0627\u062a \u0641\u0639\u0644\u064a\u0629 \u0641\u0642\u0637 (\u0645\u0646 price_mod_client_status)
-    var activeModIds = _pmMods.filter(m=>m.status==='active').map(m=>m.id);
+    // العملاء اللي فعلاً بيشتروا الأصناف اللي عليها تعديلات (مسودة + نشطة) — tamr_sales_items آخر 6 شهور
+    // + أي عميل متسجل في price_mod_client_status للتعديلات النشطة (زي الإضافة اليدوية)
+    var openMods = _pmMods.filter(m=>m.status==='draft'||m.status==='active');
+    if(openMods.length && (!_pmBuyers || _pmBuyers.err)){
+      cdd.innerHTML = '<option value="all">⏳ جاري تحميل العملاء...</option>';
+      await pmLoadBuyers();
+    }
+    var openModIds = openMods.map(m=>m.id);
     var activeClientNames = new Set();
-    _pmClientStatus.forEach(function(s){ if(activeModIds.indexOf(s.mod_id)!==-1) activeClientNames.add(s.client_name); });
+    openMods.forEach(function(m){ (pmBuyersOf(m.snf_name)||[]).forEach(function(n){ activeClientNames.add(n); }); });
+    _pmClientStatus.forEach(function(s){ if(openModIds.indexOf(s.mod_id)!==-1) activeClientNames.add(s.client_name); });
     var clients = [...activeClientNames].sort();
-    cdd.innerHTML = '<option value="all">\u0643\u0644 \u0627\u0644\u0639\u0645\u0644\u0627\u0621</option>' + clients.map(c=>'<option value="'+c+'"'+(c===prev?' selected':'')+'>'+c+'</option>').join('');
+    var allLbl = (_pmBuyers && _pmBuyers.err) ? '\u0643\u0644 \u0627\u0644\u0639\u0645\u0644\u0627\u0621 (⚠️ تعذّر تحميل المبيعات)' : '\u0643\u0644 \u0627\u0644\u0639\u0645\u0644\u0627\u0621 ('+clients.length+')';
+    if(clients.indexOf(prev)===-1) prev = 'all';
+    cdd.innerHTML = '<option value="all">'+allLbl+'</option>' + clients.map(c=>'<option value="'+c.replace(/"/g,'&quot;')+'"'+(c===prev?' selected':'')+'>'+c+'</option>').join('');
+    cdd.value = prev;
     var pdfBtn = document.getElementById('pm-client-pdf-btn');
     var xlsBtn = document.getElementById('pm-client-xls-btn');
     if(pdfBtn) pdfBtn.disabled = (!prev || prev==='all');
