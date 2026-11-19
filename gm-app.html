@@ -66612,11 +66612,12 @@ function pmGetModForProduct(snfName){
 }
 
 // ── PM-BUYERS: العملاء اللي اشتروا كل صنف فعلاً (tamr_sales_items آخر 6 شهور) ──
-// نفس منطق pmActivateMod: الصنف بالاسم بالظبط، والعميل بيتطابق مع sales_clients.name بمقارنة عربية موحّدة.
+// اسم الصنف في MT ← اسم الأسعار (item_name_aliases)، واسم العميل في جريد ← اسم التطبيق (sales_client_jareed_map) وإلا مقارنة موحّدة مع sales_clients.name.
+// pmActivateMod بيستخدم نفس القايمة.
 // تحميل واحد لكل الأصناف (صفحات 1000 بالتوازي على دفعات) وبيتكاش للجلسة — بيستخدمه عمود "عدد العملاء" ودروب داون التعديلات المعلقة.
 var _pmBuyers = null;      // {ymd, byItem:{snf_name:[أسماء sales_clients]}} أو {err:true}
 var _pmBuyersP = null;
-function pmNormAr(s){ return String(s||'').replace(/[إأآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/\s+/g,' ').trim().toLowerCase(); }
+function pmNormAr(s){ return String(s||'').replace(/ـ/g,'').replace(/[إأآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/[\s()\-–_.,،\/]+/g,'').toLowerCase(); }
 function pmLoadBuyers(force){
   if(_pmBuyers && !_pmBuyers.err && !force) return Promise.resolve(_pmBuyers);
   if(_pmBuyersP) return _pmBuyersP;
@@ -66633,7 +66634,13 @@ function pmLoadBuyers(force){
       }
       throw new Error('page '+p);
     }
+    var aliases = [], jmap = [];
     try{
+      var am = await Promise.all([
+        fetchAllRows(SUPABASE_URL+'/rest/v1/item_name_aliases?select=alias_name,canonical_name&order=id', H, 1000, true),
+        fetchAllRows(SUPABASE_URL+'/rest/v1/sales_client_jareed_map?select=app_client,jareed_customer&order=jareed_customer', H, 1000, true)
+      ]);
+      aliases = am[0]||[]; jmap = am[1]||[];
       while(!done && page < 300){
         var jobs = [];
         for(var b=0;b<BATCH;b++) jobs.push(getPage(page+b));
@@ -66647,15 +66654,21 @@ function pmLoadBuyers(force){
       }
     }catch(e){ console.error('[pm] buyers load error', e); failed = true; }
     if(failed){ _pmBuyers = {err:true}; return _pmBuyers; }
-    // العملاء النشطين بمفتاح موحّد
+    // أسماء الأصناف في MT ← اسمها في الأسعار (item_name_aliases: alias_name → canonical_name)
+    var aliasK = {};
+    aliases.forEach(function(a){ if(a.alias_name && a.canonical_name) aliasK[pmNormAr(a.alias_name)] = a.canonical_name; });
+    // العملاء النشطين بمفتاح موحّد + ربط اسم جريد باسم التطبيق (sales_client_jareed_map)
     var cKey = {};
     (_splClients||[]).forEach(function(c){ if(!c.deleted_at && c.name){ var k = pmNormAr(c.name); (cKey[k] = cKey[k]||[]).push(c.name); } });
+    var jKey = {};
+    jmap.forEach(function(m){ var names = cKey[pmNormAr(m.app_client)]; if(names && m.jareed_customer) jKey[pmNormAr(m.jareed_customer)] = names; });
     var byItem = {};
     rows.forEach(function(r){
       if(!r.item || !r.customer) return;
-      var names = cKey[pmNormAr(r.customer)];
+      var ck = pmNormAr(r.customer);
+      var names = jKey[ck] || cKey[ck];
       if(!names) return;
-      var it = String(r.item).trim();
+      var it = pmNormAr(aliasK[pmNormAr(r.item)] || r.item);
       var set = byItem[it] || (byItem[it] = new Set());
       names.forEach(function(n){ set.add(n); });
     });
@@ -66669,7 +66682,7 @@ function pmLoadBuyers(force){
 }
 function pmBuyersOf(snfName){
   if(!_pmBuyers || _pmBuyers.err) return null;
-  return _pmBuyers.byItem[String(snfName||'').trim()] || [];
+  return _pmBuyers.byItem[pmNormAr(snfName)] || [];
 }
 
 function pmFilterItems(){
@@ -66885,28 +66898,12 @@ async function pmActivateMod(modId){
   var mod = _pmMods.find(m=>m.id===modId);
   if(!mod) return;
   var H = PM_H();
-  // ── فلترة العملاء حسب بيانات البيع الفعلية (آخر 6 شهور من tamr_sales_items) ──
-  var sixMonthsAgo = new Date(); sixMonthsAgo.setMonth(sixMonthsAgo.getMonth()-6);
-  var ymd = sixMonthsAgo.toISOString().slice(0,10);
-  var itemClients = new Set();
-  try{
-    var sH = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY};
-    var encItem = encodeURIComponent('eq.'+mod.snf_name);
-    var salesRows = await fetchAllRows(
-      SUPABASE_URL+'/rest/v1/tamr_sales_items?select=customer&item='+encItem+'&invoice_date=gte.'+ymd,
-      sH
-    );
-    (salesRows||[]).forEach(function(r){ if(r.customer) itemClients.add(r.customer.trim()); });
-  }catch(e){ console.error('[pm] fetch sales clients error', e); }
-  // مطابقة أسماء العملاء من فواتير MT مع sales_clients
-  var allClients = (_splClients||[]).filter(c=>!c.deleted_at);
-  var norm = function(s){ return String(s||'').replace(/[إأآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/\s+/g,' ').trim().toLowerCase(); };
-  var matchedClients = allClients.filter(function(c){
-    if(itemClients.has(c.name)) return true;
-    var nk = norm(c.name);
-    for(var v of itemClients){ if(nk===norm(v)) return true; }
-    return false;
-  });
+  // ── العملاء الفعليين للصنف (آخر 6 شهور من tamr_sales_items) — نفس مصدر عمود "عدد العملاء" (pmLoadBuyers):
+  //    اسم الصنف في MT بيتحوّل باسمه في الأسعار عبر item_name_aliases، واسم العميل في جريد عبر sales_client_jareed_map
+  await pmLoadBuyers();
+  var buyerNames = pmBuyersOf(mod.snf_name);
+  if(buyerNames===null){ alert('تعذّر تحميل المبيعات — جرّب تاني'); return; }
+  var matchedClients = buyerNames.map(function(n){ return {name:n}; });
   if(!matchedClients.length){ alert('لا يوجد عملاء اشتروا هذا الصنف في آخر 6 شهور!'); return; }
   try{
     await fetch(SUPABASE_URL+'/rest/v1/price_modifications?id=eq.'+modId,{
