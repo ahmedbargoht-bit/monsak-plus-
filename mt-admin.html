@@ -5988,8 +5988,8 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape' && document.queryS
                   <select id="pm-pending-client" onchange="pmPendingFilterClient()" style="flex:1;min-width:180px;padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:Cairo,sans-serif;font-size:13px;background:#fff">
                     <option value="all">كل العملاء</option>
                   </select>
-                  <button class="btn" onclick="pmExportClientPDF()" style="font-size:12px;background:#D4A853;color:#fff;border:none" id="pm-client-pdf-btn" disabled>📋 تصدير PDF للعميل</button>
-                  <button class="btn" onclick="pmExportClientExcel()" style="font-size:12px;background:#16A34A;color:#fff;border:none" id="pm-client-xls-btn" disabled>📤 تصدير Excel للعميل</button>
+                  <button class="btn" onclick="pmExportClientPDF()" style="font-size:12px;background:#D4A853;color:#fff;border:none" id="pm-client-pdf-btn" title="اختار عميل من القايمة الأول">📋 تصدير PDF للعميل</button>
+                  <button class="btn" onclick="pmExportClientExcel()" style="font-size:12px;background:#16A34A;color:#fff;border:none" id="pm-client-xls-btn" title="اختار عميل من القايمة الأول">📤 تصدير Excel للعميل</button>
                 </div>
                 <div id="pm-pending-list"></div>
               </div>
@@ -66649,9 +66649,11 @@ function pmLoadBuyers(force){
       }
     }catch(e){ console.error('[pm] buyers load error', e); failed = true; }
     if(failed){ _pmBuyers = {err:true}; return _pmBuyers; }
-    // أسماء الأصناف في MT ← اسمها في الأسعار (item_name_aliases: alias_name → canonical_name)
-    var aliasK = {};
-    aliases.forEach(function(a){ if(a.alias_name && a.canonical_name) aliasK[pmNormAr(a.alias_name)] = a.canonical_name; });
+    // الأصناف المدمجة (item_name_aliases): أي اسمين متربطين = صنف واحد، في الاتجاهين — مجموعات (union-find)
+    // فالعملاء اللي اشتروا أي اسم في المجموعة بيظهروا لأي اسم فيها (مهما كان اتجاه الربط 400→450 أو 450→400)
+    var par = {};
+    function root(k){ while(par[k] && par[k]!==k){ par[k] = par[par[k]] || par[k]; k = par[k]; } return k; }
+    aliases.forEach(function(a){ if(!a.alias_name || !a.canonical_name) return; var x=root(pmNormAr(a.alias_name)), y=root(pmNormAr(a.canonical_name)); if(x!==y) par[x]=y; });
     // العملاء النشطين بمفتاح موحّد + ربط اسم جريد باسم التطبيق (sales_client_jareed_map)
     var cKey = {};
     (_splClients||[]).forEach(function(c){ if(!c.deleted_at && c.name){ var k = pmNormAr(c.name); (cKey[k] = cKey[k]||[]).push(c.name); } });
@@ -66663,13 +66665,14 @@ function pmLoadBuyers(force){
       var ck = pmNormAr(r.customer);
       var names = jKey[ck] || cKey[ck];
       if(!names) return;
-      var it = pmNormAr(aliasK[pmNormAr(r.item)] || r.item);
+      var it = root(pmNormAr(r.item));
       var set = byItem[it] || (byItem[it] = new Set());
       names.forEach(function(n){ set.add(n); });
     });
     var out = {};
     Object.keys(byItem).forEach(function(it){ out[it] = [...byItem[it]].sort(); });
-    _pmBuyers = {ymd:ymd, rows:rows.length, byItem:out};
+    var grp = {}; Object.keys(par).forEach(function(k){ grp[k] = root(k); });
+    _pmBuyers = {ymd:ymd, rows:rows.length, byItem:out, grp:grp};
     return _pmBuyers;
   })();
   _pmBuyersP.finally(function(){ _pmBuyersP = null; });
@@ -66677,7 +66680,8 @@ function pmLoadBuyers(force){
 }
 function pmBuyersOf(snfName){
   if(!_pmBuyers || _pmBuyers.err) return null;
-  return _pmBuyers.byItem[pmNormAr(snfName)] || [];
+  var k = pmNormAr(snfName); k = (_pmBuyers.grp && _pmBuyers.grp[k]) || k;
+  return _pmBuyers.byItem[k] || [];
 }
 // التعديلات (مسودة + نشط) على الأصناف اللي بتتورد للعميل: اشتراها في آخر 6 شهور (pmBuyersOf)
 // أو متسجل له في price_mod_client_status (زي الإضافة اليدوية لتعديل نشط).
@@ -66874,8 +66878,17 @@ async function pmSaveDraft(){
   else pmMsg('✅ تم حفظ '+saved+' صنف كمسودة — اضغط "التعديلات المعلقة" لتفعيل وتأكيد','#16A34A');
 }
 
+// أزرار تصدير العميل: دايمًا قابلة للضغط (مش disabled) — من غير عميل بتطلّع رسالة، وبتبقى باهتة
+function pmClientBtnsState(sel){
+  var on = !!sel && sel!=='all';
+  var lb = {'pm-client-pdf-btn':['📋 تصدير PDF للعميل','📋 تصدير PDF لكل العملاء'], 'pm-client-xls-btn':['📤 تصدير Excel للعميل','📤 تصدير Excel لكل العملاء']};
+  Object.keys(lb).forEach(function(id){ var b=document.getElementById(id); if(!b) return; b.disabled=false; b.style.opacity='1'; b.textContent = lb[id][on?0:1]; b.title = on?'الأصناف اللي بتتورد للعميل المختار بس':'كل التعديلات المفتوحة (مسودة + نشط)'; });
+}
 function pmMsg(txt, color){
-  var el = document.getElementById('pm-items-msg');
+  // خانة pm-items-msg في شاشة الأصناف بس — لو مش ظاهرة (إحنا في التعديلات المعلقة/العملاء) نطلّع إشعار
+  var el0 = document.getElementById('pm-items-msg');
+  if((!el0 || !el0.offsetParent) && typeof showToast==='function'){ try{ showToast(String(txt).replace(/<[^>]+>/g,''), 4000); }catch(e){} }
+  var el = el0;
   if(el){ el.innerHTML = '<span style="color:'+(color||'var(--text2)')+';font-weight:600">'+txt+'</span>'; setTimeout(()=>{ el.innerHTML=''; },6000); }
 }
 
@@ -66912,8 +66925,7 @@ async function pmLoadPending(){
     cdd.value = prev;
     var pdfBtn = document.getElementById('pm-client-pdf-btn');
     var xlsBtn = document.getElementById('pm-client-xls-btn');
-    if(pdfBtn) pdfBtn.disabled = (!prev || prev==='all');
-    if(xlsBtn) xlsBtn.disabled = (!prev || prev==='all');
+    pmClientBtnsState(prev);
   }
   pmRenderPendingList(cdd?cdd.value:'all');
 }
@@ -67276,7 +67288,13 @@ function pmExportPDF(){
 // ── تصدير PDF/Excel لعميل محدد ──
 async function pmExportClientPDF(){
   var sel = (document.getElementById('pm-pending-client')||{}).value;
-  if(!sel || sel==='all'){ pmMsg('⚠️ اختر عميل الأول','#B45309'); return; }
+  if(!sel || sel==='all'){
+    // "كل العملاء" = كل التعديلات المفتوحة (مسودة + نشط) من غير فلتر عميل
+    var allItems = _pmMods.filter(m=>m.status==='draft'||m.status==='active');
+    if(!allItems.length){ pmMsg('⚠️ لا توجد تعديلات للتصدير','#B45309'); return; }
+    _pmBuildPrintDoc(allItems, null, 'كل العملاء — كل التعديلات المفتوحة ('+allItems.length+' صنف)');
+    return;
+  }
   await pmLoadBuyers();
   var total = _pmMods.filter(m=>m.status==='draft'||m.status==='active').length;
   var items = pmClientMods(sel);
@@ -67286,7 +67304,7 @@ async function pmExportClientPDF(){
 
 async function pmExportClientExcel(){
   var sel = (document.getElementById('pm-pending-client')||{}).value;
-  if(!sel || sel==='all'){ pmMsg('⚠️ اختر عميل الأول','#B45309'); return; }
+  if(!sel || sel==='all'){ pmExportExcel(); return; }  // "كل العملاء" = كشف كل التعديلات المفتوحة
   await pmLoadBuyers();
   var total = _pmMods.filter(m=>m.status==='draft'||m.status==='active').length;
   var items = pmClientMods(sel);
@@ -67341,8 +67359,7 @@ function pmPendingFilterClient(){
   var sel = (document.getElementById('pm-pending-client')||{}).value;
   var pdfBtn = document.getElementById('pm-client-pdf-btn');
   var xlsBtn = document.getElementById('pm-client-xls-btn');
-  if(pdfBtn) pdfBtn.disabled = (!sel || sel==='all');
-  if(xlsBtn) xlsBtn.disabled = (!sel || sel==='all');
+  pmClientBtnsState(sel);
   pmRenderPendingList(sel);
 }
 
@@ -67457,8 +67474,16 @@ async function _pmBuildPrintDoc(items, clientName, filterNote){
       +'</tr>';
   }).join('');
   var clientTh = clientName ? '<th>حالة التأكيد</th>' : '';
-  var w = window.open('','_blank','width=1000,height=700');
-  if(!w){ pmMsg('⚠️ الرجاء السماح بالنوافذ المنبثقة','#DC2626'); return; }
+  var w = null, viaFrame = false;
+  try{ w = window.open('','_blank','width=1000,height=700'); }catch(e){ w = null; }
+  if(!w || !w.document){
+    // النافذة الجديدة اتمنعت (popup blocker / وضع التطبيق) ← نطبع من iframe مخفي في نفس الصفحة
+    var old = document.getElementById('pm-print-frame'); if(old) old.remove();
+    var fr = document.createElement('iframe'); fr.id='pm-print-frame';
+    fr.style.cssText='position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden';
+    document.body.appendChild(fr); w = fr.contentWindow; viaFrame = true;
+    pmMsg('🖨️ النافذة الجديدة اتمنعت — هيفتح الطباعة هنا، اختار "حفظ كـ PDF"','#2563EB');
+  }
   w.document.write('<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8"><title>'+title+'</title>'
     +'<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">'
     +'<style>'
@@ -67503,6 +67528,7 @@ async function _pmBuildPrintDoc(items, clientName, filterNote){
     +'<div class="np" style="text-align:center;margin-top:16px"><button onclick="window.print()" style="padding:12px 30px;background:linear-gradient(135deg,#D4A853,#C49B38);color:#fff;border:none;border-radius:8px;font-family:Cairo;font-size:14px;font-weight:700;cursor:pointer;box-shadow:0 2px 8px rgba(212,168,83,.3)">🖨️ طباعة / حفظ PDF</button></div>'
     +'</body></html>');
   w.document.close();
+  if(viaFrame) setTimeout(function(){ try{ w.focus(); w.print(); }catch(e){ console.error('[pm] print error', e); } }, 900);
 }
 
 // تذكير: تعديلات اتبعتت للعملاء ومستنية تأكيد — من يوم الإرسال لحد ما يتأكد (sig فيه اليوم ← بتبقى "جديدة" مرة في اليوم)
