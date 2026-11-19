@@ -36684,7 +36684,13 @@ async function sciLoadMt2026(){
     // تطبيق التسليم اللايف (sales_deliveries)، فلو حددنا الفترة (زي ما كان قبل كده: يناير-يونيو 2026
     // بس) كنا بنسيب برة أي صنف اتباع قبل يناير 2026 (زي فواتير ديسمبر 2025) للأبد، حتى لو موجود
     // فعليًا في قاعدة البيانات - وده كان بيبان زي إن الصنف "مش موجود" رغم إنه موجود ومسجّل صح.
-    const baseUrl = `${SUPABASE_URL}/rest/v1/tamr_sales_items?select=customer,item`;
+    // 19/11/2026: السيرفر بيرجّع أزواج (العميل، الصنف) + عدد السطور جاهزة — rpc sci_mt_pairs (~1800 صف في ~0.07 ثانية)
+    // بدل 150 طلب متوازي بيسحبوا كل السطور (~53 ألف). لو الدالة فشلت نرجع للطريقة القديمة تحت (مع ترتيب ثابت).
+    try{
+      const rr = await fetch(`${SUPABASE_URL}/rest/v1/rpc/sci_mt_pairs`, {method:'POST', headers:{...H,'Content-Type':'application/json'}, body:'{}'});
+      if(rr.ok){ const pr = await rr.json(); if(Array.isArray(pr) && pr.length) return pr; }
+    }catch(e){ console.warn('[sciLoadMt2026] rpc sci_mt_pairs failed — fallback', e); }
+    const baseUrl = `${SUPABASE_URL}/rest/v1/tamr_sales_items?select=customer,item&order=id.asc`;
     const pageSize = 1000;
 
     // بنجيب دفعة كبيرة من الصفحات مع بعض بالتوازي (Promise.all) بدل ما نستناها واحدة ورا التانية —
@@ -36720,7 +36726,7 @@ async function sciLoadMt2026(){
     const itemRaw = (r.item||'').trim();
     if(itemRaw){
       const ik = sciNormalizeItemKey(itemRaw);
-      (_itemFreq[ik] ||= {})[itemRaw] = (_itemFreq[ik][itemRaw]||0) + 1;
+      (_itemFreq[ik] ||= {})[itemRaw] = (_itemFreq[ik][itemRaw]||0) + (+r.n || 1); // r.n = عدد السطور لما الصفوف جاية من sci_mt_pairs
     }
   });
   // لكل مجموعة أسماء أصناف متشابهة إملائيًا (زي "برحي"/"برحى")، بنختار الاسم الأكتر تكرارًا في
@@ -66641,6 +66647,12 @@ function pmLoadBuyers(force){
         fetchAllRows(SUPABASE_URL+'/rest/v1/sales_client_jareed_map?select=app_client,jareed_customer&order=jareed_customer', H, 1000, true)
       ]);
       aliases = am[0]||[]; jmap = am[1]||[];
+      // 19/11: السيرفر بيرجّع أزواج (الصنف، العميل) المميزة جاهزة — rpc pm_item_buyers (~1500 صف بدل ~31 ألف سطر)
+      // لو الدالة مش موجودة/فشلت نرجع للتحميل بالصفحات القديم تحت.
+      try{
+        var rr = await fetch(SUPABASE_URL+'/rest/v1/rpc/pm_item_buyers', {method:'POST', headers:Object.assign({'Content-Type':'application/json'},H), body:JSON.stringify({p_from:ymd})});
+        if(rr.ok){ var pr = await rr.json(); if(Array.isArray(pr)){ rows = pr; done = true; } }
+      }catch(e){ console.warn('[pm] pm_item_buyers rpc failed — fallback to paging', e); }
       while(!done && page < 300){
         var jobs = [];
         for(var b=0;b<BATCH;b++) jobs.push(getPage(page+b));
