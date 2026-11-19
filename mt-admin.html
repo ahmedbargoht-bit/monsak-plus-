@@ -66753,6 +66753,27 @@ function pmClientSentNote(client, items){
   var k = Object.keys(ds).sort();
   return k.length ? 'اتبعت للعميل يوم '+k.map(pmFmtD).join(' / ') : 'لسه ماتبعتش للعميل';
 }
+// ── الباركود لكشوف تعديل الأسعار (PM-BARCODE) ──
+// بيتجاب من tamr_sales_item_catalog مع كل تصدير (مش من كاش sciBuildBarcodeIndex — اللي ممكن يتحفظ فاضي/ناقص
+// لو التحميل فشل مرة أو اتعدّل باركود قبل ما يتحمّل). المطابقة: الاسم بالظبط ← الاسم الموحّد ← مجموعة الأصناف المدمجة.
+async function pmBarcodeLookup(){
+  var rows = [];
+  try{ rows = await fetchAllRows(SUPABASE_URL+'/rest/v1/tamr_sales_item_catalog?select=item_name,item_code&item_code=not.is.null&order=id', {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}); }catch(e){ console.error('[pm] barcode load', e); }
+  if(!rows.length){ try{ var bi = await sciBuildBarcodeIndex(); Object.keys(bi||{}).forEach(function(k){ rows.push({item_name:k, item_code:bi[k]}); }); }catch(e){} }
+  var exact = {}, norm = {}, byRoot = {};
+  var grp = (_pmBuyers && _pmBuyers.grp) || {};
+  rows.forEach(function(r){
+    var n = String(r.item_name||'').trim(); if(!n || !r.item_code) return;
+    var c = String(r.item_code); exact[n] = c;
+    var k = pmNormAr(n); if(!norm[k]) norm[k] = c;
+    var rt = grp[k] || k; if(!byRoot[rt]) byRoot[rt] = c;
+  });
+  return function(name){
+    var n = String(name||'').trim(); if(exact[n]) return exact[n];
+    var k = pmNormAr(n); if(norm[k]) return norm[k];
+    return byRoot[grp[k] || k] || '';
+  };
+}
 function pmClientFilterNote(client, n, total){
   var since = (_pmBuyers && _pmBuyers.ymd) ? new Date(_pmBuyers.ymd).toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'}) : '';
   return 'فلتر: الأصناف اللي بتتورد للعميل '+client+(since?' (فواتير MT من '+since+')':'')+' — '+n+' صنف من '+total+' تعديل';
@@ -67227,32 +67248,36 @@ function pmExportExcel(){
   if(!items.length){ pmMsg('⚠️ لا توجد تعديلات للتصدير','#B45309'); return; }
   if(typeof XLSX!=='undefined') pmExportXLSX(items); else pmExportCSV(items);
 }
-function pmExportCSV(items){
-  var csv = '﻿كود,اسم الصنف,السعر القديم,السعر الجديد,نسبة التغيير,الحالة\n';
+async function pmExportCSV(items){
+  var bcOf = function(){ return ''; };
+  try{ bcOf = await pmBarcodeLookup(); }catch(e){}
+  var csv = '﻿#,الباركود,اسم الصنف,السعر القديم,السعر الجديد,نسبة التغيير,الحالة\n';
   items.forEach((m,i)=>{
     var pct = m.old_price>0 ? ((m.new_price-m.old_price)/m.old_price*100).toFixed(1) : '0';
-    csv += (i+1)+',"'+m.snf_name+'",'+Number(m.old_price).toFixed(2)+','+Number(m.new_price).toFixed(2)+','+pct+'%,'+m.status+'\n';
+    csv += (i+1)+',"'+(bcOf(m.snf_name)||'')+'","'+m.snf_name+'",'+Number(m.old_price).toFixed(2)+','+Number(m.new_price).toFixed(2)+','+pct+'%,'+m.status+'\n';
   });
   var blob = new Blob([csv],{type:'text/csv;charset=utf-8'});
   var a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='تعديل_اسعار_'+new Date().toISOString().slice(0,10)+'.csv'; a.click();
 }
-function pmExportXLSX(items){
+async function pmExportXLSX(items){
   var today = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
   var prices = _splPrices||[];
-  var head = ['#','اسم الصنف','السعر القديم','السعر الجديد','الضريبة','بعد الضريبة','نسبة التغيير','الحالة'];
+  var bcOf = function(){ return ''; };
+  try{ bcOf = await pmBarcodeLookup(); }catch(e){}
+  var head = ['#','الباركود','اسم الصنف','السعر القديم','السعر الجديد','الضريبة','بعد الضريبة','نسبة التغيير','الحالة'];
   var rows = items.map(function(m,i){
     var pct = m.old_price>0 ? +((m.new_price-m.old_price)/m.old_price*100).toFixed(1) : 0;
     var xPr = prices.find(function(x){return x.snf_name===m.snf_name;});
     var xTax = xPr?(xPr.tax_pct||0):0;
     var xAfter = xTax>0 ? +(Number(m.new_price)*(1+xTax/100)).toFixed(2) : '—';
-    return [i+1, m.snf_name, +Number(m.old_price).toFixed(2), +Number(m.new_price).toFixed(2),
+    return [i+1, bcOf(m.snf_name)||'—', m.snf_name, +Number(m.old_price).toFixed(2), +Number(m.new_price).toFixed(2),
       xTax>0?xTax+'%':'—', xAfter, pct+'%', m.status==='draft'?'مسودة':'نشط'];
   });
   rpxDeliver('xlsx',async()=>{
     const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]};
     rpxSheet(wb,'تعديل الأسعار','كشف تعديل الأسعار',today+' · عدد الأصناف: '+items.length,
       head, rows, null,
-      [{wch:5},{wch:34},{wch:12},{wch:12},{wch:10},{wch:14},{wch:12},{wch:10}]);
+      [{wch:5},{wch:16},{wch:34},{wch:12},{wch:12},{wch:10},{wch:14},{wch:12},{wch:10}]);
     const arr=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true});
     return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
   },'تعديل_اسعار_'+new Date().toISOString().slice(0,10)+'.xlsx','كشف تعديل الأسعار');
@@ -67311,8 +67336,8 @@ async function pmExportClientExcel(){
   if(!items.length){ pmMsg('⚠️ مفيش أصناف عليها تعديل بتتورد للعميل ده','#B45309'); return; }
   var fNote = pmClientFilterNote(sel, items.length, total)+' · '+pmClientSentNote(sel, items);
   var prices = _splPrices||[];
-  var barcodeIdx = {};
-  try{ barcodeIdx = await sciBuildBarcodeIndex(); }catch(e){}
+  var bcOf = function(){ return ''; };
+  try{ bcOf = await pmBarcodeLookup(); }catch(e){}
   var today = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
   if(typeof XLSX==='undefined'){
     var csv = '\xEF\xBB\xBF'+sel+' — كشف تعديل أسعار\n'+today+'\n"'+fNote+'"\n';
@@ -67322,7 +67347,7 @@ async function pmExportClientExcel(){
       var taxPct = pr?(pr.tax_pct||0):0;
       var newWithTax = taxPct>0 ? (Number(m.new_price)*(1+taxPct/100)).toFixed(2) : '';
       var pct = m.old_price>0 ? ((m.new_price-m.old_price)/m.old_price*100).toFixed(1)+'%' : '';
-      var bc = barcodeIdx[m.snf_name]||'';
+      var bc = bcOf(m.snf_name)||'';
       csv += (i+1)+',"'+bc+'","'+m.snf_name+'",'+Number(m.old_price).toFixed(2)+','+Number(m.new_price).toFixed(2)+','+(taxPct>0?taxPct+'%':'')+','+(newWithTax||'')+','+pct+'\n';
     });
     var blob = new Blob([csv],{type:'text/csv;charset=utf-8'});
@@ -67337,7 +67362,7 @@ async function pmExportClientExcel(){
     var taxPct = pr?(pr.tax_pct||0):0;
     var newWithTax = taxPct>0 ? +(Number(m.new_price)*(1+taxPct/100)).toFixed(2) : '—';
     var pct = m.old_price>0 ? +((m.new_price-m.old_price)/m.old_price*100).toFixed(1) : 0;
-    var bc = barcodeIdx[m.snf_name]||'—';
+    var bc = bcOf(m.snf_name)||'—';
     var cSt = _pmClientStatus.find(function(s){return s.mod_id===m.id && s.client_name===sel;});
     var stLabel = cSt?(cSt.status==='confirmed'?'✓ تم':'⏳ معلق'):'⏳ معلق';
     return [i+1, bc, m.snf_name, +Number(m.old_price).toFixed(2), +Number(m.new_price).toFixed(2), taxPct>0?taxPct+'%':'—', newWithTax, pct+'%', stLabel];
@@ -67446,8 +67471,8 @@ function pmRenderPendingList(clientFilter){
 // ── بناء صفحة طباعة PDF ──
 async function _pmBuildPrintDoc(items, clientName, filterNote){
   var prices = _splPrices||[];
-  var barcodeIdx = {};
-  try{ barcodeIdx = await sciBuildBarcodeIndex(); }catch(e){}
+  var bcOf = function(){ return ''; };
+  try{ bcOf = await pmBarcodeLookup(); }catch(e){}
   var today = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
   var title = clientName ? 'كشف تعديل أسعار — '+clientName : 'كشف تعديل أسعار';
   var rows = items.map(function(m,i){
@@ -67455,7 +67480,7 @@ async function _pmBuildPrintDoc(items, clientName, filterNote){
     var taxPct = pr ? (pr.tax_pct||0) : 0;
     var newWithTax = taxPct>0 ? (Number(m.new_price)*(1+taxPct/100)).toFixed(2) : '—';
     var pct = m.old_price>0 ? ((m.new_price-m.old_price)/m.old_price*100).toFixed(1) : '0';
-    var bc = barcodeIdx[m.snf_name]||'—';
+    var bc = bcOf(m.snf_name)||'—';
     var clientSt = '';
     if(clientName){
       var cSt = _pmClientStatus.find(function(s){return s.mod_id===m.id && s.client_name===clientName;});
