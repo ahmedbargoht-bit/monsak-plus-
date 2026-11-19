@@ -66679,6 +66679,21 @@ function pmBuyersOf(snfName){
   if(!_pmBuyers || _pmBuyers.err) return null;
   return _pmBuyers.byItem[pmNormAr(snfName)] || [];
 }
+// التعديلات (مسودة + نشط) على الأصناف اللي بتتورد للعميل: اشتراها في آخر 6 شهور (pmBuyersOf)
+// أو متسجل له في price_mod_client_status (زي الإضافة اليدوية لتعديل نشط).
+function pmClientMods(client){
+  var open = _pmMods.filter(function(m){ return m.status==='draft'||m.status==='active'; });
+  if(!client || client==='all') return open;
+  return open.filter(function(m){
+    var b = pmBuyersOf(m.snf_name);
+    if(b && b.indexOf(client)!==-1) return true;
+    return _pmClientStatus.some(function(s){ return s.mod_id===m.id && s.client_name===client; });
+  });
+}
+function pmClientFilterNote(client, n, total){
+  var since = (_pmBuyers && _pmBuyers.ymd) ? new Date(_pmBuyers.ymd).toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'}) : '';
+  return 'فلتر: الأصناف اللي بتتورد للعميل '+client+(since?' (فواتير MT من '+since+')':'')+' — '+n+' صنف من '+total+' تعديل';
+}
 
 function pmFilterItems(){
   var q = (document.getElementById('pm-search')||{}).value||'';
@@ -67200,22 +67215,27 @@ function pmExportPDF(){
 async function pmExportClientPDF(){
   var sel = (document.getElementById('pm-pending-client')||{}).value;
   if(!sel || sel==='all'){ pmMsg('⚠️ اختر عميل الأول','#B45309'); return; }
-  var items = _pmMods.filter(m=>m.status==='draft'||m.status==='active');
-  if(!items.length) return;
-  _pmBuildPrintDoc(items, sel);
+  await pmLoadBuyers();
+  var total = _pmMods.filter(m=>m.status==='draft'||m.status==='active').length;
+  var items = pmClientMods(sel);
+  if(!items.length){ pmMsg('⚠️ مفيش أصناف عليها تعديل بتتورد للعميل ده','#B45309'); return; }
+  _pmBuildPrintDoc(items, sel, pmClientFilterNote(sel, items.length, total));
 }
 
 async function pmExportClientExcel(){
   var sel = (document.getElementById('pm-pending-client')||{}).value;
   if(!sel || sel==='all'){ pmMsg('⚠️ اختر عميل الأول','#B45309'); return; }
-  var items = _pmMods.filter(m=>m.status==='draft'||m.status==='active');
-  if(!items.length) return;
+  await pmLoadBuyers();
+  var total = _pmMods.filter(m=>m.status==='draft'||m.status==='active').length;
+  var items = pmClientMods(sel);
+  if(!items.length){ pmMsg('⚠️ مفيش أصناف عليها تعديل بتتورد للعميل ده','#B45309'); return; }
+  var fNote = pmClientFilterNote(sel, items.length, total);
   var prices = _splPrices||[];
   var barcodeIdx = {};
   try{ barcodeIdx = await sciBuildBarcodeIndex(); }catch(e){}
   var today = new Date().toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'});
   if(typeof XLSX==='undefined'){
-    var csv = '\xEF\xBB\xBF'+sel+' — كشف تعديل أسعار\n'+today+'\n';
+    var csv = '\xEF\xBB\xBF'+sel+' — كشف تعديل أسعار\n'+today+'\n"'+fNote+'"\n';
     csv += '#,الباركود,اسم الصنف,السعر القديم,السعر الجديد,الضريبة,السعر بالضريبة,نسبة التغيير\n';
     items.forEach(function(m,i){
       var pr = prices.find(function(x){return x.snf_name===m.snf_name;});
@@ -67245,7 +67265,7 @@ async function pmExportClientExcel(){
   rpxDeliver('xlsx',async()=>{
     const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]};
     rpxSheet(wb, sel.substring(0,31), 'كشف تعديل أسعار — '+sel,
-      today+' · تم تأكيد: '+confirmed+' · معلق: '+pending,
+      today+' · '+fNote+' · تم تأكيد: '+confirmed+' · معلق: '+pending,
       head, rows, null,
       [{wch:5},{wch:16},{wch:34},{wch:12},{wch:12},{wch:10},{wch:14},{wch:12},{wch:14}]);
     const arr=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true});
@@ -67267,9 +67287,16 @@ function pmPendingFilterClient(){
 function pmRenderPendingList(clientFilter){
   var list = document.getElementById('pm-pending-list');
   if(!list) return;
-  var activeMods = _pmMods.filter(m=>m.status==='draft'||m.status==='active');
-  if(!activeMods.length){ list.innerHTML = '<div style="text-align:center;padding:30px;color:var(--text2)">لا توجد تعديلات معلقة حالياً</div>'; return; }
+  var allOpen = _pmMods.filter(m=>m.status==='draft'||m.status==='active');
+  if(!allOpen.length){ list.innerHTML = '<div style="text-align:center;padding:30px;color:var(--text2)">لا توجد تعديلات معلقة حالياً</div>'; return; }
+  var byClient = clientFilter && clientFilter!=='all';
+  var activeMods = byClient ? pmClientMods(clientFilter) : allOpen;
   var html = '';
+  if(byClient){
+    html += '<div id="pm-client-filter-info" style="background:#FFF8E7;border:1px solid #E5D5A0;border-radius:10px;padding:8px 12px;margin-bottom:10px;font-size:12.5px;font-weight:700;color:#8B6914">📦 '+activeMods.length+' صنف بيتورد لـ '+clientFilter+' من '+allOpen.length+' تعديل'
+      +((_pmBuyers && _pmBuyers.err)?' <span style="color:#B45309;font-weight:600">(⚠️ تعذّر تحميل المبيعات — ظاهر بس المتسجل له في التأكيدات)</span>':'')+'</div>';
+    if(!activeMods.length){ list.innerHTML = html + '<div style="text-align:center;padding:30px;color:var(--text2)">مفيش أصناف عليها تعديل بتتورد للعميل ده</div>'; return; }
+  }
   activeMods.forEach(function(mod){
     var st = _pmClientStatus.filter(s=>s.mod_id===mod.id);
     var confirmed = st.filter(s=>s.status==='confirmed').length;
@@ -67325,7 +67352,7 @@ function pmRenderPendingList(clientFilter){
 }
 
 // ── بناء صفحة طباعة PDF ──
-async function _pmBuildPrintDoc(items, clientName){
+async function _pmBuildPrintDoc(items, clientName, filterNote){
   var prices = _splPrices||[];
   var barcodeIdx = {};
   try{ barcodeIdx = await sciBuildBarcodeIndex(); }catch(e){}
@@ -67387,7 +67414,9 @@ async function _pmBuildPrintDoc(items, clientName){
     +'<div class="hdr">'
     +'<div class="logo"><div class="logo-ic">🌴</div><div><div class="bn">الطحان جولدن داتس</div><div class="be">AL-TAHHAN GOLDEN DATES • MODERN TRADE</div></div></div>'
     +'<div class="dt">'+title+'</div>'
-    +'<div class="dd">'+today+'</div></div>'
+    +'<div class="dd">'+today+'</div>'
+    +(filterNote?'<div style="display:inline-block;margin-top:8px;background:#FFF8E7;border:1px solid #E5D5A0;border-radius:8px;padding:4px 14px;font-size:11.5px;font-weight:700;color:#8B6914">🔎 '+filterNote+'</div>':'')
+    +'</div>'
     +'<div class="sum">'
     +'<div class="sb"><div class="n">'+items.length+'</div><div class="l">عدد الأصناف</div></div>'
     +'<div class="sb"><div class="n">'+items.filter(function(m){return m.status==='draft'}).length+'</div><div class="l">مسودة</div></div>'
