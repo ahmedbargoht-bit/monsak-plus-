@@ -66690,6 +66690,65 @@ function pmClientMods(client){
     return _pmClientStatus.some(function(s){ return s.mod_id===m.id && s.client_name===client; });
   });
 }
+// ── تسجيل إرسال التعديل للعميل (PM-SENT) ──
+// التعديل عند العميل مش لحظي (ليه شروط ومدة)؛ بنسجّل يوم الإرسال في price_mod_client_status.sent_at
+// والسطر يفضل status='pending' لحد ما يتأكد بإيد الأدمن (pmConfirmClient) — وطول ما هو كده بيظهر تذكير في صندوق الرسائل (pmBuildSentMsg).
+// الإرسال مابيغيّرش حالة التعديل (المسودة تفضل مسودة) ومابيلمسش أي سعر.
+function pmTodayYmd(){ var d=new Date(Date.now()+2*3600*1000); return d.toISOString().slice(0,10); }
+function pmFmtD(iso){ if(!iso) return ''; var y=String(iso).slice(0,10).split('-'); return y.length===3 ? (+y[2])+'/'+(+y[1])+'/'+y[0] : ''; }
+function pmDaysSince(iso){ if(!iso) return 0; var a=new Date(String(iso).slice(0,10)+'T00:00:00Z'), b=new Date(pmTodayYmd()+'T00:00:00Z'); return Math.max(0, Math.round((b-a)/86400000)); }
+function pmClientRow(modId, client){ return _pmClientStatus.find(function(s){ return s.mod_id===modId && s.client_name===client; }); }
+async function pmMarkClientSent(client){
+  var inp = document.getElementById('pm-sent-date');
+  var d = inp && inp.value ? inp.value : pmTodayYmd();
+  var items = pmClientMods(client).filter(function(m){ var r=pmClientRow(m.id, client); return !(r && r.status==='confirmed'); });
+  if(!items.length){ pmMsg('✅ كل أصناف العميل ده متأكدة','#16A34A'); return; }
+  var already = items.filter(function(m){ var r=pmClientRow(m.id, client); return r && r.sent_at; }).length;
+  if(!confirm('تسجيل إن التعديل اتبعت لـ '+client+' يوم '+pmFmtD(d)+'\n'+items.length+' صنف'+(already?' (منهم '+already+' متسجلين قبل كده — هيتحدّث تاريخهم)':'')+'\n\nالتعديل مش هيتطبق — هيفضل مستني تأكيدك.')) return;
+  var H = PM_H(), at = d+'T12:00:00+02:00';
+  var ids = [], newRows = [];
+  items.forEach(function(m){ var r=pmClientRow(m.id, client); if(r) ids.push(r.id); else newRows.push({mod_id:m.id, client_name:client, status:'pending', sent_at:at, sent_by:'admin'}); });
+  try{
+    if(ids.length){
+      var r1 = await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status?id=in.('+ids.join(',')+')',{method:'PATCH', headers:H, body:JSON.stringify({sent_at:at, sent_by:'admin'})});
+      if(!r1.ok) throw new Error('PATCH '+r1.status);
+    }
+    if(newRows.length){
+      var r2 = await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status',{method:'POST', headers:Object.assign({},H,{'Prefer':'return=minimal'}), body:JSON.stringify(newRows)});
+      if(!r2.ok) throw new Error('POST '+r2.status);
+    }
+    await pmLoadPending();
+    pmMsg('📤 اتسجّل إرسال '+items.length+' صنف لـ '+client+' يوم '+pmFmtD(d),'#2563EB');
+    try{ if(typeof ibxRefresh==='function') ibxRefresh(); }catch(e){}
+  }catch(e){ console.error('[pm] mark sent error', e); alert('حصل خطأ أثناء تسجيل الإرسال'); await pmLoadPending(); }
+}
+async function pmUnsendClient(modId, client){
+  var r = pmClientRow(modId, client); if(!r || !r.sent_at) return;
+  if(!confirm('إلغاء تسجيل إرسال الصنف ده لـ '+client+'؟')) return;
+  var mod = _pmMods.find(function(m){ return m.id===modId; });
+  var H = PM_H();
+  try{
+    // تعديل لسه مسودة: السطر اتعمل بالإرسال بس ← يتشال. تعديل نشط: السطر بتاع التفعيل ← نمسح تاريخ الإرسال بس.
+    if(mod && mod.status==='draft' && r.status!=='confirmed')
+      await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status?id=eq.'+r.id,{method:'DELETE', headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}});
+    else
+      await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status?id=eq.'+r.id,{method:'PATCH', headers:PM_H(), body:JSON.stringify({sent_at:null, sent_by:null})});
+    await pmLoadPending();
+    try{ if(typeof ibxRefresh==='function') ibxRefresh(); }catch(e){}
+  }catch(e){ console.error('[pm] unsend error', e); }
+}
+async function pmConfirmFromPending(modId, client){
+  var r = pmClientRow(modId, client); if(!r) return;
+  if(!confirm('تأكيد إن '+client+' طبّق التعديل؟')) return;
+  await pmConfirmClient(r.id, modId);
+  await pmLoadPending();
+  try{ if(typeof ibxRefresh==='function') ibxRefresh(); }catch(e){}
+}
+function pmClientSentNote(client, items){
+  var ds = {}; items.forEach(function(m){ var r=pmClientRow(m.id, client); if(r && r.sent_at) ds[String(r.sent_at).slice(0,10)] = 1; });
+  var k = Object.keys(ds).sort();
+  return k.length ? 'اتبعت للعميل يوم '+k.map(pmFmtD).join(' / ') : 'لسه ماتبعتش للعميل';
+}
 function pmClientFilterNote(client, n, total){
   var since = (_pmBuyers && _pmBuyers.ymd) ? new Date(_pmBuyers.ymd).toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'}) : '';
   return 'فلتر: الأصناف اللي بتتورد للعميل '+client+(since?' (فواتير MT من '+since+')':'')+' — '+n+' صنف من '+total+' تعديل';
@@ -66920,8 +66979,10 @@ async function pmActivateMod(modId){
       method:'PATCH', headers:H,
       body:JSON.stringify({status:'active', activated_at:new Date().toISOString()})
     });
-    var rows = matchedClients.map(c=>({mod_id:modId, client_name:c.name, status:'pending'}));
-    await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status',{
+    // العملاء اللي اتسجل لهم إرسال قبل التفعيل ليهم سطر بالفعل — مايتكرروش
+    var have = _pmClientStatus.filter(s=>s.mod_id===modId).map(s=>s.client_name);
+    var rows = matchedClients.filter(c=>have.indexOf(c.name)===-1).map(c=>({mod_id:modId, client_name:c.name, status:'pending'}));
+    if(rows.length) await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status',{
       method:'POST', headers:Object.assign({},H,{'Prefer':'return=minimal'}),
       body:JSON.stringify(rows)
     });
@@ -67048,7 +67109,8 @@ async function pmConfirmClient(statusId, modId){
       if(st){ st.status='confirmed'; st.confirmed_at=new Date().toISOString(); }
       var allStatuses = _pmClientStatus.filter(s=>s.mod_id===modId);
       var allConfirmed = allStatuses.every(s=>s.status==='confirmed');
-      if(allConfirmed){
+      // السعر الرسمي بيتغيّر بس لو التعديل نشط — تعديل مسودة فيه بس العملاء اللي اتسجل لهم إرسال (مش كل العملاء)
+      if(allConfirmed && mod.status==='active'){
         var existing = (_splPrices||[]).find(p=>p.snf_name===mod.snf_name);
         if(existing){
           await fetch(SUPABASE_URL+'/rest/v1/sales_prices?id=eq.'+existing.id,{
@@ -67219,7 +67281,7 @@ async function pmExportClientPDF(){
   var total = _pmMods.filter(m=>m.status==='draft'||m.status==='active').length;
   var items = pmClientMods(sel);
   if(!items.length){ pmMsg('⚠️ مفيش أصناف عليها تعديل بتتورد للعميل ده','#B45309'); return; }
-  _pmBuildPrintDoc(items, sel, pmClientFilterNote(sel, items.length, total));
+  _pmBuildPrintDoc(items, sel, pmClientFilterNote(sel, items.length, total)+' · '+pmClientSentNote(sel, items));
 }
 
 async function pmExportClientExcel(){
@@ -67229,7 +67291,7 @@ async function pmExportClientExcel(){
   var total = _pmMods.filter(m=>m.status==='draft'||m.status==='active').length;
   var items = pmClientMods(sel);
   if(!items.length){ pmMsg('⚠️ مفيش أصناف عليها تعديل بتتورد للعميل ده','#B45309'); return; }
-  var fNote = pmClientFilterNote(sel, items.length, total);
+  var fNote = pmClientFilterNote(sel, items.length, total)+' · '+pmClientSentNote(sel, items);
   var prices = _splPrices||[];
   var barcodeIdx = {};
   try{ barcodeIdx = await sciBuildBarcodeIndex(); }catch(e){}
@@ -67296,6 +67358,15 @@ function pmRenderPendingList(clientFilter){
     html += '<div id="pm-client-filter-info" style="background:#FFF8E7;border:1px solid #E5D5A0;border-radius:10px;padding:8px 12px;margin-bottom:10px;font-size:12.5px;font-weight:700;color:#8B6914">📦 '+activeMods.length+' صنف بيتورد لـ '+clientFilter+' من '+allOpen.length+' تعديل'
       +((_pmBuyers && _pmBuyers.err)?' <span style="color:#B45309;font-weight:600">(⚠️ تعذّر تحميل المبيعات — ظاهر بس المتسجل له في التأكيدات)</span>':'')+'</div>';
     if(!activeMods.length){ list.innerHTML = html + '<div style="text-align:center;padding:30px;color:var(--text2)">مفيش أصناف عليها تعديل بتتورد للعميل ده</div>'; return; }
+    var nSent=0, nOk=0;
+    activeMods.forEach(function(m){ var r=pmClientRow(m.id, clientFilter); if(r && r.status==='confirmed') nOk++; else if(r && r.sent_at) nSent++; });
+    var nLeft = activeMods.length - nOk - nSent;
+    html += '<div id="pm-sent-box" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;padding:10px 12px;margin-bottom:12px">'
+      + '<span style="font-weight:800;color:#1D4ED8;font-size:13px">📤 تم إرسال التعديل للعميل يوم</span>'
+      + '<input type="date" id="pm-sent-date" value="'+pmTodayYmd()+'" style="padding:6px 8px;border:1px solid #BFDBFE;border-radius:8px;font-family:inherit">'
+      + '<button class="btn btn-blue" onclick="pmMarkClientSent(\''+clientFilter.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;')+'\')" style="font-size:12px">📤 سجّل الإرسال'+(nLeft?' ('+nLeft+' صنف)':'')+'</button>'
+      + '<span style="font-size:12px;color:#334155">✓ أكد: <b>'+nOk+'</b> · 📤 اتبعت ومستني: <b>'+nSent+'</b> · لسه ماتبعتش: <b>'+nLeft+'</b></span>'
+      + '</div>';
   }
   activeMods.forEach(function(mod){
     var st = _pmClientStatus.filter(s=>s.mod_id===mod.id);
@@ -67305,16 +67376,19 @@ function pmRenderPendingList(clientFilter){
     var isDraft = mod.status==='draft';
     var changePct = mod.old_price>0 ? ((mod.new_price-mod.old_price)/mod.old_price*100).toFixed(1) : '—';
     // Client-specific status
-    var clientBadge = '';
-    if(clientFilter && clientFilter!=='all' && !isDraft){
+    var clientBadge = '', clientActs = '';
+    if(byClient){
       var cSt = st.find(s=>s.client_name===clientFilter);
-      if(cSt){
-        clientBadge = cSt.status==='confirmed'
-          ? ' <span class="pm-badge pm-badge-ok">✓ '+clientFilter+' أكد</span>'
-          : ' <span class="pm-badge pm-badge-wait">⏳ '+clientFilter+' لسه</span>';
-        if(cSt.sent_at){
-          clientBadge += ' <span class="pm-badge" style="background:#EFF6FF;color:#2563EB;font-size:10px">📤 تم الإرسال '+new Date(cSt.sent_at).toLocaleDateString('ar-EG')+'</span>';
-        }
+      var cq = clientFilter.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+      if(cSt && cSt.status==='confirmed'){
+        clientBadge = ' <span class="pm-badge pm-badge-ok">✓ أكد'+(cSt.confirmed_at?' '+pmFmtD(cSt.confirmed_at):'')+'</span>';
+      } else if(cSt && cSt.sent_at){
+        var dd = pmDaysSince(cSt.sent_at);
+        clientBadge = ' <span class="pm-badge" style="background:#EFF6FF;color:#2563EB">📤 اتبعت '+pmFmtD(cSt.sent_at)+' · '+(dd?'من '+dd+' يوم':'النهارده')+'</span>';
+        clientActs = '<button class="btn" onclick="event.stopPropagation();pmConfirmFromPending('+mod.id+',\''+cq+'\')" style="font-size:11px;padding:3px 10px;background:#F0FDF4;color:#16A34A;border:1px solid #BBF7D0">✓ أكد</button>'
+          + '<button class="btn" onclick="event.stopPropagation();pmUnsendClient('+mod.id+',\''+cq+'\')" style="font-size:11px;padding:3px 10px;background:#fff;color:#64748B;border:1px solid #E2E8F0">↩️ إلغاء الإرسال</button>';
+      } else {
+        clientBadge = ' <span class="pm-badge" style="background:#F1F5F9;color:#64748B">لسه ماتبعتش</span>';
       }
     }
     html += '<div class="pm-pending-card">';
@@ -67327,6 +67401,7 @@ function pmRenderPendingList(clientFilter){
     if(isDraft) html += '<span class="pm-badge pm-badge-draft">مسودة</span>';
     else html += '<span class="pm-badge pm-badge-wait">⏳ '+confirmed+'/'+total+'</span>';
     html += clientBadge;
+    if(clientActs) html += ' <span style="display:inline-flex;gap:6px">'+clientActs+'</span>';
     html += ' <span style="color:var(--text2);font-size:12px">▾</span>';
     html += '</div>';
     html += '<div class="pm-pending-body" style="display:none">';
@@ -67430,6 +67505,31 @@ async function _pmBuildPrintDoc(items, clientName, filterNote){
   w.document.close();
 }
 
+// تذكير: تعديلات اتبعتت للعملاء ومستنية تأكيد — من يوم الإرسال لحد ما يتأكد (sig فيه اليوم ← بتبقى "جديدة" مرة في اليوم)
+async function pmBuildSentMsg(){
+  try{
+    var H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY};
+    var r = await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status?select=id,mod_id,client_name,sent_at,status&status=eq.pending&sent_at=not.is.null&limit=5000',{headers:H});
+    if(!r.ok) return null;
+    var rows = await r.json(); if(!rows.length) return null;
+    var mr = await fetch(SUPABASE_URL+'/rest/v1/price_modifications?select=id,snf_name,status&status=in.(draft,active)&limit=1000',{headers:H});
+    var mods = mr.ok ? await mr.json() : []; var mk = {}; mods.forEach(function(m){ mk[m.id]=m; });
+    var byC = {};
+    rows.forEach(function(x){ if(!mk[x.mod_id]) return; var c = byC[x.client_name] || (byC[x.client_name] = {n:0, first:null}); c.n++; var d=String(x.sent_at).slice(0,10); if(!c.first || d<c.first) c.first=d; });
+    var cl = Object.keys(byC).sort(function(a,b){ return byC[a].first<byC[b].first?-1:byC[a].first>byC[b].first?1:a.localeCompare(b); });
+    if(!cl.length) return null;
+    var nItems = cl.reduce(function(s,c){ return s+byC[c].n; },0);
+    var li = cl.map(function(c){ var o=byC[c], dd=pmDaysSince(o.first);
+      return '<li><b>'+ibxE(c)+'</b> — '+o.n+' صنف — اتبعت '+pmFmtD(o.first)+' · '+(dd?'من '+dd+' يوم':'النهارده')+'</li>'; });
+    var sig = 'pms|'+pmTodayYmd()+'|'+cl.map(function(c){ return c+':'+byC[c].n; }).join(',');
+    return {
+      id:'pmsent', ic:'📤', c:'#2563EB', sig:sig,
+      title:'تذكير: تعديلات أسعار اتبعتت لـ '+cl.length+' عميل ومستنية التطبيق',
+      sub:nItems+' صنف — بتفضل هنا لحد ما تأكد إن العميل طبّق التعديل',
+      body:'<ul>'+li.join('')+'</ul><div class="ibx-acts"><button class="ibx-btn" onclick="ibxClose();showPanel(\'sales-pricelist\');splShowTab(\'pricemod\');pmShowPending()">افتح التعديلات المعلقة</button></div>'
+    };
+  }catch(e){ console.error('[pm] sent inbox error', e); return null; }
+}
 async function pmBuildInboxMsg(){
   try{
     var H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY};
@@ -67590,6 +67690,7 @@ function ibxBuild(){
         <div class="ibx-acts"><button class="ibx-btn" onclick="ibxGo('db-health')">افتح صحة السيرفر</button></div>`});
   }
   IBX.msgs=M; pmBuildInboxMsg().then(pm=>{if(pm){var idx=IBX.msgs.findIndex(x=>x.id==="pricemod");if(idx>=0)IBX.msgs[idx]=pm;else IBX.msgs.push(pm);ibxRender();}});
+  pmBuildSentMsg().then(pm=>{if(pm){var idx=IBX.msgs.findIndex(x=>x.id==="pmsent");if(idx>=0)IBX.msgs[idx]=pm;else IBX.msgs.push(pm);ibxRender();}});
 }
 function ibxUnread(){ const s=ibxSeen(); return IBX.msgs.filter(m=>s[m.id]!==m.sig); }
 function ibxBadge(){
