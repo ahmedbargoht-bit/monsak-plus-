@@ -1266,14 +1266,800 @@ input[type=number] { -moz-appearance:textfield; }
 // SUPABASE CONFIG — ضع بياناتك هنا بعد إنشاء المشروع
 // ══════════════════════════════════════════════════════════════
 const SUPABASE_URL  = 'https://tneeosrbxedexsrigapg.supabase.co';
-const SUPABASE_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRuZWVvc3JieGVkZXhzcmlnYXBnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxMTcxMTQsImV4cCI6MjA5NDY5MzExNH0.JHXgJ6EeDcdeofD5HShRnWvwPazCIfY7q7pCC2GMOFw';
+const SUPABASE_KEY  = '__REMOVED__'; // anon key تم نقله لطبقة API — مش محتاجه هنا تاني
+const MT_API_BASE   = SUPABASE_URL + '/functions/v1';
+const MT_APP_KEY    = '7304236994b1df4230bd503c725e2c23e4cf757c899f4d819430b0ba244975ab';
+
+// ══════════════════════════════════════════════════════════════
+// MT API Client — الطبقة الوسيطة بين التطبيق والسيرفر
+// ══════════════════════════════════════════════════════════════
+/**
+ * MT Plus — API Client v3
+ * ========================
+ * بديل لاستدعاءات Supabase المباشرة.
+ * بيكلّم Edge Functions عبر x-app-key بدل الـ anon key.
+ *
+ * Edge Functions:
+ *   api-products  — أصناف، أسعار، كتالوج
+ *   api-orders    — فواتير، مرتجعات مبيعات، محقق
+ *   api-clients   — عملاء، فروع، مناديب، عروض، إجازات
+ *   api-visits    — زيارات، حضور، أصناف زيارة، نواقص، مرتجعات زيارة
+ *   api-coord     — رسائل، توجيهات، موقع، طلبات توريد
+ *   api-data      — إعدادات، مجموعات، أهداف خاصة، RPCs
+ *
+ * الإعداد (مرة واحدة):
+ *   mtApi.init('https://tneeosrbxedexsrigapg.supabase.co/functions/v1', 'المفتاح');
+ */
+
+// eslint-disable-next-line no-unused-vars
+const mtApi = (() => {
+  'use strict';
+
+  let _baseUrl = '';
+  let _appKey = '';
+
+  // ─── Core ───────────────────────────────────────────────
+
+  function init(baseUrl, appKey) {
+    _baseUrl = baseUrl.replace(/\/+$/, '');
+    _appKey = appKey;
+  }
+
+  /**
+   * استدعاء الـ API مع retry (زي sb-guard).
+   * بيعيد المحاولة مرتين على 500/502/503/504.
+   */
+  async function call(fn, action, params, opts) {
+    opts = opts || {};
+    const method = opts.method || 'GET';
+    const body = opts.body || null;
+    const maxRetries = opts.retries != null ? opts.retries : 2;
+    const delays = [1500, 4000];
+
+    const url = new URL(`${_baseUrl}/${fn}`);
+    url.searchParams.set('action', action);
+    if (params && method === 'GET') {
+      for (const [k, v] of Object.entries(params)) {
+        if (v != null && v !== '') url.searchParams.set(k, String(v));
+      }
+    }
+
+    const headers = {
+      'x-app-key': _appKey,
+      'Content-Type': 'application/json',
+    };
+
+    let lastError = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const resp = await fetch(url.toString(), {
+          method,
+          headers,
+          body: body ? JSON.stringify(body) : undefined,
+        });
+
+        if (resp.ok) {
+          return await resp.json();
+        }
+
+        const status = resp.status;
+        if ([500, 502, 503, 504].includes(status) && attempt < maxRetries) {
+          await _sleep(delays[attempt] || 4000);
+          continue;
+        }
+
+        const errBody = await resp.json().catch(() => ({}));
+        const msg = errBody.error || `HTTP ${status}`;
+        throw new MtApiError(msg, status, fn, action);
+      } catch (err) {
+        if (err instanceof MtApiError) throw err;
+        lastError = err;
+        if (attempt < maxRetries) {
+          await _sleep(delays[attempt] || 4000);
+          continue;
+        }
+      }
+    }
+    throw new MtApiError(
+      lastError ? lastError.message : 'Network error',
+      0, fn, action
+    );
+  }
+
+  function _sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+  }
+
+  class MtApiError extends Error {
+    constructor(message, status, fn, action) {
+      super(message);
+      this.name = 'MtApiError';
+      this.status = status;
+      this.fn = fn;
+      this.action = action;
+    }
+  }
+
+  // ─── Products (api-products) ────────────────────────────
+
+  const products = {
+    list()            { return call('api-products', 'list'); },
+    catalog()         { return call('api-products', 'catalog'); },
+    prices()          { return call('api-products', 'prices'); },
+    updatePrice(data) { return call('api-products', 'update-price', null, { method: 'POST', body: data }); },
+    categories()      { return call('api-products', 'categories'); },
+  };
+
+  // ─── Orders (api-orders) ───────────────────────────────
+
+  const orders = {
+    deliveries(p)        { return call('api-orders', 'deliveries', p); },
+    returns(p)           { return call('api-orders', 'returns', p); },
+    repAchieved(rep, m)  { return call('api-orders', 'rep-achieved', { rep, month: m }); },
+    submitDelivery(data) { return call('api-orders', 'submit-delivery', null, { method: 'POST', body: data }); },
+    submitReturn(data)   { return call('api-orders', 'submit-return', null, { method: 'POST', body: data }); },
+    daySummary(rep, d)   { return call('api-orders', 'day-summary', { rep, date: d }); },
+  };
+
+  // ─── Clients (api-clients) ─────────────────────────────
+
+  const clients = {
+    list()              { return call('api-clients', 'list'); },
+    branches(client)    { return call('api-clients', 'branches', client ? { client } : null); },
+    branchMap()         { return call('api-clients', 'branch-map'); },
+    reps(p)             { return call('api-clients', 'reps', p); },
+    routes(group)       { return call('api-clients', 'routes', group ? { group } : null); },
+    targets(p)          { return call('api-clients', 'targets', p); },
+    promotions(client)  { return call('api-clients', 'promotions', client ? { client } : null); },
+    deviceCheck(data)   { return call('api-clients', 'device-check', null, { method: 'POST', body: data }); },
+    holidays(year)      { return call('api-clients', 'holidays', year ? { year } : null); },
+  };
+
+  // ─── Visits (api-visits) — جديد ────────────────────────
+
+  const visits = {
+    /** حضور اليوم */
+    attendanceToday(name) {
+      return call('api-visits', 'attendance-today', { name });
+    },
+    /** سجلات الحضور */
+    attendanceList(name) {
+      return call('api-visits', 'attendance-list', { name });
+    },
+    /** تواريخ الحضور (للتقويم) */
+    attendanceDates(name, limit) {
+      return call('api-visits', 'attendance-dates', { name, limit });
+    },
+    /** حضور يوم معين */
+    attendanceDay(name, date) {
+      return call('api-visits', 'attendance-day', { name, date });
+    },
+    /** تسجيل حضور/انصراف — POST */
+    saveAttendance(data) {
+      return call('api-visits', 'save-attendance', null, { method: 'POST', body: data });
+    },
+    /** حفظ زيارة — POST */
+    saveVisit(data) {
+      return call('api-visits', 'save-visit', null, { method: 'POST', body: data });
+    },
+    /** فحص وجود زيارة */
+    visitCheck(name, branch, date) {
+      return call('api-visits', 'visit-check', { name, branch, date });
+    },
+    /** تاريخ الزيارات */
+    visitHistory(name, date, limit) {
+      return call('api-visits', 'visit-history', { name, date, limit });
+    },
+    /** زيارات مفتوحة */
+    visitOpen(name, date) {
+      return call('api-visits', 'visit-open', { name, date });
+    },
+    /** قفل زيارة — POST */
+    closeVisit(id, timeOut) {
+      return call('api-visits', 'close-visit', null, { method: 'POST', body: { id, time_out: timeOut } });
+    },
+    /** لوحة الشرف */
+    leaderboard() {
+      return call('api-visits', 'leaderboard');
+    },
+    /** حفظ صنف زيارة — POST */
+    saveProduct(data) {
+      return call('api-visits', 'save-product', null, { method: 'POST', body: data });
+    },
+    /** أصناف زيارة */
+    visitProducts(name, branch, date, select) {
+      return call('api-visits', 'visit-products', { name, branch, date, select });
+    },
+    /** تعديل صنف — POST */
+    updateProduct(data) {
+      return call('api-visits', 'update-product', null, { method: 'POST', body: data });
+    },
+    /** أصناف صلاحية */
+    expiryProducts(route, branch) {
+      return call('api-visits', 'expiry-products', { route, branch });
+    },
+    /** حفظ ناقص — POST */
+    saveMissing(data) {
+      return call('api-visits', 'save-missing', null, { method: 'POST', body: data });
+    },
+    /** نواقص زيارة */
+    visitMissing(name, branch, date) {
+      return call('api-visits', 'visit-missing', { name, branch, date });
+    },
+    /** تعديل ناقص — POST */
+    updateMissing(data) {
+      return call('api-visits', 'update-missing', null, { method: 'POST', body: data });
+    },
+    /** حفظ مرتجع زيارة — POST */
+    saveReturn(data) {
+      return call('api-visits', 'save-return', null, { method: 'POST', body: data });
+    },
+    /** مرتجعات زيارة */
+    visitReturns(name, branch, date) {
+      return call('api-visits', 'visit-returns', { name, branch, date });
+    },
+    /** تعديل مرتجع — POST */
+    updateReturn(data) {
+      return call('api-visits', 'update-return', null, { method: 'POST', body: data });
+    },
+  };
+
+  // ─── Coord (api-coord) — جديد ──────────────────────────
+
+  const coord = {
+    /** كل الرسائل */
+    messages() {
+      return call('api-coord', 'messages');
+    },
+    /** تعليم رسالة مقروءة — POST */
+    markRead(id, name) {
+      return call('api-coord', 'mark-read', null, { method: 'POST', body: { id, name } });
+    },
+    /** حذف رسائل — POST */
+    deleteMessages(ids) {
+      return call('api-coord', 'delete-messages', null, { method: 'POST', body: { ids } });
+    },
+    /** رد على رسالة — POST */
+    replyMessage(msgId, replyData) {
+      return call('api-coord', 'reply-message', null, { method: 'POST', body: { msgId, replyData } });
+    },
+    /** توجيهات المنسق */
+    assignments(name) {
+      return call('api-coord', 'assignments', { name });
+    },
+    /** فروع التوجيه اليوم */
+    assignmentsBranch(name) {
+      return call('api-coord', 'assignments-branch', { name });
+    },
+    /** تأكيد توجيه — POST */
+    confirmAssignment(id) {
+      return call('api-coord', 'confirm-assignment', null, { method: 'POST', body: { id } });
+    },
+    /** تحديث الموقع — POST */
+    updateLocation(data) {
+      return call('api-coord', 'update-location', null, { method: 'POST', body: data });
+    },
+    /** موقع المنسق */
+    getLocation(name) {
+      return call('api-coord', 'get-location', { name });
+    },
+    /** طلبات التوريد */
+    supplyRequests(p) {
+      return call('api-coord', 'supply-requests', p);
+    },
+    /** حفظ طلب توريد — POST */
+    saveSupplyRequest(data) {
+      return call('api-coord', 'save-supply-request', null, { method: 'POST', body: data });
+    },
+    /** تحديث طلب توريد — POST */
+    updateSupplyRequest(data) {
+      return call('api-coord', 'update-supply-request', null, { method: 'POST', body: data });
+    },
+    /** الطلبات */
+    orders() {
+      return call('api-coord', 'orders');
+    },
+    /** تعليم طلب تم — POST */
+    markOrderDone(id) {
+      return call('api-coord', 'mark-order-done', null, { method: 'POST', body: { id } });
+    },
+  };
+
+  // ─── Data (api-data) — جديد ────────────────────────────
+
+  const data = {
+    /** إعدادات التطبيق */
+    brandSettings(appKey) {
+      return call('api-data', 'brand-settings', appKey ? { app_key: appKey } : null);
+    },
+    /** إعدادات جزئية */
+    brandSettingsPartial(appKey, select) {
+      return call('api-data', 'brand-settings-partial', { app_key: appKey, select });
+    },
+    /** تحديث إعدادات — POST */
+    updateBrandSettings(data) {
+      return call('api-data', 'update-brand-settings', null, { method: 'POST', body: data });
+    },
+    /** أسماء بديلة للأصناف */
+    itemAliases() {
+      return call('api-data', 'item-aliases');
+    },
+    /** أهداف خاصة */
+    specialTargets(name, branch) {
+      return call('api-data', 'special-targets', { name, branch });
+    },
+    /** سجلات الأهداف */
+    targetRecords(date, ids) {
+      return call('api-data', 'target-records', { date, ids });
+    },
+    /** حفظ سجل هدف — POST */
+    saveTargetRecord(data) {
+      return call('api-data', 'save-target-record', null, { method: 'POST', body: data });
+    },
+    /** تحديث هدف — POST */
+    updateTarget(data) {
+      return call('api-data', 'update-target', null, { method: 'POST', body: data });
+    },
+    /** منتجات التمور */
+    benefitProducts() {
+      return call('api-data', 'benefit-products');
+    },
+    /** توزيع فروع المنسقين */
+    coordRoutes(name) {
+      return call('api-data', 'coord-routes', { name });
+    },
+    /** المجموعات */
+    groups() {
+      return call('api-data', 'groups');
+    },
+    /** استثناءات الخروج */
+    checkoutExceptions() {
+      return call('api-data', 'checkout-exceptions');
+    },
+    /** تحديث استثناء — POST */
+    updateCheckout(data) {
+      return call('api-data', 'update-checkout', null, { method: 'POST', body: data });
+    },
+    /** بانر العروض */
+    promoBanner() {
+      return call('api-data', 'promo-banner');
+    },
+    /** بيانات مخزنة (cache) */
+    productsDb(key) {
+      return call('api-data', 'products-db', { key });
+    },
+    /** تسجيل الدخول — POST (RPC check_pass) */
+    checkPass(name, pass) {
+      return call('api-data', 'check-pass', null, { method: 'POST', body: { p_name: name, p_pass: pass } });
+    },
+    /** أصناف العميل — POST (RPC get_client_items) */
+    getClientItems(client) {
+      return call('api-data', 'get-client-items', null, { method: 'POST', body: { p_client: client } });
+    },
+    /** مرتجعات المبيعات — عرض المنسق */
+    salesReturnsCoord(branches, from) {
+      return call('api-data', 'sales-returns-coord', { branches, from });
+    },
+    /** تأكيد مرتجع — POST */
+    ackReturn(data) {
+      return call('api-data', 'ack-return', null, { method: 'POST', body: data });
+    },
+    /** بيانات المستخدم */
+    userProfile(name) {
+      return call('api-data', 'user-profile', { name });
+    },
+    /** تحديث بيانات مستخدم — POST */
+    userUpdate(data) {
+      return call('api-data', 'user-update', null, { method: 'POST', body: data });
+    },
+    /** فروع المندوب */
+    repBranches(name, route) {
+      return call('api-data', 'rep-branches', { name, route });
+    },
+  };
+
+  // ─── Migration Helper ───────────────────────────────────
+
+  const _tableMap = {
+    // api-products
+    sales_prices:            () => products.list(),
+    tamr_sales_item_catalog: () => products.catalog(),
+    // api-clients
+    sales_clients:           () => clients.list(),
+    branches:                (p) => clients.branches(p?.client_name),
+    branch_client_map:       () => clients.branchMap(),
+    users:                   (p) => clients.reps(p),
+    rep_targets:             (p) => clients.targets(p),
+    sales_promotions:        (p) => clients.promotions(p?.client_name),
+    holidays:                (p) => clients.holidays(p?.year),
+    // api-orders
+    sales_deliveries:        (p) => orders.deliveries(p),
+    sales_returns:           (p) => orders.returns(p),
+    // api-coord
+    messages:                () => coord.messages(),
+    orders:                  () => coord.orders(),
+    // api-data
+    app_brand_settings:      () => data.brandSettings(),
+    item_name_aliases:       () => data.itemAliases(),
+    groups:                  () => data.groups(),
+    checkout_exceptions:     () => data.checkoutExceptions(),
+    promo_banner:            () => data.promoBanner(),
+    date_benefit_products:   () => data.benefitProducts(),
+  };
+
+  function table(name, params) {
+    const mapper = _tableMap[name];
+    if (!mapper) throw new Error(`mtApi.table: no mapping for "${name}" — add an endpoint`);
+    return mapper(params);
+  }
+
+  // ─── Public API ─────────────────────────────────────────
+
+  return {
+    init,
+    call,
+    products,
+    orders,
+    clients,
+    visits,
+    coord,
+    data,
+    table,
+    MtApiError,
+    get ready() { return !!_baseUrl && !!_appKey; },
+  };
+})();
+
+// Initialize API client
+mtApi.init(MT_API_BASE, MT_APP_KEY);
+
+// ══════════════════════════════════════════════════════════════
+// _apiFetch — Bridge مؤقت: بيحوّل استدعاءات Supabase REST القديمة لـ mtApi
+// بيرجع Response-like object عشان الكود القديم يشتغل بدون تعديل
+// ══════════════════════════════════════════════════════════════
+async function _apiFetch(url, opts={}){
+  const method = (opts.method||'GET').toUpperCase();
+  const parsed = new URL(url);
+  const fullPath = parsed.pathname.replace('/rest/v1/','');
+  const search = parsed.searchParams;
+
+  // --- helper: extract eq.VALUE ---
+  function eq(key){ const v=search.get(key); return v?v.replace(/^eq\./,''):''; }
+  // --- helper: extract date from created_at gte ---
+  function dateRange(){
+    const v=search.get('created_at');
+    return v&&v.startsWith('gte.') ? v.replace('gte.','').slice(0,10) : '';
+  }
+  // --- helper: build Response-like ---
+  function ok(data){ return {ok:true,status:200,json:()=>Promise.resolve(data),text:()=>Promise.resolve(JSON.stringify(data))}; }
+  function fail(e){ return {ok:false,status:500,json:()=>Promise.resolve([]),text:()=>Promise.resolve(e?.message||'error')}; }
+
+  try{
+    // ─── RPC calls ───
+    if(fullPath.startsWith('rpc/')){
+      let body={}; try{body=JSON.parse(opts.body||'{}');}catch(e){}
+      const fn = fullPath.replace('rpc/','');
+      if(fn==='check_pass'){
+        const r = await mtApi.data.checkPass(body.p_name||body.p_stored, body.p_pass||body.p_input);
+        return ok(r);
+      }
+      if(fn==='get_client_items'){
+        const r = await mtApi.data.getClientItems(body.p_client);
+        return ok(r);
+      }
+      if(fn==='rep_device_check'){
+        const r = await mtApi.clients.deviceCheck({name:body.p_name, device_id:body.p_device, model:body.p_model, ua:body.p_ua});
+        return ok(r);
+      }
+      console.warn('_apiFetch: unknown RPC:', fn);
+      return fail(new Error('Unknown RPC: '+fn));
+    }
+
+    const table = fullPath.split('?')[0];
+
+    // ─── GET ───
+    if(method==='GET'){
+      let result=[];
+      switch(table){
+        case 'attendance': {
+          const name=eq('name'), date=eq('date');
+          const sel=search.get('select')||'*';
+          if(sel==='date'){
+            // attendance dates for calendar
+            const lim=parseInt(search.get('limit'))||60;
+            result = await mtApi.visits.attendanceDates(name, lim);
+          } else if(date){
+            result = await mtApi.visits.attendanceDay(name, date);
+          } else {
+            result = await mtApi.visits.attendanceList(name);
+          }
+          break;
+        }
+        case 'visits': {
+          const name=eq('name'), date=eq('date'), branch=eq('branch');
+          const sel=search.get('select')||'*';
+          const idParam=search.get('id');
+          if(idParam && idParam.startsWith('in.')){
+            // batch fetch by IDs
+            result = await mtApi.visits.visitHistory(name, date, 50);
+          } else if(sel.includes('id') && !sel.includes('branch') && !sel.includes('time')){
+            // visit check (select=id only)
+            result = await mtApi.visits.visitCheck(name, branch, date);
+          } else {
+            // visit history with details
+            result = await mtApi.visits.visitHistory(name, date, parseInt(search.get('limit'))||20);
+          }
+          break;
+        }
+        case 'products': {
+          const name=eq('name'), branch=eq('branch');
+          const dt=dateRange()||eq('date');
+          const sel=search.get('select')||'*';
+          result = await mtApi.visits.visitProducts(name, branch, dt, sel!=='*'?sel:undefined);
+          break;
+        }
+        case 'missing': {
+          const name=eq('name'), branch=eq('branch');
+          const dt=dateRange()||eq('date');
+          result = await mtApi.visits.visitMissing(name, branch, dt);
+          break;
+        }
+        case 'returns': {
+          const name=eq('name'), branch=eq('branch');
+          const dt=dateRange()||eq('date');
+          result = await mtApi.visits.visitReturns(name, branch, dt);
+          break;
+        }
+        case 'users': {
+          const name=eq('name');
+          if(name) {
+            result = await mtApi.data.userProfile(name);
+          } else {
+            result = await mtApi.clients.reps();
+          }
+          break;
+        }
+        case 'sales_clients':
+          result = await mtApi.clients.list();
+          break;
+        case 'branch_client_map':
+          result = await mtApi.clients.branchMap();
+          break;
+        case 'item_name_aliases':
+          result = await mtApi.data.itemAliases();
+          break;
+        case 'messages':
+          result = await mtApi.coord.messages();
+          break;
+        case 'orders':
+          result = await mtApi.coord.orders();
+          break;
+        case 'assignments': {
+          const name=eq('rep_name');
+          const or_param=search.get('or');
+          if(or_param){
+            result = await mtApi.coord.assignments(name);
+          } else {
+            result = await mtApi.coord.assignmentsBranch(name);
+          }
+          break;
+        }
+        case 'special_targets': {
+          const name=eq('rep_name'), branch=eq('branch_name');
+          result = await mtApi.data.specialTargets(name, branch);
+          break;
+        }
+        case 'special_target_records': {
+          const date=eq('record_date');
+          const tid=search.get('target_id')||'';
+          const ids=tid.replace('in.(','').replace(')','');
+          result = await mtApi.data.targetRecords(date, ids);
+          break;
+        }
+        case 'date_benefit_products':
+          result = await mtApi.data.benefitProducts();
+          break;
+        case 'coord_route_assignments': {
+          const name=eq('rep_name');
+          result = await mtApi.data.coordRoutes(name);
+          break;
+        }
+        case 'branches': {
+          const route=eq('route');
+          const repName=eq('rep_name')||eq('rep_name2')||eq('rep_name3');
+          if(route){
+            result = await mtApi.clients.branches();
+          } else if(repName){
+            result = await mtApi.data.repBranches(repName);
+          } else {
+            result = await mtApi.clients.branches();
+          }
+          break;
+        }
+        case 'sales_returns': {
+          const brIn=search.get('branch_name')||'';
+          const from=search.get('return_date')||'';
+          const branches=brIn.replace('in.(','').replace(')','');
+          const fromDate=from.replace('gte.','');
+          result = await mtApi.data.salesReturnsCoord(branches, fromDate);
+          break;
+        }
+        case 'supply_requests': {
+          result = await mtApi.coord.supplyRequests({name:eq('name'),to_name:eq('to_name')});
+          break;
+        }
+        case 'location': {
+          const name=eq('name');
+          result = await mtApi.coord.getLocation(name);
+          break;
+        }
+        case 'app_brand_settings':
+          result = await mtApi.data.brandSettings();
+          break;
+        case 'groups':
+          result = await mtApi.data.groups();
+          break;
+        case 'checkout_exceptions':
+          result = await mtApi.data.checkoutExceptions();
+          break;
+        case 'promo_banner':
+          result = await mtApi.data.promoBanner();
+          break;
+        case 'products_db': {
+          const key=eq('key');
+          result = await mtApi.data.productsDb(key);
+          break;
+        }
+        default:
+          console.warn('_apiFetch: unmapped GET table:', table);
+          result=[];
+      }
+      if(!Array.isArray(result)) result = result ? [result] : [];
+      return ok(result);
+    }
+
+    // ─── PATCH ───
+    if(method==='PATCH'){
+      let body={}; try{body=JSON.parse(opts.body||'{}');}catch(e){}
+      switch(table){
+        case 'products': {
+          const id=eq('id');
+          await mtApi.visits.updateProduct({id:parseInt(id),...body});
+          break;
+        }
+        case 'missing': {
+          const id=eq('id');
+          await mtApi.visits.updateMissing({id:parseInt(id),...body});
+          break;
+        }
+        case 'returns': {
+          const id=eq('id');
+          await mtApi.visits.updateReturn({id:parseInt(id),...body});
+          break;
+        }
+        case 'visits': {
+          const idParam=search.get('id')||'';
+          if(idParam.startsWith('in.')){
+            const ids=idParam.replace('in.(','').replace(')','').split(',').map(Number);
+            await Promise.all(ids.map(id=>mtApi.visits.closeVisit(id,body.time_out)));
+          } else {
+            await mtApi.visits.closeVisit(parseInt(eq('id')),body.time_out);
+          }
+          break;
+        }
+        case 'attendance': {
+          const id=eq('id');
+          await mtApi.visits.saveAttendance({id:parseInt(id),type:'update',...body});
+          break;
+        }
+        case 'messages': {
+          const id=eq('id');
+          if(body.read_by==='__deleted__'){
+            await mtApi.coord.deleteMessages([parseInt(id)]);
+          } else {
+            await mtApi.coord.markRead(parseInt(id),body.read_by);
+          }
+          break;
+        }
+        case 'special_targets': {
+          const id=eq('id');
+          await mtApi.data.updateTarget({id:parseInt(id),...body});
+          break;
+        }
+        case 'supply_requests': {
+          const id=eq('id');
+          await mtApi.coord.updateSupplyRequest({id:parseInt(id),...body});
+          break;
+        }
+        case 'sales_returns': {
+          const id=eq('id');
+          await mtApi.data.ackReturn({id:parseInt(id),...body});
+          break;
+        }
+        case 'users': {
+          const name=eq('name');
+          await mtApi.data.userUpdate({name,...body});
+          break;
+        }
+        case 'location': {
+          const name=eq('name');
+          await mtApi.coord.updateLocation({name,...body});
+          break;
+        }
+        case 'app_brand_settings':
+          await mtApi.data.updateBrandSettings(body);
+          break;
+        case 'checkout_exceptions': {
+          const id=eq('id');
+          await mtApi.data.updateCheckout({id:parseInt(id),...body});
+          break;
+        }
+        case 'assignments': {
+          const id=eq('id');
+          await mtApi.coord.confirmAssignment(parseInt(id));
+          break;
+        }
+        default:
+          console.warn('_apiFetch: unmapped PATCH table:', table);
+      }
+      return ok({ok:true});
+    }
+
+    // ─── POST (insert/upsert) ───
+    if(method==='POST'){
+      let body={}; try{body=JSON.parse(opts.body||'{}');}catch(e){}
+      switch(table){
+        case 'special_target_records':
+          await mtApi.data.saveTargetRecord(body);
+          break;
+        case 'messages':
+          await mtApi.coord.replyMessage(null,body);
+          break;
+        case 'supply_requests':
+          await mtApi.coord.saveSupplyRequest(body);
+          break;
+        case 'location':
+          await mtApi.coord.updateLocation(body);
+          break;
+        case 'checkout_exceptions':
+          await mtApi.data.updateCheckout(body);
+          break;
+        default:
+          console.warn('_apiFetch: unmapped POST table:', table);
+      }
+      return ok([body]);
+    }
+
+    console.warn('_apiFetch: unhandled', method, table);
+    return fail(new Error('Unhandled'));
+  }catch(e){
+    console.warn('_apiFetch error:', e);
+    return fail(e);
+  }
+}
+
+// Override sciFetchAllRows to route through _apiFetch (API returns all rows, no pagination)
+const _origSciFetchAllRows = typeof sciFetchAllRows==='function' ? sciFetchAllRows : null;
+async function sciFetchAllRows(url, headers){
+  if(url.includes('/rest/v1/')){
+    try{
+      const resp = await _apiFetch(url, {headers});
+      const rows = await resp.json();
+      return {rows: Array.isArray(rows)?rows:[], ok:true};
+    }catch(e){
+      return {rows:[], ok:false};
+    }
+  }
+  if(_origSciFetchAllRows) return _origSciFetchAllRows(url, headers);
+  return {rows:[], ok:false};
+}
+
+
 
 // ── تعديلات جوهرية: تطبيق هوية/ألوان/حجم خط هذا التطبيق (app_brand_settings, app_key='coord') ──
 async function brsBootstrapApply(){
   try{
-    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.coord&select=*`, {headers:H});
-    const rows = res.ok ? await res.json().catch(()=>[]) : [];
+    const rows = await mtApi.data.brandSettings('coord').catch(()=>[]);
     const row = (Array.isArray(rows) && rows[0]) ? rows[0] : null;
     if(!row) return;
     const root = document.documentElement.style;
@@ -1353,9 +2139,7 @@ function navBuildFromIdsHidden(orderIds, hiddenIds){
 // localStorage ثم الترتيب الافتراضي لو فشل الاتصال أو محدش حفظ ترتيب لسه
 async function navFetchFromDB(){
   try{
-    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.coord&select=sidebar_order,sidebar_hidden`, {headers:H});
-    const rows = res.ok ? await res.json().catch(()=>[]) : [];
+    const rows = await mtApi.data.brandSettingsPartial('coord','sidebar_order,sidebar_hidden').catch(()=>[]);
     const row = rows && rows[0];
     if(row && Array.isArray(row.sidebar_order) && row.sidebar_order.length){
       return navBuildFromIdsHidden(row.sidebar_order, row.sidebar_hidden||[]);
@@ -1368,8 +2152,7 @@ async function navSaveToDB(){
   try{
     const order = navOrder.map(i=>i.id);
     const hidden = navOrder.filter(i=>!i.visible).map(i=>i.id);
-    const H = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
-    await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.coord`,{method:'PATCH', headers:H,
+    await mtApi.data.updateBrandSettings({app_key:'coord',
       body:JSON.stringify({sidebar_order:order, sidebar_hidden:hidden, updated_at:new Date().toISOString()})});
   }catch(e){}
 }
@@ -1597,7 +2380,7 @@ async function sciLoadClientAliasesMap(){
   const map = {};
   try{
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/sales_clients?select=name,mt_customer_names&deleted_at=is.null`, {headers:H, cache:'no-store'});
+    const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/sales_clients?select=name,mt_customer_names&deleted_at=is.null`, {headers:H, cache:'no-store'});
     const rows = res.ok ? await res.json().catch(()=>[]) : [];
     (Array.isArray(rows)?rows:[]).forEach(r=>{
       if(r.name) map[r.name] = Array.isArray(r.mt_customer_names) ? r.mt_customer_names : [];
@@ -1815,7 +2598,7 @@ async function _sciLoadCatalogInto(state, branchName){
     const seen = {};
     let deliveriesOk = false;
     try{
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_client_items`, {
+      const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/rpc/get_client_items`, {
         method:'POST', headers:{...H,'Content-Type':'application/json'}, body: JSON.stringify({p_client: client})
       });
       const rows = res.ok ? await res.json().catch(()=>null) : null;
@@ -1991,7 +2774,7 @@ async function restoreShiftTimer(){
   // عشان منرجعش نعرض حضور/انصراف قديم لزيارة سابقة خلصت في نفس اليوم
   try{
     const today = localDateStr();
-    const data = await fetch(
+    const data = await _apiFetch(
       `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(cu.name)}&date=eq.${today}&select=time_in,time_out&order=id.desc&limit=10`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
     ).then(r=>r.ok?r.json():[]).catch(()=>[]);
@@ -2146,7 +2929,7 @@ async function sendFinalData(){
         if(v.date && v.date !== todayISO) { v._sent = true; continue; }
         // تحقق من عدم وجود تكرار في Supabase
         try{
-          const chk = await fetch(
+          const chk = await _apiFetch(
             `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(v.name)}&branch=eq.${encodeURIComponent(v.branch||'')}&date=eq.${todayISO}&select=id&limit=1`,
             {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
           );
@@ -2208,7 +2991,7 @@ async function passMatches(stored, input){
   if(stored === input) return stored !== '' || input !== '';
   if(!stored.startsWith('$2')) return false;
   try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/check_pass`, {
+    const r = await _apiFetch(`${SUPABASE_URL}/rest/v1/rpc/check_pass`, {
       method:'POST',
       headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
       body: JSON.stringify({p_stored: stored, p_input: input})
@@ -2553,9 +3336,9 @@ async function logout(){
   if(cu && branch){
     try{
       const [prodRes, missRes, retRes] = await Promise.all([
-        fetch(`${SUPABASE_URL}/rest/v1/products?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id`,{headers:H}),
-        fetch(`${SUPABASE_URL}/rest/v1/missing?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id`,{headers:H}),
-        fetch(`${SUPABASE_URL}/rest/v1/returns?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id`,{headers:H}),
+        _apiFetch(`${SUPABASE_URL}/rest/v1/products?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id`,{headers:H}),
+        _apiFetch(`${SUPABASE_URL}/rest/v1/missing?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id`,{headers:H}),
+        _apiFetch(`${SUPABASE_URL}/rest/v1/returns?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id`,{headers:H}),
       ]);
       const prodData = prodRes.ok ? await prodRes.json() : [];
       const missData = missRes.ok ? await missRes.json() : [];
@@ -2588,7 +3371,7 @@ async function logout(){
   let openVisitBranch = null;
   if(cu?.name){
     try{
-      const openRes = await fetch(
+      const openRes = await _apiFetch(
         `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(cu.name)}&date=eq.${today}&select=branch,time_out&order=created_at.desc&limit=20`,
         {headers:H}
       );
@@ -2635,7 +3418,7 @@ async function confirmLogout(){
     try{
       const today = localDateStr();
       const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-      const openRes = await fetch(
+      const openRes = await _apiFetch(
         `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(cu.name)}&date=eq.${today}&select=id,time_out&order=created_at.desc&limit=20`,
         {headers:H}
       );
@@ -2643,7 +3426,7 @@ async function confirmLogout(){
       const openIds = (Array.isArray(openData)?openData:[]).filter(v=>!v.time_out || v.time_out==='--').map(v=>v.id);
       if(openIds.length){
         const nowTime = new Date().toTimeString().slice(0,5);
-        await fetch(
+        await _apiFetch(
           `${SUPABASE_URL}/rest/v1/visits?id=in.(${openIds.join(',')})`,
           {method:'PATCH', headers:{...H,'Content-Type':'application/json','Prefer':'return=minimal'}, body: JSON.stringify({time_out: nowTime})}
         ).catch(()=>{});
@@ -2724,7 +3507,7 @@ async function loadVisitTab(){
 
   // 2. الأصناف
   try{
-    const res = await fetch(
+    const res = await _apiFetch(
       `${SUPABASE_URL}/rest/v1/products?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id,snf,shelf_qty,stock_qty&order=snf.asc`,
       {headers:H}
     );
@@ -2752,7 +3535,7 @@ async function loadVisitTab(){
 
   // 3. النواقص
   try{
-    const res = await fetch(
+    const res = await _apiFetch(
       `${SUPABASE_URL}/rest/v1/missing?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=snf,reason`,
       {headers:H}
     );
@@ -2775,7 +3558,7 @@ async function loadVisitTab(){
 
   // 4. المرتجعات
   try{
-    const res = await fetch(
+    const res = await _apiFetch(
       `${SUPABASE_URL}/rest/v1/returns?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=snf,qty,reason`,
       {headers:H}
     );
@@ -2815,7 +3598,7 @@ async function saveEditProd(){
   const shelf = document.getElementById('edit-shelf-qty').value;
   const stock = document.getElementById('edit-stock-qty').value;
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${id}`,{
+    const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${id}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
       body: JSON.stringify({shelf_qty: parseFloat(shelf)||0, stock_qty: parseFloat(stock)||0})
@@ -3328,7 +4111,7 @@ function showTab(tab){
     // بس لو فيه شيفت مفتوح فعلاً (حضور بدون انصراف) — مش أي سجل قديم من زيارة سابقة خلصت
     if(cu && !attIn){
       const today = localDateStr();
-      fetch(`${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(cu.name)}&date=eq.${today}&select=time_in,time_out&order=id.desc`,
+      _apiFetch(`${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(cu.name)}&date=eq.${today}&select=time_in,time_out&order=id.desc`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}})
       .then(r=>r.ok?r.json():[])
       .then(data=>{
@@ -3403,7 +4186,7 @@ async function sptLoad(){
   let targets = [];
   try{
     const enc = encodeURIComponent(cu.name), encB = encodeURIComponent(branch);
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/special_targets?select=*&rep_name=eq.${enc}&branch_name=eq.${encB}&status=eq.active&date_from=lte.${today}&date_to=gte.${today}`,{headers:H});
+    const r = await _apiFetch(`${SUPABASE_URL}/rest/v1/special_targets?select=*&rep_name=eq.${enc}&branch_name=eq.${encB}&status=eq.active&date_from=lte.${today}&date_to=gte.${today}`,{headers:H});
     targets = r.ok ? await r.json().catch(()=>[]) : [];
   }catch(e){ targets = []; }
 
@@ -3418,7 +4201,7 @@ async function sptLoad(){
   let records = [];
   try{
     const ids = targets.map(t=>t.id).join(',');
-    const r2 = await fetch(`${SUPABASE_URL}/rest/v1/special_target_records?select=*&record_date=eq.${today}&target_id=in.(${ids})`,{headers:H});
+    const r2 = await _apiFetch(`${SUPABASE_URL}/rest/v1/special_target_records?select=*&record_date=eq.${today}&target_id=in.(${ids})`,{headers:H});
     records = r2.ok ? await r2.json().catch(()=>[]) : [];
   }catch(e){ records = []; }
 
@@ -3486,7 +4269,7 @@ async function sptReceiveTarget(targetId, btn){
   if(btn){ btn.disabled=true; btn.textContent='جاري الاستلام...'; }
   const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
   try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/special_targets?id=eq.${targetId}`,{
+    const r = await _apiFetch(`${SUPABASE_URL}/rest/v1/special_targets?id=eq.${targetId}`,{
       method:'PATCH', headers:H, body: JSON.stringify({received_at: new Date().toISOString()})
     });
     if(r.ok){ showToast('✅ تم الاستلام'); sptLoad(); }
@@ -3520,7 +4303,7 @@ async function sptUpsertRecord(targetId, itemName, patch){
     ...patch
   };
   try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/special_target_records?on_conflict=target_id,record_date,item_name`,{
+    const r = await _apiFetch(`${SUPABASE_URL}/rest/v1/special_target_records?on_conflict=target_id,record_date,item_name`,{
       method:'POST', headers:H, body: JSON.stringify(body)
     });
     if(r.ok){ showToast('✅ اتسجل بنجاح'); sptLoad(); }
@@ -3541,8 +4324,8 @@ async function tbLoad(){
   const grid = document.getElementById('tb-grid');
   if(!_tbLoaded){ grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text2);padding:20px;font-size:12px">جارِ التحميل...</div>'; }
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/date_benefit_products?select=name,image_link,description,benefits,nutrition_info,usage_tips&order=name.asc`,
-      {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const _bpData = await mtApi.data.benefitProducts().catch(()=>[]);
+    const res = {ok:true, json:()=>Promise.resolve(_bpData)};
     _tbItems = res.ok ? await res.json() : [];
   }catch(e){
     _tbItems = [];
@@ -3630,7 +4413,7 @@ function onBranchChange(){
   }
   // حدّث location.branch فوراً عشان المشرف يشوف الفرع الحالي
   if(cu && branch){
-    fetch(`${SUPABASE_URL}/rest/v1/location?name=eq.${encodeURIComponent(cu.name)}`,{
+    _apiFetch(`${SUPABASE_URL}/rest/v1/location?name=eq.${encodeURIComponent(cu.name)}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
       body: JSON.stringify({branch})
@@ -3778,7 +4561,7 @@ async function popBranches(route){
     if(isFixedRep(coordType)){
       // ثابت — المصدر الوحيد لفروعه هو coord_route_assignments (مفيش قراءة من branches.rep_name/2/3 تاني)
       const enc=encodeURIComponent(cu.name);
-      const byCoord = await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+      const byCoord = await _apiFetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
       allData=[...byCoord];
       // توافق مع الفرع الفردي القديم (users.fixed_branch) لو لسه محفوظ ومفيش تخصيص جديد بعد
       if(cu?.fixedBranch) allData.push({branch_name:cu.fixedBranch});
@@ -3786,13 +4569,13 @@ async function popBranches(route){
       // متحرك — لو الأدمن خصّص له فروع معينة من خط السير (coord_route_assignments) استخدمها هي بس،
       // ولو مفيش تخصيص، ارجع للسلوك الافتراضي: كل فروع الخط
       const enc=encodeURIComponent(cu.name);
-      const assignedData = await fetch(
+      const assignedData = await _apiFetch(
         `${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,
         {headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
       if(assignedData.length){
         allData=assignedData;
       } else {
-        const data=await fetch(
+        const data=await _apiFetch(
           `${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${encodeURIComponent(route)}&status=neq.inactive&order=branch_name.asc`,
           {headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
         allData=data;
@@ -4074,7 +4857,7 @@ async function saveVisit(){
   // ── تحقق من عدم وجود زيارة مسجلة بالفعل لنفس الفرع في نفس اليوم ──
   const today = localDateStr();
   try{
-    const chkRes = await fetch(
+    const chkRes = await _apiFetch(
       `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(cu.name)}&branch=eq.${encodeURIComponent(branch)}&date=eq.${today}&select=id&limit=1`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
     );
@@ -5128,7 +5911,7 @@ async function submitMissing(){
     const today=localDateStr();
     let isDup=false;
     try{
-      const chk=await fetch(
+      const chk=await _apiFetch(
         `${SUPABASE_URL}/rest/v1/missing?branch=eq.${encodeURIComponent(branch)}&snf=eq.${encodeURIComponent(m.snf)}&name=eq.${encodeURIComponent(cu.name)}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id&limit=1`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
       );
@@ -5365,7 +6148,7 @@ async function renderReturnsPendingAck(){
 async function confirmRepReturnInvoice(id, btn){
   if(btn){ btn.disabled=true; btn.textContent='جارِ التأكيد...'; }
   try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/sales_returns?id=eq.${id}`,{
+    const r = await _apiFetch(`${SUPABASE_URL}/rest/v1/sales_returns?id=eq.${id}`,{
       method:'PATCH',
       headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'},
       body:JSON.stringify({coord_ack:true, coord_ack_by:cu?.name||'', coord_ack_at:new Date().toISOString()})
@@ -5407,7 +6190,7 @@ async function renderRepRaisedReturns(){
     let rows=[];
     for(let i=0;i<names.length;i+=40){
       const chunk=names.slice(i,i+40).map(n=>'"'+String(n).replace(/"/g,'\\"')+'"').join(',');
-      const r=await fetch(`${SUPABASE_URL}/rest/v1/sales_returns?branch_name=in.(${encodeURIComponent(chunk)})&deleted_at=is.null&return_date=gte.${from}&select=id,rep_name,branch_name,return_date,items,coord_ack,coord_ack_by&order=return_date.desc,created_at.desc&limit=5000`,{headers:H});
+      const r=await _apiFetch(`${SUPABASE_URL}/rest/v1/sales_returns?branch_name=in.(${encodeURIComponent(chunk)})&deleted_at=is.null&return_date=gte.${from}&select=id,rep_name,branch_name,return_date,items,coord_ack,coord_ack_by&order=return_date.desc,created_at.desc&limit=5000`,{headers:H});
       if(r.ok){ const j=await r.json().catch(()=>[]); if(Array.isArray(j)) rows=rows.concat(j); }
     }
     _retInvCnt = {}; rows.forEach(r=>{ if(r.coord_ack!==true){ const b=r.branch_name||'—'; _retInvCnt[b]=(_retInvCnt[b]||0)+1; } });
@@ -5469,7 +6252,7 @@ async function loadRepOrders(){
   if(!listEl||!cu) return;
 
   try{
-    const r = await fetch(
+    const r = await _apiFetch(
       `${SUPABASE_URL}/rest/v1/supply_requests?to_name=eq.${encodeURIComponent(cu.name)}&deal_source=eq.sales_supervisor&select=*&order=created_at.desc&limit=100`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
     );
@@ -5536,7 +6319,7 @@ async function loadRepOrders(){
 }
 
 async function repOrderReceive(id){
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
+  const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body:JSON.stringify({status:'rep_received'})
@@ -5547,7 +6330,7 @@ async function repOrderReceive(id){
 }
 
 async function repOrderDelivered(id){
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
+  const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/supply_requests?id=eq.${id}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body:JSON.stringify({status:'done'})
@@ -5681,7 +6464,7 @@ function renderMessages(){
   // تحديث حالة القراءة
   messages.forEach(m=>{
     if(!(m.read_by||m.readBy||'').includes(cu?.name||'')){
-      fetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${m.id}`,{
+      _apiFetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${m.id}`,{
         method:'PATCH',
         headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
         body:JSON.stringify({read_by:(m.read_by?m.read_by+',':'')+cu.name})
@@ -5695,14 +6478,14 @@ async function confirmVisitResultMsg(msgId, fromName){
   if(btn){ btn.disabled=true; btn.textContent='⏳ جارٍ...'; }
 
   // حدّث الرسالة كـ مقروءة ومؤكدة
-  const res1 = await fetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${msgId}`,{
+  const res1 = await _apiFetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${msgId}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body:JSON.stringify({is_read:true, read_at:new Date().toISOString()})
   }).catch(()=>null);
 
   // ابعت رسالة تأكيد للمشرف
-  const res2 = await fetch(`${SUPABASE_URL}/rest/v1/messages`,{
+  const res2 = await _apiFetch(`${SUPABASE_URL}/rest/v1/messages`,{
     method:'POST',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body:JSON.stringify({
@@ -5903,10 +6686,10 @@ async function openCheckoutModal(){
     const range = `created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59`;
 
     const [visitRes, prodRes, retRes, missRes] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/visits?name=eq.${enc}&branch=eq.${encBranch}&date=eq.${today}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-      fetch(`${SUPABASE_URL}/rest/v1/products?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-      fetch(`${SUPABASE_URL}/rest/v1/returns?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-      fetch(`${SUPABASE_URL}/rest/v1/missing?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      _apiFetch(`${SUPABASE_URL}/rest/v1/visits?name=eq.${enc}&branch=eq.${encBranch}&date=eq.${today}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      _apiFetch(`${SUPABASE_URL}/rest/v1/products?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      _apiFetch(`${SUPABASE_URL}/rest/v1/returns?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+      _apiFetch(`${SUPABASE_URL}/rest/v1/missing?name=eq.${enc}&branch=eq.${encBranch}&${range}&select=id&limit=1`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
     ]);
 
     if(_chkState.visit){ /* اتأكد أصلاً محلياً */ }
@@ -6049,7 +6832,7 @@ async function loadDashDates(){
   const sel = document.getElementById('dash-date-sel');
   if(!sel) return;
   try{
-    const res = await fetch(
+    const res = await _apiFetch(
       `${SUPABASE_URL}/rest/v1/attendance?select=date&name=eq.${encodeURIComponent(cu.name)}&order=date.desc&limit=60`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
     );
@@ -6071,7 +6854,7 @@ async function loadDashByDate(date){
   // 1. ساعات العمل من attendance
   let firstIn = null, lastOut = null, hrs = 0;
   try{
-    const res = await fetch(
+    const res = await _apiFetch(
       `${SUPABASE_URL}/rest/v1/attendance?name=eq.${encodeURIComponent(cu.name)}&date=eq.${date}&select=time_in,time_out`,
       {headers:H}
     );
@@ -6092,7 +6875,7 @@ async function loadDashByDate(date){
   // 2. الزيارات من visits (distinct branch)
   let visitBranches = [], prodCount = 0, missCount = 0, spaceT = 0, spaceU = 0, score = 0;
   try{
-    const res = await fetch(
+    const res = await _apiFetch(
       `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(cu.name)}&date=eq.${date}&select=branch,time_in,time_out,points,space_total,space_used,sku_on,missing_count&order=time_in.asc`,
       {headers:H}
     );
@@ -6110,7 +6893,7 @@ async function loadDashByDate(date){
 
   // 3. الأصناف من products
   try{
-    const res = await fetch(
+    const res = await _apiFetch(
       `${SUPABASE_URL}/rest/v1/products?name=eq.${encodeURIComponent(cu.name)}&created_at=gte.${date}T00:00:00&created_at=lte.${date}T23:59:59&select=snf`,
       {headers:H}
     );
@@ -6269,301 +7052,174 @@ function renderProdReport(){
 }
 
 // ══════════════════════════════════════════════════════════════
-// SUPABASE API HELPERS
+// SUPABASE API HELPERS — compatibility wrappers (للـ offline queue)
+// الاستدعاءات الجديدة بتروح عبر mtApi مباشرة
+const _SB_HEADERS = ()=>({'Content-Type':'application/json','x-app-key':MT_APP_KEY});
+
 async function sbInsert(table, data){
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Prefer': 'return=minimal'
-      },
-      body: JSON.stringify(data)
-    });
-    window.__sbLastStatus = res.status;
-    if(!res.ok){
-      // 409 = قاعدة البيانات رفضت الإدراج لأنه تكرار فعلي لصف موجود بالفعل (unique constraint) —
-      // ده مش فشل حقيقي، الصف المطلوب أصلاً موجود على السيرفر، فنعتبره "نجح" عشان العنصر
-      // يتشال من الطابور بدل ما يفضل يحاول يترفع كل شوية للأبد من غير فايدة.
-      if(res.status === 409){
-        console.warn('sbInsert: duplicate rejected by DB (already exists) —', table, data);
-        return true;
-      }
-      // نسجل السبب الحقيقي للفشل عشان يبان للمنسق ولينا في التشخيص بدل "فشل" غامضة
-      let reason = 'HTTP '+res.status;
-      try{ const t = await res.text(); if(t) reason += ' — '+t.slice(0,150); }catch(e2){}
-      window._lastSbError = reason;
-      console.warn('sbInsert failed:', table, reason, data);
-    }
-    return res.ok;
+    // route through Edge Functions via mtApi
+    const result = await mtApi.call(_sbTableToFn(table), _sbTableToAction(table,'insert'), null, {method:'POST', body:data});
+    window.__sbLastStatus = 200;
+    return !!(result && (result.ok || result._conflict));
   }catch(e){
-    window._lastSbError = 'خطأ اتصال: '+e.message;
-    console.warn('sbInsert error:', e);
+    window._lastSbError = e.message;
+    console.warn('sbInsert error:', table, e);
     return false;
   }
 }
 
-// نفس sbInsert لكن بترجع الـ id المُنشأ
 async function sbInsertGetId(table, data){
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Prefer': 'return=representation'
-      },
-      body: JSON.stringify(data)
-    });
-    window.__sbLastStatus = res.status;
-    if(!res.ok){
-      // 409 = قاعدة البيانات رفضت الإدراج لأنه تكرار (unique constraint) — الصف المطلوب أصلاً
-      // موجود على السيرفر. بدل ما نرجّع فشل (اللي كان هيكسر ربط الأصناف/النواقص التالية بالزيارة
-      // دي)، نجيب الـ id الحقيقي للصف الموجود ونرجّعه بدل ما نعتبرها فشلت.
-      if(res.status === 409 && table === 'visits'){
-        try{
-          const q = `${SUPABASE_URL}/rest/v1/visits?name=eq.${encodeURIComponent(data.name||'')}`+
-            `&branch=eq.${encodeURIComponent(data.branch||'')}&date=eq.${encodeURIComponent(data.date||'')}&select=id&limit=1`;
-          const r2 = await fetch(q, {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-          if(r2.ok){
-            const rows2 = await r2.json();
-            if(Array.isArray(rows2) && rows2[0]) return rows2[0].id;
-          }
-        }catch(e3){}
-      }
-      let reason = 'HTTP '+res.status;
-      try{ const t = await res.text(); if(t) reason += ' — '+t.slice(0,150); }catch(e2){}
-      window._lastSbError = reason;
-      console.warn('sbInsertGetId failed:', table, reason, data);
-      return null;
-    }
-    const rows = await res.json();
-    return Array.isArray(rows) && rows[0] ? rows[0].id : null;
+    const result = await mtApi.call(_sbTableToFn(table), _sbTableToAction(table,'insertGetId'), null, {method:'POST', body:data});
+    window.__sbLastStatus = 200;
+    if(result && result.visit_id) return result.visit_id;
+    if(result && result.id) return result.id;
+    if(Array.isArray(result) && result[0]) return result[0].id;
+    return null;
   }catch(e){
-    window._lastSbError = 'خطأ اتصال: '+e.message;
-    console.warn('sbInsertGetId error:', e);
+    window._lastSbError = e.message;
+    console.warn('sbInsertGetId error:', table, e);
     return null;
   }
 }
 
 async function sbSelect(table, params={}){
   try{
-    let url = `${SUPABASE_URL}/rest/v1/${table}?select=*`;
-    Object.entries(params).forEach(([k,v]) => url += `&${k}=eq.${v}`);
-    // products_db مفيش فيه created_at
-    if(table !== 'products_db'){
-      url += '&order=created_at.desc';
-    }
-    url += '&limit=500';
-    const res = await fetch(url, {
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`
-      }
-    });
-    return await res.json();
-  }catch(e){ console.warn('sbSelect error:', e); return []; }
+    // Map to the right mtApi endpoint
+    return await _sbSelectRoute(table, params);
+  }catch(e){ console.warn('sbSelect error:', table, e); return []; }
 }
 
 async function sbUpsert(table, data, onConflict='name'){
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=${onConflict}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Prefer': 'resolution=merge-duplicates,return=minimal'
-      },
-      body: JSON.stringify(data)
-    });
-    window.__sbLastStatus = res.status;
-    return res.ok;
-  }catch(e){ console.warn('sbUpsert error:', e); return false; }
+    const fn = _sbTableToFn(table);
+    const action = _sbTableToAction(table, 'upsert');
+    const result = await mtApi.call(fn, action, null, {method:'POST', body:data});
+    window.__sbLastStatus = 200;
+    return !!(result && result.ok);
+  }catch(e){ console.warn('sbUpsert error:', table, e); return false; }
 }
 
 async function sbUpdate(table, match, data){
   try{
-    const matchStr = Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join('&');
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${matchStr}`, {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Prefer': 'return=minimal'
-      },
-      body: JSON.stringify(data)
-    });
-    window.__sbLastStatus = res.status;
-    return res.ok;
-  }catch(e){ console.warn('sbUpdate error:', e); return false; }
+    const body = {...data};
+    if(match.id) body.id = match.id;
+    if(match.name) body.name = match.name;
+    const fn = _sbTableToFn(table);
+    const action = _sbTableToAction(table, 'update');
+    const result = await mtApi.call(fn, action, null, {method:'POST', body});
+    window.__sbLastStatus = 200;
+    return !!(result && result.ok);
+  }catch(e){ console.warn('sbUpdate error:', table, e); return false; }
+}
+
+// ── Routing helpers for sbXxx compatibility ──
+function _sbTableToFn(table){
+  const map = {
+    attendance:'api-visits', visits:'api-visits', products:'api-visits',
+    missing:'api-visits', returns:'api-visits',
+    messages:'api-coord', assignments:'api-coord', location:'api-coord',
+    supply_requests:'api-coord', orders:'api-coord',
+    app_brand_settings:'api-data', special_targets:'api-data',
+    special_target_records:'api-data', checkout_exceptions:'api-data',
+    users:'api-data', sales_returns:'api-data',
+  };
+  return map[table] || 'api-data';
+}
+
+function _sbTableToAction(table, op){
+  const map = {
+    'attendance:insert':'save-attendance', 'attendance:update':'save-attendance',
+    'visits:insertGetId':'save-visit',
+    'products:insert':'save-product', 'products:update':'update-product',
+    'missing:insert':'save-missing', 'missing:update':'update-missing',
+    'returns:insert':'save-return', 'returns:update':'update-return',
+    'messages:update':'mark-read',
+    'assignments:update':'confirm-assignment',
+    'location:upsert':'update-location',
+    'supply_requests:insert':'save-supply-request', 'supply_requests:update':'update-supply-request',
+    'orders:update':'mark-order-done',
+    'app_brand_settings:update':'update-brand-settings',
+    'special_targets:update':'update-target',
+    'special_target_records:upsert':'save-target-record',
+    'checkout_exceptions:update':'update-checkout',
+    'users:update':'user-update',
+    'sales_returns:update':'ack-return',
+  };
+  return map[`${table}:${op}`] || table;
+}
+
+async function _sbSelectRoute(table, params){
+  switch(table){
+    case 'attendance': return mtApi.visits.attendanceList(params.name);
+    case 'messages': return mtApi.coord.messages();
+    case 'orders': return mtApi.coord.orders();
+    default:
+      console.warn('sbSelect: unmapped table', table, '— using mtApi.table()');
+      try{ return await mtApi.table(table, params); }catch(e){ return []; }
+  }
 }
 
 // ── Wrappers بنفس اسم الدوال القديمة عشان مش نغير الكود ──────
 async function apiPost(data){
   const d = data;
-  switch(d.action){
-    case 'saveAttendance':{
-      const existing = await sbSelect('attendance', {name: d.name}); // مرتّبة created_at تنازلي بالفعل (الأحدث أولاً)
-      // استخدم التوقيت المحلي (مصر UTC+2/+3) مش UTC لتجنب خطأ تسجيل التاريخ الغلط
-      const _now = new Date();
-      const todayStr = _now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0')+'-'+String(_now.getDate()).padStart(2,'0');
-      let todayRec = existing.find(r => r.date === todayStr);
+  try{
+    switch(d.action){
+      case 'saveAttendance':
+        return await mtApi.visits.saveAttendance(d);
 
-      if(d.type === 'out'){
-        if(!todayRec){
-          // مفيش سجل حضور بتاريخ النهارده — يمكن الشيفت عدّى نص الليل (حضور بالأمس + انصراف
-          // بعد الساعة 12 بشوية). قبل كده كان بيتعمل سجل جديد "يتيم" فيه انصراف بس من غير
-          // حضور. دلوقتي بندور على آخر شيفت لسه "مفتوح" (فيه وقت حضور وملوش وقت انصراف)
-          // لنفس المنسق، وبنسكّره هو بدل ما نفتح سجل يتيم جديد — بشرط يكون اتفتح إمبارح
-          // أو النهارده بالظبط (يوم واحد فرق كحد أقصى) عشان منقفلش غلط شيفت قديم متنسي.
-          const openRec = existing.find(r => r.time_in && r.time_in!=='--' && (!r.time_out || r.time_out==='--'));
-          if(openRec){
-            const openDate  = new Date(openRec.date+'T00:00:00');
-            const daysDiff  = Math.round((_now - openDate) / 86400000);
-            if(daysDiff <= 1) todayRec = openRec;
-          }
+      case 'saveVisit':{
+        const result = await mtApi.visits.saveVisit(d);
+        if(result && result.visit_id){
+          window._currentVisitId = result.visit_id;
         }
-        if(todayRec){
-          // حدّث الانصراف على نفس سجل الحضور (سواء بتاريخ النهارده أو شيفت الأمس المفتوح)
-          return sbUpdate('attendance', {id: todayRec.id}, {
-            time_out: d.time, lat_out: d.lat||'', lng_out: d.lng||'',
-            hours: calcHours(todayRec.time_in, d.time)
-          });
-        }
-        // مفيش سجل نهارده ولا شيفت مفتوح قريب نقفله — حالة نادرة، نسجل انصراف يتيم
-        // بدل ما نضيّع البيانات خالص
-        return sbInsert('attendance', {
-          name: d.name, route: d.route, grp: d.group||'',
-          date: todayStr, time_in: '', time_out: d.time,
-          lat_in: '', lng_in: '', lat_out: d.lat||'', lng_out: d.lng||'',
+        return !!(result && (result.ok || result.visit_id));
+      }
+
+      case 'saveProduct':{
+        const result = await mtApi.visits.saveProduct({
+          name:d.name, route:d.route, branch:d.branch||'',
+          fea:d.fea, cat:d.cat||'', grp:(cu&&cu.group)||d.grp||'', snf:d.snf,
+          shelf_qty:d.shelf||0, stock_qty:d.stock||0,
+          date_shelf:d.dateShelf||'', months_shelf:d.monthsShelf||'',
+          date_stock:d.dateStock||'', months_stock:d.monthsStock||'',
+          visit_id: window._currentVisitId || null
         });
+        if(result && result.duplicate) return {duplicate:true};
+        return !!(result && result.ok);
       }
 
-      // d.type === 'in'
-      if(todayRec){
-        // حضور مكرر — تجاهل بدون إدراج جديد
-        return {skipped: true, reason: 'duplicate'};
+      case 'saveMissing':{
+        const result = await mtApi.visits.saveMissing({
+          name:d.name, route:d.route, branch:d.branch||'',
+          fea:d.fea, grp:(cu&&cu.group)||d.grp||'', snf:d.snf,
+          reason:d.reasonText||'', note:d.note||'',
+          visit_id: window._currentVisitId || null
+        });
+        if(result && result.duplicate) return {duplicate:true};
+        return !!(result && result.ok);
       }
-      // أول تسجيل لهذا اليوم
-      return sbInsert('attendance', {
-        name: d.name, route: d.route, grp: d.group||'',
-        date: todayStr, time_in: d.time, time_out: '',
-        lat_in: d.lat||'', lng_in: d.lng||'', lat_out: '', lng_out: '',
-      });
+
+      case 'updateLocation':
+        return await mtApi.coord.updateLocation({
+          name:d.name, route:d.route, group:d.group||'',
+          lat:d.lat, lng:d.lng
+        });
+
+      case 'markOrderDone':
+        return await mtApi.coord.markOrderDone(d.id);
+
+      case 'markMsgRead':
+        return await mtApi.coord.markRead(d.id, d.name);
+
+      default:
+        console.warn('Unknown action:', d.action);
+        return false;
     }
-
-    case 'saveVisit':{
-      const visitId = await sbInsertGetId('visits', {
-        name:d.name, grp:d.group||'', route:d.route, branch:d.branch,
-        date:d.date, time_in:d.timeIn||'', time_out:d.timeOut||'',
-        lat:d.lat||'', lng:d.lng||'', client_type:d.clientType||'',
-        display_type:d.displayType||'', shelf_total:d.shelfTotal||0,
-        shelf_taken:d.shelfTaken||0, space_total:d.spaceTotal||0,
-        space_used:d.spaceUsed||0, sku_on:d.skuOn||0, sku_stock:d.skuStock||0,
-        missing_count:d.missing||0, points:d.points||0, coord_type:d.coordType||'متحرك',
-        // (كانت محسوبة في e ومش بتتبعت فعلياً للـDB — محتاجينها في لوحة شرف المنسقين الجديدة)
-        kpi_tasks:d.kpi_tasks||'', kpi_pts:d.kpi_pts||0, kpi_photo_url:d.kpi_photo_url||''
-      });
-      if(visitId){
-        window._currentVisitId = visitId;
-        // ── ربط retroactive: الأصناف/النواقص/المرتجعات بتتبعت من التابات قبل ما نعرف رقم الزيارة أصلاً
-        // (المنسق بيبعتها الأول وبعدين يحفظ الزيارة) فبتوصل بـ visit_id فاضي. هنا بعد ما الزيارة
-        // اتسجلت وعرفنا رقمها، بنربط أي صف لنفس المنسق/الفرع/اليوم ده كان لسه من غير visit_id.
-        try{
-          const H2 = {'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'};
-          const dayStart = `${d.date}T00:00:00`, dayEnd = `${d.date}T23:59:59`;
-          const linkTable = (table) => fetch(
-            `${SUPABASE_URL}/rest/v1/${table}?name=eq.${encodeURIComponent(d.name)}&branch=eq.${encodeURIComponent(d.branch)}`+
-            `&created_at=gte.${dayStart}&created_at=lte.${dayEnd}&visit_id=is.null`,
-            {method:'PATCH', headers:H2, body: JSON.stringify({visit_id: visitId})}
-          ).catch(err=>console.warn('link '+table+' to visit failed:', err));
-          await Promise.all([linkTable('products'), linkTable('missing'), linkTable('returns')]);
-        }catch(linkErr){ console.warn('visit_id backfill error:', linkErr); }
-      }
-      return !!visitId;
-    }
-
-    case 'saveProduct':{
-      // فحص تكرار دقيق — نفس المنسق + الفرع + الصنف + تواريخ الصلاحية + الكميات في نفس اليوم
-      // (مسموح: نفس الصنف بتواريخ صلاحية مختلفة، أو منسقين مختلفين لنفس الفرع)
-      const todayP = localDateStr();
-      try{
-        const chkP = await fetch(
-          `${SUPABASE_URL}/rest/v1/products?name=eq.${encodeURIComponent(d.name||'')}`+
-          `&branch=eq.${encodeURIComponent(d.branch||'')}`+
-          `&snf=eq.${encodeURIComponent(d.snf||'')}`+
-          `&date_shelf=eq.${encodeURIComponent(d.dateShelf||'')}`+
-          `&date_stock=eq.${encodeURIComponent(d.dateStock||'')}`+
-          `&shelf_qty=eq.${d.shelf||0}`+
-          `&stock_qty=eq.${d.stock||0}`+
-          `&created_at=gte.${todayP}T00:00:00&created_at=lte.${todayP}T23:59:59`+
-          `&select=id&limit=1`,
-          {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
-        );
-        const existsP = chkP.ok ? await chkP.json() : [];
-        if(Array.isArray(existsP) && existsP.length > 0){
-          return {duplicate:true};
-        }
-      }catch(e){}
-
-      return sbInsert('products', {
-        name:d.name, route:d.route, branch:d.branch||'',
-        fea:d.fea, cat:d.cat||'', grp:(cu&&cu.group)||d.grp||'', snf:d.snf,
-        shelf_qty:d.shelf||0, stock_qty:d.stock||0,
-        date_shelf:d.dateShelf||'', months_shelf:d.monthsShelf||'',
-        date_stock:d.dateStock||'', months_stock:d.monthsStock||'',
-        visit_id: window._currentVisitId || null
-      });
-    }
-
-    case 'saveMissing':{
-      // تحقق من التكرار — نفس الصنف في نفس الفرع في نفس اليوم
-      const today = localDateStr();
-      try{
-        const chk = await fetch(
-          `${SUPABASE_URL}/rest/v1/missing?branch=eq.${encodeURIComponent(d.branch||'')}&snf=eq.${encodeURIComponent(d.snf||'')}&name=eq.${encodeURIComponent(d.name||'')}&created_at=gte.${today}T00:00:00&created_at=lte.${today}T23:59:59&select=id&limit=1`,
-          {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
-        );
-        const exists = chk.ok ? await chk.json() : [];
-        if(Array.isArray(exists) && exists.length > 0){
-          return {duplicate: true};
-        }
-      }catch(e){}
-      return sbInsert('missing', {
-        name:d.name, route:d.route, branch:d.branch||'',
-        fea:d.fea, grp:(cu&&cu.group)||d.grp||'', snf:d.snf,
-        reason:d.reasonText||'', note:d.note||'',
-        visit_id: window._currentVisitId || null
-      });
-    }
-
-    case 'updateLocation':
-      return sbUpsert('location', {
-        name:d.name, route:d.route, grp:d.group||'',
-        lat:d.lat, lng:d.lng, active:true,
-        updated_at: new Date().toISOString()
-      }, 'name');
-
-    case 'markOrderDone':
-      return sbUpdate('orders', {id: d.id}, {status:'done'});
-
-    case 'markMsgRead':
-      const msgs = await sbSelect('messages', {id: d.id});
-      if(msgs[0]){
-        const readers = (msgs[0].read_by||'').split(',').filter(Boolean);
-        if(!readers.includes(d.name)) readers.push(d.name);
-        return sbUpdate('messages', {id: d.id}, {read_by: readers.join(',')});
-      }
-      return false;
-
-    default:
-      console.warn('Unknown action:', d.action);
-      return false;
+  }catch(e){
+    console.warn('apiPost error:', d.action, e);
+    return false;
   }
 }
 
@@ -6643,7 +7299,7 @@ function showFieldSupportPopup(msg){
 async function confirmFsMsg(msgId, popupEl){
   // علّم الرسالة كمقروءة
   try{
-    await fetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${msgId}`,{
+    await _apiFetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${msgId}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
       body: JSON.stringify({read_by: cu.name})
@@ -6660,7 +7316,7 @@ async function fetchAssignments(){
   try{
     const today = localDateStr(); // YYYY-MM-DD
     // فلتر: directed_date = اليوم أو null (للتوجيهات القديمة)
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/assignments?rep_name=eq.${encodeURIComponent(cu.name)}&or=(directed_date.eq.${today},directed_date.is.null)&order=created_at.desc&limit=20`,{
+    const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/assignments?rep_name=eq.${encodeURIComponent(cu.name)}&or=(directed_date.eq.${today},directed_date.is.null)&order=created_at.desc&limit=20`,{
       headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
     });
     const data = await res.json();
@@ -6720,7 +7376,7 @@ async function fetchAssignments(){
 
 async function confirmAssignment(id, btn){
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/assignments?id=eq.${id}`,{
+    const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/assignments?id=eq.${id}`,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
       body: JSON.stringify({status:'confirmed', confirmed_at:new Date().toISOString()})
@@ -6859,7 +7515,7 @@ async function loadLB(){
     };
     // الأسماء من جدول groups (المصدر الوحيد) — القايمة المكتوبة احتياطي بس
     try{
-      const grRes = await fetch(`${SUPABASE_URL}/rest/v1/groups?select=key_name,name&limit=200`,
+      const grRes = await _apiFetch(`${SUPABASE_URL}/rest/v1/groups?select=key_name,name&limit=200`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
       const gr = grRes.ok ? await grRes.json() : [];
       (Array.isArray(gr)?gr:[]).forEach(g=>{ if(g.key_name && g.name) GROUP_LABELS[g.key_name] = g.name; });
@@ -7638,7 +8294,7 @@ async function sendCheckoutException(){
   const t = now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
 
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions`, {
+    const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions`, {
       method:'POST',
       headers:{
         'Content-Type':'application/json',
@@ -7691,7 +8347,7 @@ function startExcPoll(){
 async function checkExceptionStatus(){
   if(!_excId) return;
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions?id=eq.${_excId}&select=*`,{
+    const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/checkout_exceptions?id=eq.${_excId}&select=*`,{
       headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}
     });
     const data = await res.json();
@@ -7768,7 +8424,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // الفروع المعروضة فورًا من غير ما يحتاج يعمل تسجيل خروج/دخول يدوي.
   async function syncRouteInBackground(savedSession){
     try{
-      const res = await fetch(
+      const res = await _apiFetch(
         `${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(savedSession.name)}&role=eq.rep&select=route,grp,user_type,fixed_branch,status&limit=1`,
         {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}}
       );
@@ -7980,19 +8636,19 @@ async function myAssignedBranchNames(){
     let allData=[];
     if(isFixedRep(coordType)){
       const [byRepName, byRepName2, byRepName3, byCoord] = await Promise.all([
-        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name2=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-        fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name3=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-        fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        _apiFetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        _apiFetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name2=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        _apiFetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&rep_name3=eq.${enc}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
+        _apiFetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]),
       ]);
       allData=[...byRepName,...byRepName2,...byRepName3,...byCoord];
       if(cu?.fixedBranch) allData.push({branch_name:cu.fixedBranch});
     } else {
-      const assignedData = await fetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+      const assignedData = await _apiFetch(`${SUPABASE_URL}/rest/v1/coord_route_assignments?select=branch_name&rep_name=eq.${enc}`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
       if(assignedData.length){
         allData=assignedData;
       } else {
-        allData = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${encodeURIComponent(cu.route||'')}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
+        allData = await _apiFetch(`${SUPABASE_URL}/rest/v1/branches?select=branch_name&route=eq.${encodeURIComponent(cu.route||'')}&status=neq.inactive`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[]);
       }
     }
     return [...new Set(allData.map(b=>b.branch_name).filter(Boolean))];
@@ -8021,7 +8677,7 @@ async function pbMatchTargetClients(targetClients, myBranches){
 
 async function checkPromoBanner(){
   try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/promo_banner?active=eq.true&select=*&order=id.asc`,
+    const r = await _apiFetch(`${SUPABASE_URL}/rest/v1/promo_banner?active=eq.true&select=*&order=id.asc`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     if(!r.ok) return;
     const rows = await r.json();
@@ -8389,7 +9045,7 @@ function mdvTestBar(){
 document.addEventListener('DOMContentLoaded',mdvTestBar);
 async function mdvCheck(name){
   try{
-    const r=await fetch(`${SUPABASE_URL}/rest/v1/rpc/rep_device_check`,{method:'POST',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+    const r=await _apiFetch(`${SUPABASE_URL}/rest/v1/rpc/rep_device_check`,{method:'POST',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
       body:JSON.stringify({p_name:name,p_device:mdvId(),p_model:await mdvModel(),p_ua:(navigator.userAgent||'').slice(0,300)})});
     if(!r.ok) return 'err';
     const j=(await r.json())||{}; const st=j.st||'err';
