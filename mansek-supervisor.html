@@ -2800,6 +2800,16 @@ async function sbFetchAll(baseUrl, headers){
   return all;
 }
 
+// 20/11/2026: نداء دالة سيرفر بترجّع json (مصفوفة) — null لو فشلت، عشان الكود يرجع للطريقة القديمة
+async function supRpcJson(fn, body){
+  try{
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`,{method:'POST',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},body:JSON.stringify(body||{})});
+    if(!r.ok) return null;
+    const j = await r.json();
+    return Array.isArray(j) ? j : null;
+  }catch(e){ return null; }
+}
+
 async function sbPatch(table, filter, data){
   try{
     const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`,{
@@ -10312,7 +10322,9 @@ async function supLoadExpiry(){
     const grps = (cu.groups||[]).join(',');
     // كان limit=1000 بيتقطع صامت من غير أي فلتر تاريخ على جدول products (107 ألف صف) — بيرجع
     // كل الصفحات دلوقتي عشان "أحدث تسجيل لكل صنف" يبقى صحيح فعلاً.
-    let data = await sbFetchAll(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps})&select=*&order=created_at.desc`);
+    // 20/11/2026: السيرفر بيرجّع آخر تسجيل لكل (منسق، فرع، صنف) جاهز — rpc sup_products_latest (بدل سحب كل التسجيلات)
+    let data = await supRpcJson('sup_products_latest', {p_grps: (cu.groups||[])});
+    if(!Array.isArray(data)) data = await sbFetchAll(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps})&select=*&order=created_at.desc`);
     if(!Array.isArray(data)) data = [];
 
     // أحدث تسجيل لكل صنف لكل منسق
@@ -10400,7 +10412,8 @@ function supCheckExpiryBadge(){
   setTimeout(async()=>{
     try{
       const grps = (cu.groups||[]).join(',');
-      const data = await sbFetchAll(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps})&select=name,branch,snf,date_shelf,months_shelf,date_stock,months_stock&order=created_at.desc`);
+      let data = await supRpcJson('sup_products_latest', {p_grps: (cu.groups||[])});
+      if(!Array.isArray(data)) data = await sbFetchAll(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps})&select=name,branch,snf,date_shelf,months_shelf,date_stock,months_stock&order=created_at.desc`);
       if(!Array.isArray(data)) return;
       const latest = {};
       data.forEach(p=>{ const k=`${p.name}__${p.branch}__${p.snf}`; if(!latest[k]) latest[k]=p; });
@@ -10614,7 +10627,7 @@ async function rptLoadBranches(){
 
     // (v1.7) جيب الفروع من جدولين: products + visits — ودمجهم
     const [prodRes, visitRes] = await Promise.all([
-      sbFetchAll(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&select=branch&order=branch.asc`),
+      supRpcJson('sup_product_branches', {p_grps: grps}).then(b=> Array.isArray(b) ? b.map(x=>({branch:x})) : sbFetchAll(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&select=branch&order=branch.asc`)),
       sbFetchAll(`${SUPABASE_URL}/rest/v1/visits?grp=in.(${grps.join(',')})&select=branch${from?'&created_at=gte.'+from+'T00:00:00%2B02:00':''}${to?'&created_at=lte.'+to+'T23:59:59%2B02:00':''}`),
     ]);
 
@@ -10641,7 +10654,8 @@ async function rptLoadBranchesForRep(visitedBranches){
   container.innerHTML='<div style="color:var(--text2);font-size:12px">جاري تحميل الفروع...</div>';
 
   try{
-    const data = await sbFetchAll(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&select=branch&order=branch.asc`);
+    let data = await supRpcJson('sup_product_branches', {p_grps: grps});
+    data = Array.isArray(data) ? data.map(x=>({branch:x})) : await sbFetchAll(`${SUPABASE_URL}/rest/v1/products?grp=in.(${grps.join(',')})&select=branch&order=branch.asc`);
     const allBranches = [...new Set((Array.isArray(data)?data:[]).map(x=>x.branch).filter(Boolean))].sort();
     const visitedSet  = new Set(visitedBranches);
 
