@@ -2424,6 +2424,17 @@ function sciNormalizeItemKey(s){
 // بترجع {rows, ok} — ok=false معناها فيه صفحة فشلت فعلاً (مشكلة نت/سيرفر)، مش إن البيانات فاضية
 // فعلاً؛ المتصل لازم يفرّق بين الحالتين بدل ما يفترض إن أي نتيجة فاضية = "مفيش بيانات".
 async function sciFetchAllRows(baseUrl, headers, pageSize){
+  // ── API bridge: لو الـ URL بتاع Supabase، نمر عبر _apiFetch (بترجع كل الصفوف مرة واحدة) ──
+  if(baseUrl.includes('/rest/v1/')){
+    try{
+      const resp = await _apiFetch(baseUrl, {headers});
+      const rows = await resp.json();
+      return {rows: Array.isArray(rows)?rows:[], ok:true};
+    }catch(e){
+      return {rows:[], ok:false};
+    }
+  }
+  // ── fallback: pagination عادية لأي URL تاني ──
   pageSize = pageSize||1000;
   let all = [];
   let offset = 0;
@@ -3016,7 +3027,7 @@ async function doLogin(){
   // جيب دايماً من Supabase
   try{
     const url=`${SUPABASE_URL}/rest/v1/users?select=*&name=eq.${encodeURIComponent(name)}&role=eq.rep&limit=1`;
-    const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const res=await _apiFetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     if(res.ok){
       const data=await res.json();
       if(data&&data.length){
@@ -3245,8 +3256,9 @@ function manualRetryLoadReps(){
 // fetch بحد أقصى للوقت — عشان لو النت بطيء جداً أو الجهاز مش راضي يرجّع رد
 // (بعض الأجهزة زي أوبو/فيفو بتوقف/تبطئ الطلبات في الخلفية) منستناش لحد الأبد
 function fetchWithTimeout(url, opts, ms){
+  const fetchFn = (typeof url==='string' && url.includes('/rest/v1/')) ? _apiFetch : fetch;
   return Promise.race([
-    fetch(url, opts),
+    fetchFn(url, opts),
     new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
   ]);
 }
@@ -4631,7 +4643,7 @@ async function popBranches(route){
   try{
     const today=localDateStr();
     const url=`${SUPABASE_URL}/rest/v1/assignments?rep_name=eq.${encodeURIComponent(cu.name)}&directed_date=eq.${today}&status=in.(pending,confirmed)&select=branch_name&limit=50`;
-    const res=await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const res=await _apiFetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     if(res.ok){
       const data=await res.json();
       if(Array.isArray(data)&&data.length){
@@ -6393,7 +6405,7 @@ async function changePassword(){
   // حفظ في Supabase
   try{
     const url=`${SUPABASE_URL}/rest/v1/users?name=eq.${encodeURIComponent(cu.name)}`;
-    const res=await fetch(url,{
+    const res=await _apiFetch(url,{
       method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
       body:JSON.stringify({pass_hash:newPass})
@@ -7984,7 +7996,7 @@ async function _oqIsDuplicate(table, d){
     } else {
       return false; // جداول تانية مفيش لها فحص تكرار حالياً
     }
-    const res = await fetch(url, {headers:H});
+    const res = await _apiFetch(url, {headers:H});
     if(!res.ok) return false;
     const rows = await res.json();
     return Array.isArray(rows) && rows.length > 0;
