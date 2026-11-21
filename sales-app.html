@@ -4198,6 +4198,30 @@ function rbRenderPending(rows){
   }).join('');
 }
 
+// ══ (21/11) الفروع اللي المندوب اختارها في طلب البضاعة (rep_stock_requests.branches) — متجمّعة بالعميل في الـ PDF ══
+async function rbEnsureBranchClientMap(){
+  if(Array.isArray(window._pbLinkedMapCache) && window._pbLinkedMapCache.length) return window._pbLinkedMapCache;
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/branch_client_map?select=client_name,branch_name&limit=5000`,{headers:H});
+    window._pbLinkedMapCache = r.ok ? await r.json().catch(()=>[]) : [];
+  }catch(e){ if(!Array.isArray(window._pbLinkedMapCache)) window._pbLinkedMapCache = []; }
+  return window._pbLinkedMapCache;
+}
+function rbBranchesSectionHTML(r){
+  const esc = s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const brs = Array.isArray(r.branches) ? r.branches.filter(Boolean) : [];
+  const box = inner => `<div style="background:#F1F8F2;border:1px solid #BFDCC6;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#1F4D33">${inner}</div>`;
+  if(!brs.length) return box('<b>📍 هيتورد لـ:</b> <span style="color:#888">الفروع مش متسجلة في الطلب ده</span>');
+  const map = {}; (window._pbLinkedMapCache||[]).forEach(m=>{ if(m && m.branch_name) map[m.branch_name.trim()] = m.client_name; });
+  const groups = {}, order = [];
+  brs.forEach(b=>{ const c = map[String(b).trim()] || ''; if(!groups[c]){ groups[c]=[]; order.push(c); } groups[c].push(b); });
+  order.sort((a,b)=> (a===''?1:0)-(b===''?1:0) || a.localeCompare(b,'ar'));
+  const nC = order.filter(c=>c).length;
+  const lines = order.map(c=>`<div style="margin-top:4px"><b style="color:#731E2E">${c?esc(c):'فروع تانية'}:</b> ${groups[c].map(esc).join('، ')}</div>`).join('');
+  return box(`<b>📍 هيتورد لـ:</b> <span style="color:#555">${nC?nC+' عميل · ':''}${brs.length} فرع</span>${lines}`);
+}
+
 // طباعة طلبية المندوب: كل صنف قدامه الكمية المطلوبة، بهوية الطحان جولدن داتس،
 // وفي الآخر 3 خانات توقيع (المشرف، المدير، المندوب) يتوقعوا عليها بعد الطباعة يدويًا.
 // يبني محتوى مستند الطلبية (نفس التصميم القديم) كـ HTML خام يستخدم داخل الصفحة أو داخل نافذة منفصلة
@@ -4232,6 +4256,7 @@ function rbBuildRequestDocHTML(r){
       <div>تاريخ الطلب: <b style="color:#731E2E">${dateStr}</b></div>
       <div>رقم الطلب: <b style="color:#731E2E">#${r.id}</b></div>
     </div>
+    ${rbBranchesSectionHTML(r)}
     <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px">
       <thead><tr style="background:#731E2E;color:#fff"><th style="padding:8px;border:1px solid #5a1622;font-weight:700;width:40px">#</th><th style="padding:8px;border:1px solid #5a1622;font-weight:700">اسم الصنف</th><th style="padding:8px;border:1px solid #5a1622;font-weight:700;width:120px">الكمية المطلوبة</th><th style="padding:8px;border:1px solid #5a1622;font-weight:700;width:110px">القيمة</th></tr></thead>
       <tbody>${rowsHtml}</tbody>
@@ -4489,6 +4514,7 @@ function rbPrintRequestFallback(r){
 async function rbPrintRequest(id){
   const r = _rbPending.find(x=>x.id===id);
   if(!r){ showToast?.('الطلب مش موجود') || alert('الطلب مش موجود'); return; }
+  await rbEnsureBranchClientMap(); // عشان الفروع تتجمّع باسم العميل في الـ PDF
 
   // لو مكتبات توليد الـ PDF مش متاحة (تحميل فشل/لسه بيتحمّل) — نستخدم الطريقة القديمة فورًا
   if(typeof html2canvas==='undefined' || !window.jspdf){
