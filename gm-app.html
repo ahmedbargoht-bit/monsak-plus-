@@ -8627,6 +8627,11 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape' && document.queryS
               <div style="font-size:12px;font-weight:700;color:var(--text-primary);margin-bottom:10px">
                 <i class="ti ti-table" style="color:#D97706"></i> جدول الأصناف وتفاصيل العروض
                 <span id="promo-prod-count" style="font-size:10px;color:var(--text-secondary);margin-right:8px">لم يتم إضافة أصناف بعد</span>
+                <button id="promo-newprice-btn" onclick="promosToggleNewPrices()" title="لما يكون شغال: السعر الأساسي = السعر الجديد من تعديلات الأسعار المفعّلة"
+                  style="float:left;padding:5px 12px;border:1px solid #15803D;background:#fff;color:#15803D;border-radius:7px;font-family:Cairo,sans-serif;font-size:11px;font-weight:700;cursor:pointer">
+                  <i class="ti ti-bolt"></i> تفعيل الأسعار الجديدة
+                </button>
+                <div id="promo-newprice-note" style="font-size:10px;color:#15803D;margin-top:4px;display:none"></div>
               </div>
               <div style="overflow-x:auto">
                 <table style="width:100%;border-collapse:collapse;font-family:Cairo,sans-serif;font-size:12px">
@@ -25609,27 +25614,28 @@ async function editUser(){
     return;
   }
 
-  // 2.5 تحديث تلقائي لخط سير/مجموعة الفروع المرتبطة بهذا المنسق (rep_name/rep_name2/rep_name3)
-  // عشان لو الأدمن غيّر خط سير المنسق من هنا، الفروع اللي شغالة معاه تتحدث معاه فوراً
-  // ولا تفضل شايلة الخط القديم (نفس منطق أداة "فحص تعارض الفروع" لكن تلقائي بدل ما يحتاج تدخل يدوي)
+  // 2.5 (23/11) المنسق اتنقل لخط سير تاني ← اسمه بيتشال من فروع الخط القديم (الفروع مابتتحركش معاه)
   try{
     const matchName = oldName || name;
     // الكاسكيد ده بيحدّث route/grp لفروع خط سير منسق متحرك بس (rep_name = ملكية خط سير فعلية).
     // للمنسق الثابت مفيش خط سير بالمعنى ده — تخصيصه بيتسجل في coord_route_assignments بس،
     // فلازم نتجنب إننا نلمس أي صفوف قديمة/legacy في branches.rep_name/2/3 بتاعته من هنا.
     if(matchName && route && !(type||'').startsWith('ثابت')){
-      const orFilter = ['rep_name','rep_name2','rep_name3'].map(f=>`${f}.eq.${pgOrVal(matchName)}`).join(',');
-      const branchPayload = group ? {route, grp:group} : {route};
-      await fetch(`${SUPABASE_URL}/rest/v1/branches?or=(${orFilter})&status=eq.active`,{
-        method:'PATCH',
-        headers:{
-          'Content-Type':'application/json',
-          'apikey':SUPABASE_KEY,
-          'Authorization':`Bearer ${SUPABASE_KEY}`,
-          'Prefer':'return=minimal'
-        },
-        body: JSON.stringify(branchPayload)
-      });
+      // (23/11) خط سير الفرع ملك الفرع مش المنسق: نقل المنسق لخط سير تاني مابقاش بيسحب فروعه القديمة معاه
+      // (ده اللي رحّل فروع محرم بك للتجمع الثالث لما اتحفظ منسق كان اسمه لسه مكتوب عليها).
+      // بدل كده: اسمه بيتشال من فروع أي خط سير غير خطه الجديد، والفروع نفسها بتفضل على خطها ومجموعتها.
+      for(const f of ['rep_name','rep_name2','rep_name3']){
+        await fetch(`${SUPABASE_URL}/rest/v1/branches?${f}=eq.${encodeURIComponent(matchName)}&route=neq.${encodeURIComponent(route)}`,{
+          method:'PATCH',
+          headers:{
+            'Content-Type':'application/json',
+            'apikey':SUPABASE_KEY,
+            'Authorization':`Bearer ${SUPABASE_KEY}`,
+            'Prefer':'return=minimal'
+          },
+          body: JSON.stringify({[f]:null})
+        });
+      }
 
       // تنظيف تخصيصات الفروع المحددة القديمة (coord_route_assignments) المرتبطة بخط سير سابق مختلف عن الجديد
       // ده اللي كان بيسبب ظهور فروع خط السير القديم للمنسق (لأن الجدول ده بيتقرا بالاسم بس من غير فلتر خط سير)
@@ -59639,6 +59645,29 @@ let _promosAllClients  = [];   // كل أسماء العملاء
 let _promosAllProds    = [];   // كل الأصناف [{name, price, fea, cat}]
 let _promosProdRows    = [];   // صفوف جدول العروض [{name, base, type, val}]
 let _promosSelProdNames = new Set(); // أسماء الأصناف المحددة بمربعات الاختيار في الـ dropdown
+// زرار "تفعيل الأسعار الجديدة" (24/11): تعديلات الأسعار المفعّلة (price_modifications status=active) — السعر الرسمي في sales_prices مابيتغيرش غير لما كل العملاء يأكدوا
+let _promosNewMap = {};        // snf_name → {np, op, d}
+let _promosUseNew = false;
+function promosPriceOf(name){
+  const p = _promosAllProds.find(x=>x.name===name);
+  if(_promosUseNew && _promosNewMap[name]) return _promosNewMap[name].np;
+  return p ? p.price : 0;
+}
+function promosNewPriceUi(){
+  const b=document.getElementById('promo-newprice-btn'), n=document.getElementById('promo-newprice-note');
+  const cnt=Object.keys(_promosNewMap).length;
+  if(b){ b.style.background=_promosUseNew?'#15803D':'#fff'; b.style.color=_promosUseNew?'#fff':'#15803D';
+    b.innerHTML='<i class="ti ti-bolt"></i> '+(_promosUseNew?'الأسعار الجديدة شغالة ✓':'تفعيل الأسعار الجديدة')+' ('+cnt+' صنف)'; }
+  if(n){ n.style.display=_promosUseNew?'block':'none';
+    const inT=_promosProdRows.filter(r=>_promosNewMap[r.name]).length;
+    n.textContent='السعر الأساسي بقى السعر الجديد من تعديلات الأسعار المفعّلة — '+inT+' صنف في الجدول اتغيّر سعره. دوس تاني يرجع للسعر الرسمي الحالي.'; }
+}
+function promosToggleNewPrices(){
+  if(!_promosUseNew && !Object.keys(_promosNewMap).length){ alert('مفيش تعديلات أسعار مفعّلة دلوقتي'); return; }
+  _promosUseNew=!_promosUseNew;
+  _promosProdRows.forEach(r=>{ r.base=promosPriceOf(r.name); });
+  promosRenderProdTable(); promosRenderProdDropdown(_promosAllProds); promosNewPriceUi();
+}
 
 async function promosInit(){
   if(_promosAllClients.length && _promosAllProds.length) return;
@@ -59657,8 +59686,13 @@ async function promosInit(){
     const [pdbRow, pricesRows] = await Promise.all([
       fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.pdb&select=value`,{headers:H}).then(r=>r.json()),
       // الأسعار الحقيقية مصدرها تاب "أسعار الأصناف والخصومات" (جدول sales_prices)، مش products_db
-      fetch(`${SUPABASE_URL}/rest/v1/sales_prices?select=snf_name,price`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[])
+      fetch(`${SUPABASE_URL}/rest/v1/sales_prices?select=snf_name,price&deleted_at=is.null`,{headers:H}).then(r=>r.ok?r.json():[]).catch(()=>[])
     ]);
+    try{
+      const mods = await fetch(`${SUPABASE_URL}/rest/v1/price_modifications?status=eq.active&select=snf_name,old_price,new_price,activated_at&order=activated_at.asc`,{headers:H}).then(r=>r.ok?r.json():[]);
+      _promosNewMap={};
+      (Array.isArray(mods)?mods:[]).forEach(m=>{ const np=parseFloat(m.new_price)||0; if(m.snf_name&&np>0) _promosNewMap[m.snf_name]={np, op:parseFloat(m.old_price)||0, d:m.activated_at}; });
+    }catch(_e){ _promosNewMap={}; }
     const priceMap = {};
     (Array.isArray(pricesRows)?pricesRows:[]).forEach(r=>{ if(r.snf_name) priceMap[r.snf_name]=parseFloat(r.price)||0; });
 
@@ -59679,6 +59713,7 @@ async function promosInit(){
     });
     _promosAllProds = allProds.sort((a,b)=>a.name.localeCompare(b.name,'ar'));
     promosRenderProdDropdown(_promosAllProds);
+    promosNewPriceUi();
   }catch(e){ document.getElementById('promo-prod-dropdown').innerHTML='<div style="color:red;font-size:11px;padding:8px">خطأ في تحميل الأصناف</div>'; }
 }
 
@@ -59726,7 +59761,7 @@ function promosRenderProdDropdown(list){
       </span>
       <span style="display:flex;flex-direction:column;align-items:flex-end;gap:1px;flex-shrink:0">
         ${(p.fea||p.cat)?`<span style="font-size:9px;color:var(--text-secondary);white-space:nowrap">${p.fea||''}${p.fea&&p.cat?' · ':''}${p.cat||''}</span>`:''}
-        ${p.price>0?`<span style="font-size:10px;color:var(--text-secondary)">${p.price.toFixed(2)} ج</span>`:''}
+        ${(()=>{ const pr=promosPriceOf(p.name), nw=_promosUseNew&&_promosNewMap[p.name]; return pr>0?`<span style="font-size:10px;color:${nw?'#15803D;font-weight:700':'var(--text-secondary)'}">${nw?'🆕 ':''}${pr.toFixed(2)} ج</span>`:''; })()}
       </span>
     </label>`;
   }).join('');
@@ -59749,7 +59784,7 @@ function promosAddSelectedProd(){
   _promosSelProdNames.forEach(name=>{
     const p = _promosAllProds.find(x=>x.name===name);
     if(!p) return;
-    _promosProdRows.push({name, base:p.price, type:'pct', val:0});
+    _promosProdRows.push({name, base:promosPriceOf(name), type:'pct', val:0});
     addedCount++;
   });
   _promosSelProdNames.clear();
@@ -59776,7 +59811,7 @@ function promosRenderProdTable(){
     <tr style="border-bottom:1px solid var(--border)${i%2===0?';background:var(--surface-1)':''}">
       <td style="padding:7px 8px;text-align:center;color:var(--text-secondary);font-size:11px">${i+1}</td>
       <td style="padding:7px 8px;font-size:12px;font-weight:700;color:var(--text-primary)">${r.name}</td>
-      <td style="padding:7px 8px;text-align:center;font-size:11px;color:var(--text-secondary)">${r.base>0?r.base.toFixed(2)+' ج':'-'}</td>
+      <td style="padding:7px 8px;text-align:center;font-size:11px;color:var(--text-secondary)">${r.base>0?r.base.toFixed(2)+' ج':'-'}${_promosUseNew&&_promosNewMap[r.name]?`<div style="font-size:9px;color:#15803D;font-weight:700">🆕 سعر جديد (كان ${(_promosNewMap[r.name].op||0).toFixed(2)})</div>`:''}</td>
       <td style="padding:7px 8px">
         <select onchange="promosChangeType(${i},this.value)"
           style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:6px;font-family:Cairo,sans-serif;font-size:11px;background:var(--surface-1)">
@@ -59805,7 +59840,7 @@ function promosRenderProdTable(){
 
 function promosChangeType(i,val){ _promosProdRows[i].type=val; _promosProdRows[i].val=0; promosRenderProdTable(); }
 function promosChangeVal(i,val){ _promosProdRows[i].val=parseFloat(val)||0; promosRenderProdTable(); }
-function promosDelProd(i){ _promosProdRows.splice(i,1); promosRenderProdTable(); promosRenderProdDropdown(_promosAllProds); }
+function promosDelProd(i){ _promosProdRows.splice(i,1); promosRenderProdTable(); promosRenderProdDropdown(_promosAllProds); promosNewPriceUi(); }
 
 function promosGenerate(){
   const clients  = [...document.querySelectorAll('.promo-client-cb:checked')].map(cb=>cb.value);
@@ -67564,6 +67599,13 @@ function ibxBuild(){
     M.push({id:'vc', ic:'⚠️', c:'#B45309', sig, title:`${vcCount(V)} مكان شاغر — تحت التعيين`, sub:'الأماكن دي بتفضل على الهيكل لحد ما يتعيّن حد — الأهداف والفروع مش ضايعة.',
       body:`<ul>${li.slice(0,10).map(x=>`<li>${x}</li>`).join('')}${li.length>10?`<li>و${li.length-10} كمان...</li>`:''}</ul><div class="ibx-acts"><button class="ibx-btn" onclick="ibxGo('vacancy')">افتح الأماكن الشاغرة</button></div>`});
   }
+  // (22/11) تحصيل: عملاء فات تاريخهم المتوقع ومفيش فلوس منهم في الكشوفات
+  const OD=IBX.colod&&Array.isArray(IBX.colod.rows)?IBX.colod.rows:[];
+  if(OD.length){ const sh=n=>(typeof stmShort==='function')?stmShort(n):n, dl=d=>String(d||'').split('-').reverse().join('/');
+    M.push({id:'colod', ic:'💰', c:'#B71C1C', sig:'colod|'+OD.map(r=>r.ck+':'+r.exp).join(','),
+      title:`تحصيل متأخر — ${OD.length} عميل فات تاريخهم المتوقع`, sub:`حسب كشوفات الحساب لحد ${dl(IBX.colod.asof)}`,
+      body:`<ul>${OD.map(r=>`<li><b>${ibxE(sh(r.name))}</b> — كان متوقع ${dl(r.exp)} (فات من ${r.days} يوم)${r.collector?` · المحصّل: ${ibxE(r.collector)}`:''}</li>`).join('')}</ul>
+        <div class="ibx-acts"><button class="ibx-btn" onclick="ibxGo('cust-settle')">افتح موقف التحصيل</button></div>`}); }
   // صحة السيرفر
   const H=(typeof DBH!=='undefined')&&DBH.d;
   if(H){ const bad=H.level==='warn'||H.level==='red', L=DBH_LV[H.level]||DBH_LV.ok, mon=ibxDay().slice(0,7);
@@ -67613,6 +67655,7 @@ async function ibxRefresh(slow){
       jobs.push(vcFetch().then(()=>vcBadge()).catch(e=>console.warn('[ibx vc]',e)));
       jobs.push(dbhFetch().then(()=>dbhBadge()).catch(e=>console.warn('[ibx dbh]',e)));
       jobs.push(blfFetch().then(()=>blfBadge()).catch(e=>console.warn('[ibx blf]',e)));
+      jobs.push(fetch(`${SUPABASE_URL}/rest/v1/rpc/col_overdue`,{method:'POST',headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},body:'{}'}).then(r=>r.ok?r.json():null).then(j=>{ IBX.colod=j; }).catch(e=>console.warn('[ibx colod]',e)));
     }
     await Promise.all(jobs);
     IBX.upd=ibxTime(); ibxBuild(); ibxBadge(); if(ibxIsOpen()){ ibxRender(); ibxMarkSeen(); }
@@ -68683,20 +68726,22 @@ async function cstLoad(){
 
 async function cstLoadTerms(){
   CST.terms={}; CST.termsOk=false;
-  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/cust_credit_terms?select=ck,credit_days,note,cycle,ret_prev`,{headers:srrH()}); if(!r.ok) return;
-    (await r.json()).forEach(t=>CST.terms[t.ck]={cd:+t.credit_days||0,note:t.note||'',cy:t.cycle||'m',rp:!!t.ret_prev}); CST.termsOk=true; }catch(e){}
+  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/cust_credit_terms?select=ck,credit_days,note,cycle,ret_prev,collector,exp_date`,{headers:srrH()}); if(!r.ok) return;
+    (await r.json()).forEach(t=>CST.terms[t.ck]={cd:+t.credit_days||0,note:t.note||'',cy:t.cycle||'m',rp:!!t.ret_prev,co:t.collector||'',ed:t.exp_date||''}); CST.termsOk=true; }catch(e){}
 }
 async function cstSaveTerm(ck,f,v){
   ck=decodeURIComponent(ck); const x=CST.res&&CST.res.C.find(y=>y.c.ck===ck); if(!x) return;
-  const cur=CST.terms[ck]||{cd:cstCd(x.c),note:'',cy:cstCy(x.c),rp:cstRP(x.c)}; const nx={...cur,cy:cur.cy||cstCy(x.c),rp:cur.rp==null?cstRP(x.c):cur.rp};
+  const cur=CST.terms[ck]||{cd:cstCd(x.c),note:'',cy:cstCy(x.c),rp:cstRP(x.c),co:'',ed:''}; const nx={...cur,cy:cur.cy||cstCy(x.c),rp:cur.rp==null?cstRP(x.c):cur.rp};
   if(f==='cd'){ const d=Math.round(+v); if(!(d>0&&d<=365)){ showToast('اكتب عدد أيام صح'); cstRender(); return; } nx.cd=d; }
   else if(f==='cy'){ nx.cy=(v==='h'?'h':'m'); if(!cur.cd) nx.cd=(nx.cy==='h'?40:30); }
+  else if(f==='co') nx.co=String(v||'').trim();
+  else if(f==='ed'){ const d=String(v||'').trim(); if(d&&!/^\d{4}-\d{2}-\d{2}$/.test(d)){ showToast('اختار تاريخ صح'); cstRender(); return; } nx.ed=d; }
   else nx.note=String(v||'').trim();
   const who=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER&&CURRENT_USER.name)||'admin';
   try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/cust_credit_terms?on_conflict=ck`,{method:'POST',headers:{...srrH(true),'Prefer':'resolution=merge-duplicates,return=minimal'},
-      body:JSON.stringify({ck,name:x.c.name,credit_days:nx.cd,note:nx.note||null,cycle:nx.cy,ret_prev:!!nx.rp,updated_by:who,updated_at:new Date().toISOString()})});
+      body:JSON.stringify({ck,name:x.c.name,credit_days:nx.cd,note:nx.note||null,cycle:nx.cy,ret_prev:!!nx.rp,collector:nx.co||null,exp_date:nx.ed||null,updated_by:who,updated_at:new Date().toISOString()})});
     if(!r.ok) throw new Error('HTTP '+r.status);
-    CST.terms[ck]=nx; showToast(f==='cd'?'✅ اتحفظت مدة الائتمان':f==='cy'?'✅ اتحفظت دورة التحصيل':'✅ اتحفظ موقف السداد'); if(f!=='note'){ cstCompute(); cstRender(); }
+    CST.terms[ck]=nx; showToast(f==='cd'?'✅ اتحفظت مدة الائتمان':f==='cy'?'✅ اتحفظت دورة التحصيل':f==='co'?'✅ اتحفظ المحصّل المسؤول':f==='ed'?'✅ اتحفظ التاريخ المتوقع':'✅ اتحفظ موقف السداد'); if(f!=='note'){ cstCompute(); cstRender(); }
   }catch(e){ showToast('❌ ماتحفظش: '+e.message); }
 }
 
@@ -68706,7 +68751,7 @@ function cstCompute(){
   const MS=cstMonths(Y+'-01',lastM), first=MS[0];
   if(!CST.cm||CST.cm.slice(0,4)!==Y){ CST.cm=Y===today.slice(0,4)?today.slice(0,7):Y+'-12'; }
   const cm=CST.cm, cmStart=cm+'-01';
-  const alloc=(c,payCut)=>{
+  const alloc=(c,payCut,dedCut)=>{
     const cy=cstCy(c), exp=m=>cy==='h'?[m+'/A',m+'/B']:[m];
     const mk=cy==='h'?MS.flatMap(m=>[m+'/A',m+'/B']):MS.slice();
     const W={}; mk.forEach(k=>W[k]=+((cy==='h'?(c.wh||{}):(c.w||{}))[k])||0);
@@ -68714,7 +68759,7 @@ function cstCompute(){
     const cov={}, al={}; keys.forEach(k=>{ cov[k]=0; al[k]=[]; });
     const put=(k,a,x)=>{ cov[k]+=a; al[k].push({...x,a}); };
     // (1) الإشعارات على فترتها
-    (c.ded||[]).forEach(d=>{ const f=(d.f||d.d).slice(0,7), t=(d.t||d.f||d.d).slice(0,7); const ms=cstMonths(f,t<f?f:t);
+    (c.ded||[]).filter(d=>!dedCut||d.d<dedCut).forEach(d=>{ const f=(d.f||d.d).slice(0,7), t=(d.t||d.f||d.d).slice(0,7); const ms=cstMonths(f,t<f?f:t);
       const tg=[...new Set(ms.flatMap(m=>m<first?['open']:exp(m>lastM?lastM:m)))]; const w=tg.map(k=>Math.max(0,due[k]||0)); const s=w.reduce((a,b)=>a+b,0);
       tg.forEach((k,i)=>put(k,(+d.a)*(s>0?w[i]/s:1/tg.length),{k:'ded',d:d.d,ds:d.ds,all:+d.a})); });
     // (2) الشيكات بشهورها
@@ -68736,7 +68781,8 @@ function cstCompute(){
     return {c,W,keys,due,cov,al,credit:pool};
   };
   // مرتين: النهارده (كل الشيكات) + أول شهر التحصيل (الشيكات اللي قبله بس) — الفرق = اللي اتحصّل في الشهر
-  const C=D.customers.map(c=>{ const x=alloc(c,null), s0=alloc(c,cmStart); x.remS={}; x.keys.forEach(k=>x.remS[k]=s0.due[k]-s0.cov[k]); x.creditS=s0.credit; return x; });
+  const C=D.customers.map(c=>{ const x=alloc(c,null), s0=alloc(c,cmStart), s1=alloc(c,cmStart,cmStart); x.remS={}; x.remG={}; x.keys.forEach(k=>{ x.remS[k]=s0.due[k]-s0.cov[k]; x.remG[k]=s1.due[k]-s1.cov[k]; }); x.creditS=s0.credit; return x; });
+  // (22/11) remG = الباقي أول الشهر قبل خصومات الشهر نفسه — زي تقرير قسم التحصيل: المطلوب إجمالي، والمسدد = فلوس + خصومات
   // نمط السداد
   const lagOf=c=>(c.c.pays||[]).map(p=>{ const ms=((typeof stmPayParse==='function')?stmPayParse(p.ds,p.d).months:[])||[]; if(ms.length!==1||!(+p.a>0)||ms[0]<first) return null;
       const e=new Date(Date.UTC(+ms[0].slice(0,4),+ms[0].slice(5,7),0)); const L=Math.round((new Date(p.d)-e)/864e5); return (L>-40&&L<300)?L:null; }).filter(x=>x!=null).sort((a,b)=>a-b);
@@ -68758,27 +68804,34 @@ function cstCompute(){
       const expDed=k==='open'?0:Math.max(0,Math.min(rem,Math.max(0,due)*x.rate-dedDone)), expChq=Math.max(0,rem-expDed);
       let st; if(Math.abs(due)<1&&Math.abs(rem)<1) st='none'; else if(rem<=Math.max(100,0.01*Math.abs(due))) st='ok';
       else if(expChq<=Math.max(100,0.02*due)) st='ded'; else if(k==='open'||dd<today) st='late'; else if(dd.slice(0,7)===today.slice(0,7)) st='thism'; else st='wait';
-      return {k,due,cov:x.cov[k],rem,remS:x.remS[k]||0,dd,dm:dd?dd.slice(0,7):null,expDed,expChq,st,late:st==='late'&&dd?Math.round((new Date(today)-new Date(dd))/864e5):null,al:x.al[k]}; });
+      return {k,due,cov:x.cov[k],rem,remS:x.remS[k]||0,remG:x.remG[k]||0,dd,dm:dd?dd.slice(0,7):null,expDed,expChq,st,late:st==='late'&&dd?Math.round((new Date(today)-new Date(dd))/864e5):null,al:x.al[k]}; });
     x.balCalc=x.rows.reduce((s,r)=>s+r.rem,0)-x.credit; x.balStmt=x.c.bal==null?null:+x.c.bal; x.match=x.balStmt==null?null:Math.abs(x.balCalc-x.balStmt)<=5;
     x.Wt=x.keys.filter(k=>k!=='open').reduce((s,k)=>s+x.W[k],0);
     // موقف التحصيل لشهر cm (13/11 — مبسّط): المطلوب = الشهر اللي ميعاده الشهر ده (dueM) بالباقي منه أول الشهر،
     // المتأخرات = اللي قبله وكان مفتوح أول الشهر. الشهر "مدفوع" لو اتقفل (st ok) أو فاضل فيه إشعارات بس (st ded) — الفرق البسيط بيتكتب جنبه.
     const th=v=>v>100, closed=r=>r.st==='ok'||r.st==='ded', pd=r=>Math.max(0,r.remS-Math.max(0,r.rem));
-    const dRows=x.rows.filter(r=>r.dm===cm&&th(r.remS));
-    const arr=x.rows.filter(r=>(r.k==='open'||(r.dm&&r.dm<cm))&&th(r.remS));
+    const dRows=x.rows.filter(r=>r.dm===cm&&(th(r.remS)||th(r.remG)||th(r.due)));
+    const arr=x.rows.filter(r=>(r.k==='open'||(r.dm&&r.dm<cm))&&(th(r.remS)||th(r.remG)));
+    // (22/11) زي تقرير قسم التحصيل: القيمة = مسحوبات الفترة كلها، والمسدد = اللي اتقفل منها لحد النهارده (فلوس + خصومات + أي رصيد دائن قديم)
+    // المتأخرات: القيمة = الباقي منها أول الشهر (قبل فلوس وخصومات الشهر ده)
+    const vG=r=>r.k==='open'?Math.max(0,r.remS):Math.max(0,r.due), pdG=r=>Math.max(0,vG(r)-Math.max(0,r.rem));
+    const vA=r=>Math.max(0,r.remG), pdA=r=>Math.max(0,vA(r)-Math.max(0,r.rem));
     const aOpen=arr.filter(r=>!closed(r));
     const c={dueK:dRows.map(r=>r.k), dV:dRows.reduce((s,r)=>s+r.remS,0), dP:dRows.reduce((s,r)=>s+pd(r),0),
       dLeft:dRows.filter(r=>!closed(r)).reduce((s,r)=>s+Math.max(0,r.rem),0),
       dDiff:dRows.filter(closed).reduce((s,r)=>s+Math.max(0,r.rem),0), dDiffDed:dRows.some(r=>r.st==='ded'),
       aM:aOpen.map(r=>r.k), aV:arr.reduce((s,r)=>s+r.remS,0), aP:arr.reduce((s,r)=>s+pd(r),0), aLeft:aOpen.reduce((s,r)=>s+Math.max(0,r.rem),0),
-      aPaidM:arr.filter(closed).map(r=>r.k)};
-    c.left=c.dLeft+c.aLeft; c.paid=c.dP+c.aP; c.has=c.dV>0||c.aV>0;
+      aPaidM:arr.filter(closed).map(r=>r.k),
+      dVg:dRows.reduce((s,r)=>s+vG(r),0), dPg:dRows.reduce((s,r)=>s+pdG(r),0),
+      aVg:arr.reduce((s,r)=>s+vA(r),0), aPg:arr.reduce((s,r)=>s+pdA(r),0)};
+    c.left=c.dLeft+c.aLeft; c.paid=c.dP+c.aP; c.has=c.dV>0||c.aV>0||c.dVg>0||c.aVg>0;
     // الإشعارات اللي لسه متسجلتش على الفترات المطلوبة + (لسبينيس) مرتجع الشهر اللي قبل شهر الشيك
     const crs=[...dRows,...aOpen];
     c.expDed=Math.min(c.left,crs.reduce((s,r)=>s+(r.st==='ok'?0:r.expDed),0));
     x.rp=cstRP(x.c); c.retM=cstAddM(cm,-1); c.retPrev=x.rp?Math.round(+((x.c.r||{})[c.retM])||0):0;
     c.expChq=Math.max(0,c.left-c.expDed-c.retPrev);
-    c.st=c.left<=0?'paid':(c.paid>100?'part':'none');
+    c.st=c.left<=0?'paid':((c.dPg+c.aPg)>100?'part':'none');
+    { const t=CST.terms[x.c.ck]||{}; c.co=t.co||''; c.ed=t.ed||''; c.over=!!(c.ed&&c.ed<today&&c.st!=='paid'); c.overD=c.over?Math.round((new Date(today)-new Date(c.ed))/864e5):0; }
     x.col=c;
   });
   C.sort((a,b)=>b.Wt-a.Wt||(b.balStmt||0)-(a.balStmt||0));
@@ -68786,7 +68839,7 @@ function cstCompute(){
   const sum=(f,v)=>all.filter(f).reduce((s,o)=>s+v(o),0);
   const CL=C.filter(x=>x.col.has), cs=f=>CL.reduce((s,x)=>s+f(x.col),0);
   CST.res={C,MS,today,gLag,cm,CL,
-    colTot:{dV:cs(c=>c.dV),dP:cs(c=>c.dP),dLeft:cs(c=>c.dLeft),aLeft:cs(c=>c.aLeft),aP:cs(c=>c.aP),left:cs(c=>c.left),paid:cs(c=>c.paid),expChq:cs(c=>c.expChq),retPrev:cs(c=>c.retPrev),
+    colTot:{dVg:cs(c=>c.dVg),dPg:cs(c=>c.dPg),aVg:cs(c=>c.aVg),aPg:cs(c=>c.aPg),nOver:CL.filter(x=>x.col.over).length,dV:cs(c=>c.dV),dP:cs(c=>c.dP),dLeft:cs(c=>c.dLeft),aLeft:cs(c=>c.aLeft),aP:cs(c=>c.aP),left:cs(c=>c.left),paid:cs(c=>c.paid),expChq:cs(c=>c.expChq),retPrev:cs(c=>c.retPrev),
       nPaid:CL.filter(x=>x.col.st==='paid').length,nPart:CL.filter(x=>x.col.st==='part').length,nNone:CL.filter(x=>x.col.st==='none').length},
     bal:C.reduce((s,x)=>s+x.balCalc,0), balStmt:C.reduce((s,x)=>s+(x.balStmt||0),0), nOk:C.filter(x=>x.match).length, nChk:C.filter(x=>x.match!=null).length, bad:C.filter(x=>x.match===false),
     thism:all.filter(o=>o.r.st==='thism'), late:all.filter(o=>o.r.st==='late'),
@@ -68821,29 +68874,41 @@ function cstMLbl(ks){ // شهور متتالية ← "مايو–أغسطس" · 
 function cstDueLbl(c){ if(!c.dueK||!c.dueK.length) return '—';
   return c.dueK.map(k=>cstKL(k,true)).join(' + '); }
 const CST_CS={paid:['✅','دفع كله','#1A7A4A','#E6F4EC'],part:['🟡','دفع جزء','#B26A00','#FFF1DC'],none:['🔴','مادفعش','#B71C1C','#FDE8E8']};
-function cstColRows(){ const q=(CST.q||'').trim(), o={none:0,part:1,paid:2};
-  return CST.res.CL.filter(x=>!q||String(x.c.name).includes(q)).slice().sort((a,b)=>o[a.col.st]-o[b.col.st]||b.col.left-a.col.left||b.col.dV-a.col.dV); }
+function cstColRows(){ const q=(CST.q||'').trim(), o={none:0,part:1,paid:2}, co=CST.co||'';
+  return CST.res.CL.filter(x=>(!q||String(x.c.name).includes(q))&&(!co||(co==='—'?!x.col.co:x.col.co===co))).slice().sort((a,b)=>o[a.col.st]-o[b.col.st]||b.col.left-a.col.left||b.col.dV-a.col.dV); }
 function cstArrTxt(c){ return c.aLeft>1?cstMLbl(c.aM):''; }
 function cstColPanel(){
   const X=CST.res, L=cstColRows(), MS=X.MS.filter(m=>m<=(X.today.slice(0,4)===String(CST.year)?X.today.slice(0,7):m));
   const tools=`<div class="cst-tools"><b>شهر التحصيل:</b> <select onchange="CST.cm=this.value;cstCompute();cstRender()" style="padding:6px 10px;border-radius:10px;border:1px solid #D9CBB3;font-weight:800;font-family:inherit">${MS.slice().reverse().map(m=>`<option value="${m}"${m===X.cm?' selected':''}>${cstKL(m)}</option>`).join('')}</select>
     <input placeholder="🔍 دوّر على عميل..." value="${cstE(CST.q)}" oninput="CST.q=this.value;clearTimeout(window._cstQ);window._cstQ=setTimeout(()=>{cstRender();const i=document.querySelector('.cst-tools input');if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length);}},250)">
+    <b>المحصّل:</b> <select onchange="CST.co=this.value;cstRender()" style="padding:6px 10px;border-radius:10px;border:1px solid #D9CBB3;font-weight:800;font-family:inherit"><option value="">الكل</option>${cstCollectors().map(n=>`<option${CST.co===n?' selected':''}>${cstE(n)}</option>`).join('')}<option value="—"${CST.co==='—'?' selected':''}>— مش متحدد</option></select>
     <button class="btn btn-ghost btn-sm" onclick="cstColPdf()"><i class="ti ti-file-type-pdf"></i> PDF</button><button class="btn btn-ghost btn-sm" onclick="cstColXlsx()"><i class="ti ti-file-spreadsheet"></i> Excel</button><button class="btn btn-ghost btn-sm" onclick="cstColPdf(true)"><i class="ti ti-send"></i> إرسال</button></div>
     ${CST.termsOk?'':'<div class="cst-note" style="color:#B26A00;font-weight:800;margin:0 0 8px">⚠️ جدول مدة الائتمان مش واصل — المدد من تقرير موقف المديونية (والباقي 30 يوم)، والتعديل مش هيتحفظ.</div>'}`;
+  const kp=cstColKpis(L);
   if(!L.length) return tools+'<div class="cst-empty">مفيش مطلوب ولا متأخرات في الشهر ده.</div>';
   const inp=(x,f,v,w)=>`<input class="cst-in" style="width:${w}" value="${cstE(v)}" onclick="event.stopPropagation()" onchange="cstSaveTerm('${encodeURIComponent(x.c.ck)}','${f}',this.value)">`;
   const sum=f=>cstF(L.reduce((s,x)=>s+f(x),0));
-  return tools+`<div style="overflow:auto"><table class="cst-t coll"><thead><tr><th>#</th><th style="text-align:right">العميل</th><th>الدورة</th><th>مدة الائتمان</th><th>الرصيد النهارده</th><th>مطلوب عن</th><th>المطلوب</th><th>اتدفع</th><th>الباقي</th><th>المتأخرات</th><th>الحالة</th><th>موقف السداد</th></tr></thead><tbody>
+  return tools+kp+`<datalist id="cst-co-dl">${cstCollectors().map(n=>`<option value="${cstE(n)}">`).join('')}</datalist><div style="overflow:auto"><table class="cst-t coll"><thead><tr><th>#</th><th style="text-align:right">العميل</th><th>الدورة</th><th>مدة الائتمان</th><th>الرصيد النهارده</th><th>مطلوب عن</th><th>المطلوب</th><th>اتدفع<div style="font-size:10px;opacity:.8">فلوس + خصومات</div></th><th>الباقي</th><th>المتأخرات</th><th>الحالة</th><th>المحصّل المسؤول</th><th>التاريخ المتوقع</th><th>موقف السداد</th></tr></thead><tbody>
     ${L.map((x,i)=>{ const c=x.col, t=CST.terms[x.c.ck], S=CST_CS[c.st]; return `<tr><td>${i+1}</td><td class="n">${cstNameCell(x)}${x.slow?` <span class="cst-tag" title="بيدفع فعليًا بعد آخر الشهر بـ ${x.lag} يوم — المتفق ${x.allow} يوم" style="color:#B71C1C;background:#FDE8E8;font-size:10.5px">بيتأخر عادةً</span>`:''}</td>
       <td><select class="cst-in" style="width:84px" onclick="event.stopPropagation()" onchange="cstSaveTerm('${encodeURIComponent(x.c.ck)}','cy',this.value)"><option value="m"${x.cy==='m'?' selected':''}>شهري</option><option value="h"${x.cy==='h'?' selected':''}>نص شهر</option></select></td>
       <td>${inp(x,'cd',x.cd,'46px')}</td><td>${cstF(x.balCalc)}</td>
-      <td>${c.dV?cstDueLbl(c):'—'}</td><td>${c.dV?cstF(c.dV):'—'}</td><td class="${c.dP>1?'pd':''}">${c.dV?cstF(c.dP):'—'}</td>
+      <td>${(c.dV||c.dVg)?cstDueLbl(c):'—'}</td><td>${c.dVg?cstF(c.dVg):'—'}</td><td class="${c.dPg>1?'pd':''}">${c.dVg?cstF(c.dPg):'—'}</td>
       <td><b>${c.dV?cstF(c.dLeft):'—'}</b>${c.dDiff?`<div class="g">${c.dDiffDed?'فاضل إشعارات':'فرق'} ${cstF(c.dDiff)}</div>`:''}${c.retPrev>1?`<div class="g" style="color:#B45309">− مرتجع ${cstKL(c.retM,true)} ${cstF(c.retPrev)}</div>`:''}</td>
-      <td class="red">${c.aLeft>1?`${cstMLbl(c.aM)}: <b>${cstF(c.aLeft)}</b>`:'—'}${c.aP>1?`<div class="g">اتدفع منها ${cstF(c.aP)}</div>`:''}</td>
-      <td><span class="cst-tag" style="color:${S[2]};background:${S[3]}">${S[0]} ${S[1]}</span></td><td>${inp(x,'note',t&&t.note||'','150px')}</td></tr>`; }).join('')}
-    </tbody><tfoot><tr><td></td><td class="n">الإجمالي (${L.length} عميل)</td><td></td><td></td><td>${sum(x=>x.balCalc)}</td><td></td><td>${sum(x=>x.col.dV)}</td><td>${sum(x=>x.col.dP)}</td><td>${sum(x=>x.col.dLeft)}</td><td>${sum(x=>x.col.aLeft)}</td><td></td><td></td></tr></tfoot></table></div>
+      <td class="red">${c.aLeft>1?`${cstMLbl(c.aM)}: <b>${cstF(c.aLeft)}</b>`:'—'}${c.aPg>1?`<div class="g">اتدفع منها ${cstF(c.aPg)}</div>`:''}</td>
+      <td><span class="cst-tag" style="color:${S[2]};background:${S[3]}">${S[0]} ${S[1]}</span></td>
+      <td><input class="cst-in" list="cst-co-dl" style="width:96px" value="${cstE(c.co)}" placeholder="—" onclick="event.stopPropagation()" onchange="cstSaveTerm('${encodeURIComponent(x.c.ck)}','co',this.value)"></td>
+      <td><input class="cst-in" type="date" style="width:128px;${c.over?'border-color:#E57373;background:#FDE8E8;color:#B71C1C;font-weight:800':''}" value="${cstE(c.ed)}" onclick="event.stopPropagation()" onchange="cstSaveTerm('${encodeURIComponent(x.c.ck)}','ed',this.value)">${c.over?`<div class="g" style="color:#B71C1C;font-weight:800">⏰ فات من ${c.overD} يوم</div>`:''}</td>
+      <td>${inp(x,'note',t&&t.note||'','150px')}</td></tr>`; }).join('')}
+    </tbody><tfoot><tr><td></td><td class="n">الإجمالي (${L.length} عميل)</td><td></td><td></td><td>${sum(x=>x.balCalc)}</td><td></td><td>${sum(x=>x.col.dVg)}</td><td>${sum(x=>x.col.dPg)}</td><td>${sum(x=>x.col.dLeft)}</td><td>${sum(x=>x.col.aLeft)}</td><td></td><td></td><td></td><td></td></tr></tfoot></table></div>
     <div class="cst-note">المطلوب = الفترة اللي ميعاد شيكها في ${cstKL(X.cm)}، بالباقي منها أول الشهر. العميل الشهري: الشهر اللي قبله بشهر أو شهرين أو 3 حسب مدة الائتمان (10/15 ← شهر، 30/45 ← شهرين، 60/70 ← 3 شهور). العميل نص الشهر (زي كارفور): كل نص شهر ليه شيك لوحده، وميعاده = آخر النص + مدة الائتمان (40 يوم لكارفور). اتدفع = الشيكات اللي اتسجلت في الكشوفات خلال ${cstKL(X.cm)} عن الشهر ده. لو الباقي أقل من 1% أو فاضل فيه إشعارات بس، الشهر بيتحسب مدفوع والفرق مكتوب تحته. المتأخرات = شهور قبله لسه عليها باقي. افتح العميل تشوف الإشعارات المتوقعة والشيك المتوقع لكل شهر.</div>`;
 }
+// (22/11) كروت زي تقرير قسم التحصيل: المستحق / المحصل / المتبقي — للشهر وللمتأخرات + عدد اللي فات تاريخهم المتوقع
+function cstCollectors(){ const s=new Set(['باسم خالد','احمد عماد']); Object.values(CST.terms||{}).forEach(t=>{ if(t&&t.co) s.add(t.co); }); return [...s]; }
+function cstColKpis(L){ const S=f=>L.reduce((s,x)=>s+(+f(x.col)||0),0), N=v=>Math.round(v).toLocaleString('en-US'), pc=(a,b)=>b>0?Math.round(a/b*100)+'%':'—';
+  const dV=S(c=>c.dVg), dP=S(c=>c.dPg), dL=S(c=>c.dLeft), aV=S(c=>c.aVg), aP=S(c=>c.aPg), aL=S(c=>c.aLeft), od=L.filter(x=>x.col.over);
+  const k=(t,v,sub,col)=>`<div style="flex:1;min-width:150px;background:#fff;border:1px solid #E8DCC4;border-radius:12px;padding:10px 12px"><div style="font-size:11.5px;color:#8B7B60;font-weight:800">${t}</div><div style="font-size:20px;font-weight:900;color:${col||'#3A2A14'}">${v}</div>${sub?`<div style="font-size:11px;color:#8B7B60">${sub}</div>`:''}</div>`;
+  return `<div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 6px">${k('المستحق السداد',N(dV))}${k('المحصل حتى الآن',N(dP),'فلوس + خصومات','#1A7A4A')}${k('نسبة التحصيل',pc(dP,dV),'','#1A7A4A')}${k('المتبقي للتحصيل',N(dL),'','#B26A00')}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px">${k('المتأخرات',N(aV),'','#B71C1C')}${k('المحصل منها',N(aP),'','#1A7A4A')}${k('نسبة تحصيل المتأخرات',pc(aP,aV),'','#1A7A4A')}${k('المتبقي من المتأخرات',N(aL),'','#B71C1C')}${od.length?k('⏰ فات تاريخهم المتوقع',od.length+' عميل',od.slice(0,3).map(x=>cstE(cstShort(x.c.name))).join('، ')+(od.length>3?' …':''),'#B71C1C'):''}</div>`; }
 const CST_PR={late:4,thism:3,ded:2,wait:1,ok:0,none:-1};
 function cstGridCells(x){ // عمود لكل شهر؛ العميل نص الشهر بيتجمع نصّيه في خانة واحدة
   const keys=['open',...CST.res.MS];
@@ -68855,12 +68920,13 @@ function cstGridCells(x){ // عمود لكل شهر؛ العميل نص الشه
 }
 function cstColReport(){
   const X=CST.res, L=cstColRows(), T=X.colTot, N=cstF, pc=(a,b)=>b>0?Math.round(a/b*100)+'%':'0%';
-  const rows=L.map((x,i)=>{ const c=x.col, t=CST.terms[x.c.ck]; return [i+1,cstShort(x.c.name),x.cy==='h'?'نص شهر':'شهري',x.cd,N(x.balCalc),c.dV?cstDueLbl(c):'',c.dV?N(c.dV):'',c.dV?N(c.dP):'',c.dV?N(c.dLeft)+(c.dDiff?' ('+(c.dDiffDed?'فاضل إشعارات ':'فرق ')+N(c.dDiff)+')':''):'',c.aLeft>1?cstMLbl(c.aM)+': '+N(c.aLeft):'',N(c.expChq),CST_CS[c.st][1],t&&t.note||'']; });
+  const rows=L.map((x,i)=>{ const c=x.col, t=CST.terms[x.c.ck]; return [i+1,cstShort(x.c.name),x.cy==='h'?'نص شهر':'شهري',x.cd,N(x.balCalc),(c.dV||c.dVg)?cstDueLbl(c):'',c.dVg?N(c.dVg):'',c.dVg?N(c.dPg):'',c.dVg?N(c.dLeft)+(c.dDiff?' ('+(c.dDiffDed?'فاضل إشعارات ':'فرق ')+N(c.dDiff)+')':''):'',c.aLeft>1?cstMLbl(c.aM)+': '+N(c.aLeft):'',N(c.expChq),CST_CS[c.st][1],c.co||'',c.ed?c.ed.split('-').reverse().join('/')+(c.over?' ⏰':''):'',t&&t.note||'']; });
   const S=f=>N(L.reduce((s,x)=>s+f(x),0));
   return {ym:X.cm,title:`موقف مديونية عملاء مودرن تريد — شهر التحصيل ${cstKL(X.cm)}`,
-    kpis:[['الرصيد النهارده',N(X.bal)],['المطلوب',N(T.dV)],['اتدفع',N(T.dP)+' ('+pc(T.dP,T.dV)+')'],['المتأخرات',N(T.aLeft)],['الباقي للتحصيل',N(T.left)],['الشيك المتوقع',N(T.expChq)],['دفع كله / جزء / مادفعش',T.nPaid+' / '+T.nPart+' / '+T.nNone]],
-    secs:[{title:'موقف التحصيل',alignR:[1],nowrap:[0,2,3,4,5,6,7,9,10],head:['#','العميل','الدورة','مدة الائتمان','الرصيد النهارده','مطلوب عن','المطلوب','اتدفع','الباقي','المتأخرات','الشيك المتوقع','الحالة','موقف السداد'],
-      rows,total:['','الإجمالي ('+L.length+' عميل)','','',S(x=>x.balCalc),'',S(x=>x.col.dV),S(x=>x.col.dP),S(x=>x.col.dLeft),S(x=>x.col.aLeft),S(x=>x.col.expChq),'','']}]};
+    kpis:(()=>{ const S2=f=>L.reduce((s,x)=>s+(+f(x.col)||0),0), dV=S2(c=>c.dVg), dP=S2(c=>c.dPg), aV=S2(c=>c.aVg), aP=S2(c=>c.aPg);
+      return [['المستحق السداد',N(dV)],['المحصل حتى الآن',N(dP)+' ('+pc(dP,dV)+')'],['المتبقي للتحصيل',N(S2(c=>c.dLeft))],['المتأخرات',N(aV)],['المحصل من المتأخرات',N(aP)+' ('+pc(aP,aV)+')'],['المتبقي من المتأخرات',N(S2(c=>c.aLeft))],['الشيك المتوقع',N(S2(c=>c.expChq))],['دفع كله / جزء / مادفعش',L.filter(x=>x.col.st==='paid').length+' / '+L.filter(x=>x.col.st==='part').length+' / '+L.filter(x=>x.col.st==='none').length]]; })(),
+    secs:[{title:'موقف التحصيل',alignR:[1],nowrap:[0,2,3,4,5,6,7,9,10,12,13],head:['#','العميل','الدورة','مدة الائتمان','الرصيد النهارده','مطلوب عن','المطلوب','المسدد (فلوس + خصومات)','الباقي','المتأخرات','الشيك المتوقع','الحالة','المحصّل المسؤول','التاريخ المتوقع','موقف السداد'],
+      rows,total:['','الإجمالي ('+L.length+' عميل)','','',S(x=>x.balCalc),'',S(x=>x.col.dVg),S(x=>x.col.dPg),S(x=>x.col.dLeft),S(x=>x.col.aLeft),S(x=>x.col.expChq),'','','','']}]};
 }
 function cstColMeta(){ const D=CST.data, up={}; (D.uploads||[]).forEach(u=>{ const k=String(u.branch).replace(/\s+/g,' ').trim(); if(!up[k]||u.to>up[k]) up[k]=u.to; });
   return `<span>المصدر: <b style="color:#731E2E">كشوفات حساب العملاء</b></span><span>الكشوفات لحد: ${Object.entries(up).map(([b,t])=>`<b style="color:#731E2E">${cstE(b)}</b> <bdi>${cstDL(t)}</bdi>`).join(' · ')}</span>`; }
