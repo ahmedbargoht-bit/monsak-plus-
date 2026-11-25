@@ -37050,6 +37050,27 @@ function sciBuildPdbIndex(){
   return idx;
 }
 
+// (25/11) أسعار جديدة مؤكدة للعميل: تعديل سعر مفعّل + العميل أكّد ← السعر الجديد (زي تطبيق المندوب)
+let _sciNewPx = {};
+function sciClKey(s){ return String(s||'').replace(/ـ/g,'').replace(/\s+/g,' ').trim(); }
+async function sciLoadNewPx(){
+  _sciNewPx = {};
+  const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  try{
+    const mods = await fetch(`${SUPABASE_URL}/rest/v1/price_modifications?status=eq.active&select=id,snf_name,old_price,new_price`,{headers:H,cache:'no-store'}).then(r=>r.ok?r.json():[]);
+    if(!Array.isArray(mods)||!mods.length) return;
+    const byId={}; mods.forEach(m=>{ byId[m.id]=m; });
+    const st = await fetch(`${SUPABASE_URL}/rest/v1/price_mod_client_status?status=eq.confirmed&mod_id=in.(${mods.map(m=>m.id).join(',')})&select=mod_id,client_name,confirmed_at`,{headers:H,cache:'no-store'}).then(r=>r.ok?r.json():[]);
+    (Array.isArray(st)?st:[]).forEach(r=>{ const m=byId[r.mod_id], np=m&&parseFloat(m.new_price); if(!m||!(np>0)) return;
+      const k=sciClKey(r.client_name); (_sciNewPx[k]=_sciNewPx[k]||{})[m.snf_name]={np, op:parseFloat(m.old_price)||0, d:r.confirmed_at}; });
+  }catch(e){ console.error('[sci newpx]', e); }
+}
+// سعر الصنف للعميل المختار: السعر الجديد المؤكد لو موجود، وإلا سعر الكتالوج
+function sciPriceFor(key){
+  const pr = (typeof _splPrices!=='undefined' ? _splPrices : []).find(x=>x.snf_name===key);
+  const nw = (_sciCurrentClientRaw && _sciCurrentClientRaw!=='__ALL__') ? (_sciNewPx[sciClKey(_sciCurrentClientRaw)]||{})[key] : null;
+  return { price: nw ? nw.np : (pr?.price||0), tax_pct: pr?.tax_pct||0, nw };
+}
 async function sciOnClientChange(){
   const client = document.getElementById('sci-client')?.value || '';
   _sciCurrentClientRaw = client;
@@ -37074,6 +37095,7 @@ async function sciOnClientChange(){
   if(cardEl) cardEl.style.display = 'none';
 
   const isAll = client === '__ALL__';
+  await sciLoadNewPx();
   let branches = [];
   if(isAll){
     const allSet = new Set();
@@ -37257,8 +37279,8 @@ function sciRenderTable(){
   const sciPriceList = (typeof _splPrices!=='undefined' ? _splPrices : []);
   const sciTableExempt = splIsClientTaxExempt(_sciCurrentClientRaw);
   tbody.innerHTML = filtered.map((r,i)=>{
-    const pr = sciPriceList.find(x=>x.snf_name===(r.priceKey||r.name));
-    const price = pr?.price||0;
+    const pr = sciPriceFor(r.priceKey||r.name);
+    const price = pr.price||0;
     const taxPct = sciTableExempt ? 0 : (pr?.tax_pct||0);
     const priceWithTax = taxPct>0 ? price*(1+taxPct/100) : price;
     return `
@@ -37270,7 +37292,7 @@ function sciRenderTable(){
           : !_sciEditMode ? `<span style="color:#ccc;font-family:Cairo,sans-serif">—</span>` : `<span style="color:#ccc;font-family:Cairo,sans-serif">—</span> <button onclick="mebcOpen('${r.name.replace(/'/g,"\\'")}')" style="border:1px solid var(--border);background:#F9F6F1;border-radius:6px;padding:1px 8px;cursor:pointer;color:var(--caramel);font-family:Cairo,sans-serif;font-size:11px;font-weight:600">+ إضافة</button>`}
       </td>
       <td style="padding:7px 12px;font-weight:600">${r.name}${_sciManualSet.has(r.name)?` <span title="مضاف يدويًا" style="background:#E1F5EE;color:#0F6E56;padding:1px 7px;border-radius:8px;font-size:10px;font-weight:700">يدوي</span>${!_sciEditMode?'':` <button title="إزالة من أصناف العميل" onclick="sciManualRemove('${r.name.replace(/'/g,"\\'")}')" style="border:none;background:none;cursor:pointer;color:#C0392B;font-size:13px;vertical-align:middle"><i class="ti ti-x"></i></button>`}`:''}${!_sciEditMode?'':` <button title="دمج الصنف ده مع صنف مسجّل في النظام (نفس الصنف باسم تاني)" onclick="sciOpenMerge('${r.name.replace(/'/g,"\\'")}')" style="border:none;background:none;cursor:pointer;color:#0F6E56;font-size:13px;vertical-align:middle"><i class="ti ti-git-merge"></i></button>`}${!_sciEditMode?'':` <button title="تعديل اسم الصنف في كل النظام" onclick="sciRenameItem('${r.name.replace(/'/g,"\\'")}')" style="border:none;background:none;cursor:pointer;color:var(--caramel);font-size:12px;vertical-align:middle"><i class="ti ti-edit"></i></button>`}</td>
-      <td style="padding:7px 12px;text-align:center;font-weight:700;color:${price>0?'var(--navy)':'#ccc'}">${price>0?price.toFixed(2):'—'}</td>
+      <td style="padding:7px 12px;text-align:center;font-weight:700;color:${price>0?'var(--navy)':'#ccc'}">${price>0?price.toFixed(2):'—'}${pr.nw?`<div style="font-size:9.5px;color:#15803D;font-weight:700">🆕 سعر جديد مؤكد (كان ${pr.nw.op.toFixed(2)})</div>`:''}</td>
       <td style="padding:7px 12px;text-align:center;font-size:11px">${taxPct>0?`<span style="background:#FFF3E0;color:#E65100;padding:2px 6px;border-radius:8px;font-size:10px;font-weight:700">${taxPct}%</span>`:'<span style="color:#ccc">—</span>'}</td>
       <td style="padding:7px 12px;text-align:center;font-weight:700;color:${price>0?'#1A7A4A':'#ccc'}">${price>0?priceWithTax.toFixed(2):'—'}</td>
       <td style="padding:7px 12px;text-align:center">${r.fea?`<span class="badge b-blue">${r.fea}</span>`:'<span style="color:#ccc">—</span>'}</td>
@@ -37627,8 +37649,8 @@ function sciExportPDF(){
   const sciPdfPriceList = (typeof _splPrices!=='undefined' ? _splPrices : []);
   const sciPdfExempt = splIsClientTaxExempt(_sciCurrentClientRaw);
   const tableRows = rows.map((r,i)=>{
-    const pr = sciPdfPriceList.find(x=>x.snf_name===(r.priceKey||r.name));
-    const price = pr?.price||0;
+    const pr = sciPriceFor(r.priceKey||r.name);
+    const price = pr.price||0;
     const taxPct = sciPdfExempt ? 0 : (pr?.tax_pct||0);
     const priceWithTax = taxPct>0 ? price*(1+taxPct/100) : price;
     return `
@@ -37705,8 +37727,8 @@ function sciExportExcel(){
   const sciXlsPriceList = (typeof _splPrices!=='undefined' ? _splPrices : []);
   const sciXlsExempt = splIsClientTaxExempt(_sciCurrentClientRaw);
   const priceInfoOf = name => {
-    const pr = sciXlsPriceList.find(x=>x.snf_name===name);
-    const price = pr?.price||0;
+    const pr = sciPriceFor(name);
+    const price = pr.price||0;
     const taxPct = sciXlsExempt ? 0 : (pr?.tax_pct||0);
     const priceWithTax = taxPct>0 ? price*(1+taxPct/100) : price;
     return {price, taxPct, priceWithTax};

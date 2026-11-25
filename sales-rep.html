@@ -1160,13 +1160,15 @@ html,body{position:fixed;inset:0;width:100%;height:100%;overflow:hidden;font-fam
 <script>
 // ══════════════ CONFIG ══════════════
 const SUPABASE_URL = 'https://tneeosrbxedexsrigapg.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRuZWVvc3JieGVkZXhzcmlnYXBnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxMTcxMTQsImV4cCI6MjA5NDY5MzExNH0.JHXgJ6EeDcdeofD5HShRnWvwPazCIfY7q7pCC2GMOFw';
+const SUPABASE_KEY = '__REMOVED__';
+const MT_API_BASE = 'https://tneeosrbxedexsrigapg.supabase.co/functions/v1';
+const MT_APP_KEY  = 'mtp_2025_secure_key_!@#';
 
 // ── تعديلات جوهرية: تطبيق هوية/ألوان/حجم خط هذا التطبيق (app_brand_settings, app_key='rep') ──
 async function brsBootstrapApply(){
   try{
     const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.rep&select=*`, {headers:H});
+    const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.rep&select=*`, {headers:H});
     const rows = res.ok ? await res.json().catch(()=>[]) : [];
     const row = (Array.isArray(rows) && rows[0]) ? rows[0] : null;
     if(!row) return;
@@ -1175,6 +1177,53 @@ async function brsBootstrapApply(){
     if(row.font_size_base) document.body.style.fontSize = row.font_size_base+'px';
     if(row.company_name) document.title = row.company_name;
   }catch(e){}
+}
+
+
+/* ── API-layer bridge ── */
+async function _apiFetch(url, opts = {}) {
+  const u = new URL(url);
+  const path = u.pathname;          // e.g. /rest/v1/branches  or  /rest/v1/rpc/check_pass
+  const method = (opts.method || 'GET').toUpperCase();
+
+  // ── RPC calls ──
+  if (path.startsWith('/rest/v1/rpc/')) {
+    const fn = path.split('/rest/v1/rpc/')[1];
+    const resp = await fetch(`${MT_API_BASE}/api-rpc?fn=${fn}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-app-key': MT_APP_KEY },
+      body: opts.body || '{}'
+    });
+    // match what the app expects: return a Response-like object
+    return resp;
+  }
+
+  // ── Table calls ──
+  const table = path.split('/rest/v1/')[1];
+  if (!table) return fetch(url, opts);     // fallback (shouldn't happen)
+
+  const proxyUrl = new URL(`${MT_API_BASE}/api-table`);
+  proxyUrl.searchParams.set('table', table);
+  // Forward original query params
+  // append (مش set) عشان الفلاتر المتكررة لنفس العمود (date=gte.X&date=lt.Y) تفضل كلها — 21/11
+  for (const [k, v] of u.searchParams) proxyUrl.searchParams.append(k, v);
+
+  const headers = { 'Content-Type': 'application/json', 'x-app-key': MT_APP_KEY };
+  // Forward Prefer header
+  if (opts.headers) {
+    const h = opts.headers;
+    if (h['Prefer'] || h.Prefer) headers['Prefer'] = h['Prefer'] || h.Prefer;
+    if (h['prefer']) headers['Prefer'] = h['prefer'];
+    // Check Headers object or plain object
+    if (typeof h.get === 'function') {
+      const pref = h.get('Prefer'); if (pref) headers['Prefer'] = pref;
+    }
+  }
+
+  const fetchOpts = { method, headers };
+  if (opts.body) fetchOpts.body = opts.body;
+
+  return fetch(proxyUrl.toString(), fetchOpts);
 }
 
 const SB_HEADERS = {
@@ -1317,8 +1366,8 @@ function computeItemPricing(basePrice, clientSpecialPrice, promoEntry, catDiscPc
 async function checkBackdateEnabled(){
   try{
     const [gRes, repRes] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.sinv_backdate_enabled&select=value&limit=1`,{headers:SB_HEADERS}),
-      fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${currentRep.id}&select=allow_backdate_invoice&limit=1`,{headers:SB_HEADERS}),
+      _apiFetch(`${SUPABASE_URL}/rest/v1/products_db?key=eq.sinv_backdate_enabled&select=value&limit=1`,{headers:SB_HEADERS}),
+      _apiFetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${currentRep.id}&select=allow_backdate_invoice&limit=1`,{headers:SB_HEADERS}),
     ]);
     const gData = gRes.ok ? await gRes.json() : [];
     const repData = repRes.ok ? await repRes.json() : [];
@@ -1358,7 +1407,7 @@ function renderInvoiceDateSelector(isReturn){
 }
 
 async function sbFetch(table, params=''){
-  const res = await fetch(SUPABASE_URL+'/rest/v1/'+table+params, {headers: SB_HEADERS});
+  const res = await _apiFetch(SUPABASE_URL+'/rest/v1/'+table+params, {headers: SB_HEADERS});
   if(!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -1406,7 +1455,7 @@ async function addBranchLocation(btn){
     const lat=pos.coords.latitude, lng=pos.coords.longitude, acc=Math.round(pos.coords.accuracy);
     if(!confirm('تسجيل موقعك الحالي كلوكيشن لفرع:\n'+name+'\n\n(دقة الموقع حوالي '+acc+' متر)\nتأكد إنك واقف في الفرع. تأكيد؟')) return;
     // الشرط lat=is.null يمنع تغيير لوكيشن اتسجل قبل كده
-    const res=await fetch(SUPABASE_URL+'/rest/v1/branches?branch_name=eq.'+encodeURIComponent(name)+'&lat=is.null',{
+    const res=await _apiFetch(SUPABASE_URL+'/rest/v1/branches?branch_name=eq.'+encodeURIComponent(name)+'&lat=is.null',{
       method:'PATCH', headers:{...SB_HEADERS,'Prefer':'return=representation'},
       body:JSON.stringify({lat,lng,location_saved_at:new Date().toISOString(),location_saved_by:(currentRep&&currentRep.name)||null,location_accuracy_m:acc})
     });
@@ -1435,7 +1484,7 @@ async function sbFetchAll(table, params=''){
   const sep = params.includes('?') ? '&' : '?';
   while(offset<hardCap){
     try{
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}${sep}limit=${pageSize}&offset=${offset}`, {headers: SB_HEADERS});
+      const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/${table}${params}${sep}limit=${pageSize}&offset=${offset}`, {headers: SB_HEADERS});
       const page = res.ok ? await res.json().catch(()=>[]) : [];
       if(!Array.isArray(page) || !page.length) break;
       all = all.concat(page);
@@ -1529,7 +1578,7 @@ async function passMatches(stored, input){
   if(stored === input) return stored !== '' || input !== '';
   if(!stored.startsWith('$2')) return false;
   try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/check_pass`, {
+    const r = await _apiFetch(`${SUPABASE_URL}/rest/v1/rpc/check_pass`, {
       method:'POST',
       headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
       body: JSON.stringify({p_stored: stored, p_input: input})
@@ -1550,7 +1599,7 @@ async function sdvModel(){
   if(/iPhone/.test(ua)) return 'iPhone'; if(/iPad/.test(ua)) return 'iPad'; return (navigator.platform||'جهاز'); }
 function sdvOkFor(name){ try{ return localStorage.getItem('mt_dev_ok_s')===name; }catch(e){ return false; } }
 async function sdvCheck(name){
-  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/rpc/rep_device_check`,{method:'POST',headers:SB_HEADERS,
+  try{ const r=await _apiFetch(`${SUPABASE_URL}/rest/v1/rpc/rep_device_check`,{method:'POST',headers:SB_HEADERS,
       body:JSON.stringify({p_name:name,p_device:sdvId(),p_model:await sdvModel(),p_ua:(navigator.userAgent||'').slice(0,300),p_kind:'sales'})});
     if(!r.ok) return 'err'; const j=(await r.json())||{}; const st=j.st||'err';
     try{ if(st==='ok') localStorage.setItem('mt_dev_ok_s',name); else if(st==='pending'||st==='rejected') localStorage.removeItem('mt_dev_ok_s');
@@ -1659,8 +1708,8 @@ async function loadHomeScreen(){
   try{
     const todayStr=today();
     const [salesRes, returnsRes] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=eq.${encodeURIComponent(currentRep.name)}&delivery_date=eq.${todayStr}&deleted_at=is.null&select=branch_name,total_net`,{headers:SB_HEADERS}),
-      fetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=eq.${encodeURIComponent(currentRep.name)}&return_date=eq.${todayStr}&deleted_at=is.null&select=total_net`,{headers:SB_HEADERS})
+      _apiFetch(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=eq.${encodeURIComponent(currentRep.name)}&delivery_date=eq.${todayStr}&deleted_at=is.null&select=branch_name,total_net`,{headers:SB_HEADERS}),
+      _apiFetch(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=eq.${encodeURIComponent(currentRep.name)}&return_date=eq.${todayStr}&deleted_at=is.null&select=total_net`,{headers:SB_HEADERS})
     ]);
     const sales = salesRes.ok ? await salesRes.json() : [];
     const rets = returnsRes.ok ? await returnsRes.json() : [];
@@ -1782,6 +1831,33 @@ async function loadSalesPrices(){
   return _salesPricesCache;
 }
 
+// ── (25/11) أسعار جديدة مؤكدة لكل عميل ──
+// العميل اللي أكّد على تعديل سعر مفعّل (price_modifications.status=active + price_mod_client_status.status=confirmed)
+// بياخد السعر الجديد كسعر أساسي على طول — من غير ما يستنى باقي العملاء. خصم العميل والعروض بتتطبق عليه عادي.
+let _clientNewPriceCache=null, _clientNewPriceAt=0;
+async function loadClientNewPrices(){
+  if(_clientNewPriceCache && Date.now()-_clientNewPriceAt<120000) return _clientNewPriceCache;
+  const m={};
+  try{
+    const mods=await sbFetch('price_modifications','?status=eq.active&select=id,snf_name,new_price');
+    if(Array.isArray(mods)&&mods.length){
+      const byId={}; mods.forEach(x=>{ byId[x.id]=x; });
+      const st=await sbFetch('price_mod_client_status','?status=eq.confirmed&mod_id=in.('+mods.map(x=>x.id).join(',')+')&select=mod_id,client_name');
+      (Array.isArray(st)?st:[]).forEach(r=>{ const md=byId[r.mod_id], np=md&&parseFloat(md.new_price); if(!md||!r.client_name||!(np>0)) return; (m[r.client_name]=m[r.client_name]||{})[md.snf_name]=np; });
+    }
+    _clientNewPriceCache=m; _clientNewPriceAt=Date.now();
+  }catch(e){ if(!_clientNewPriceCache) _clientNewPriceCache={}; }
+  return _clientNewPriceCache;
+}
+async function pricesForClient(prices, client){
+  if(!client) return prices;
+  const np=(await loadClientNewPrices())[client];
+  if(!np) return prices;
+  const out=Object.assign({},prices);
+  Object.entries(np).forEach(([n,v])=>{ out[n]=Object.assign({},prices[n]||{tax_pct:0},{price:v}); });
+  return out;
+}
+
 // ── قوائم الأسعار الاستثنائية ──────────────────────────────
 async function loadBranchSpecialPL(){
   if(_branchSpecialPLCache) return _branchSpecialPLCache;
@@ -1895,7 +1971,7 @@ async function loadMktRetTab(){
     if(repRoutes.length){
       const routeList = pgInList(repRoutes);
       fetches.push(
-        fetch(`${SUPABASE_URL}/rest/v1/returns?superseded_at=is.null&pulled=eq.false&route=in.(${routeList})&select=*&order=created_at.asc&limit=20000`, {headers: SB_HEADERS})
+        _apiFetch(`${SUPABASE_URL}/rest/v1/returns?superseded_at=is.null&pulled=eq.false&route=in.(${routeList})&select=*&order=created_at.asc&limit=20000`, {headers: SB_HEADERS})
           .then(r => r.ok ? r.json() : [])
       );
     }
@@ -1903,7 +1979,7 @@ async function loadMktRetTab(){
     if(repBranches.length){
       const brList = pgInList(repBranches);
       fetches.push(
-        fetch(`${SUPABASE_URL}/rest/v1/returns?superseded_at=is.null&pulled=eq.false&branch=in.(${brList})&select=*&order=created_at.asc&limit=20000`, {headers: SB_HEADERS})
+        _apiFetch(`${SUPABASE_URL}/rest/v1/returns?superseded_at=is.null&pulled=eq.false&branch=in.(${brList})&select=*&order=created_at.asc&limit=20000`, {headers: SB_HEADERS})
           .then(r => r.ok ? r.json() : [])
       );
     }
@@ -2058,7 +2134,7 @@ async function submitMktRet(type){
   // PATCH كل records الفرع
   try{
     await Promise.all(_mktRetModalIds.map(id =>
-      fetch(`${SUPABASE_URL}/rest/v1/returns?id=eq.${id}`, {
+      _apiFetch(`${SUPABASE_URL}/rest/v1/returns?id=eq.${id}`, {
         method: 'PATCH',
         headers: {...SB_HEADERS, 'Content-Type':'application/json', 'Prefer':'return=minimal'},
         body: JSON.stringify(payload)
@@ -2118,14 +2194,14 @@ async function loadMktMissTab(){
     if(repRoutes.length){
       const routeList = pgInList(repRoutes);
       fetches.push(
-        fetch(`${SUPABASE_URL}/rest/v1/missing?delivered=eq.false&route=in.(${routeList})&select=*&order=created_at.asc&limit=20000`, {headers: SB_HEADERS})
+        _apiFetch(`${SUPABASE_URL}/rest/v1/missing?delivered=eq.false&route=in.(${routeList})&select=*&order=created_at.asc&limit=20000`, {headers: SB_HEADERS})
           .then(r => r.ok ? r.json() : [])
       );
     }
     if(repBranches.length){
       const brList = pgInList(repBranches);
       fetches.push(
-        fetch(`${SUPABASE_URL}/rest/v1/missing?delivered=eq.false&branch=in.(${brList})&select=*&order=created_at.asc&limit=20000`, {headers: SB_HEADERS})
+        _apiFetch(`${SUPABASE_URL}/rest/v1/missing?delivered=eq.false&branch=in.(${brList})&select=*&order=created_at.asc&limit=20000`, {headers: SB_HEADERS})
           .then(r => r.ok ? r.json() : [])
       );
     }
@@ -2248,7 +2324,7 @@ async function submitMktMiss(type){
   const now = new Date().toISOString();
   try{
     await Promise.all(_mktMissModalIds.map(id =>
-      fetch(`${SUPABASE_URL}/rest/v1/missing?id=eq.${id}`, {
+      _apiFetch(`${SUPABASE_URL}/rest/v1/missing?id=eq.${id}`, {
         method:'PATCH',
         headers:{...SB_HEADERS,'Content-Type':'application/json','Prefer':'return=minimal'},
         body: JSON.stringify({delivered:true, delivered_at:now, delivered_by:note})
@@ -2299,7 +2375,7 @@ async function loadGoalTab(){
 
   try{
     const [tgtRes, salesRes, retRes] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${month}&select=rep_name,target_amount,work_days&limit=500`,{headers:SB_HEADERS}),
+      _apiFetch(`${SUPABASE_URL}/rest/v1/rep_targets?month=eq.${month}&select=rep_name,target_amount,work_days&limit=500`,{headers:SB_HEADERS}),
       // الشهر بس (مش كل فواتير المندوب من أول ما اشتغل) — من الجدول الحالي + الأرشيف
       // (الفواتير الأقدم من 90 يوم بتتنقل للأرشيف، فشهر زي يوليو كان بيطلع ناقص)
       Promise.all([
@@ -2339,7 +2415,7 @@ async function loadGoalTab(){
     // — نفس رقم لوحة التحكم بالظبط. التعديل اليدوي اتلغى.
     let repAchievedOverridden = false;
     try{
-      const offRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rep_achieved`,{method:'POST',headers:{...SB_HEADERS,'Content-Type':'application/json'},body:JSON.stringify({p_month:month,p_to:null})});
+      const offRes = await _apiFetch(`${SUPABASE_URL}/rest/v1/rpc/rep_achieved`,{method:'POST',headers:{...SB_HEADERS,'Content-Type':'application/json'},body:JSON.stringify({p_month:month,p_to:null})});
       if(!offRes.ok) throw new Error('HTTP '+offRes.status);
       const offRows = await offRes.json();
       const me = (offRows||[]).find(x=>norm(x.rep_name)===norm(currentRep.name));
@@ -2350,7 +2426,7 @@ async function loadGoalTab(){
     // خصومات العملاء (من لوحة التحكم): المحقق قبل الخصم / بعده
     const preDisc = net; let discAmt = 0;
     try{
-      const dRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rep_goal_discounts`,{method:'POST',headers:{...SB_HEADERS,'Content-Type':'application/json'},body:JSON.stringify({p_month:month})});
+      const dRes = await _apiFetch(`${SUPABASE_URL}/rest/v1/rpc/rep_goal_discounts`,{method:'POST',headers:{...SB_HEADERS,'Content-Type':'application/json'},body:JSON.stringify({p_month:month})});
       const dArr = dRes.ok ? await dRes.json() : [];
       const me = (dArr||[]).find(x=>norm(x.rep_name)===norm(currentRep.name));
       if(me) discAmt = +me.disc||0;
@@ -2457,7 +2533,7 @@ async function tbLoad(){
   const grid = document.getElementById('tb-grid');
   if(!_tbLoaded){ grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#aaa;padding:20px;font-size:12px">جارِ التحميل...</div>'; }
   try{
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/date_benefit_products?select=name,image_link,description,benefits,nutrition_info,usage_tips&order=name.asc`,
+    const res = await _apiFetch(`${SUPABASE_URL}/rest/v1/date_benefit_products?select=name,image_link,description,benefits,nutrition_info,usage_tips&order=name.asc`,
       {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     _tbItems = res.ok ? await res.json() : [];
   }catch(e){
@@ -2596,7 +2672,7 @@ async function ciAddItemToMyList(name){
     // مهم: لازم نحدد on_conflict=rep_name,snf صراحة — الجدول عنده UNIQUE على (rep_name, snf)
     // مش على المفتاح الأساسي (id)، فمن غيرها الـ Prefer: resolution=ignore-duplicates بيتجاهل
     // وPostgREST بيرجع خطأ تكرار حقيقي (409) حتى لو الصنف موجود بالفعل في قايمة المندوب.
-    const res = await fetch(SUPABASE_URL+'/rest/v1/rep_extra_items?on_conflict=rep_name,snf',{
+    const res = await _apiFetch(SUPABASE_URL+'/rest/v1/rep_extra_items?on_conflict=rep_name,snf',{
       method:'POST',
       headers:Object.assign({},SB_HEADERS,{'Prefer':'resolution=ignore-duplicates,return=minimal'}),
       body:JSON.stringify({rep_name:currentRep.name, snf:name})
@@ -2621,7 +2697,7 @@ async function ciLoadFullCatalogForInventory(){
     const rows = missing.map(snf=>({rep_name:currentRep.name, snf}));
     // نفس التنويه: لازم on_conflict=rep_name,snf عشان تجاهل التكرار يشتغل فعليًا على القيد
     // الصحيح، خصوصًا هنا لأن الطلب بيبعت دفعة كبيرة ممكن يتقاطع فيها مع أصناف موجودة بالفعل
-    const res = await fetch(SUPABASE_URL+'/rest/v1/rep_extra_items?on_conflict=rep_name,snf',{
+    const res = await _apiFetch(SUPABASE_URL+'/rest/v1/rep_extra_items?on_conflict=rep_name,snf',{
       method:'POST',
       headers:Object.assign({},SB_HEADERS,{'Prefer':'resolution=ignore-duplicates,return=minimal'}),
       body:JSON.stringify(rows)
@@ -2814,7 +2890,7 @@ async function ciSubmitDamagedHandover(){
   });
   if(!items.length){ showToast('اختار صنف وكمية أولاً'); return; }
   try{
-    const res = await Promise.all(items.map(it=>fetch(SUPABASE_URL+'/rest/v1/rep_damaged_handovers', {
+    const res = await Promise.all(items.map(it=>_apiFetch(SUPABASE_URL+'/rest/v1/rep_damaged_handovers', {
       method:'POST',
       headers:Object.assign({},SB_HEADERS,{'Prefer':'return=minimal'}),
       body: JSON.stringify({rep_name:currentRep.name, snf:it.snf, qty:it.qty, created_by:currentRep.name})
@@ -2903,21 +2979,21 @@ async function ciConfirmTransfer(id, action){
     if(action==='source_confirm'){
       if(!confirm(`تأكيد تسليم البضاعة دي لـ${t.to_rep}؟ هتتخصم من رصيدك فورًا.`)) return;
       const adjRows = (t.items||[]).map(it=>({rep_name:t.from_rep, snf:it.name, qty_delta:-it.qty, reason:`تحويل بضاعة إلى ${t.to_rep}`, adjusted_by:currentRep.name, source_transfer_id:t.id}));
-      const r1 = await fetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{method:'POST',headers:H,body:JSON.stringify(adjRows)});
+      const r1 = await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{method:'POST',headers:H,body:JSON.stringify(adjRows)});
       if(!r1.ok) throw new Error(await r1.text());
-      await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'pending_target', source_confirmed_by:currentRep.name, source_confirmed_at:new Date().toISOString()})});
+      await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'pending_target', source_confirmed_by:currentRep.name, source_confirmed_at:new Date().toISOString()})});
     } else if(action==='source_reject'){
       if(!confirm('رفض طلب التحويل ده؟')) return;
-      await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'rejected_source', rejected_by:currentRep.name, rejected_at:new Date().toISOString()})});
+      await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'rejected_source', rejected_by:currentRep.name, rejected_at:new Date().toISOString()})});
     } else if(action==='target_confirm'){
       if(!confirm(`تأكيد استلام البضاعة دي من ${t.from_rep}؟ هتتضاف لرصيدك فورًا.`)) return;
       const adjRows = (t.items||[]).map(it=>({rep_name:t.to_rep, snf:it.name, qty_delta:+it.qty, reason:`تحويل بضاعة من ${t.from_rep}`, adjusted_by:currentRep.name, source_transfer_id:t.id}));
-      const r1 = await fetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{method:'POST',headers:H,body:JSON.stringify(adjRows)});
+      const r1 = await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{method:'POST',headers:H,body:JSON.stringify(adjRows)});
       if(!r1.ok) throw new Error(await r1.text());
-      await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'completed', target_confirmed_by:currentRep.name, target_confirmed_at:new Date().toISOString()})});
+      await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'completed', target_confirmed_by:currentRep.name, target_confirmed_at:new Date().toISOString()})});
     } else if(action==='target_reject'){
       if(!confirm('رفض استلام البضاعة دي؟ الحالة هتفضل معلّقة لحد ما المشرف يتدخل يدويًا.')) return;
-      await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'disputed', rejected_by:currentRep.name, rejected_at:new Date().toISOString(), reject_reason:'رفض المندوب المستلم تأكيد الاستلام'})});
+      await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'disputed', rejected_by:currentRep.name, rejected_at:new Date().toISOString(), reject_reason:'رفض المندوب المستلم تأكيد الاستلام'})});
     }
     showToast?.('✅ تم');
     ciLoad();
@@ -3009,7 +3085,7 @@ async function ciSaveCount(){
              computed_qty:computed, diff:computed-counted, resolved:true };
   });
   try{
-    const res = await fetch(SUPABASE_URL+'/rest/v1/rep_car_inventory',{method:'POST',headers:SB_HEADERS,body:JSON.stringify(rows)});
+    const res = await _apiFetch(SUPABASE_URL+'/rest/v1/rep_car_inventory',{method:'POST',headers:SB_HEADERS,body:JSON.stringify(rows)});
     if(!res.ok) throw new Error(await res.text());
 
     const adjRows = rows.filter(r=>r.diff!==0).map(r=>({
@@ -3017,7 +3093,7 @@ async function ciSaveCount(){
       reason: 'جرد دوري شامل — اعتماد فوري أوتوماتيكي', adjusted_by: currentRep.name
     }));
     if(adjRows.length){
-      const adjRes = await fetch(SUPABASE_URL+'/rest/v1/rep_balance_adjustments',{method:'POST',headers:SB_HEADERS,body:JSON.stringify(adjRows)});
+      const adjRes = await _apiFetch(SUPABASE_URL+'/rest/v1/rep_balance_adjustments',{method:'POST',headers:SB_HEADERS,body:JSON.stringify(adjRows)});
       if(!adjRes.ok) throw new Error(await adjRes.text());
     }
 
@@ -3158,7 +3234,7 @@ async function ciSendRequest(){
   if(!items.length){ showToast('اختار كمية لصنف واحد على الأقل'); return; }
   try{
     const branches=[..._ciReqSelBr];
-    const res = await fetch(SUPABASE_URL+'/rest/v1/rep_stock_requests',{method:'POST',headers:SB_HEADERS,body:JSON.stringify({
+    const res = await _apiFetch(SUPABASE_URL+'/rest/v1/rep_stock_requests',{method:'POST',headers:SB_HEADERS,body:JSON.stringify({
       rep_name: currentRep.name, grp: currentRep.grp||'', items, branches, status:'pending'
     })});
     if(!res.ok) throw new Error(await res.text());
@@ -3377,7 +3453,8 @@ async function openDelVisit(branch){
 
   // preload pdb + prices
   try{
-    const [pdb, prices] = await Promise.all([loadPdb(), loadSalesPrices()]);
+    const [pdb, prices0] = await Promise.all([loadPdb(), loadSalesPrices()]);
+    const prices = await pricesForClient(prices0, branch.client_name);
     visitState._pdb = pdb;
     visitState._prices = prices;
     buildFeaButtons(pdb);
@@ -3625,7 +3702,7 @@ async function openInvoiceReview(mode){
   invoiceState.specialDisc=state.specialDisc||0;
   invoiceState.editIdx=null;
 
-  const prices=await loadSalesPrices();
+  const prices=isReturn?await loadSalesPrices():await pricesForClient(await loadSalesPrices(), state.client);
   const clientPLPrices=state.clientPL||{};
   const statePromos=state.promos||{};
   invoiceState.items=[];
@@ -3818,7 +3895,7 @@ async function sendInvoice(mode){
           ...(isReturn ? {receipt_status:'pending'} : {}),
           [dateField]:invoiceDate
         };
-        const res=await fetch(SUPABASE_URL+'/rest/v1/'+table,{method:'POST',headers:H,body:JSON.stringify(payload)});
+        const res=await _apiFetch(SUPABASE_URL+'/rest/v1/'+table,{method:'POST',headers:H,body:JSON.stringify(payload)});
         if(res.ok||res.status===201){ sent=true; break; }
         const eTxt=await res.text();
         // 409 أو رسالة duplicate key = تعارض في رقم الفاتورة تحديداً → أعد المحاولة برقم جديد
@@ -4332,7 +4409,7 @@ async function savePass(){
   if(nw.length<4){msg.className='pro-msg err';msg.style.display='block';msg.textContent='كلمة المرور قصيرة جداً';return;}
   if(!(await passMatches(currentRep.pass_hash,cur))){msg.className='pro-msg err';msg.style.display='block';msg.textContent='كلمة المرور الحالية غير صحيحة';return;}
   try{
-    await fetch(SUPABASE_URL+'/rest/v1/users?id=eq.'+currentRep.id,{method:'PATCH',headers:SB_HEADERS,body:JSON.stringify({pass_hash:nw})});
+    await _apiFetch(SUPABASE_URL+'/rest/v1/users?id=eq.'+currentRep.id,{method:'PATCH',headers:SB_HEADERS,body:JSON.stringify({pass_hash:nw})});
     currentRep.pass_hash=nw;
     msg.className='pro-msg ok';msg.style.display='block';msg.textContent='✅ تم تغيير كلمة المرور';
     $('pass-cur').value='';$('pass-new').value='';$('pass-con').value='';
@@ -4348,7 +4425,7 @@ async function loadBranchNotesRep(){
   let notes = [];
   try{
     const url = `${SUPABASE_URL}/rest/v1/messages?to_rep=eq.${encodeURIComponent(currentRep.name)}&notif_type=eq.branch_note_rep&select=*&order=created_at.desc&limit=50`;
-    const res = await fetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const res = await _apiFetch(url,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
     notes = res.ok ? await res.json() : [];
   }catch(e){ notes=[]; }
 
@@ -4397,14 +4474,14 @@ async function bnRepSendReply(msgId, fromName){
   if(!reply){ showToast('⚠️ اكتب رداً أولاً'); return; }
 
   // حفّظ الرد في الرسالة الأصلية
-  await fetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${msgId}`,{
+  await _apiFetch(`${SUPABASE_URL}/rest/v1/messages?id=eq.${msgId}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body: JSON.stringify({ reply_text: reply, reply_by: currentRep.name, reply_at: new Date().toISOString(), is_read: true })
   });
 
   // أرسل إشعار لمشرف المبيعات بأن المندوب رد
-  await fetch(`${SUPABASE_URL}/rest/v1/messages`,{
+  await _apiFetch(`${SUPABASE_URL}/rest/v1/messages`,{
     method:'POST',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=minimal'},
     body: JSON.stringify({
@@ -4451,7 +4528,7 @@ async function pbMatchTargetClients(targetClients, myBranches){
 
 async function checkPromoBanner(){
   try{
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/promo_banner?active=eq.true&select=*&order=id.asc`,{headers:SB_HEADERS});
+    const r = await _apiFetch(`${SUPABASE_URL}/rest/v1/promo_banner?active=eq.true&select=*&order=id.asc`,{headers:SB_HEADERS});
     if(!r.ok) return;
     const rows = await r.json();
     if(!rows.length) return;
