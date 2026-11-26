@@ -69181,6 +69181,27 @@ function cstCfCompute(){
   const tot=MS.map((_,i)=>T.late[i]+T.open[i]+T.fut[i]);
   return {MS,T,tot,rows,after,chqAhead,chqAheadN,m0,doubt,doubtN};
 }
+
+// تصدير التدفق النقدي (PDF / Excel / إرسال) — نفس محرك تقارير التحصيل (rpxBuildPdf / rpxSheet / rpxDeliver)
+function cstCfReport(){
+  const F=cstCfCompute(), N=cstF, ml=m=>CST_MON[+m.slice(5,7)-1]+' '+m.slice(0,4), sum=a=>a.reduce((x,y)=>x+y,0);
+  const q=(CST.q||'').trim(), L=F.rows.filter(R=>!q||String(R.x.c.name).includes(q));
+  const all=sum(F.tot), C3=[['late','متأخرات'],['open','مستحقات مفتوحة (بيع اتعمل)'],['fut','مبيعات جاية (متوقعة)']];
+  return {ym:F.m0,title:`التدفق النقدي المتوقع من عملاء مودرن تريد — ${ml(F.MS[0])} إلى ${ml(F.MS[CF_H-1])}`,
+    kpis:[['المتوقع يدخل في '+CF_H+' شهور',N(all)],[ml(F.MS[0]),N(F.tot[0])],['متأخرات',N(sum(F.T.late))],['مستحقات مفتوحة',N(sum(F.T.open))],['من مبيعات جاية',N(sum(F.T.fut))]].concat(F.doubt>0.5?[['مستبعد (ديون مشكوك فيها)',N(F.doubt)]]:[]),
+    secs:[{title:'المصادر',alignR:[0],nowrap:F.MS.map((_,i)=>i+1).concat([CF_H+1]),head:['المصدر',...F.MS.map(ml),'الإجمالي'],
+        rows:C3.map(([k,l])=>[l,...F.T[k].map(N),N(sum(F.T[k]))]),total:['الإجمالي',...F.tot.map(N),N(all)]},
+      {title:'العملاء',alignR:[1],nowrap:[0,2,3].concat(F.MS.map((_,i)=>i+4),[CF_H+4,CF_H+5]),head:['#','العميل','متوسط مسحوباته (3 شهور)','بيدفع بعد',...F.MS.map(ml),'الإجمالي','منه متأخرات'],
+        rows:L.map((R,i)=>[i+1,cstShort(R.x.c.name),N(R.avg),R.x.cy==='h'?R.x.cd+' يوم (نص شهر)':R.x.lag+' يوم',...R.tot.map(v=>v>0.5?N(v):''),N(R.sum),sum(R.late)>0.5?N(sum(R.late)):'']),
+        total:['','الإجمالي ('+L.length+' عميل)',N(L.reduce((a,R)=>a+R.avg,0)),'',...F.MS.map((_,i)=>N(L.reduce((a,R)=>a+R.tot[i],0))),N(L.reduce((a,R)=>a+R.sum,0)),N(L.reduce((a,R)=>a+sum(R.late),0))]}]};
+}
+function cstCfPdf(send){ if(!CST.res) return; const d=cstCfReport();
+  rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,d.secs,cstColMeta()); return pdf?pdf.output('blob'):null; },`AlTahhan_MT_CashFlow_${d.ym}.pdf`,d.title,send); }
+function cstCfXlsx(send){ if(!CST.res) return; const d=cstCfReport();
+  rpxDeliver('xlsx',async()=>{ const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]}; const num=v=>typeof v==='string'&&/^-?\d+(\.\d+)?$/.test(v)?+v:v;
+    d.secs.forEach(s=>rpxSheet(wb,s.title,d.title,d.kpis.map(k=>k[0]+': '+k[1]).join(' · '),s.head,s.rows.map(r=>r.map(num)),s.total&&s.total.map(num)));
+    wb.SheetNames.forEach(n=>{ const ws=wb.Sheets[n]; Object.keys(ws).forEach(k=>{ if(k[0]!=='!'&&ws[k]&&typeof ws[k].v==='number') ws[k].z=Number.isInteger(ws[k].v)?'0':'0.00'; }); });
+    const arr=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true}); return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}); },`AlTahhan_MT_CashFlow_${d.ym}.xlsx`,d.title,send); }
 function cstCfPanel(){
   const X=CST.res; if(String(CST.data.year)!==X.today.slice(0,4)) return `<div class="cst-empty">التدفق النقدي بيتحسب على السنة الحالية بس — اختار ${X.today.slice(0,4)} من فوق.</div>`;
   const F=cstCfCompute(), N=v=>Math.round(v).toLocaleString('en-US'), ml=m=>CST_MON[+m.slice(5,7)-1]+' '+m.slice(0,4);
@@ -69199,7 +69220,7 @@ function cstCfPanel(){
     ${C3.map(([k,l])=>`<tr><td class="n">${l}</td>${F.T[k].map(v=>`<td>${N(v)}</td>`).join('')}<td><b>${N(F.T[k].reduce((a,b)=>a+b,0))}</b></td></tr>`).join('')}
     </tbody><tfoot><tr><td class="n">الإجمالي</td>${F.tot.map(v=>`<td>${N(v)}</td>`).join('')}<td>${N(all)}</td></tr></tfoot></table>`;
   const q=(CST.q||'').trim(), L=F.rows.filter(R=>!q||String(R.x.c.name).includes(q));
-  h+=`<div class="cst-tools" style="margin-top:12px"><input placeholder="🔍 دوّر على عميل..." value="${cstE(CST.q)}" oninput="CST.q=this.value;clearTimeout(window._cstQ);window._cstQ=setTimeout(()=>{cstRender();const i=document.querySelector('.cst-tools input');if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length);}},350)"></div>
+  h+=`<div class="cst-tools" style="margin-top:12px"><input placeholder="🔍 دوّر على عميل..." value="${cstE(CST.q)}" oninput="CST.q=this.value;clearTimeout(window._cstQ);window._cstQ=setTimeout(()=>{cstRender();const i=document.querySelector('.cst-tools input');if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length);}},350)"><span style="flex:1"></span><button class="btn btn-ghost btn-sm" onclick="cstCfPdf()"><i class="ti ti-file-type-pdf"></i> PDF</button><button class="btn btn-ghost btn-sm" onclick="cstCfXlsx()"><i class="ti ti-file-spreadsheet"></i> Excel</button><button class="btn btn-ghost btn-sm" onclick="cstCfPdf(true)"><i class="ti ti-send"></i> إرسال</button></div>
     <div style="overflow:auto"><table class="cst-t"><thead><tr><th>#</th><th style="text-align:right">العميل</th><th>متوسط مسحوباته (3 شهور)</th><th>بيدفع بعد</th>${F.MS.map(m=>`<th>${ml(m)}</th>`).join('')}<th>الإجمالي</th><th>منه متأخرات</th></tr></thead><tbody>
     ${L.map((R,i)=>{ const lt=R.late.reduce((a,b)=>a+b,0); return `<tr><td>${i+1}</td><td class="n">${cstNameCell(R.x)}</td><td>${N(R.avg)}</td><td>${R.x.cy==='h'?R.x.cd+' يوم (نص شهر)':R.x.lag+' يوم'}</td>${R.tot.map(v=>`<td>${v>0.5?N(v):'—'}</td>`).join('')}<td><b>${N(R.sum)}</b></td><td style="${lt>0.5?'color:#B71C1C;font-weight:800':''}">${lt>0.5?N(lt):'—'}</td></tr>`; }).join('')}
     </tbody></table></div>
