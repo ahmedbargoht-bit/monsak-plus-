@@ -63109,8 +63109,92 @@ function sfcLoadRates(){
   return SFC.ratesP;
 }
 function sfcRateOf(c){ if(!SFC.rates) return null; const k=typeof stmN==='function'?stmN(c):String(c||'').trim(); return SFC.rates.m[k]||null; }
+// ══ النموذج الإحصائي للتوقع البيعي (26/11) — انحدار Poisson يومي بمواسم هجرية ══
+// المدخلات: بيع يومي صافي (fc_daily_net). المميزات: أسبوع بالنسبة لأول رمضان (−10 لـ +5 أسابيع)، العيد الكبير،
+// يوم الأسبوع، أول/آخر الشهر، آخر السنة، واتجاه عام. الأيام اللي مفيهاش بيع = صفر.
+const SFM_RAM=['2024-03-11','2025-03-01','2026-02-18','2027-02-08','2028-01-28','2029-01-16'];
+const SFM_ADHA=['2024-06-16','2025-06-06','2026-05-27','2027-05-16','2028-05-05','2029-04-24'];
+function sfmD(s){ return Date.UTC(+s.slice(0,4),+s.slice(5,7)-1,+s.slice(8,10))/864e5; }
+function sfmS(n){ return new Date(n*864e5).toISOString().slice(0,10); }
+function sfmNear(list,n){ let b=null,bd=1e9; list.forEach(x=>{ const k=n-sfmD(x); if(Math.abs(k)<Math.abs(bd)){ bd=k; b=x; } }); return bd; }
+function sfmFeat(n,t0,tCap){
+  const f=[1], k=sfmNear(SFM_RAM,n), k2=sfmNear(SFM_ADHA,n), dt=new Date(n*864e5), wd=dt.getUTCDay(), day=dt.getUTCDate(), mo=dt.getUTCMonth()+1;
+  for(let a=-70;a<42;a+=7) f.push(k>=a&&k<a+7?1:0);
+  f.push(k2>=-14&&k2<0?1:0, k2>=0&&k2<4?1:0);
+  for(let w=0;w<7;w++) f.push(wd===w?1:0);
+  f.push(day<=3?1:0, day>=26?1:0, (mo===12&&day>=20)?1:0, Math.min(n,tCap)/365-t0);
+  return f; }
+function sfmSolve(A,b){ const n=b.length, M=A.map((r,i)=>[...r,b[i]]);
+  for(let c=0;c<n;c++){ let p=c; for(let r=c+1;r<n;r++) if(Math.abs(M[r][c])>Math.abs(M[p][c])) p=r; [M[c],M[p]]=[M[p],M[c]];
+    const d=M[c][c]||1e-12; for(let r=0;r<n;r++){ if(r===c) continue; const q=M[r][c]/d; if(q) for(let j=c;j<=n;j++) M[r][j]-=q*M[c][j]; } }
+  return M.map((r,i)=>r[n]/(r[i]||1e-12)); }
+// rows: [[ 'YYYY-MM-DD', value ], ...] — بيرجّع دالة بتدّي التوقع لأي يوم
+function sfmFit(rows, opt){
+  opt=opt||{}; if(!rows.length) return null;
+  const m={}; rows.forEach(([d,v])=>{ m[d]=(m[d]||0)+(+v||0); });
+  const ds=Object.keys(m).sort(), a=sfmD(ds[0]), b=opt.to?sfmD(opt.to):sfmD(ds[ds.length-1]);
+  const sc=1000, t0=a/365, X=[], y=[];
+  for(let n=a;n<=b;n++){ X.push(sfmFeat(n,t0,b)); y.push(Math.max(0,(m[sfmS(n)]||0))/sc); }
+  const p=X[0].length, lam=opt.lam==null?2:opt.lam, mean=y.reduce((s,v)=>s+v,0)/y.length||1e-6;
+  // أعمدة ثابتة (مفيش تنوع) تتشال من التعلم
+  const use=X[0].map((_,j)=>j===0||X.some(r=>r[j]!==X[0][j]));
+  let beta=new Array(p).fill(0); beta[0]=Math.log(mean);
+  for(let it=0;it<60;it++){
+    const H=Array.from({length:p},()=>new Array(p).fill(0)), g=new Array(p).fill(0);
+    for(let i=0;i<X.length;i++){ const x=X[i]; let e=0; for(let j=0;j<p;j++) e+=x[j]*beta[j]; const mu=Math.exp(Math.min(e,30)), r=y[i]-mu;
+      for(let j=0;j<p;j++){ if(!x[j]) continue; g[j]+=x[j]*r; for(let k=0;k<p;k++) if(x[k]) H[j][k]+=x[j]*x[k]*mu; } }
+    for(let j=0;j<p;j++){ if(j>0){ g[j]-=lam*beta[j]; H[j][j]+=lam; } if(!use[j]){ H[j]=H[j].map((_,k)=>k===j?1:0); g[j]=0; } }
+    const d=sfmSolve(H,g); let mx=0; for(let j=0;j<p;j++){ beta[j]+=d[j]; mx=Math.max(mx,Math.abs(d[j])); } if(mx<1e-7) break; }
+  const pred=n=>{ const x=sfmFeat(n,t0,b); let e=0; for(let j=0;j<p;j++) e+=x[j]*beta[j]; return Math.exp(Math.min(e,30))*sc; };
+  return { last:sfmS(b), day:s=>pred(sfmD(s)), range:(f,t)=>{ let s=0; for(let n=sfmD(f);n<=sfmD(t);n++) s+=pred(n); return s; } };
+}
+
+// ── تحميل/تشغيل النموذج على نفس فلاتر التوقع ──
+function sfmArgs(){ return {p_branches:sfcArr('br'),p_grps:sfcArr('grp'),p_routes:sfcArr('route'),p_customers:sfcArr('cust'),p_sites:sfcArr('site'),p_items:sfcArr('item')}; }
+async function sfmEnsure(){
+  const args=sfmArgs(), to=sfcLastData(), key=JSON.stringify({...args,to});
+  if(SFC.sfm&&(SFC.sfm.key===key)) return;
+  SFC.sfm={key,loading:true}; 
+  try{
+    const r=await csRpc('fc_daily_net',{p_from:'2025-01-01',p_to:to,...args});
+    if(!SFC.sfm||SFC.sfm.key!==key) return;
+    const rows=(r||[]).map(a=>[String(a[0]).slice(0,10),+a[1]||0]);
+    const M=sfmFit(rows,{to});
+    // دقة النموذج: نتوقع كل شهر من آخر 6 شهور كاملة من اللي قبله ونقارن بالفعلي
+    const lm=to.slice(0,7), lastFull=(to===sfcMonthRange(lm)[1])?lm:sfcAddM(lm,-1), bt=[];
+    for(let k=5;k>=0;k--){ const ym=sfcAddM(lastFull,-k), [f,t]=sfcMonthRange(ym), prev=sfmS(sfmD(f)-1);
+      const tr=rows.filter(x=>x[0]<f); if(tr.length<200) continue; const Mk=sfmFit(tr,{to:prev});
+      const act=rows.filter(x=>x[0]>=f&&x[0]<=t).reduce((a,x)=>a+x[1],0); if(act>0) bt.push({ym,act,pred:Mk.range(f,t)}); }
+    const mape=bt.length?bt.reduce((a,x)=>a+Math.abs(x.pred-x.act)/x.act,0)/bt.length*100:null;
+    SFC.sfm={key,M,bt,mape,n:rows.length};
+  }catch(e){ console.error('[sfm]',e); SFC.sfm={key,err:String(e&&e.message||e)}; }
+  sfcRenderMonths();
+}
+function sfmMonth(ym){ const S=SFC.sfm; if(!S||!S.M) return 0; const [f,t]=sfcMonthRange(ym); return Math.round(S.M.range(f,t)); }
+function sfmUseAll(){ const S=SFC.sfm; if(!S||!S.M) return;
+  const L=sfcMonthList(); if(!confirm('هيتكتب توقع النموذج كهدف في كل الشهور ('+L.length+' شهر) بدل الأرقام اللي فيها. تكمل؟')) return;
+  L.forEach(ym=>{ const v=sfmMonth(ym); if(v>0) SFC.months[ym]=v; }); sfcRenderMonths(); sfcChanged(); sfcLoad(); }
+function sfmUse(ym){ const v=sfmMonth(ym); if(v>0){ SFC.months[ym]=v; sfcRenderMonths(); sfcChanged(); sfcLoad(); } }
+function sfmRowHtml(L){
+  const S=SFC.sfm;
+  if(!S||S.loading) return `<tr><td colspan="${L.length}" style="padding:6px;font-size:11px;color:#8B6F47">📈 جاري حساب توقع النموذج الإحصائي...</td></tr>`;
+  if(S.err||!S.M) return `<tr><td colspan="${L.length}" style="padding:6px;font-size:11px;color:#B71C1C">📈 تعذر حساب النموذج${S.err?': '+ccEsc(S.err):''}</td></tr>`;
+  return `<tr style="background:#EEF6EE">${L.map(ym=>{ const v=sfmMonth(ym); return `<td style="padding:4px 3px;white-space:nowrap"><button type="button" onclick="sfmUse('${ym}')" title="حط توقع النموذج كهدف للشهر ده"
+    style="width:104px;padding:5px 2px;border:1px dashed #2E7D32;border-radius:7px;background:#fff;color:#1B5E20;font-family:inherit;font-weight:800;font-size:11.5px;cursor:pointer;direction:ltr">${v?sfcN(v):'—'}</button></td>`; }).join('')}</tr>`; }
+function sfmBarHtml(){
+  const S=SFC.sfm; if(!S||!S.M) return '';
+  const bt=(S.bt||[]).map(x=>`${sfcMonLbl(x.ym)}: ${Math.round((x.pred-x.act)/x.act*100)}%`).join(' · ');
+  return `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:#EEF6EE;border:1px solid #A5D6A7;border-radius:10px;padding:8px 12px;margin-bottom:8px;font-size:12px">
+    <b style="color:#1B5E20">📈 توقع النموذج الإحصائي</b>
+    <span style="color:#33691E">مبني على البيع اليومي من يناير 2025 لحد ${S.M.last} بنفس الفلاتر — بيتعلم موسم رمضان (بالأسابيع قبله وبعده)، والعيد الكبير، وأيام الأسبوع، وأول وآخر الشهر، وآخر السنة، والاتجاه العام.</span>
+    ${S.mape!=null?`<span style="background:#fff;border-radius:8px;padding:2px 8px;font-weight:800;color:#1B5E20" title="${ccEsc(bt)}">دقته على آخر ${S.bt.length} شهور: متوسط خطأ ${S.mape.toFixed(0)}%</span>`:''}
+    <button class="btn btn-ghost btn-sm" style="margin-right:auto;background:#fff;border:1px solid #2E7D32;color:#1B5E20;font-weight:800" onclick="sfmUseAll()">استخدم توقع النموذج كهدف لكل الشهور</button>
+    <span style="width:100%;color:#6B7B5B;font-size:11px">الصف الأخضر تحت الشهور = توقع النموذج. دوس على أي رقم يتكتب هدف للشهر ده. ⚠️ اتعلّم موسم رمضان من سنتين بس، فخد أرقام الموسم كإشارة وراجعها.</span>
+  </div>`; }
+
 function sfcRenderMonths(){
   sfcRenderIsrc();
+  setTimeout(()=>{ try{ sfmEnsure(); }catch(e){} },0);
   const box=document.getElementById('sfc-months'); if(!box) return;
   const ms=sfcActiveMonths(), tot=ms.reduce((a,k)=>a+(SFC.tgt[k]||SFC.months[k]||0),0), A=SFC.annual, L=sfcMonthList(), R=new Set(sfcRangeMonths());
   if(!A.from||!A.to){ const d=sfcDefRange(); A.from=A.from||d[0]; A.to=A.to||d[1]; }
@@ -63126,12 +63210,14 @@ function sfcRenderMonths(){
       <div style="font-size:11.5px;color:#8B6F47;max-width:520px;line-height:1.6">الإجمالي بيتقسم على الشهور، كل شهر بنسبة بيعه في نفس الأيام الهجرية من السنة اللي فاتت. تقدر تكتب رقم شهر بإيدك فيتثبت، والباقي يتقسم على باقي الشهور.</div>
       <div style="margin-right:auto;font-weight:800">مجموع الشهور: <span style="color:#731E2E">${sfcN(tot)}</span> ج</div></div>
     ${SFC.annWarn?`<div style="background:#FFEBEE;border:1px solid #E57373;border-radius:8px;padding:6px 10px;margin-bottom:8px;color:#B71C1C;font-size:12px">⚠️ ${SFC.annWarn}</div>`:''}
+    ${sfmBarHtml()}
     <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;text-align:center;min-width:100%">
       <tr style="background:#F3EBDD">${L.map(ym=>`<th style="padding:6px 4px;white-space:nowrap;${R.has(ym)?'background:#EDE0C8':''}">${sfcMonLbl(ym)}</th>`).join('')}</tr>
       <tr>${L.map(ym=>{ const man=SFC.months[ym]>0, v=man?SFC.months[ym]:(SFC.tgt[ym]||0), auto=!man&&v>0;
         return `<td style="padding:4px 3px;white-space:nowrap"><input type="text" inputmode="decimal" value="${v?Math.round(v).toLocaleString('en-US'):''}" placeholder="—" data-ym="${ym}" onchange="sfcSetMonth(this.dataset.ym,this.value)" title="${man?'رقم مكتوب بإيدك — امسحه عشان يرجع يتحسب':(auto?'محسوب من الهدف الإجمالي — اكتب رقم عشان تثبته':'')}"
         style="width:104px;padding:6px 4px;border:1.5px solid ${man?'#731E2E':(auto?'#C8A96E':'#D4C4A8')};border-radius:7px;font-family:inherit;font-weight:${man?800:600};color:${man?'#731E2E':'#5B4630'};background:${man?'#FFF8E1':'#fff'};text-align:center;direction:ltr"/>${man&&R.has(ym)?`<div><a href="javascript:void 0" data-ym="${ym}" onclick="sfcSetMonth(this.dataset.ym,'')" style="font-size:10px;color:#B71C1C">📌 إلغاء التثبيت</a></div>`:''}</td>`; }).join('')}</tr>
       <tr>${L.map(ym=>{ const b=sfcBaseOf(ym); return `<td style="padding:2px 3px;font-size:10px;color:#8B6F47;line-height:1.4" title="أساس النسب: من ${b.f} إلى ${b.t}">${b.lbl}${b.back>1?'<br><span style="color:#B26A00">(سنتين قبل)</span>':''}</td>`; }).join('')}</tr>
+      ${sfmRowHtml(L)}
     </table></div></div>`;
 }
 function sfcSetAnnual(k,v){ if(k==='total'){ const n=sfcNum(v); SFC.annual.total=n&&n>0?n:0; } else SFC.annual[k]=v;
