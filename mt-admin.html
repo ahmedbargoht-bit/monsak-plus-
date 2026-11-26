@@ -69077,7 +69077,7 @@ function cstRender(){
   const card=(l,v,s,c)=>`<div class="cst-card" style="--c:${c}"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s}</div></div>`;
   const T=X.colTot, pc=(a,b)=>b>0?Math.round(a/b*100)+'%':'0%', ml=cstKL(X.cm);
   h+=`<div class="cst-cards">${card('📌 الرصيد النهارده',cstF(X.bal),'رصيد الكشف: '+cstF(X.balStmt),'#731E2E')}${card('📅 المطلوب في '+ml,cstF(T.dV),'اتدفع '+cstF(T.dP)+' ('+pc(T.dP,T.dV)+') · الباقي '+cstF(T.dLeft),'#B26A00')}${card('⏰ المتأخرات',cstF(T.aLeft),T.aP>1?'اتدفع منها الشهر ده '+cstF(T.aP):'شهور قديمة لسه مادفعتش','#B71C1C')}${card('💰 الباقي للتحصيل',cstF(T.left),'الشيك المتوقع بعد الإشعارات'+(T.retPrev>1?' والمرتجع':'')+': '+cstF(T.expChq),'#1A5E8A')}${card('👥 العملاء',`<span style="color:#1A7A4A">${T.nPaid}</span> · <span style="color:#B26A00">${T.nPart}</span> · <span style="color:#B71C1C">${T.nNone}</span>`,'✅ دفع كله · 🟡 دفع جزء · 🔴 مادفعش','#4A5B70')}</div>`;
-  const tabs=[['coll','📋 موقف التحصيل'],['late','⏰ المتأخرين'],['grid','🗓️ تصفية الشهور'],['pat','📈 نمط العملاء'],['cf','💰 التدفق النقدي المتوقع']];
+  const tabs=[['coll','📋 موقف التحصيل'],['late','⏰ المتأخرين'],['grid','🗓️ تصفية الشهور'],['pat','📈 نمط العملاء'],['cf','💰 التدفق النقدي المتوقع'],['risk','🛡️ تقييم الخطر']];
   h+=`<div class="cst-tabs">${tabs.map(([k,l])=>`<div class="cst-tab${CST.tab===k?' on':''}" onclick="CST.tab='${k}';cstRender()">${l}</div>`).join('')}</div><div class="cst-panel">${cstPanel()}</div>`;
   if(CST.open) h+=cstCardHtml();
   box.innerHTML=h;
@@ -69230,10 +69230,89 @@ function cstCfPanel(){
     • التوقيت بميعاد <b>استلام الشيك</b> مش صرفه. ${F.chqAheadN?`فيه ${F.chqAheadN} شيك مستلم استحقاقهم بعد النهارده بإجمالي ${N(F.chqAhead)} (من الوصف — مش كل الشيكات مكتوب عليها استحقاق).`:''}${F.after>0.5?` · فيه ${N(F.after)} متوقعين بعد ${ml(F.MS[CF_H-1])} (أغلبهم من مبيعات آخر الشهور اللي بتتحصّل بعد كده).`:''}${F.doubt>0.5?`<br>• <b>مستبعد:</b> ${F.doubtN>1?F.doubtN+' حسابات':'حساب'} الديون المشكوك في تحصيلها (${N(F.doubt)}) — مش داخل في التوقع.`:''}</div>`;
   return h;
 }
+
+// ══ تقييم الخطر لكل عميل (26/11) — درجة من 100 (أعلى = آمن) من 7 عوامل، كلها من حسابات التصفية (CST.res) ══
+// التأخير الفعلي عن المتفق 25 · المتأخرات ÷ متوسط المسحوبات 20 · الشيكات المرتدة 15 · نسبة الإشعارات 15 · المرتجع 10 · اتجاه البيع 10 · مطابقة الكشف 5
+const RK_F=[['lag','التأخير في الدفع',25],['arr','المتأخرات',20],['bnc','شيكات مرتدة',15],['ded','الإشعارات',15],['ret','المرتجع',10],['trd','اتجاه البيع',10],['mt','مطابقة الكشف',5]];
+function cstRkCompute(){
+  const X=CST.res, today=X.today, m0=today.slice(0,7), lin=(v,good,bad)=>Math.max(0,Math.min(1,(bad-v)/(bad-good)));
+  const out=[]; let doubt=0;
+  X.C.forEach(x=>{
+    if(/مشكوك/.test(String(x.c.name||''))){ doubt+=Math.max(0,x.balCalc); return; }
+    const wm=ym=>+((x.c.w||{})[ym])||0, ms=X.MS.filter(m=>m<m0), act=ms.filter(m=>Math.abs(wm(m))>1);
+    if(!act.length&&Math.abs(x.balCalc)<1000) return;
+    const avgW=act.length?act.reduce((a,m)=>a+Math.max(0,wm(m)),0)/act.length:0;
+    // 1) التأخير الفعلي (وسيط شيكاته) عن المسموح — محتاج شيكين على الأقل
+    const over=x.lagOwn?x.lag-x.allow:null, sLag=over==null?0.6:lin(over,0,60);
+    // 2) المتأخرات = الشيك المتوقع عن شهور ميعادها عدّى ÷ متوسط مسحوباته الشهرية
+    const arrV=x.rows.filter(r=>r.st==='late').reduce((a,r)=>a+Math.max(0,r.expChq),0), arrM=avgW>0?arrV/avgW:(arrV>1000?9:0), sArr=lin(arrM,0,3);
+    // 3) الشيكات المرتدة في السنة (سطور سداد بالسالب)
+    const bl=(x.c.pays||[]).filter(p=>+p.a<0), bN=bl.length, bV=-bl.reduce((a,p)=>a+(+p.a),0), sBnc=lin(bN,0,3);
+    // 4) نسبة الإشعارات (الشهور اللي عدّى عليها 3 شهور)
+    const sDed=lin(x.rate,0.20,0.45);
+    // 5) المرتجع ÷ (الصافي + المرتجع)
+    const rT=Object.values(x.c.r||{}).reduce((a,v)=>a+(+v||0),0), wT=Object.values(x.c.w||{}).reduce((a,v)=>a+(+v||0),0), retP=(wT+rT)>0?rT/(wT+rT):0, sRet=lin(retP,0.03,0.15);
+    // 6) اتجاه البيع: آخر 3 شهور كاملة ÷ الـ 3 اللي قبلهم
+    const l3=[1,2,3].map(k=>wm(cstAddM(m0,-k))).reduce((a,b)=>a+b,0), p3=[4,5,6].map(k=>wm(cstAddM(m0,-k))).reduce((a,b)=>a+b,0), trd=p3>0?l3/p3-1:null, sTrd=trd==null?0.5:lin(-trd,0,0.5);
+    // 7) رصيده المحسوب = رصيد الكشف؟
+    const sMt=x.match==null?0.5:(x.match?1:0);
+    // مديونية واقفة: متأخرات ومفيش بيع آخر 3 شهور ← التأخير والاتجاه صفر
+    const stuck=arrV>=20000&&l3<=0; const S={lag:stuck?0:sLag,arr:sArr,bnc:sBnc,ded:sDed,ret:sRet,trd:stuck?0:sTrd,mt:sMt}, P={}; let score=0; RK_F.forEach(([k,,w])=>{ P[k]=S[k]*w; score+=P[k]; });
+    // سقف: متأخرات 3 شهور مسحوبات فأكتر (أو مديونية واقفة) ← خطر · 1.5 شهر فأكتر ← مش أحسن من "متابعة" (لو المتأخرات 20 ألف فأكتر)
+    let cap=100, capWhy=''; if(arrV>=20000){ if(stuck||arrM>=3){ cap=39; capWhy=stuck?'مديونية متأخرة ومفيش بيع آخر 3 شهور':'متأخرات أكتر من 3 شهور مسحوبات'; } else if(arrM>=1.5){ cap=69; capWhy='متأخرات أكتر من شهر ونص مسحوبات'; } }
+    const why={lag:over==null?'مفيش شيكات كفاية نعرف بيدفع بعد قد إيه':`بيدفع بعد ${x.lag} يوم والمسموح ${x.allow}`,arr:`متأخرات ${cstF(arrV)} (${arrM.toFixed(1)} شهر من مسحوباته)`,
+      bnc:`${bN} شيك مرتد (${cstF(bV)})`,ded:`إشعارات ${(x.rate*100).toFixed(0)}% من مسحوباته`,ret:`مرتجع ${(retP*100).toFixed(0)}%`,trd:trd==null?'مفيش بيع كفاية للمقارنة':`البيع ${trd>=0?'زاد':'قل'} ${Math.abs(trd*100).toFixed(0)}% (آخر 3 شهور)`,mt:x.match==null?'مفيش رصيد كشف':'رصيده مش مطابق للكشف'};
+    const lost=RK_F.map(([k,,w])=>({k,l:w-P[k]})).filter(o=>o.l>=2).sort((a,b)=>b.l-a.l).slice(0,2).map(o=>why[o.k]);
+    score=Math.min(Math.round(score),cap); if(capWhy) lost.unshift('⛔ '+capWhy);
+    out.push({x,score,lv:score>=70?'g':score>=40?'y':'r',P,avgW,over,arrV,arrM,bN,bV,retP,trd,why:lost.slice(0,3).join(' · ')||'—'});
+  });
+  out.sort((a,b)=>a.score-b.score||b.x.balCalc-a.x.balCalc);
+  return {rows:out,doubt};
+}
+const RK_LV={g:['🟢','آمن','#1A7A4A','#E6F4EC'],y:['🟡','محتاج متابعة','#B26A00','#FFF1DC'],r:['🔴','خطر','#B71C1C','#FDECEC']};
+function cstRkList(){ const R=cstRkCompute(), q=(CST.q||'').trim(), f=CST.rkLv||''; return {R,L:R.rows.filter(o=>(!f||o.lv===f)&&(!q||String(o.x.c.name).includes(q)))}; }
+function cstRkPanel(){
+  const {R,L}=cstRkList(), N=v=>Math.round(v).toLocaleString('en-US'), A=R.rows, f=CST.rkLv||'';
+  const cnt=lv=>A.filter(o=>o.lv===lv), bal=a=>a.reduce((s,o)=>s+Math.max(0,o.x.balCalc),0);
+  const card=(l,v,sb,c)=>`<div class="cst-card" style="--c:${c}"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${sb}</div></div>`;
+  let h=`<div class="cst-cards">${card('🔴 خطر',cnt('r').length+' عميل','مديونيتهم '+N(bal(cnt('r'))),'#B71C1C')}${card('🟡 محتاج متابعة',cnt('y').length+' عميل','مديونيتهم '+N(bal(cnt('y'))),'#B26A00')}${card('🟢 آمن',cnt('g').length+' عميل','مديونيتهم '+N(bal(cnt('g'))),'#1A7A4A')}${card('📊 متوسط الدرجة',A.length?Math.round(A.reduce((s,o)=>s+o.score,0)/A.length):'—','من 100 — '+A.length+' عميل','#731E2E')}</div>`;
+  const chip=(k,l)=>`<button type="button" class="cs-mode-btn${f===k?' on':''}" onclick="CST.rkLv='${k}';cstRender()">${l}</button>`;
+  h+=`<div class="cst-tools" style="margin-top:10px">${chip('','الكل')}${chip('r','🔴 خطر')}${chip('y','🟡 متابعة')}${chip('g','🟢 آمن')}<input placeholder="🔍 دوّر على عميل..." value="${cstE(CST.q)}" oninput="CST.q=this.value;clearTimeout(window._cstQ);window._cstQ=setTimeout(()=>{cstRender();const i=document.querySelector('.cst-tools input');if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length);}},350)"><span style="flex:1"></span><button class="btn btn-ghost btn-sm" onclick="cstRkPdf()"><i class="ti ti-file-type-pdf"></i> PDF</button><button class="btn btn-ghost btn-sm" onclick="cstRkXlsx()"><i class="ti ti-file-spreadsheet"></i> Excel</button><button class="btn btn-ghost btn-sm" onclick="cstRkPdf(true)"><i class="ti ti-send"></i> إرسال</button></div>`;
+  const pt=(o,k,w,txt)=>{ const v=o.P[k], c=v>=w*0.7?'#1A7A4A':v>=w*0.4?'#B26A00':'#B71C1C'; return `<td><div style="font-weight:800;color:${c}">${Math.round(v)}/${w}</div><div style="font-size:10.5px;color:#6B5B45;white-space:nowrap">${txt}</div></td>`; };
+  h+=`<div style="overflow:auto"><table class="cst-t"><thead><tr><th>#</th><th style="text-align:right">العميل</th><th>الدرجة</th><th>الرصيد</th>${RK_F.map(([,l,w])=>`<th>${l}<div style="font-size:10px;font-weight:600">(${w})</div></th>`).join('')}<th style="text-align:right">أهم سبب</th></tr></thead><tbody>
+    ${L.map((o,i)=>{ const v=RK_LV[o.lv]; return `<tr><td>${i+1}</td><td class="n">${cstNameCell(o.x)}</td><td><span class="cst-tag" style="color:${v[2]};background:${v[3]};font-size:13px">${v[0]} ${o.score}</span></td><td>${N(o.x.balCalc)}</td>
+      ${pt(o,'lag',25,o.over==null?'—':(o.over>0?'+':'')+o.over+' يوم')}${pt(o,'arr',20,o.arrV>1?N(o.arrV):'—')}${pt(o,'bnc',15,o.bN?o.bN+' شيك':'—')}${pt(o,'ded',15,(o.x.rate*100).toFixed(0)+'%')}${pt(o,'ret',10,(o.retP*100).toFixed(1)+'%')}${pt(o,'trd',10,o.trd==null?'—':((o.trd>=0?'+':'')+(o.trd*100).toFixed(0)+'%'))}${pt(o,'mt',5,o.x.match==null?'—':(o.x.match?'✅':'❌'))}
+      <td style="text-align:right;font-size:11.5px;min-width:220px">${cstE(o.why)}</td></tr>`; }).join('')}
+    </tbody></table></div>
+    <div class="cst-note">الدرجة من 100 (أعلى = أأمن): 🟢 70 فأكتر · 🟡 40–69 · 🔴 أقل من 40.<br>
+    • <b>التأخير (25):</b> وسيط شيكاته مقارنة بالمسموح (مدة الائتمان) — كاملة لو في ميعاده، وصفر لو متأخر 60 يوم أو أكتر. العميل اللي أقل من شيكين بياخد 60%.<br>
+    • <b>المتأخرات (20):</b> الشيك المتوقع عن شهور ميعادها عدّى ÷ متوسط مسحوباته الشهرية — صفر لو 3 شهور أو أكتر.<br>
+    • <b>الشيكات المرتدة (15):</b> السنة دي — صفر لو 3 أو أكتر · <b>الإشعارات (15):</b> كاملة لحد 20% وصفر عند 45% · <b>المرتجع (10):</b> كاملة لحد 3% وصفر عند 15%.<br>
+    • <b>سقف:</b> لو المتأخرات 20 ألف فأكتر و≥ 3 شهور مسحوبات، أو متأخرات ومفيش بيع آخر 3 شهور (مديونية واقفة) ← العميل 🔴 مهما كانت باقي النقط · ≥ شهر ونص ← مش أحسن من 🟡.<br>
+    • <b>اتجاه البيع (10):</b> آخر 3 شهور ÷ الـ 3 اللي قبلهم — كاملة لو ثابت أو زايد، وصفر لو قل 50% · <b>مطابقة الكشف (5):</b> رصيده المحسوب = رصيد الكشف.${R.doubt>0.5?`<br>• مستبعد: حساب الديون المشكوك في تحصيلها (${N(R.doubt)}).`:''}</div>`;
+  return h;
+}
+function cstRkReport(){
+  const {L}=cstRkList(), N=cstF, m0=CST.res.today.slice(0,7), f=CST.rkLv||'';
+  const cnt=lv=>L.filter(o=>o.lv===lv).length;
+  return {ym:m0,title:'تقييم خطر عملاء مودرن تريد'+(f?' — '+RK_LV[f][1]:''),
+    kpis:[['🔴 خطر',cnt('r')+' عميل'],['🟡 محتاج متابعة',cnt('y')+' عميل'],['🟢 آمن',cnt('g')+' عميل'],['متوسط الدرجة',L.length?String(Math.round(L.reduce((s,o)=>s+o.score,0)/L.length)):'—']],
+    secs:[{title:'تقييم الخطر',alignR:[1,12],nowrap:[0,2,3,4,5,6,7,8,9,10,11],head:['#','العميل','الدرجة','التصنيف','الرصيد',...RK_F.map(([,l,w])=>l+' ('+w+')'),'أهم سبب'],
+      rows:L.map((o,i)=>[i+1,cstShort(o.x.c.name),o.score,RK_LV[o.lv][1],N(o.x.balCalc),...RK_F.map(([k])=>Math.round(o.P[k])),o.why]),
+      total:['','الإجمالي ('+L.length+' عميل)','','',N(L.reduce((s,o)=>s+o.x.balCalc,0)),...RK_F.map(()=>''),'']}]};
+}
+function cstRkPdf(send){ if(!CST.res) return; const d=cstRkReport();
+  rpxDeliver('pdf',async()=>{ const pdf=await rpxBuildPdf(d.title,d.kpis,d.secs,cstColMeta()); return pdf?pdf.output('blob'):null; },`AlTahhan_MT_Risk_${d.ym}.pdf`,d.title,send); }
+function cstRkXlsx(send){ if(!CST.res) return; const d=cstRkReport();
+  rpxDeliver('xlsx',async()=>{ const wb=XLSX.utils.book_new(); wb.Workbook={Views:[{RTL:true}]}; const num=v=>typeof v==='string'&&/^-?\d+(\.\d+)?$/.test(v)?+v:v;
+    d.secs.forEach(s=>rpxSheet(wb,s.title,d.title,d.kpis.map(k=>k[0]+': '+k[1]).join(' · '),s.head,s.rows.map(r=>r.map(num)),s.total&&s.total.map(num)));
+    wb.SheetNames.forEach(n=>{ const ws=wb.Sheets[n]; Object.keys(ws).forEach(k=>{ if(k[0]!=='!'&&ws[k]&&typeof ws[k].v==='number') ws[k].z=Number.isInteger(ws[k].v)?'0':'0.00'; }); });
+    const arr=XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true}); return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}); },`AlTahhan_MT_Risk_${d.ym}.xlsx`,d.title,send); }
 function cstPanel(){
   const X=CST.res;
   if(CST.tab==='coll') return cstColPanel();
   if(CST.tab==='cf') return cstCfPanel();
+  if(CST.tab==='risk') return cstRkPanel();
   if(CST.tab==='thism'){ const L=X.thism.slice().sort((a,b)=>(a.r.dd<b.r.dd?-1:a.r.dd>b.r.dd?1:b.r.expChq-a.r.expChq));
     if(!L.length) return '<div class="cst-empty">مفيش عملاء ميعاد سدادهم في الشهر ده.</div>';
     return `<table class="cst-t"><thead><tr><th>#</th><th style="text-align:right">العميل</th><th>عن شهر</th><th>مسحوبات الشهر</th><th>الباقي عليه</th><th>نسبة إشعاراته</th><th>إشعارات متوقعة</th><th>الشيك المتوقع</th><th>الميعاد المتوقع</th></tr></thead><tbody>
