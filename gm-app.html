@@ -44820,7 +44820,7 @@ function repbalCalcBalances(raw, from, to, has){
   // مفيش رصيد سالب فعليًا في الواقع — لو حصل نتيجة حالة قديمة (زي مرتجع معلّق قبل تصفير
   // الرصيد ولسه متسلّمش رسميًا، ثم اتسلّم لإدارة التوالف بعد التصفير)، بنثبّته عند صفر بدل
   // ما يظهر رقم سالب مش منطقي للمستخدم
-  Object.keys(bal).forEach(rep=>{ Object.keys(bal[rep]).forEach(item=>{ if(bal[rep][item]<0) bal[rep][item]=0; }); });
+  // 28/11: السالب مابقاش بيتثبّت عند صفر — بيظهر زي ما هو بالأحمر لأنه معناه حركة مااتسجلتش (قانون رصيد مخزن المندوب)
   return bal;
 }
 // تفصيل رصيد كل مندوب لثلاث طبقات: صالح (بضاعة سليمة جاهزة للبيع) / مرتجع صالح / مرتجع تالف
@@ -44851,7 +44851,7 @@ function repbalCalcBreakdown(raw, from, to, has){
   (raw.handovers||[]).forEach(h=>{ if(afterStart(h.rep_name,h.created_at) && inRange(h.created_at)) addTo(retDamaged,h.rep_name,h.snf,-(+h.qty||0)); });
   // نفس مبدأ عدم ظهور رصيد سالب — لو حصل نتيجة حالة قديمة (مرتجع معلّق قبل التصفير اتسلّم
   // لإدارة التوالف بعده)، بنثبّته عند صفر
-  [valid, retValid, retDamaged].forEach(map=>{ Object.keys(map).forEach(rep=>{ Object.keys(map[rep]).forEach(item=>{ if(map[rep][item]<0) map[rep][item]=0; }); }); });
+  // 28/11: السالب بيظهر زي ما هو (من غير تثبيت عند صفر)
   return {valid, retValid, retDamaged};
 }
 // الرصيد الفعلي الحالي الحقيقي لمندوب معين — بيتجاهل فلتر الفترة (من/إلى) المختار فوق في
@@ -44921,10 +44921,10 @@ async function repbalLoad(){
     fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.pending&select=*&order=created_at.asc`),
     fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&resolved=eq.false&diff=neq.0&order=created_at.desc`),
     fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&select=*&order=created_at.desc`),
-    fetchAllJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date,created_at`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&deleted_at=is.null&select=id,rep_name,items,delivery_date,created_at,branch_name,invoice_number`),
     fetchAllJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status,created_at`),
-    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at`),
-    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=id,rep_name,items,decided_at,created_at`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at,reason,adjusted_by`),
     fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc`),
     fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&order=created_at.desc&select=id,rep_name,snf,counted_qty,counted_valid_qty,counted_returned_qty,computed_qty,diff,resolved,created_at`),
     fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc`),
@@ -45822,12 +45822,14 @@ function repbalRenderBalances(){
   if(!reps.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش مناديب لعرضهم</div>'; return; }
   wrap.innerHTML = reps.map(rep=>{
     const items = Object.entries(_repbalBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0);
+    const negCount = items.filter(([,q])=>q<0).length;
     const pendingCount = (_repbalDiffsRows||[]).filter(r=>r.rep_name===rep).length;
     const safe = rep.replace(/'/g,"\\'");
     return `<div onclick="repbalOpenExportModal('${safe}','balance')" style="display:flex;align-items:center;justify-content:space-between;border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:8px;cursor:pointer;transition:background .15s" onmouseover="this.style.background='var(--surface-2,#F8F5F0)'" onmouseout="this.style.background='transparent'">
       <span style="font-weight:700;font-size:13px"><i class="ti ti-user" style="color:#C8A96E;margin-left:6px"></i>${rep}</span>
       <span style="display:flex;align-items:center;gap:8px">
         ${pendingCount ? `<span style="background:#FEF3C7;color:#92400E;border-radius:999px;padding:3px 9px;font-size:10.5px;font-weight:700;display:flex;align-items:center;gap:4px"><i class="ti ti-alert-triangle"></i> ${pendingCount} محتاج مراجعة</span>` : ''}
+        ${negCount ? `<span style="background:#FBEDED;color:#9E1B1B;border-radius:999px;padding:3px 9px;font-size:10.5px;font-weight:800">🔴 ${negCount} صنف بالسالب</span>` : ''}
         <span style="color:var(--text2);font-weight:400;font-size:11px">${items.length} صنف برصيد</span>
         <i class="ti ti-chevron-left" style="color:var(--text2)"></i>
       </span>
@@ -45859,6 +45861,34 @@ function repbalRenderInventoryList(){
   }).join('');
 }
 
+// ══ كارت الصنف (28/11) — كشف حركة صنف لمندوب: كل حركة بتاريخها ومستندها والرصيد بعدها ══
+// نفس شروط repbalCalcBreakdown بالظبط (الصالح): طلبات معتمدة + تعديلات − فواتير، من نقطة البداية.
+function repbalLedgerRows(rep, item){
+  const raw = _repbalRawBalanceData || {}, sd = (raw.startDates||{})[rep];
+  const after = d => !!(sd && d && d>=sd);
+  const mv = [];
+  (raw.reqsApproved||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(d.rep_name===rep && after(dt)) (d.items||[]).forEach(it=>{ if(it.name===item) mv.push({t:dt, q:+it.qty||0, doc:`طلب بضاعة #${d.id||''}`, kind:'in'}); }); });
+  (raw.adjs||[]).forEach(a=>{ if(a.rep_name===rep && a.snf===item && after(a.created_at)) mv.push({t:a.created_at, q:+a.qty_delta||0, doc:a.reason||'تعديل', kind:'adj'}); });
+  (raw.dels||[]).forEach(d=>{ if(d.rep_name===rep && after(d.created_at)) (d.items||[]).forEach(it=>{ if(it.name===item) mv.push({t:d.created_at, q:-(+it.qty||0), doc:`فاتورة ${d.branch_name||''}${d.id?' #'+d.id:''}`, kind:'out'}); }); });
+  mv.sort((a,b)=>a.t<b.t?-1:a.t>b.t?1:0);
+  let bal = 0, firstNeg = -1;
+  mv.forEach((m,i)=>{ bal = Math.round((bal+m.q)*100)/100; m.bal = bal; if(bal<0 && firstNeg<0) firstNeg = i; });
+  return {mv, firstNeg, start: sd};
+}
+function repbalLedgerToggle(rep, item, boxId){
+  const box = document.getElementById(boxId); if(!box) return;
+  if(box.innerHTML){ box.innerHTML=''; return; }
+  const E = lkadmEsc, {mv, firstNeg, start} = repbalLedgerRows(rep, item);
+  if(!mv.length){ box.innerHTML = '<div style="font-size:11px;color:var(--text2);padding:6px">مفيش حركات للصنف ده من نقطة البداية</div>'; return; }
+  const f = ts => new Date(ts).toLocaleString('ar-EG',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+  box.innerHTML = `<div style="margin:6px 0 4px;border:1px solid #E8DCC4;border-radius:8px;overflow:hidden;background:#fff">
+    <div style="background:#731E2E;color:#fff;font-size:11.5px;font-weight:800;padding:6px 10px;border-bottom:2px solid #C8A96E">كارت الصنف — من ${start?new Date(start).toLocaleDateString('ar-EG',{day:'numeric',month:'long'}):'البداية'} · ${mv.length} حركة</div>
+    <div style="max-height:260px;overflow-y:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">
+      <tr style="background:#F5F0E6;color:#6B5B45;position:sticky;top:0"><th style="padding:5px;text-align:right">التاريخ</th><th style="padding:5px;text-align:right">المستند</th><th style="padding:5px;text-align:center">داخل/خارج</th><th style="padding:5px;text-align:center">الرصيد</th></tr>
+      ${mv.map((m,i)=>`<tr style="background:${i===firstNeg?'#FBEDED':(i%2?'#FCFAF6':'#fff')}"><td style="padding:4px 5px;white-space:nowrap">${f(m.t)}</td><td style="padding:4px 5px">${E(m.doc)}${i===firstNeg?' <b style="color:#9E1B1B">← هنا بقى بالسالب</b>':''}</td><td style="padding:4px 5px;text-align:center;font-weight:800;color:${m.q<0?'#9E1B1B':'#276749'}">${m.q>0?'+':''}${m.q}</td><td style="padding:4px 5px;text-align:center;font-weight:800;color:${m.bal<0?'#9E1B1B':'#2C1F0A'}">${m.bal}</td></tr>`).join('')}
+    </table></div></div>`;
+}
+
 // ══ بوب أب تصدير سجل جرد المندوب (PDF / Excel) ══
 let _repbalExportRep = null;
 function repbalPeriodTxt(rep, from, to, has){
@@ -45880,7 +45910,7 @@ async function repbalOpenExportModal(rep, mode){
   // فوق لسه بيتحكم في باقي المودال (سجل الجرد/الفروق) لو المستخدم محتاج يراجع فترة معينة.
   const curBalances  = repbalCurrentBalances();
   const curBreakdown = repbalCurrentBreakdown();
-  const items = Object.entries(curBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>b[1]-a[1]);
+  const items = Object.entries(curBalances[rep]||{}).filter(([,q])=>Math.round(q*100)!==0).sort((a,b)=>(a[1]<0)===(b[1]<0)?b[1]-a[1]:(a[1]<0?-1:1));
   const periodTxt = repbalPeriodTxt(rep, '', '', false);
   const title = document.getElementById('repbal-export-title');
   const meta  = document.getElementById('repbal-export-meta');
@@ -45907,19 +45937,21 @@ async function repbalOpenExportModal(rep, mode){
           const rv = (bd.retValid[rep]||{})[name]||0;
           const rd = (bd.retDamaged[rep]||{})[name]||0;
           const parts = [];
-          if(v)  parts.push(`<span style="color:#276749">✅ صالح ${v}</span>`);
+          if(v)  parts.push(v<0?`<span style="color:#9E1B1B">⚠️ صالح ${Math.round(v*100)/100} — فيه حركة مااتسجلتش، دوس على اسم الصنف</span>`:`<span style="color:#276749">✅ صالح ${v}</span>`);
           if(rv) parts.push(`<span style="color:#1D4ED8">↩️ مرتجع صالح ${rv}</span>`);
           if(rd) parts.push(`<span style="color:#B71C1C">🗑️ مرتجع تالف ${rd}</span>`);
           const pr = productPriceFor(name);
           let valueTxt = '';
-          if(pr && pr.price){
+          if(pr && pr.price && qty>0){
             const val = qty * (+pr.price||0);
             totalValue += val; pricedCount++;
             valueTxt = `<span style="color:#8A6D2F;font-weight:700">${val.toLocaleString('en-US',{maximumFractionDigits:0})} ج</span>`;
           }
-          return `<div style="padding:5px 0;font-size:12px;border-bottom:1px dashed var(--border)">
-            <div style="display:flex;justify-content:space-between;align-items:center"><span>${name}</span><span style="display:flex;gap:8px;align-items:center"><span style="font-weight:700">Σ ${qty}</span>${valueTxt}</span></div>
+          const neg = qty<0, lid = 'rbl-'+Math.abs([...name].reduce((h,c)=>(h*31+c.charCodeAt(0))|0,7));
+          return `<div style="padding:5px 0;font-size:12px;border-bottom:1px dashed var(--border);${neg?'background:#FDF3F3':''}">
+            <div style="display:flex;justify-content:space-between;align-items:center"><span onclick="repbalLedgerToggle(this.dataset.rep,this.dataset.item,'${lid}')" data-rep="${lkadmEsc(rep)}" data-item="${lkadmEsc(name)}" style="cursor:pointer;text-decoration:underline dotted;${neg?'color:#9E1B1B;font-weight:700':''}">${neg?'🔴 ':''}${name}</span><span style="display:flex;gap:8px;align-items:center"><span style="font-weight:800;${neg?'color:#9E1B1B':''}">Σ ${Math.round(qty*100)/100}</span>${valueTxt}</span></div>
             ${parts.length ? `<div style="display:flex;gap:10px;flex-wrap:wrap;font-size:10.5px;margin-top:3px;font-weight:600">${parts.join('')}</div>` : ''}
+            <div id="${lid}"></div>
           </div>`;
         }).join('')
       : '<div style="font-size:11px;color:var(--text2);padding:4px 0">مفيش رصيد مسجّل حاليًا</div>';
