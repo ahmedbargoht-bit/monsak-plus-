@@ -37060,8 +37060,8 @@ async function sciLoadNewPx(){
     const mods = await fetch(`${SUPABASE_URL}/rest/v1/price_modifications?status=eq.active&select=id,snf_name,old_price,new_price`,{headers:H,cache:'no-store'}).then(r=>r.ok?r.json():[]);
     if(!Array.isArray(mods)||!mods.length) return;
     const byId={}; mods.forEach(m=>{ byId[m.id]=m; });
-    const st = await fetch(`${SUPABASE_URL}/rest/v1/price_mod_client_status?status=eq.confirmed&mod_id=in.(${mods.map(m=>m.id).join(',')})&select=mod_id,client_name,confirmed_at`,{headers:H,cache:'no-store'}).then(r=>r.ok?r.json():[]);
-    (Array.isArray(st)?st:[]).forEach(r=>{ const m=byId[r.mod_id], np=m&&parseFloat(m.new_price); if(!m||!(np>0)) return;
+    const st = await fetch(`${SUPABASE_URL}/rest/v1/price_mod_client_status?status=eq.confirmed&mod_id=in.(${mods.map(m=>m.id).join(',')})&select=mod_id,client_name,confirmed_at,client_new_price`,{headers:H,cache:'no-store'}).then(r=>r.ok?r.json():[]);
+    (Array.isArray(st)?st:[]).forEach(r=>{ const m=byId[r.mod_id], np=m&&(parseFloat(r.client_new_price)>0?parseFloat(r.client_new_price):parseFloat(m.new_price)); if(!m||!(np>0)) return;
       const k=sciClKey(r.client_name); (_sciNewPx[k]=_sciNewPx[k]||{})[m.snf_name]={np, op:parseFloat(m.old_price)||0, d:r.confirmed_at}; });
   }catch(e){ console.error('[sci newpx]', e); }
 }
@@ -66735,6 +66735,74 @@ function pmClientMods(client){
     return _pmClientStatus.some(function(s){ return s.mod_id===m.id && s.client_name===client; });
   });
 }
+
+// ══ (28/11) العملاء اللي ليهم قايمة أسعار استثنائية (products_db.client_pricelists) ══
+// الصنف اللي في قايمة العميل: السعر القديم = سعر قايمته، والجديد = سعر بيتكتب بالإيد للعميل ده
+// (price_mod_client_status.client_new_price). بعد تأكيد العميل، قايمته الاستثنائية بتتحدّث بالسعر الجديد.
+var _pmSpl = null; // {client:{snf:{price, list}}}
+async function pmLoadSpl(force){
+  if(_pmSpl && !force) return _pmSpl;
+  var m = {};
+  try{
+    var r = await fetch(SUPABASE_URL+'/rest/v1/products_db?key=eq.client_pricelists&select=value',{headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY},cache:'no-store'});
+    var d = r.ok ? await r.json() : [];
+    var lists = d.length ? JSON.parse(d[0].value||'[]') : [];
+    lists.filter(function(pl){ return pl && pl.active; }).forEach(function(pl){
+      (pl.clients||[]).forEach(function(c){ m[c]=m[c]||{}; (pl.products||[]).forEach(function(pr){ if(pr && pr.name!=null) m[c][pr.name]={price:parseFloat(pr.price), list:pl.name}; }); });
+    });
+  }catch(e){ console.error('[pm spl] load', e); }
+  _pmSpl = m; return m;
+}
+function pmSplOf(client, snf){ return (_pmSpl && client && _pmSpl[client]) ? (_pmSpl[client][snf]||null) : null; }
+// التعديل كما يخص العميل: لو الصنف في قايمته الاستثنائية ← القديم = سعر القايمة، والجديد = السعر اليدوي (أو null لسه ماتكتبش)
+function pmEff(m, client){
+  var sp = pmSplOf(client, m.snf_name); if(!sp) return m;
+  var r = pmClientRow(m.id, client);
+  var np = r && r.client_new_price!=null ? parseFloat(r.client_new_price) : null;
+  return Object.assign({}, m, {old_price: sp.price, new_price: np, _spl: sp.list, _gOld: m.old_price, _gNew: m.new_price});
+}
+function pmSplMissing(items){ return items.filter(function(x){ return x._spl && !(x.new_price>0); }); }
+async function pmSetClientPrice(modId, client, val){
+  var v = parseFloat(String(val||'').replace(/[^0-9.]/g,''));
+  var sp = pmSplOf(client, (_pmMods.find(function(m){return m.id===modId;})||{}).snf_name);
+  var row = pmClientRow(modId, client), H = PM_H();
+  var body = {client_new_price: v>0 ? v : null, client_old_price: sp ? sp.price : null};
+  try{
+    var r;
+    if(row) r = await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status?id=eq.'+row.id,{method:'PATCH', headers:H, body:JSON.stringify(body)});
+    else r = await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status',{method:'POST', headers:Object.assign({},H,{'Prefer':'return=minimal'}), body:JSON.stringify(Object.assign({mod_id:modId, client_name:client, status:'pending'}, body))});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    await pmLoadExistingMods();
+    pmMsg(v>0 ? '✅ اتحفظ سعر '+client+' الجديد: '+v : '🗑️ اتمسح السعر الجديد لـ '+client,'#16A34A');
+    pmRenderPendingList((document.getElementById('pm-pending-client')||{}).value||'all');
+  }catch(e){ console.error('[pm spl] save', e); alert('ماتحفظش السعر: '+e.message); }
+}
+// بعد تأكيد عميل: لو ليه سعر يدوي والصنف في قايمته الاستثنائية ← حدّث القايمة (والسعر القديم بيتحفظ في prev_price)
+async function pmSplApplyConfirmed(statusRows){
+  var todo = (statusRows||[]).filter(function(s){ return s && s.client_new_price!=null && parseFloat(s.client_new_price)>0 && !s.spl_updated_at; });
+  if(!todo.length) return 0;
+  var H = {'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY};
+  var r = await fetch(SUPABASE_URL+'/rest/v1/products_db?key=eq.client_pricelists&select=value',{headers:H,cache:'no-store'});
+  var d = r.ok ? await r.json() : []; if(!d.length) return 0;
+  var lists = JSON.parse(d[0].value||'[]'), n = 0, done = [];
+  todo.forEach(function(s){
+    var mod = _pmMods.find(function(m){ return m.id===s.mod_id; }); if(!mod) return;
+    lists.forEach(function(pl){
+      if(!pl || !pl.active || (pl.clients||[]).indexOf(s.client_name)===-1) return;
+      (pl.products||[]).forEach(function(pr){
+        if(pr && pr.name===mod.snf_name){ pr.prev_price = pr.price; pr.price = parseFloat(s.client_new_price); pr.updated_from_mod = mod.id; pr.updated_at = new Date().toISOString(); n++; done.push(s.id); }
+      });
+    });
+  });
+  if(!n) return 0;
+  var w = await fetch(SUPABASE_URL+'/rest/v1/products_db?key=eq.client_pricelists',{method:'PATCH', headers:PM_H(), body:JSON.stringify({value:JSON.stringify(lists)})});
+  if(!w.ok){ alert('⚠️ اتأكد التعديل بس قايمة الأسعار الاستثنائية ماتحدّثتش (HTTP '+w.status+') — حدّثها بإيدك'); return 0; }
+  var at = new Date().toISOString(), ids = [...new Set(done)];
+  await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status?id=in.('+ids.join(',')+')',{method:'PATCH', headers:PM_H(), body:JSON.stringify({spl_updated_at:at})});
+  _pmSpl = null; try{ if(typeof splSpecialInit==='function' && document.getElementById('spl-special-tbody')) splSpecialInit(); }catch(e){}
+  pmMsg('⭐ اتحدّثت القايمة الاستثنائية بالسعر الجديد ('+n+' صنف)','#16A34A');
+  return n;
+}
 // ── تسجيل إرسال التعديل للعميل (PM-SENT) ──
 // التعديل عند العميل مش لحظي (ليه شروط ومدة)؛ بنسجّل يوم الإرسال في price_mod_client_status.sent_at
 // والسطر يفضل status='pending' لحد ما يتأكد بإيد الأدمن (pmConfirmClient) — وطول ما هو كده بيظهر تذكير في صندوق الرسائل (pmBuildSentMsg).
@@ -66748,6 +66816,8 @@ async function pmMarkClientSent(client){
   var d = inp && inp.value ? inp.value : pmTodayYmd();
   var items = pmClientMods(client).filter(function(m){ var r=pmClientRow(m.id, client); return !(r && r.status==='confirmed'); });
   if(!items.length){ pmMsg('✅ كل أصناف العميل ده متأكدة','#16A34A'); return; }
+  var miss0 = pmSplMissing(items.map(function(m){ return pmEff(m, client); }));
+  if(miss0.length){ alert('⭐ '+client+' ليه قايمة أسعار استثنائية — اكتب السعر الجديد لـ '+miss0.length+' صنف الأول:\n\n'+miss0.map(function(x){return '• '+x.snf_name+' (سعره دلوقتي '+x.old_price+')';}).join('\n')); return; }
   var already = items.filter(function(m){ var r=pmClientRow(m.id, client); return r && r.sent_at; }).length;
   if(!confirm('تسجيل إن التعديل اتبعت لـ '+client+' يوم '+pmFmtD(d)+'\n'+items.length+' صنف'+(already?' (منهم '+already+' متسجلين قبل كده — هيتحدّث تاريخهم)':'')+'\n\nالتعديل مش هيتطبق — هيفضل مستني تأكيدك.')) return;
   var H = PM_H(), at = d+'T12:00:00+02:00';
@@ -66774,7 +66844,7 @@ async function pmUnsendClient(modId, client){
   var H = PM_H();
   try{
     // تعديل لسه مسودة: السطر اتعمل بالإرسال بس ← يتشال. تعديل نشط: السطر بتاع التفعيل ← نمسح تاريخ الإرسال بس.
-    if(mod && mod.status==='draft' && r.status!=='confirmed')
+    if(mod && mod.status==='draft' && r.status!=='confirmed' && r.client_new_price==null)
       await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status?id=eq.'+r.id,{method:'DELETE', headers:{'apikey':SUPABASE_KEY,'Authorization':'Bearer '+SUPABASE_KEY}});
     else
       await fetch(SUPABASE_URL+'/rest/v1/price_mod_client_status?id=eq.'+r.id,{method:'PATCH', headers:PM_H(), body:JSON.stringify({sent_at:null, sent_by:null})});
@@ -67007,7 +67077,7 @@ async function pmShowPending(){
 }
 
 async function pmLoadPending(){
-  await pmLoadExistingMods();
+  await Promise.all([pmLoadExistingMods(), pmLoadSpl(true)]);
   var list = document.getElementById('pm-pending-list');
   if(!list) return;
   // Populate client dropdown
@@ -67226,6 +67296,7 @@ async function pmConfirmClient(statusId, modId){
     if(mod){
       var st = _pmClientStatus.find(s=>s.id===statusId);
       if(st){ st.status='confirmed'; st.confirmed_at=new Date().toISOString(); }
+      try{ await pmSplApplyConfirmed([st]); }catch(e){ console.error('[pm spl] apply', e); }
       var allStatuses = _pmClientStatus.filter(s=>s.mod_id===modId);
       var allConfirmed = allStatuses.every(s=>s.status==='confirmed');
       // السعر الرسمي بيتغيّر بس لو التعديل نشط — تعديل مسودة فيه بس العملاء اللي اتسجل لهم إرسال (مش كل العملاء)
@@ -67264,6 +67335,7 @@ async function pmConfirmAllClients(){
       s.status='confirmed'; s.confirmed_at=new Date().toISOString();
     }catch(e){ console.error('[pm] batch confirm error', s.client_name, e); }
   }
+  try{ await pmSplApplyConfirmed(pending); }catch(e){ console.error('[pm spl] apply all', e); }
   var existing = (_splPrices||[]).find(p=>p.snf_name===mod.snf_name);
   if(existing){
     await fetch(SUPABASE_URL+'/rest/v1/sales_prices?id=eq.'+existing.id,{
@@ -67408,8 +67480,10 @@ async function pmExportClientPDF(){
   }
   await pmLoadBuyers();
   var total = _pmMods.filter(m=>m.status==='draft'||m.status==='active').length;
-  var items = pmClientMods(sel);
+  await pmLoadSpl();
+  var items = pmClientMods(sel).map(function(m){ return pmEff(m, sel); });
   if(!items.length){ pmMsg('⚠️ مفيش أصناف عليها تعديل بتتورد للعميل ده','#B45309'); return; }
+  var miss = pmSplMissing(items); if(miss.length){ pmMsg('⭐ اكتب السعر الجديد لـ '+miss.length+' صنف من قايمة '+sel+' الاستثنائية الأول (الخانات الصفرا في القايمة تحت)','#B45309'); return; }
   _pmBuildPrintDoc(items, sel, pmClientFilterNote(sel, items.length, total)+' · '+pmClientSentNote(sel, items));
 }
 
@@ -67418,8 +67492,10 @@ async function pmExportClientExcel(){
   if(!sel || sel==='all'){ pmExportExcel(); return; }  // "كل العملاء" = كشف كل التعديلات المفتوحة
   await pmLoadBuyers();
   var total = _pmMods.filter(m=>m.status==='draft'||m.status==='active').length;
-  var items = pmClientMods(sel);
+  await pmLoadSpl();
+  var items = pmClientMods(sel).map(function(m){ return pmEff(m, sel); });
   if(!items.length){ pmMsg('⚠️ مفيش أصناف عليها تعديل بتتورد للعميل ده','#B45309'); return; }
+  var miss = pmSplMissing(items); if(miss.length){ pmMsg('⭐ اكتب السعر الجديد لـ '+miss.length+' صنف من قايمة '+sel+' الاستثنائية الأول (الخانات الصفرا في القايمة تحت)','#B45309'); return; }
   var fNote = pmClientFilterNote(sel, items.length, total)+' · '+pmClientSentNote(sel, items);
   var prices = _splPrices||[];
   var bcOf = function(){ return ''; };
@@ -67486,6 +67562,8 @@ function pmRenderPendingList(clientFilter){
     html += '<div id="pm-client-filter-info" style="background:#FFF8E7;border:1px solid #E5D5A0;border-radius:10px;padding:8px 12px;margin-bottom:10px;font-size:12.5px;font-weight:700;color:#8B6914">📦 '+activeMods.length+' صنف بيتورد لـ '+clientFilter+' من '+allOpen.length+' تعديل'
       +((_pmBuyers && _pmBuyers.err)?' <span style="color:#B45309;font-weight:600">(⚠️ تعذّر تحميل المبيعات — ظاهر بس المتسجل له في التأكيدات)</span>':'')+'</div>';
     if(!activeMods.length){ list.innerHTML = html + '<div style="text-align:center;padding:30px;color:var(--text2)">مفيش أصناف عليها تعديل بتتورد للعميل ده</div>'; return; }
+    var _effAll = activeMods.map(function(m){ return pmEff(m, clientFilter); }), _nSpl = _effAll.filter(function(x){return x._spl;}).length, _nMiss = pmSplMissing(_effAll).length;
+    if(_nSpl) html += '<div style="background:#FFFBEB;border:1.5px solid #F59E0B;border-radius:10px;padding:8px 12px;margin-bottom:10px;font-size:12.5px;font-weight:700;color:#92400E">⭐ '+clientFilter+' ليه قايمة أسعار استثنائية — '+_nSpl+' صنف السعر القديم فيهم = سعر قايمته، والجديد بتكتبه انت في الخانة الصفرا. '+(_nMiss?'<span style="color:#B71C1C">فاضل '+_nMiss+' صنف من غير سعر — التصدير وتسجيل الإرسال واقفين لحد ما تكتبهم.</span>':'<span style="color:#16A34A">✓ كل الأسعار متكتبة.</span>')+' وبعد ما العميل يأكد، قايمته بتتحدّث لوحدها.</div>';
     var nSent=0, nOk=0;
     activeMods.forEach(function(m){ var r=pmClientRow(m.id, clientFilter); if(r && r.status==='confirmed') nOk++; else if(r && r.sent_at) nSent++; });
     var nLeft = activeMods.length - nOk - nSent;
@@ -67496,13 +67574,14 @@ function pmRenderPendingList(clientFilter){
       + '<span style="font-size:12px;color:#334155">✓ أكد: <b>'+nOk+'</b> · 📤 اتبعت ومستني: <b>'+nSent+'</b> · لسه ماتبعتش: <b>'+nLeft+'</b></span>'
       + '</div>';
   }
-  activeMods.forEach(function(mod){
+  activeMods.forEach(function(mod0){
+    var mod = byClient ? pmEff(mod0, clientFilter) : mod0;
     var st = _pmClientStatus.filter(s=>s.mod_id===mod.id);
     var confirmed = st.filter(s=>s.status==='confirmed').length;
     var total = st.length;
     var pct = total>0 ? Math.round(confirmed/total*100) : 0;
     var isDraft = mod.status==='draft';
-    var changePct = mod.old_price>0 ? ((mod.new_price-mod.old_price)/mod.old_price*100).toFixed(1) : '—';
+    var changePct = (mod.old_price>0 && mod.new_price>0) ? ((mod.new_price-mod.old_price)/mod.old_price*100).toFixed(1) : '—';
     // Client-specific status
     var clientBadge = '', clientActs = '';
     if(byClient){
@@ -67524,8 +67603,12 @@ function pmRenderPendingList(clientFilter){
     html += '<span style="font-weight:800;flex:1;min-width:0">'+mod.snf_name+'</span>';
     html += '<span style="font-size:12px;text-decoration:line-through;color:var(--text2)">'+Number(mod.old_price).toFixed(2)+'</span>';
     html += ' <span style="font-size:12px">←</span> ';
-    html += '<span style="font-size:12px;font-weight:700;color:#16A34A">'+Number(mod.new_price).toFixed(2)+'</span>';
-    html += ' <span style="font-size:11px;color:#D97706">('+((changePct>0?'+':'')+changePct)+'%)</span> ';
+    if(mod._spl){
+      var cqs = clientFilter.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+      html += '<input type="number" step="0.01" min="0" placeholder="السعر الجديد" value="'+(mod.new_price>0?mod.new_price:'')+'" onclick="event.stopPropagation()" onchange="pmSetClientPrice('+mod.id+',\''+cqs+'\',this.value)" title="السعر الجديد لـ '+clientFilter.replace(/"/g,'&quot;')+' (العام: '+Number(mod._gOld).toFixed(2)+' ← '+Number(mod._gNew).toFixed(2)+')" style="width:96px;padding:3px 6px;border-radius:7px;border:2px solid '+(mod.new_price>0?'#16A34A':'#F59E0B')+';background:'+(mod.new_price>0?'#F0FDF4':'#FFFBEB')+';font-family:inherit;font-weight:800;color:#16A34A;font-size:12px">';
+      html += ' <span class="pm-badge" style="background:#FEF3C7;color:#92400E" title="قايمة '+String(mod._spl).replace(/"/g,'&quot;')+' — العام: '+Number(mod._gOld).toFixed(2)+' ← '+Number(mod._gNew).toFixed(2)+'">⭐ سعر استثنائي</span>';
+    } else html += '<span style="font-size:12px;font-weight:700;color:#16A34A">'+Number(mod.new_price).toFixed(2)+'</span>';
+    if(changePct!=='—') html += ' <span style="font-size:11px;color:#D97706">('+((changePct>0?'+':'')+changePct)+'%)</span> ';
     if(isDraft) html += '<span class="pm-badge pm-badge-draft">مسودة</span>';
     else html += '<span class="pm-badge pm-badge-wait">⏳ '+confirmed+'/'+total+'</span>';
     html += clientBadge;
