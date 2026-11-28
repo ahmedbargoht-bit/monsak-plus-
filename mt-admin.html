@@ -45051,14 +45051,14 @@ async function lkadmLoad(repNames){
       const det = items.length ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:var(--text2)">الأصناف (${items.length})</summary>${items.map(it=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;border-bottom:1px dashed #eee"><span>${lkadmEsc(it.snf)}</span><b style="direction:ltr;color:#9E1B1B">${lkadmEsc(it.qty)}</b></div>`).join('')}</details>` : '';
       return `<div style="border:1px solid ${isLock?'#E2A9A9':'#EAD9A8'};background:${isLock?'#FBEDED':'#FBF6E8'};border-radius:8px;padding:8px 10px;margin-bottom:6px">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <b style="font-size:12.5px">${lkadmEsc(r.rep_name)}</b>
+          ${isLock?`<b style="font-size:12.5px">${lkadmEsc(r.rep_name)}</b>`:`<b onclick="lkadmWarnOpen(${Number(r.id)})" style="font-size:13.5px;color:#731E2E;cursor:pointer;text-decoration:underline">${lkadmEsc(r.rep_name)} ▾</b>`}
           <span style="font-size:11.5px">${lkadmEsc(r.reason_text)}</span>
           <span style="font-size:10.5px;color:var(--text2)">${r.locked_by==='system'?'أوتوماتيك':lkadmEsc(r.locked_by)} · ${when}</span>
           <span style="margin-right:auto;display:flex;gap:6px">
             ${isLock?'':`<button onclick="lkadmEscalate(${Number(r.id)})" style="background:#9E1B1B;color:#fff;border:none;border-radius:6px;padding:5px 10px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">اقفل التطبيق</button>`}
             <button onclick="lkadmUnlock(${Number(r.id)}, ${isLock})" style="background:#276749;color:#fff;border:none;border-radius:6px;padding:5px 10px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">${isLock?'فتح التطبيق':'اتراجع — اقفل التحذير'}</button>
           </span>
-        </div>${det}</div>`;
+        </div>${isLock?det:''}${isLock?'':`<div id="lkadm-warn-${Number(r.id)}"></div>`}</div>`;
     };
     body.innerHTML = `<div style="margin-bottom:10px">${modeSel}</div>
       <div style="font-size:12px;font-weight:700;margin:6px 0">مقفولين دلوقتي (${locks.length})</div>
@@ -45123,25 +45123,189 @@ async function repbalDeleteSelected(kind){
   }catch(e){ alert('حصل خطأ أثناء الحذف، حاول تاني'); }
 }
 
-function repbalRenderPending(rows){
+// 28/11: طلبات البضاعة المعلّقة متجمّعة بالمندوب — دوس على الاسم يفتح جدول مستقل لكل يوم فيه طلب معلّق + تصدير PDF لليوم.
+let _repbalPendOpen = new Set();
+function repbalDayKey(ts){ return new Date(ts).toLocaleDateString('en-CA',{timeZone:'Africa/Cairo'}); }
+function repbalDayLabel(key){ return new Date(key+'T12:00:00').toLocaleDateString('ar-EG',{weekday:'long',day:'numeric',month:'long'}); }
+function repbalTime(ts){ return new Date(ts).toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit',timeZone:'Africa/Cairo'}); }
+function repbalPendToggle(rep){ if(_repbalPendOpen.has(rep)) _repbalPendOpen.delete(rep); else _repbalPendOpen.add(rep); repbalRenderPending(_repbalPendingRows, true); }
+function repbalPendDays(rs){
+  const days = {};
+  rs.forEach(r=>{ (days[repbalDayKey(r.created_at)] = days[repbalDayKey(r.created_at)] || []).push(r); });
+  return Object.keys(days).sort().reverse().map(k=>({key:k, reqs:days[k].slice().sort((a,b)=>a.created_at<b.created_at?-1:1)}));
+}
+function repbalRenderPending(rows, keepSel){
   const wrap = document.getElementById('rbadm-pending');
   _repbalPendingRows = rows;
-  _repbalSelPending.clear();
+  if(!keepSel){ _repbalSelPending.clear(); }
   repbalUpdateDelBtn('pending');
   if(!rows.length){ wrap.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">مفيش طلبات معلّقة حاليًا</div>'; return; }
-  wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px">
-    <tr style="background:#F5F0E6">
-      <th style="padding:8px;width:28px"><input type="checkbox" onchange="repbalToggleSelectAll('pending',this.checked)"/></th>
-      <th style="padding:8px;text-align:right">المندوب</th><th style="padding:8px;text-align:right">الأصناف</th><th style="padding:8px;text-align:right">الفروع اللي هتنزّل لها</th><th style="padding:8px;text-align:right">التاريخ</th>
-    </tr>
-    ${rows.map(r=>{ const brs=Array.isArray(r.branches)?r.branches:[]; return `<tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:8px"><input type="checkbox" class="repbal-row-cb" onchange="repbalToggleSel('pending',${r.id},this.checked)"/></td>
-      <td style="padding:8px">${r.rep_name}</td>
-      <td style="padding:8px">${(r.items||[]).map(i=>`${i.name} ×${i.qty}`).join('، ')}</td>
-      <td style="padding:8px;font-size:11px;color:#276749">${brs.length?'📍 '+brs.join(' · '):'<span style="color:#999">—</span>'}</td>
-      <td style="padding:8px">${new Date(r.created_at).toLocaleDateString('ar-EG',{day:'numeric',month:'short'})}</td>
-    </tr>`; }).join('')}
+  const E = lkadmEsc;
+  const by = {};
+  rows.forEach(r=>{ (by[r.rep_name] = by[r.rep_name] || []).push(r); });
+  const now = Date.now();
+  const reps = Object.keys(by).map(n=>{
+    const rs = by[n];
+    const oldest = rs.reduce((m,r)=>r.created_at<m?r.created_at:m, rs[0].created_at);
+    const items = rs.reduce((s,r)=>s+(r.items||[]).length,0);
+    const pcs = rs.reduce((s,r)=>s+(r.items||[]).reduce((a,i)=>a+(+i.qty||0),0),0);
+    return {n, rs, oldest, items, pcs, age: Math.floor((now-new Date(oldest).getTime())/864e5)};
+  }).sort((a,b)=>a.oldest<b.oldest?-1:1);
+  const th = 'padding:7px 8px;text-align:right;border-bottom:1px solid #E8DCC4;font-size:11.5px;color:#6B5B45';
+  wrap.innerHTML = reps.map(rp=>{
+    const open = _repbalPendOpen.has(rp.n);
+    const ageCol = rp.age>14?'#9E1B1B':rp.age>=3?'#8A5A00':'#276749';
+    const allSel = rp.rs.every(r=>_repbalSelPending.has(r.id));
+    const head = `<div onclick="repbalPendToggle(this.dataset.rep)" data-rep="${E(rp.n)}" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 12px;cursor:pointer;background:${open?'#F7F2EA':'#fff'};border:1px solid #E8DCC4;border-radius:${open?'10px 10px 0 0':'10px'}">
+        <input type="checkbox" ${allSel?'checked':''} data-rep="${E(rp.n)}" onclick="event.stopPropagation()" onchange="repbalToggleSelectAllGroup('pending', this.dataset.rep, this.checked)" style="width:18px;height:18px" title="اختيار كل طلباته"/>
+        <span style="font-size:15px;font-weight:900;color:#2C1F0A">${E(rp.n)}</span>
+        <span style="font-size:11.5px;background:#FBF0D9;color:#7A4F00;border-radius:999px;padding:2px 9px;font-weight:700">${rp.rs.length} طلب</span>
+        <span style="font-size:11.5px;color:#6B5B45">${rp.items} صنف · ${rp.pcs.toLocaleString('en-US')} قطعة</span>
+        <span style="font-size:11.5px;font-weight:800;color:${ageCol}">أقدم طلب من ${rp.age} يوم</span>
+        <span style="margin-right:auto;font-size:13px;color:#731E2E;font-weight:800">${open?'▴ قفل':'▾ افتح'}</span>
+      </div>`;
+    if(!open) return `<div style="margin-bottom:8px">${head}</div>`;
+    const days = repbalPendDays(rp.rs).map(d=>{
+      const multi = d.reqs.length>1;
+      const lines = [];
+      d.reqs.forEach(r=>(r.items||[]).forEach(it=>lines.push({r, name:it.name, qty:+it.qty||0})));
+      const total = lines.reduce((s,l)=>s+l.qty,0);
+      const reqHdr = d.reqs.map(r=>{ const brs = Array.isArray(r.branches)?r.branches:[]; return `<div style="display:flex;align-items:flex-start;gap:8px;padding:4px 0;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:800;color:#2C1F0A"><input type="checkbox" class="repbal-row-cb" data-rep="${E(rp.n)}" ${_repbalSelPending.has(r.id)?'checked':''} onchange="repbalToggleSel('pending',${Number(r.id)},this.checked)"/> طلب #${Number(r.id)} · ${repbalTime(r.created_at)}</label>
+          <span style="font-size:11px;color:#276749">${brs.length?'📍 '+brs.map(E).join(' · '):'<span style="color:#999">من غير فروع</span>'}</span></div>`; }).join('');
+      const body = lines.map((l,k)=>`<tr style="background:${k%2?'#FCFAF6':'#fff'}"><td style="padding:6px 8px;border-bottom:1px solid #F1E9DA">${E(l.name)}</td><td style="padding:6px 8px;border-bottom:1px solid #F1E9DA;text-align:center;font-weight:800">${l.qty.toLocaleString('en-US')}</td>${multi?`<td style="padding:6px 8px;border-bottom:1px solid #F1E9DA;text-align:center;color:#6B5B45">#${Number(l.r.id)}</td>`:''}</tr>`).join('');
+      return `<div style="border:1px solid #E8DCC4;border-radius:10px;margin:10px 0;overflow:hidden;background:#fff">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;background:#731E2E;color:#fff;padding:8px 12px;border-bottom:3px solid #C8A96E">
+          <span style="font-size:13.5px;font-weight:900">${repbalDayLabel(d.key)}</span>
+          <span style="font-size:11.5px;color:#E8D3A2">${d.reqs.length} طلب · ${lines.length} صنف · ${total.toLocaleString('en-US')} قطعة</span>
+          <button onclick="repbalPendDayPDF(this.dataset.rep,'${d.key}')" data-rep="${E(rp.n)}" style="background:#C8A96E;color:#2C1F0A;border:none;border-radius:7px;padding:6px 12px;font-size:11.5px;font-weight:800;font-family:Cairo,sans-serif;cursor:pointer">📤 تصدير PDF</button>
+        </div>
+        <div style="padding:6px 12px;background:#FBF6EC">${reqHdr}</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <tr style="background:#F5F0E6"><th style="${th}">الصنف</th><th style="${th};text-align:center;width:90px">الكمية (قطعة)</th>${multi?`<th style="${th};text-align:center;width:70px">الطلب</th>`:''}</tr>
+          ${body}
+          <tr style="background:#F3EBDD"><td style="padding:7px 8px;font-weight:900">الإجمالي</td><td style="padding:7px 8px;text-align:center;font-weight:900;color:#731E2E">${total.toLocaleString('en-US')}</td>${multi?'<td></td>':''}</tr>
+        </table></div>`;
+    }).join('');
+    return `<div style="margin-bottom:8px">${head}<div style="border:1px solid #E8DCC4;border-top:none;border-radius:0 0 10px 10px;padding:4px 10px 8px;background:#FDFBF7">${days}</div></div>`;
+  }).join('');
+}
+
+// تحويل HTML لـ PDF بنفس طريقة باقي تصديرات اللوحة، وفتح المعاينة (فيها إرسال/مشاركة)
+async function repbalHtmlToPdf(html, fileName, title, text){
+  if(!(await ensurePdfLibs())){ showToast('مكتبة PDF لسه بتتحمّل، حاول تاني بعد لحظة','err'); return; }
+  showToast('⏳ جاري تجهيز الملف...');
+  const holder = document.createElement('div');
+  holder.style.cssText = 'position:fixed;top:0;left:-99999px;width:780px;background:#fff;z-index:-1;direction:rtl;font-family:Cairo,Arial,sans-serif';
+  holder.innerHTML = html;
+  document.body.appendChild(holder);
+  try{
+    if(document.fonts && document.fonts.ready) await document.fonts.ready;
+    const canvas = await html2canvas(holder, {scale:2, useCORS:true, backgroundColor:'#ffffff'});
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({unit:'mm', format:'a4'});
+    const pageW = pdf.internal.pageSize.getWidth(), pageH = pdf.internal.pageSize.getHeight();
+    const imgW = pageW, imgH = canvas.height * imgW / canvas.width;
+    const imgData = canvas.toDataURL('image/jpeg', 0.95);
+    let heightLeft = imgH, position = 0;
+    pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH);
+    heightLeft -= pageH;
+    while(heightLeft > 0){ position = heightLeft - imgH; pdf.addPage(); pdf.addImage(imgData, 'JPEG', 0, position, imgW, imgH); heightLeft -= pageH; }
+    pdfPreviewOpen(pdf.output('blob'), fileName, title, text);
+  }catch(e){ console.warn('repbalHtmlToPdf failed', e); showToast('حصل خطأ أثناء تجهيز الملف','err'); }
+  finally{ holder.remove(); }
+}
+// هيكل مستند بهوية الطحان (عنابي + دهبي + اللوجو)
+function repbalBrandDoc(title, sub, bodyHtml){
+  const now = new Date().toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'});
+  return `<div style="font-family:Cairo,Arial,sans-serif;color:#2C1F0A;background:#fff">
+    <div style="background:#731E2E;color:#fff;padding:16px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:6px solid #C8A96E">
+      <div style="display:flex;align-items:center;gap:12px">
+        <img src="${SINV_LOGO}" alt="Al Tahhan Logo" style="height:58px;border-radius:8px;background:#fff;padding:4px"/>
+        <div><div style="font-size:21px;font-weight:900">الطحان جولدن داتس</div><div style="font-size:12px;color:#E8D3A2;font-weight:600">إدارة المودرن تريد</div></div>
+      </div>
+      <div style="text-align:left"><div style="font-size:18px;font-weight:900">${title}</div><div style="font-size:12.5px;color:#E8D3A2;font-weight:700">${sub||''}</div></div>
+    </div>
+    <div style="padding:18px 22px">${bodyHtml}</div>
+    <div style="background:#F7F2EA;border-top:3px solid #C8A96E;padding:8px 22px;display:flex;justify-content:space-between;font-size:10.5px;color:#6B5B45"><span>اتطلع من MT Plus — ${now}</span><span>الطحان جولدن داتس</span></div>
+  </div>`;
+}
+const REPBAL_BR_PAL = [['#731E2E','#F8E9EC'],['#A8781F','#FBF2DE'],['#2F6B3A','#E8F3EA'],['#1F5C7A','#E5F0F6'],['#6A3F8F','#F0E8F6']];
+function repbalMetaGrid(pairs){
+  return `<div style="display:grid;grid-template-columns:repeat(${pairs.length},1fr);gap:8px;margin-bottom:14px">${pairs.map(([k,v])=>`<div style="background:#F7F2EA;border-radius:8px;padding:8px 10px"><div style="font-size:10.5px;font-weight:700;color:#6B5B45">${k}</div><div style="font-size:13.5px;font-weight:800">${v}</div></div>`).join('')}</div>`;
+}
+function repbalSignRow(labels){
+  return `<div style="display:grid;grid-template-columns:repeat(${labels.length},1fr);gap:18px;margin-top:26px">${labels.map(l=>`<div style="border-top:1.5px solid #9A8A70;padding-top:6px;font-size:11.5px;font-weight:700;color:#6B5B45;text-align:center">${l}</div>`).join('')}</div>`;
+}
+function repbalPendDayPDF(rep, dayKey){
+  const E = lkadmEsc;
+  const rs = (_repbalPendingRows||[]).filter(r=>r.rep_name===rep && repbalDayKey(r.created_at)===dayKey).sort((a,b)=>a.created_at<b.created_at?-1:1);
+  if(!rs.length){ showToast('مفيش طلبات لليوم ده','err'); return; }
+  const brs = [...new Set(rs.flatMap(r=>Array.isArray(r.branches)?r.branches:[]))];
+  const lines = []; rs.forEach(r=>(r.items||[]).forEach(it=>lines.push({r, name:it.name, qty:+it.qty||0})));
+  const total = lines.reduce((s,l)=>s+l.qty,0);
+  const multi = rs.length>1;
+  const brHtml = brs.length ? `<div style="font-size:15px;font-weight:900;color:#731E2E;border-bottom:2px solid #C8A96E;padding-bottom:5px;margin-bottom:10px">الفروع اللي البضاعة دي ليها <span style="font-size:12px;color:#6B5B45;font-weight:600">(${brs.length} فرع)</span></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:16px">${brs.map((b,k)=>{ const p=REPBAL_BR_PAL[k%REPBAL_BR_PAL.length]; return `<div style="display:flex;align-items:center;gap:9px;border-radius:9px;padding:8px 11px;background:${p[1]};border-right:6px solid ${p[0]};color:${p[0]}"><span style="width:24px;height:24px;border-radius:50%;background:${p[0]};color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:900">${k+1}</span><span style="font-size:13.5px;font-weight:800">${E(b)}</span></div>`; }).join('')}</div>`
+    : `<div style="background:#FBF0D9;border-radius:8px;padding:8px 12px;font-size:12px;color:#7A4F00;margin-bottom:14px">الطلب ده مافيهوش فروع متسجلة</div>`;
+  const tb = `<div style="font-size:15px;font-weight:900;color:#731E2E;border-bottom:2px solid #C8A96E;padding-bottom:5px;margin-bottom:8px">الأصناف <span style="font-size:12px;color:#6B5B45;font-weight:600">(${lines.length} صنف)</span></div>
+    <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+      <tr style="background:#2C1F0A;color:#fff"><th style="padding:8px;text-align:right;width:34px">#</th><th style="padding:8px;text-align:right">الصنف</th><th style="padding:8px;text-align:center;width:100px">الكمية (قطعة)</th>${multi?'<th style="padding:8px;text-align:center;width:70px">الطلب</th>':''}</tr>
+      ${lines.map((l,k)=>`<tr style="background:${k%2?'#FCFAF6':'#fff'}"><td style="padding:7px 8px;border-bottom:1px solid #EFE6D6;color:#6B5B45">${k+1}</td><td style="padding:7px 8px;border-bottom:1px solid #EFE6D6">${E(l.name)}</td><td style="padding:7px 8px;border-bottom:1px solid #EFE6D6;text-align:center;font-weight:800">${l.qty.toLocaleString('en-US')}</td>${multi?`<td style="padding:7px 8px;border-bottom:1px solid #EFE6D6;text-align:center">#${Number(l.r.id)}</td>`:''}</tr>`).join('')}
+      <tr style="background:#F3EBDD;border-top:2px solid #C8A96E"><td></td><td style="padding:9px 8px;font-weight:900">الإجمالي</td><td style="padding:9px 8px;text-align:center;font-weight:900;color:#731E2E">${total.toLocaleString('en-US')}</td>${multi?'<td></td>':''}</tr>
+    </table>`;
+  const ids = rs.map(r=>'#'+Number(r.id)).join(' · ');
+  const body = repbalMetaGrid([['المندوب',E(rep)],['اليوم',repbalDayLabel(dayKey)],['الطلبات',ids],['الحالة','معلّق']]) + brHtml + tb + repbalSignRow(['توقيع المندوب','المخزن','اعتماد الإدارة']);
+  repbalHtmlToPdf(repbalBrandDoc('طلب بضاعة', ids, body), `طلب_بضاعة_${rep}_${dayKey}.pdf`, `طلب بضاعة — ${rep}`, `طلب بضاعة — ${rep} — ${repbalDayLabel(dayKey)} — الطحان جولدن داتس`);
+}
+
+// تحذير الرصيد السالب: تفصيل الصنف (استلم/تعديلات/اتفوتر/الرصيد) من نفس داتا رصيد المناديب + إرسال PDF
+function lkadmWarnCalc(w){
+  const raw = _repbalRawBalanceData || {};
+  const rep = w.rep_name, sd = (raw.startDates||{})[rep];
+  const items = (w.details && Array.isArray(w.details.items)) ? w.details.items : [];
+  const m = {}; items.forEach(it=>{ m[it.snf] = {snf:it.snf, snap:+it.qty||0, got:0, adj:0, sold:0}; });
+  const after = d => !!(sd && d && d>=sd);
+  (raw.reqsApproved||[]).forEach(d=>{ if(d.rep_name===rep && after(d.decided_at||d.created_at)) (d.items||[]).forEach(it=>{ if(m[it.name]) m[it.name].got += +it.qty||0; }); });
+  (raw.adjs||[]).forEach(a=>{ if(a.rep_name===rep && after(a.created_at) && m[a.snf]) m[a.snf].adj += +a.qty_delta||0; });
+  (raw.dels||[]).forEach(d=>{ if(d.rep_name===rep && after(d.created_at)) (d.items||[]).forEach(it=>{ if(m[it.name]) m[it.name].sold += +it.qty||0; }); });
+  const rows = Object.values(m).map(r=>({...r, bal: Math.round((r.got + r.adj - r.sold)*100)/100})).sort((a,b)=>a.bal-b.bal);
+  return {rows, start: sd || (w.details && w.details.start) || null};
+}
+function lkadmWarnTable(rows, forPdf){
+  const E = lkadmEsc, f = v => (Math.round(v*100)/100).toLocaleString('en-US');
+  const c = forPdf ? 'padding:7px 8px;border-bottom:1px solid #EFE6D6' : 'padding:5px 6px;border-bottom:1px dashed #E8DCC4';
+  return `<table style="width:100%;border-collapse:collapse;font-size:${forPdf?'12.5px':'11.5px'}">
+    <tr style="background:${forPdf?'#2C1F0A':'#F5F0E6'};color:${forPdf?'#fff':'#6B5B45'}"><th style="padding:7px 8px;text-align:right">الصنف</th><th style="padding:7px 8px;text-align:center">استلم (طلبات)</th><th style="padding:7px 8px;text-align:center">تعديلات وتحويلات</th><th style="padding:7px 8px;text-align:center">اتفوتر</th><th style="padding:7px 8px;text-align:center">الرصيد</th></tr>
+    ${rows.map((r,k)=>`<tr style="background:${k%2?'#FCFAF6':'#fff'}"><td style="${c}">${E(r.snf)}</td><td style="${c};text-align:center">${f(r.got)}</td><td style="${c};text-align:center">${r.adj?f(r.adj):'—'}</td><td style="${c};text-align:center">${f(r.sold)}</td><td style="${c};text-align:center;font-weight:900;color:${r.bal<0?'#9E1B1B':'#276749'}">${f(r.bal)}</td></tr>`).join('')}
   </table>`;
+}
+function lkadmWarnOpen(id){
+  const box = document.getElementById('lkadm-warn-'+id); if(!box) return;
+  if(box.innerHTML){ box.innerHTML=''; return; }
+  const w = (_lkadmRows||[]).find(x=>x.id===id); if(!w) return;
+  if(!_repbalRawBalanceData || !(_repbalRawBalanceData.dels||[]).length){ showToast('استنى لحظة لحد ما أرصدة المناديب تتحمّل','err'); return; }
+  const {rows, start} = lkadmWarnCalc(w);
+  const neg = rows.filter(r=>r.bal<0).length;
+  box.innerHTML = `<div style="margin-top:8px;background:#fff;border:1px solid #EAD9A8;border-radius:8px;padding:8px">
+    <div style="font-size:11px;color:#6B5B45;margin-bottom:6px">الحساب من ${start?new Date(start).toLocaleDateString('ar-EG',{day:'numeric',month:'long'}):'بداية رصيده'} لحد دلوقتي · ${neg} صنف لسه بالسالب من ${rows.length}</div>
+    ${lkadmWarnTable(rows,false)}
+    <button onclick="lkadmWarnPDF(${Number(id)})" style="margin-top:8px;width:100%;min-height:42px;background:#731E2E;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:800;font-family:Cairo,sans-serif;cursor:pointer">📤 إرسال PDF</button>
+  </div>`;
+}
+function lkadmWarnPDF(id){
+  const w = (_lkadmRows||[]).find(x=>x.id===id); if(!w) return;
+  const E = lkadmEsc;
+  const {rows, start} = lkadmWarnCalc(w);
+  const neg = rows.filter(r=>r.bal<0);
+  const when = new Date(w.created_at).toLocaleString('ar-EG',{day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'});
+  const body = repbalMetaGrid([['المندوب',E(w.rep_name)],['تاريخ التحذير',when],['الحساب من',start?new Date(start).toLocaleDateString('ar-EG',{day:'numeric',month:'long'}):'—'],['أصناف بالسالب',`${neg.length} من ${rows.length}`]])
+    + `<div style="background:#FBEDED;border-right:5px solid #9E1B1B;border-radius:8px;padding:9px 12px;font-size:13px;color:#7A1414;font-weight:700;margin-bottom:14px">${E(w.reason_text)}</div>`
+    + `<div style="font-size:15px;font-weight:900;color:#731E2E;border-bottom:2px solid #C8A96E;padding-bottom:5px;margin-bottom:8px">تفصيل الأصناف</div>`
+    + lkadmWarnTable(rows,true)
+    + `<div style="font-size:11px;color:#6B5B45;margin-top:8px;line-height:1.8">الرصيد = استلم من طلبات البضاعة المعتمدة + التعديلات والتحويلات − اللي اتفوتر. الرصيد بالسالب معناه إن اللي اتفوتر أكتر من المتسجّل إنه اتسلّم له — غالبًا طلب لسه مااتعتمدش أو تحويل من زميل مااتسجلش.</div>`
+    + repbalSignRow(['توقيع المندوب','المشرف','اعتماد الإدارة']);
+  repbalHtmlToPdf(repbalBrandDoc('تحذير رصيد العربية', E(w.rep_name), body), `تحذير_رصيد_${w.rep_name}_${localISO()}.pdf`, `تحذير رصيد — ${w.rep_name}`, `تحذير رصيد العربية — ${w.rep_name} — الطحان جولدن داتس`);
 }
 
 function repbalRenderDiffs(rows){
