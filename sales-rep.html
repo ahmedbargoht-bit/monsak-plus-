@@ -1679,6 +1679,8 @@ async function doLogin(){
     setTimeout(checkPromoBanner, 1200);
     setTimeout(checkWeeklyMotivationalPopup, 1800);
     setTimeout(trCheckPending, 900); // بوب أب التحويلات المعلّقة — بيقفل التطبيق لحد التأكيد أو الرفض
+    setTimeout(rcCheckPending, 1100); // بوب أب استلام الصرف — بيقفل التطبيق لحد ما يأكد
+    setTimeout(cdCheck, 1300); // يوم جرد (10 و20 وآخر الشهر) — لازم يجرد قبل أي حاجة
     setTimeout(()=>lkCheck(true), 700); // قفل التطبيق من الإدارة/القواعد — مايتفتحش غير من الأدمن
   }catch(e){
     errEl.classList.add('on');
@@ -1689,7 +1691,7 @@ async function doLogin(){
 }
 
 function doLogout(){
-  document.getElementById('lk-gate')?.remove(); document.getElementById('tr-gate')?.remove();
+  document.getElementById('lk-gate')?.remove(); document.getElementById('tr-gate')?.remove(); document.getElementById('rc-gate')?.remove(); document.getElementById('cd-gate')?.remove(); _cdRequired=false;
   currentRep=null; pdbData=null; _salesPricesCache=null;
   _clientDiscCache=null; _branchClientCache=null; _clientPromoCache=null; _branchSpecialPLCache=null; _clientPLCache=null;
   visitState={branch:'',route:'',client:'',fea:null,cat:null,quantities:{},discounts:{},prices:{}};
@@ -2622,6 +2624,9 @@ function tbOpenDetail(name){
 // افتراضيًا عشان الكمية متضيعش من الحساب.
 let _ciBalances     = {};
 let _ciMoves        = [];
+// 28/11: الطلب اللي ليه إذن صرف بيدخل الرصيد بالمصروف (أو اللي اتعتمد إنه اتستلم) وبعد تأكيد الاستلام بس
+function rqEffItems(d){ return Array.isArray(d.issued_items) ? (d.receipt_status==='received' ? (Array.isArray(d.received_items)?d.received_items:d.issued_items) : []) : (d.items||[]); }
+function rqEffDate(d){ return (Array.isArray(d.issued_items) && d.received_at) ? d.received_at : (d.decided_at||d.created_at); }
 let _ciAllNames     = [];   // قائمة الأصناف الشخصية للمندوب (اللي اشتغل بيها أو أضافها بنفسه)
 let _ciCatalogNames = [];   // كل أصناف الكتالوج (لاستخدامها في مودال "إضافة صنف")
 let _ciCountInputs  = {};
@@ -2760,7 +2765,7 @@ async function ciComputeBalances(opts){
     // التصفير من غير ما يكون فيه توريد يقابلها، فيطلع رصيد سالب غلط.
     sbFetchAll('sales_deliveries',       `?rep_name=eq.${enc}&delivery_date=gte.${startDateOnly}&deleted_at=is.null&select=id,items,created_at,branch_name`).catch(()=>[]),
     sbFetchAll('sales_returns',          `?rep_name=eq.${enc}&return_date=gte.${startDateOnly}&select=items,receipt_status,created_at`).catch(()=>[]),
-    sbFetchAll('rep_stock_requests',     `?rep_name=eq.${enc}&status=eq.approved&created_at=gte.${startTs}&select=id,items,created_at,decided_at`).catch(()=>[]),
+    sbFetchAll('rep_stock_requests',     `?rep_name=eq.${enc}&status=eq.approved&created_at=gte.${startTs}&select=id,items,created_at,decided_at,issued_items,received_items,receipt_status,received_at`).catch(()=>[]),
     sbFetchAll('rep_balance_adjustments',`?rep_name=eq.${enc}&created_at=gte.${startTs}&select=snf,qty_delta,created_at,reason`).catch(()=>[]),
     sbFetchAll('rep_damaged_handovers',  `?rep_name=eq.${enc}&created_at=gte.${startTs}&select=snf,qty`).catch(()=>[]),
   ]);
@@ -2771,7 +2776,7 @@ async function ciComputeBalances(opts){
   // 28/11: كارت الصنف — كل حركة على "الصالح" بتتسجل هنا بتاريخها ومستندها
   const moves = [];
   (dels||[]).filter(d=>d.created_at && d.created_at>=startDate).forEach(d=>(d.items||[]).forEach(it=>{ addValid(it.name, -(+it.qty||0)); moves.push({n:it.name, t:d.created_at, q:-(+it.qty||0), doc:`فاتورة ${d.branch_name||''}`}); }));
-  (reqs||[]).forEach(d=>(d.items||[]).forEach(it=>{ addValid(it.name, +(+it.qty||0)); moves.push({n:it.name, t:d.decided_at||d.created_at, q:+(+it.qty||0), doc:`طلب بضاعة #${d.id||''}`}); }));
+  (reqs||[]).forEach(d=>rqEffItems(d).forEach(it=>{ addValid(it.name, +(+it.qty||0)); moves.push({n:it.name, t:rqEffDate(d), q:+(+it.qty||0), doc:`${Array.isArray(d.issued_items)?'صرف':'طلب بضاعة'} #${d.id||''}`}); }));
   (adjs||[]).forEach(a=>{ addValid(a.snf, +(+a.qty_delta||0)); moves.push({n:a.snf, t:a.created_at, q:+(+a.qty_delta||0), doc:a.reason||'تعديل'}); });
   _ciMoves = moves;
   // المرتجع "لسه في العربية" = المرتجعات اللي لسه معلّقة بس (المشرف لسه ما أكّدش استلامها).
@@ -2943,6 +2948,7 @@ async function ciCheckManualCountOpen(){
     const rows = await sbFetch('products_db', `?key=eq.ci_manual_count_open&select=value&limit=1`);
     _ciManualOpen = !!(rows && rows[0] && rows[0].value==='true');
   }catch(e){ _ciManualOpen = false; }
+  if(cdIsCountDay()) _ciManualOpen = true; // 28/11: يوم 10 و20 وآخر الشهر = جرد دوري إجباري
   const lockedEl = document.getElementById('ci-manual-locked');
   const openEl   = document.getElementById('ci-manual-open');
   if(lockedEl) lockedEl.style.display = _ciManualOpen ? 'none' : '';
@@ -3104,8 +3110,127 @@ function trRenderGate(){
     ${cards}
   </div>`;
 }
-document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ trCheckPending(); lkCheck(false); } });
-setInterval(()=>{ if(!document.hidden){ trCheckPending(); lkCheck(false); } }, 10*60*1000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ trCheckPending(); rcCheckPending(); cdCheck(); lkCheck(false); } });
+setInterval(()=>{ if(!document.hidden){ trCheckPending(); rcCheckPending(); lkCheck(false); } }, 10*60*1000);
+
+// ══ الجرد الدوري الإجباري (28/11) — يوم 10 ويوم 20 وآخر يوم في الشهر (بتوقيت القاهرة) ══
+// لو النهارده يوم جرد والمندوب لسه ماسجلش جرد النهارده: بوب أب يوديه لشاشة الجرد، وأي تاب تاني مقفول لحد ما يحفظ.
+let _cdRequired = false, _cdBusy = false;
+function cdToday(){ return new Date().toLocaleDateString('en-CA',{timeZone:'Africa/Cairo'}); }
+function cdIsCountDay(){
+  const [y,m,d] = cdToday().split('-').map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return d===10 || d===20 || d===last;
+}
+async function cdCheck(){
+  if(!currentRep || _cdBusy) return;
+  if(!cdIsCountDay()){ _cdRequired=false; document.getElementById('cd-gate')?.remove(); return; }
+  _cdBusy = true;
+  try{
+    const enc = encodeURIComponent(currentRep.name);
+    const start = new Date(cdToday()+'T00:00:00+02:00').toISOString();
+    const rows = await sbFetch('rep_car_inventory', `?rep_name=eq.${enc}&created_at=gte.${encodeURIComponent(start)}&select=id&limit=1`);
+    _cdRequired = !(rows && rows.length);
+    if(_cdRequired && !(document.getElementById('s-carinv')?.classList.contains('active') && document.getElementById('ci-sub-count')?.style.display!=='none')) cdShowGate();
+    if(!_cdRequired) document.getElementById('cd-gate')?.remove();
+  }catch(e){ /* النت فاصل — مانقفلش */ }
+  finally{ _cdBusy = false; }
+}
+function cdShowGate(){
+  let ov = document.getElementById('cd-gate');
+  if(!ov){ ov = document.createElement('div'); ov.id='cd-gate';
+    ov.style.cssText='position:fixed;inset:0;z-index:99998;background:rgba(20,10,5,.82);display:flex;align-items:center;justify-content:center;padding:16px;direction:rtl;font-family:Cairo,sans-serif';
+    document.body.appendChild(ov); }
+  const day = new Date().toLocaleDateString('ar-EG',{weekday:'long',day:'numeric',month:'long',timeZone:'Africa/Cairo'});
+  ov.innerHTML = `<div style="background:#F7F2EA;border-radius:16px;max-width:420px;width:100%;padding:20px;text-align:center;border-top:6px solid #C8A96E">
+    <div style="font-size:40px">📋</div>
+    <div style="font-size:19px;font-weight:900;color:#731E2E;margin:6px 0 4px">النهارده يوم جرد</div>
+    <div style="font-size:13px;color:#2C1F0A;margin-bottom:6px">${day}</div>
+    <div style="font-size:12.5px;color:#6B5B45;line-height:1.8;margin-bottom:14px">عدّ كل البضاعة اللي في العربية واكتب العدد الفعلي لكل صنف. التطبيق هيفتح بعد ما تحفظ الجرد.</div>
+    <button onclick="cdGo()" style="width:100%;min-height:48px;background:#731E2E;color:#fff;border:none;border-radius:10px;font-family:Cairo,sans-serif;font-size:15px;font-weight:800;cursor:pointer">ابدأ الجرد</button>
+  </div>`;
+}
+function cdGo(){
+  document.getElementById('cd-gate')?.remove();
+  _origSwitchTab('carinv'); setTimeout(()=>ciSwitchSub('count'), 50);
+}
+const _origSwitchTab = switchTab;
+switchTab = function(tab){ if(_cdRequired && tab!=='carinv'){ cdShowGate(); return; } return _origSwitchTab(tab); };
+
+// ══ استلام الصرف (28/11) — المشرف صرف بضاعة من مبيعات بلس، والمندوب لازم يأكد إنه استلمها ══
+// التطبيق بيتقفل لحد ما يأكد. "استلمت زي ما مكتوب" = تدخل الرصيد فورًا. "استلمت كمية مختلفة" = بتروح
+// للوحة التحكم تراجعها، ومش بتدخل الرصيد لحد ما تتعتمد.
+let _rcRows = [], _rcBusy = false;
+async function rcCheckPending(){
+  if(!currentRep || _rcBusy) return;
+  _rcBusy = true;
+  try{
+    const enc = encodeURIComponent(currentRep.name);
+    _rcRows = await sbFetch('rep_stock_requests', `?rep_name=eq.${enc}&receipt_status=eq.pending&select=id,items,issued_items,issued_by,issued_at,branches&order=issued_at.asc`) || [];
+    rcRender();
+  }catch(e){ /* النت فاصل — مانقفلش */ }
+  finally{ _rcBusy = false; }
+}
+function rcRender(){
+  let ov = document.getElementById('rc-gate');
+  if(!_rcRows.length){ if(ov) ov.remove(); return; }
+  if(!ov){
+    ov = document.createElement('div'); ov.id = 'rc-gate';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(20,10,5,.82);display:flex;align-items:center;justify-content:center;padding:16px;direction:rtl;font-family:Cairo,sans-serif';
+    document.body.appendChild(ov);
+  }
+  const E = trEsc;
+  const cards = _rcRows.map(r=>{
+    const req = {}; (r.items||[]).forEach(i=>{ req[i.name]=(req[i.name]||0)+(+i.qty||0); });
+    const when = r.issued_at ? new Date(r.issued_at).toLocaleString('ar-EG',{day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'}) : '';
+    const rows = (r.issued_items||[]).map((i,k)=>`<tr style="border-bottom:1px solid #F1E9DA"><td style="padding:6px 4px;font-size:12.5px">${E(i.name)}</td><td style="padding:6px 4px;text-align:center;color:#6B5B45">${req[i.name]??'—'}</td><td style="padding:6px 4px;text-align:center;font-weight:900">${+i.qty||0}</td>
+      <td class="rc-diff-${Number(r.id)}" style="display:none;padding:6px 4px;text-align:center"><input type="number" min="0" inputmode="decimal" id="rcq-${Number(r.id)}-${k}" value="${+i.qty||0}" style="width:64px;padding:5px;border:1.5px solid #D4C4A8;border-radius:7px;text-align:center;font-family:Cairo,sans-serif;font-weight:800"/></td></tr>`).join('');
+    return `<div style="border:1.5px solid #E8DCC4;border-radius:12px;padding:12px;margin-bottom:12px;background:#fff">
+      <div style="font-size:15px;font-weight:800;color:#731E2E">📦 بضاعة اتصرفت لك — طلب #${Number(r.id)}</div>
+      <div style="font-size:11.5px;color:#6B5B45;margin:2px 0 8px">صرفها ${E(r.issued_by||'المشرف')}${when?' · '+when:''}</div>
+      <table style="width:100%;border-collapse:collapse"><tr style="font-size:11px;color:#6B5B45"><th style="text-align:right;padding:4px">الصنف</th><th style="padding:4px">طلبت</th><th style="padding:4px">اتصرف</th><th class="rc-diff-${Number(r.id)}" style="display:none;padding:4px">استلمت</th></tr>${rows}</table>
+      <textarea class="rc-diff-${Number(r.id)}" id="rcn-${Number(r.id)}" placeholder="اكتب إيه اللي حصل (إجباري)" style="display:none;width:100%;box-sizing:border-box;margin-top:8px;padding:8px;border:1.5px solid #D4C4A8;border-radius:8px;font-family:Cairo,sans-serif;font-size:12.5px;min-height:56px"></textarea>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button id="rcok-${Number(r.id)}" onclick="rcConfirm(${Number(r.id)},'ok')" style="flex:1;min-height:46px;background:#276749;color:#fff;border:none;border-radius:10px;font-family:Cairo,sans-serif;font-size:14px;font-weight:800;cursor:pointer">✅ استلمت زي ما مكتوب</button>
+        <button id="rcdf-${Number(r.id)}" onclick="rcDiffMode(${Number(r.id)})" style="flex:1;min-height:46px;background:#fff;color:#9E1B1B;border:1.5px solid #E2A9A9;border-radius:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:800;cursor:pointer">⚠️ استلمت كمية مختلفة</button>
+      </div></div>`;
+  }).join('');
+  ov.innerHTML = `<div style="background:#F7F2EA;border-radius:16px;max-width:470px;width:100%;max-height:88vh;overflow:auto;padding:16px">
+    <div style="font-size:17px;font-weight:900;color:#2C1F0A;margin-bottom:4px">أكّد استلام البضاعة الأول</div>
+    <div style="font-size:12.5px;color:#6B5B45;margin-bottom:12px">التطبيق هيفضل مقفول لحد ما تأكد. اللي بتأكد عليه بيدخل رصيد عربيتك فورًا — عدّ البضاعة قبل ما تدوس.</div>
+    ${cards}</div>`;
+}
+function rcDiffMode(id){
+  document.querySelectorAll('.rc-diff-'+id).forEach(el=>{ el.style.display = el.tagName==='TEXTAREA' ? 'block' : ''; });
+  const ok = document.getElementById('rcok-'+id); if(ok) ok.style.display='none';
+  const df = document.getElementById('rcdf-'+id); if(df){ df.textContent='📤 ابعت للإدارة'; df.style.background='#9E1B1B'; df.style.color='#fff'; df.setAttribute('onclick',`rcConfirm(${id},'diff')`); }
+}
+async function rcConfirm(id, how){
+  const r = _rcRows.find(x=>x.id===id); if(!r) return;
+  const now = new Date().toISOString();
+  let body;
+  if(how==='ok'){
+    if(!confirm('متأكد إنك عدّيت البضاعة واستلمت الكميات دي كلها؟')) return;
+    body = {receipt_status:'received', received_by:currentRep.name, received_at:now};
+  } else {
+    const got = [];
+    for(let k=0;k<(r.issued_items||[]).length;k++){
+      const v = document.getElementById(`rcq-${id}-${k}`)?.value;
+      if(v==='' || v==null || isNaN(+v) || +v<0){ showToast('اكتب الكمية اللي استلمتها لكل صنف'); return; }
+      got.push({name:r.issued_items[k].name, qty:+v});
+    }
+    const note = (document.getElementById('rcn-'+id)?.value||'').trim();
+    if(!note){ showToast('اكتب إيه اللي حصل'); return; }
+    body = {receipt_status:'disputed', received_items:got, receipt_note:note, received_by:currentRep.name, received_at:now};
+  }
+  try{
+    const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'};
+    await trPatchOk(`${SUPABASE_URL}/rest/v1/rep_stock_requests?id=eq.${id}&receipt_status=eq.pending`,{method:'PATCH',headers:H,body:JSON.stringify(body)});
+    showToast(how==='ok' ? '✅ اتضافت لرصيدك' : '📤 اتبعتت للإدارة تراجعها');
+    rcCheckPending();
+    if(typeof ciLoad==='function' && document.getElementById('ci-balance-list')) ciLoad();
+  }catch(e){ showToast('❌ حصل خطأ، حاول تاني'); }
+}
 
 // ══ قفل التطبيق (28/11/2026) — rep_app_locks + rep_app_lock_rules ══
 // أي قفلة مفتوحة (mode=lock) على المندوب = التطبيق مقفول بالكامل، ومايتفتحش غير من الأدمن بسبب مكتوب.
@@ -3225,7 +3350,6 @@ function ciRenderCountList(){
     return `<div style="display:flex;align-items:center;gap:8px;padding:8px 4px;border-bottom:1px solid var(--bg2)">
       <div style="flex:1">
         <div style="font-size:12px;color:var(--t1)">${n}</div>
-        <div style="font-size:10px;color:var(--t3)">المتوقع حاليًا: ${expected}</div>
       </div>
       <input type="number" min="0" inputmode="decimal" value="${val}" oninput="ciOnCountInput('${esc}',this.value)"
         placeholder="العدد الفعلي" style="width:80px;flex-shrink:0;padding:7px 8px;border:1.5px solid var(--bg2);border-radius:8px;font-family:Cairo,sans-serif;font-size:12px;text-align:center;box-sizing:border-box"/>
@@ -3243,35 +3367,60 @@ function ciOnCountInput(name, val){
 // لأنه بقى متتبَّع بدقة من لحظة رفعه لحد ما المشرف يأكّد استلامه. الجرد بيتعتمد فورًا كرصيد
 // رسمي بمجرد ما المندوب يحفظ، وأي فرق بيتسجّله تصحيح رصيد تلقائي فورًا.
 async function ciSaveCount(){
+  // 28/11 (قانون رصيد مخزن المندوب): الجرد أعمى. الصنف بيتعتمد لوحده لو الفرق ≤ max(عبوتين، 2% من المحسوب)،
+  // وأول جرد بعد بداية الرصيد/التصفير (افتتاحي) بيتعتمد كله. أي صنف فرقه أكبر بيروح للمراجعة ويقفل التطبيق.
   const isFilled = (v)=> v!=null && v!=='' && !isNaN(+v);
   const entries = Object.entries(_ciCountInputs).filter(([n,v])=> isFilled(v));
   if(!entries.length){ showToast('دخّل عدد صنف واحد على الأقل'); return; }
+  if(!confirm(`حفظ الجرد (${entries.length} صنف)؟ اتأكد إنك عدّيت كل حاجة في العربية.`)) return;
+  const enc = encodeURIComponent(currentRep.name);
+  let opening = false, rule = null;
+  try{
+    const resetRows = await sbFetch('rep_balance_resets', `?rep_name=eq.${enc}&select=reset_at&order=reset_at.desc&limit=1`).catch(()=>[]);
+    const cut = resetRows && resetRows[0] && resetRows[0].reset_at;
+    const prev = await sbFetch('rep_car_inventory', `?rep_name=eq.${enc}${cut?`&created_at=gt.${encodeURIComponent(cut)}`:''}&select=id&limit=1`);
+    opening = !(prev && prev.length);
+    const rules = await sbFetch('rep_app_lock_rules','?code=eq.count_diff&select=mode,threshold').catch(()=>[]);
+    rule = rules && rules[0];
+  }catch(e){ showToast('❌ مقدرتش أتأكد من بيانات الجرد — اتأكد من النت وجرّب تاني'); return; }
+  const minTol = rule ? (+rule.threshold||2) : 2;
   const rows = entries.map(([name,v])=>{
     const counted  = +v;
-    const computed = +((_ciBalances&&_ciBalances.valid&&_ciBalances.valid[name])||0);
+    const computed = Math.round(((_ciBalances&&_ciBalances.valid&&_ciBalances.valid[name])||0)*100)/100;
+    const diff = Math.round((computed-counted)*100)/100;
+    const tol = Math.max(minTol, Math.abs(computed)*0.02);
+    const ok = opening || Math.abs(diff) <= tol;
     return { rep_name:currentRep.name, grp:currentRep.grp||'', snf:name,
              counted_qty:counted, counted_valid_qty:counted, counted_returned_qty:0,
-             computed_qty:computed, diff:computed-counted, resolved:true };
+             computed_qty:computed, diff, resolved: ok || diff===0 };
   });
   try{
     const res = await _apiFetch(SUPABASE_URL+'/rest/v1/rep_car_inventory',{method:'POST',headers:SB_HEADERS,body:JSON.stringify(rows)});
     if(!res.ok) throw new Error(await res.text());
-
-    const adjRows = rows.filter(r=>r.diff!==0).map(r=>({
+    const adjRows = rows.filter(r=>r.resolved && r.diff!==0).map(r=>({
       rep_name: r.rep_name, snf: r.snf, qty_delta: -r.diff,
-      reason: 'جرد دوري شامل — اعتماد فوري أوتوماتيكي', adjusted_by: currentRep.name
+      reason: opening ? 'جرد افتتاحي — اعتماد أوتوماتيكي' : 'جرد دوري — فرق في الحدود المسموحة (اعتماد أوتوماتيكي)', adjusted_by: currentRep.name
     }));
     if(adjRows.length){
       const adjRes = await _apiFetch(SUPABASE_URL+'/rest/v1/rep_balance_adjustments',{method:'POST',headers:SB_HEADERS,body:JSON.stringify(adjRows)});
       if(!adjRes.ok) throw new Error(await adjRes.text());
     }
-
-    showToast('✅ اتسجل الجرد واعتمد رصيدك فورًا');
+    const big = rows.filter(r=>!r.resolved);
+    if(big.length && (!rule || rule.mode!=='off')){
+      const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+      await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_app_locks`,{method:'POST',headers:H,body:JSON.stringify({
+        rep_name: currentRep.name, reason_code:'count_diff', mode: (rule&&rule.mode)||'lock',
+        reason_text: `جرد ${new Date().toLocaleDateString('ar-EG',{day:'numeric',month:'long'})}: ${big.length} صنف فرقهم أكبر من المسموح`,
+        details: {items: big.map(r=>({snf:r.snf, qty:-r.diff, counted:r.counted_qty, computed:r.computed_qty}))}
+      })}).catch(()=>{});
+    }
+    showToast(big.length ? `⚠️ اتسجل الجرد — ${big.length} صنف فرقهم كبير وراحوا للإدارة` : (opening ? '✅ اتسجل الجرد الافتتاحي واعتمد رصيدك' : '✅ اتسجل الجرد واعتمد رصيدك'));
     _ciCountInputs = {};
     _ciBalances = await ciComputeBalances();
     ciRenderBalanceList();
     ciRenderCountList();
     ciLoadMyHistory();
+    _cdRequired = false; cdCheck(); lkCheck(false);
   }catch(e){ showToast('❌ حصل خطأ، حاول تاني'); }
 }
 
