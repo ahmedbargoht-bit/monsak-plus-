@@ -8027,6 +8027,13 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape' && document.queryS
             <button onclick="repbalLoad(true)" class="btn btn-ghost btn-sm"><i class="ti ti-refresh"></i> تحديث</button>
           </div>
 
+          <div class="card" id="lkadm-card">
+            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+              <span><i class="ti ti-lock" style="color:#9E1B1B"></i> قفل تطبيق المندوب</span>
+              <button onclick="lkadmManualLock()" class="btn btn-ghost btn-sm"><i class="ti ti-lock"></i> قفل مندوب يدوي</button>
+            </div>
+            <div id="lkadm-body"><div style="text-align:center;padding:14px;color:var(--text2);font-size:12px">جارٍ التحميل...</div></div>
+          </div>
           <div class="card">
             <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
               <span><i class="ti ti-clock" style="color:#B45309"></i> طلبات بضاعة معلّقة</span>
@@ -30216,7 +30223,7 @@ async function lgsChoose(k){
   try{
     const res = await fetch(`${SUPABASE_URL}/rest/v1/app_brand_settings?app_key=eq.admin`,{method:'PATCH',
       headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'return=representation'},
-      body:JSON.stringify({login_skin:k, updated_at:new Date().toISOString(), updated_by:(CU&&CU.name)||'admin'})});
+      body:JSON.stringify({login_skin:k, updated_at:new Date().toISOString(), updated_by:(typeof CU!=='undefined'&&CU&&CU.name)||'admin'})});
     const rows = res.ok ? await res.json() : null;
     if(!res.ok || !rows || !rows.length) throw new Error('فشل الحفظ ('+res.status+')');
     _lgsCur = k; try{ localStorage.setItem('mt_login_skin', k); }catch(e){}
@@ -44892,6 +44899,7 @@ async function repbalLoad(){
   if(_repbalSelectedGrps.length) repsAll = repsAll.filter(r=>_repbalSelectedGrps.includes(r.grp));
   _repbalReps = repsAll;
   const repNames = repsAll.map(r=>r.name);
+  lkadmLoad(repNames); // قفل تطبيق المندوب (28/11)
 
   if(!repNames.length){
     ['rbadm-pending','rbadm-all-requests','rbadm-balances'].forEach(id=>{
@@ -45013,6 +45021,94 @@ function repbalToggleSelectAllGroup(kind, repName, checked){
 
 // حذف نهائي من قاعدة البيانات — بيختفي تلقائيًا من تطبيق المشرف/مدير المبيعات ومن تطبيق المندوب
 // كمان لأن الكل بيقرا من نفس الجدول. إجراء لا رجعة فيه.
+
+// ══ قفل تطبيق المندوب (28/11/2026) — rep_app_locks / rep_app_lock_rules ══
+// القفلة بتتعمل من تطبيق المندوب (قاعدة أوتوماتيك) أو من هنا (يدوي). الفتح من هنا بس، بسبب إجباري (rpc rep_app_unlock).
+let _lkadmReps = [], _lkadmRows = [];
+function lkadmEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function lkadmH(){ return {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}; }
+async function lkadmRpc(fn, body){
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`,{method:'POST',headers:lkadmH(),body:JSON.stringify(body)});
+  if(!r.ok){ let m=''; try{ m=(await r.json()).message||''; }catch(e){} throw new Error(m||('HTTP '+r.status)); }
+}
+async function lkadmLoad(repNames){
+  if(repNames) _lkadmReps = repNames;
+  const body = document.getElementById('lkadm-body');
+  if(!body) return;
+  try{
+    const enc = _lkadmReps.map(n=>encodeURIComponent(n)).join(',');
+    const [rows, rules] = await Promise.all([
+      enc ? fetchAllRows(`${SUPABASE_URL}/rest/v1/rep_app_locks?rep_name=in.(${enc})&unlocked_at=is.null&order=created_at.asc&select=*`, lkadmH(), 1000, true) : Promise.resolve([]),
+      fetchAllRows(`${SUPABASE_URL}/rest/v1/rep_app_lock_rules?select=*&order=code.asc`, lkadmH(), 1000, true)
+    ]);
+    _lkadmRows = rows||[];
+    const neg = (rules||[]).find(r=>r.code==='neg_balance');
+    const modeSel = neg ? `<label style="display:flex;align-items:center;gap:8px;font-size:12px;flex-wrap:wrap">رصيد صنف بالسالب:
+      <select onchange="lkadmSetRule('neg_balance', this.value, ${+neg.threshold||0})" style="font-family:Cairo,sans-serif;font-size:12px;padding:4px 8px;border-radius:6px">
+        <option value="off" ${neg.mode==='off'?'selected':''}>مش شغال</option>
+        <option value="warn" ${neg.mode==='warn'?'selected':''}>تحذير للإدارة بس</option>
+        <option value="lock" ${neg.mode==='lock'?'selected':''}>يقفل التطبيق</option>
+      </select><span style="color:var(--text2)">بيتفحص كل ما المندوب يدخل</span></label>` : '';
+    const locks = _lkadmRows.filter(r=>r.mode==='lock'), warns = _lkadmRows.filter(r=>r.mode==='warn');
+    const row = (r, isLock)=>{
+      const items = (r.details && Array.isArray(r.details.items)) ? r.details.items : [];
+      const when = new Date(r.created_at).toLocaleString('ar-EG',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+      const det = items.length ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:var(--text2)">الأصناف (${items.length})</summary>${items.map(it=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;border-bottom:1px dashed #eee"><span>${lkadmEsc(it.snf)}</span><b style="direction:ltr;color:#9E1B1B">${lkadmEsc(it.qty)}</b></div>`).join('')}</details>` : '';
+      return `<div style="border:1px solid ${isLock?'#E2A9A9':'#EAD9A8'};background:${isLock?'#FBEDED':'#FBF6E8'};border-radius:8px;padding:8px 10px;margin-bottom:6px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <b style="font-size:12.5px">${lkadmEsc(r.rep_name)}</b>
+          <span style="font-size:11.5px">${lkadmEsc(r.reason_text)}</span>
+          <span style="font-size:10.5px;color:var(--text2)">${r.locked_by==='system'?'أوتوماتيك':lkadmEsc(r.locked_by)} · ${when}</span>
+          <span style="margin-right:auto;display:flex;gap:6px">
+            ${isLock?'':`<button onclick="lkadmEscalate(${Number(r.id)})" style="background:#9E1B1B;color:#fff;border:none;border-radius:6px;padding:5px 10px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">اقفل التطبيق</button>`}
+            <button onclick="lkadmUnlock(${Number(r.id)}, ${isLock})" style="background:#276749;color:#fff;border:none;border-radius:6px;padding:5px 10px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">${isLock?'فتح التطبيق':'اتراجع — اقفل التحذير'}</button>
+          </span>
+        </div>${det}</div>`;
+    };
+    body.innerHTML = `<div style="margin-bottom:10px">${modeSel}</div>
+      <div style="font-size:12px;font-weight:700;margin:6px 0">مقفولين دلوقتي (${locks.length})</div>
+      ${locks.length? locks.map(r=>row(r,true)).join('') : '<div style="font-size:11.5px;color:var(--text2);padding:4px 0 8px">مفيش تطبيق مقفول</div>'}
+      <div style="font-size:12px;font-weight:700;margin:10px 0 6px">تحذيرات مفتوحة (${warns.length})</div>
+      ${warns.length? warns.map(r=>row(r,false)).join('') : '<div style="font-size:11.5px;color:var(--text2);padding:4px 0">مفيش تحذيرات</div>'}`;
+  }catch(e){
+    body.innerHTML = `<div style="color:#B91C1C;font-size:12px;padding:8px">مقدرتش أحمّل القفل: ${lkadmEsc(e.message||e)}</div>`;
+  }
+}
+async function lkadmUnlock(id, isLock){
+  const note = prompt(isLock ? 'سبب فتح التطبيق (إجباري) — اتراجع إيه واتصلح إيه؟' : 'سبب قفل التحذير (إجباري)');
+  if(!note || !note.trim()) return;
+  try{ await lkadmRpc('rep_app_unlock',{p_id:id, p_by:(typeof CU!=='undefined'&&CU&&CU.name)||'admin', p_note:note.trim()}); showToast('✅ اتفتح'); }
+  catch(e){ alert('حصل خطأ: '+(e.message||e)); }
+  lkadmLoad();
+}
+async function lkadmPostLock(rep, reason, details){
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/rep_app_locks`,{method:'POST',headers:lkadmH(),body:JSON.stringify({rep_name:rep, reason_code:'manual', mode:'lock', reason_text:reason, locked_by:(typeof CU!=='undefined'&&CU&&CU.name)||'admin', details:details||null})});
+  if(r.status===409) throw new Error('المندوب ده عليه قفل يدوي مفتوح بالفعل');
+  if(!r.ok) throw new Error('HTTP '+r.status);
+}
+async function lkadmEscalate(id){
+  const w = _lkadmRows.find(x=>x.id===id); if(!w) return;
+  if(!confirm(`قفل تطبيق ${w.rep_name}؟ مش هيقدر يشتغل لحد ما تفتحه من هنا.`)) return;
+  try{ await lkadmPostLock(w.rep_name, w.reason_text, w.details); }catch(e){ alert(e.message||e); }
+  lkadmLoad();
+}
+async function lkadmManualLock(){
+  if(!_lkadmReps.length){ alert('حمّل المناديب الأول'); return; }
+  const rep = prompt('اسم المندوب بالظبط:\n'+_lkadmReps.join('\n'));
+  if(!rep) return;
+  if(!_lkadmReps.includes(rep.trim())){ alert('الاسم ده مش في قايمة المناديب'); return; }
+  const reason = prompt('سبب القفل (هيظهر للمندوب):');
+  if(!reason || !reason.trim()) return;
+  try{ await lkadmPostLock(rep.trim(), reason.trim(), null); }catch(e){ alert(e.message||e); }
+  lkadmLoad();
+}
+async function lkadmSetRule(code, mode, threshold){
+  if(mode==='lock' && !confirm('كده أي مندوب رصيده بالسالب هيتقفل تطبيقه أول ما يدخل. متأكد؟')){ lkadmLoad(); return; }
+  try{ await lkadmRpc('rep_app_lock_rule_set',{p_code:code, p_mode:mode, p_threshold:threshold, p_by:(typeof CU!=='undefined'&&CU&&CU.name)||'admin'}); }
+  catch(e){ alert('حصل خطأ: '+(e.message||e)); }
+  lkadmLoad();
+}
+
 async function repbalDeleteSelected(kind){
   const sel   = kind==='pending' ? _repbalSelPending : _repbalSelDiffs;
   const table = kind==='pending' ? 'rep_stock_requests' : 'rep_car_inventory';
@@ -68801,8 +68897,8 @@ async function mtsLoad(){
     const f=`${m}-01`, t=mtsMonthEnd(m);
     const [inv,items,rets,dels,aret,brs,als,users,map,lastS,lastR]=await Promise.all([
       mtsAll(`tamr_sales_invoices?select=invoice_no,branch,invoice_date,rep,customer_site,customer,gross,net,tax,discount_pct&month_key=eq.${m}&order=id`),
-      mtsAll(`tamr_sales_items?select=invoice_no,branch,invoice_date,item,qty_carton,qty_piece,price_piece,total&month_key=eq.${m}&order=id`),
-      mtsAll(`tamr_sales_returns?select=invoice_no,branch,invoice_date,customer,warehouse,item,qty_carton,qty_piece,price_piece,total&invoice_date=gte.${f}&invoice_date=lte.${t}&order=id`),
+      mtsAll(`tamr_sales_items?select=invoice_no,branch,invoice_date,item,qty_carton,qty_piece,price_piece,price_carton,total&month_key=eq.${m}&order=id`),
+      mtsAll(`tamr_sales_returns?select=invoice_no,branch,invoice_date,customer,warehouse,item,qty_carton,qty_piece,price_piece,price_carton,total&invoice_date=gte.${f}&invoice_date=lte.${t}&order=id`),
       mtsAll(`sales_deliveries?select=id,invoice_number,rep_name,branch_name,client_name,total_net,total_tax,delivery_date,items,mt_status&delivery_date=gte.${f}&delivery_date=lte.${t}&deleted_at=is.null&order=id`),
       mtsAll(`sales_returns?select=id,invoice_number,rep_name,branch_name,client_name,total_before_discount,total_net,total_tax,return_date,items,mt_status&return_date=gte.${f}&return_date=lte.${t}&deleted_at=is.null&order=id`),
       mtsAll(`branches?select=branch_name,route`), mtsAll(`branch_name_aliases?select=alias_name,branch_name`),
@@ -68944,13 +69040,18 @@ function mtsPlan(){
   const head={}; D.inv.forEach(x=>head[x.branch+'|'+x.invoice_no]=x);
   const cst={}; D.inv.forEach(x=>{ const k=mtsN(x.customer); const o=cst[k]=cst[k]||{g:0,n:0,t:0}; o.g+=+x.gross||0; o.n+=+x.net||0; o.t+=+x.tax||0; });
   const typ=r=>r>0.1?'tax_14':r>0.03?'tax_5':'no_tax';
-  const saleItems=key=>(X.itBy[key]||[]).map(l=>{ const p=+l.price_piece||0, t=+l.total||0; const q=p>0?Math.round(t/p*100)/100:((+l.qty_piece||0)+(+l.qty_carton||0)); return {qty:q,name:itemName(l.item),price:p,total:t}; });
+  // 28/11: صنف متباع بالكرتونة في السيستم (qty_piece=0) سعر قطعته وهمي 0.001 — القسمة عليه كانت بتطلّع كميات بالملايين.
+  // في الحالة دي الكمية = عدد الكراتين والسعر = سعر الكرتونة (ده نفس اللي المندوب بيكتبه).
+  const mtsLineQP=l=>{ const p=+l.price_piece||0, t=+l.total||0, qc=+l.qty_carton||0, qp=+l.qty_piece||0, pc=+l.price_carton||0;
+    if(qp===0 && qc>0 && pc>0 && p<0.01) return {q:qc, p:pc};
+    return {q:p>0?Math.round(t/p*100)/100:(qp+qc), p}; };
+  const saleItems=key=>(X.itBy[key]||[]).map(l=>{ const t=+l.total||0, {q,p}=mtsLineQP(l); return {qty:q,name:itemName(l.item),price:p,total:t}; });
   const saleTotals=m=>{ const h=head[m.key]||{}; const after=mtsR2(m.v), before=Math.max(mtsR2(+h.gross||m.gross||after),after), tax=mtsR2(m.tax);
     return {total_before_discount:before,total_after_discount:after,discount_pct:before>0?Math.min(100,Math.max(0,mtsR2((1-after/before)*100))):0,total_tax:tax,total_net:mtsR2(after+tax),invoice_type:typ(after>0?tax/after:0)}; };
   const retTotals=m=>{ const c=cst[mtsN(m.cust)]||{g:0,n:0,t:0}; const disc=c.g>0?Math.max(0,Math.min(0.9,1-c.n/c.g)):0, tr0=c.n>0?c.t/c.n:0, tr=tr0>0.1?0.14:tr0>0.03?0.05:0;
     const before=mtsR2(m.v), after=mtsR2(before*(1-disc)), tax=mtsR2(after*tr);
     return {total_before_discount:before,total_after_discount:after,discount_pct:mtsR2(disc*100),total_tax:tax,total_net:mtsR2(after+tax),invoice_type:typ(tr)}; };
-  const retItems=m=>m.lines.map(l=>{ const p=+l.price_piece||0, t=+l.total||0; const q=p>0?Math.round(t/p*100)/100:((+l.qty_piece||0)+(+l.qty_carton||0)); return {qty:q,name:itemName(l.item),price:p,total:t}; });
+  const retItems=m=>m.lines.map(l=>{ const t=+l.total||0, {q,p}=mtsLineQP(l); return {qty:q,name:itemName(l.item),price:p,total:t}; });
   const refOf=ms=>ms.map(m=>m.key).join(',');
   X.acts.forEach(x=>{
     const t=x.side==='s'?'d':'r', m=x.mts[0];
