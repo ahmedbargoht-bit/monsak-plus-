@@ -44769,6 +44769,10 @@ const REP_BALANCE_START_DATE = '2026-09-21';
 let _repbalRawPending  = [];
 let _repbalRawDiffs    = [];
 let _repbalRawAllReqs  = [];
+// 28/11: الطلب اللي ليه إذن صرف (issued_items) بيدخل الرصيد بالمصروف بس وبعد تأكيد المندوب الاستلام؛
+// الطلبات القديمة (من غير إذن صرف) زي ما هي بالكمية المطلوبة.
+function rqEffItems(d){ return Array.isArray(d.issued_items) ? (d.receipt_status==='received' ? (Array.isArray(d.received_items)?d.received_items:d.issued_items) : []) : (d.items||[]); }
+function rqEffDate(d){ return (Array.isArray(d.issued_items) && d.received_at) ? d.received_at : (d.decided_at||d.created_at); }
 let _repbalRawBalanceData = {dels:[], rets:[], reqsApproved:[], adjs:[]};
 
 function repbalGetPeriod(){
@@ -44812,7 +44816,7 @@ function repbalCalcBalances(raw, from, to, has){
   // المرتجع بيتحسب بس لما يكون لسه "معلّق" (المشرف لسه ما أكّدش استلامه) — لحظة ما يتأكد
   // الاستلام، الكمية دي بتخرج فعليًا من رصيد عربية المندوب فمبتتحسبش تاني
   (raw.rets||[]).forEach(d=>{ if(d.receipt_status==='pending' && afterStart(d.rep_name,d.created_at) && inRange(d.return_date)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
-  (raw.reqsApproved||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.reqsApproved||[]).forEach(d=>{ const dt=rqEffDate(d); if(afterStart(d.rep_name,dt) && inRange(dt)) rqEffItems(d).forEach(it=>add(d.rep_name,it.name,+(+it.qty||0))); });
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) add(a.rep_name,a.snf,+(+a.qty_delta||0)); });
   // تسليم تالف لإدارة التوالف — بمجرد ما المندوب يسجّل تسليمها، بتتخصم فورًا من رصيده لأنها
   // بقت مش موجودة فعليًا في العربية
@@ -44834,7 +44838,7 @@ function repbalCalcBreakdown(raw, from, to, has){
   const afterStart = (rep,d)=>{ const sd=startDates[rep]; if(!sd||!d) return false; return d>=sd; };
   const inRange = (d)=>{ if(!has) return true; if(!d) return false; const s=d.slice(0,10); if(from&&s<from) return false; if(to&&s>to) return false; return true; };
   (raw.dels||[]).forEach(d=>{ if(afterStart(d.rep_name,d.created_at) && inRange(d.delivery_date)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,-(+it.qty||0))); });
-  (raw.reqsApproved||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(afterStart(d.rep_name,dt) && inRange(dt)) (d.items||[]).forEach(it=>addTo(valid,d.rep_name,it.name,+(+it.qty||0))); });
+  (raw.reqsApproved||[]).forEach(d=>{ const dt=rqEffDate(d); if(afterStart(d.rep_name,dt) && inRange(dt)) rqEffItems(d).forEach(it=>addTo(valid,d.rep_name,it.name,+(+it.qty||0))); });
   (raw.adjs||[]).forEach(a=>{ if(afterStart(a.rep_name,a.created_at) && inRange(a.created_at)) addTo(valid,a.rep_name,a.snf,+(+a.qty_delta||0)); });
   (raw.rets||[]).forEach(d=>{
     if(d.receipt_status!=='pending' || !afterStart(d.rep_name,d.created_at) || !inRange(d.return_date)) return;
@@ -44923,7 +44927,7 @@ async function repbalLoad(){
     fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&select=*&order=created_at.desc`),
     fetchAllJ(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&deleted_at=is.null&select=id,rep_name,items,delivery_date,created_at,branch_name,invoice_number`),
     fetchAllJ(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status,created_at`),
-    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=id,rep_name,items,decided_at,created_at`),
+    fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=id,rep_name,items,decided_at,created_at,issued_items,received_items,receipt_status,received_at`),
     fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at,reason,adjusted_by`),
     fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&select=rep_name,created_at&order=created_at.asc`),
     fetchAllJ(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${encList})&order=created_at.desc&select=id,rep_name,snf,counted_qty,counted_valid_qty,counted_returned_qty,computed_qty,diff,resolved,created_at`),
@@ -45070,10 +45074,80 @@ async function lkadmLoad(repNames){
       ${locks.length? locks.map(r=>row(r,true)).join('') : '<div style="font-size:11.5px;color:var(--text2);padding:4px 0 8px">مفيش تطبيق مقفول</div>'}
       <div style="font-size:12px;font-weight:700;margin:10px 0 6px">تحذيرات مفتوحة (${warns.length})</div>
       ${warns.length? warns.map(r=>row(r,false)).join('') : '<div style="font-size:11.5px;color:var(--text2);padding:4px 0">مفيش تحذيرات</div>'}`;
+    body.insertAdjacentHTML('beforeend', await lkadmRcHtml());
+    body.insertAdjacentHTML('beforeend', await lkadmCountHtml());
   }catch(e){
     body.innerHTML = `<div style="color:#B91C1C;font-size:12px;padding:8px">مقدرتش أحمّل القفل: ${lkadmEsc(e.message||e)}</div>`;
   }
 }
+// 28/11: استلامات الصرف المحتاجة مراجعة — المندوب قال فيه اختلاف، أو الصرف مستني تأكيده أكتر من 24 ساعة
+let _lkadmRc = [];
+async function lkadmRcHtml(){
+  const enc = (_lkadmReps||[]).map(n=>encodeURIComponent(n)).join(',');
+  if(!enc) return '';
+  _lkadmRc = await fetchAllRows(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${enc})&receipt_status=in.(disputed,pending)&select=id,rep_name,items,issued_items,received_items,receipt_status,receipt_note,issued_at,issued_by,received_at&order=issued_at.asc`, lkadmH(), 1000, true).catch(()=>[]);
+  const late = Date.now() - 24*3600*1000;
+  const rows = (_lkadmRc||[]).filter(r=>r.receipt_status==='disputed' || (r.issued_at && new Date(r.issued_at).getTime()<late));
+  const E = lkadmEsc;
+  const card = r=>{
+    const rec = {}; (Array.isArray(r.received_items)?r.received_items:[]).forEach(i=>{ rec[i.name]=+i.qty||0; });
+    const lines = (r.issued_items||[]).map(i=>{ const got = r.receipt_status==='disputed' && Array.isArray(r.received_items) ? (rec[i.name]||0) : null; const d = got==null?0:got-(+i.qty||0);
+      return `<div style="display:flex;justify-content:space-between;font-size:11.5px;padding:2px 0;border-bottom:1px dashed #eee"><span>${E(i.name)}</span><span>اتصرف <b>${+i.qty||0}</b>${got!=null?` · استلم <b style="color:${d?'#9E1B1B':'#276749'}">${got}</b>`:''}</span></div>`; }).join('');
+    const disp = r.receipt_status==='disputed';
+    return `<div style="border:1px solid ${disp?'#E2A9A9':'#EAD9A8'};background:${disp?'#FBEDED':'#FBF6E8'};border-radius:8px;padding:8px 10px;margin-bottom:6px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><b style="font-size:12.5px">${E(r.rep_name)}</b><span style="font-size:11.5px">طلب #${Number(r.id)} · ${disp?'المندوب قال فيه اختلاف':'مستني تأكيد المندوب من أكتر من يوم'}</span><span style="font-size:10.5px;color:var(--text2)">صرف ${E(r.issued_by||'')} · ${r.issued_at?new Date(r.issued_at).toLocaleString('ar-EG',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):''}</span></div>
+      ${r.receipt_note?`<div style="font-size:11.5px;color:#7A1414;margin-top:3px">ملاحظة المندوب: ${E(r.receipt_note)}</div>`:''}
+      <div style="margin-top:4px">${lines}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        ${disp&&Array.isArray(r.received_items)?`<button onclick="lkadmRcResolve(${Number(r.id)},'rep')" style="background:#276749;color:#fff;border:none;border-radius:6px;padding:5px 10px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">اعتمد اللي المندوب استلمه</button>`:''}
+        <button onclick="lkadmRcResolve(${Number(r.id)},'issued')" style="background:#1F5C7A;color:#fff;border:none;border-radius:6px;padding:5px 10px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">اعتمد المصروف كله</button>
+        <button onclick="lkadmRcResolve(${Number(r.id)},'cancel')" style="background:#fff;color:#9E1B1B;border:1px solid #E2A9A9;border-radius:6px;padding:5px 10px;font-size:11px;font-family:Cairo,sans-serif;cursor:pointer">إلغاء الصرف</button>
+      </div></div>`;
+  };
+  return `<div style="font-size:12px;font-weight:700;margin:12px 0 6px">استلامات صرف محتاجة مراجعة (${rows.length})</div>`
+    + (rows.length ? rows.map(card).join('') : '<div style="font-size:11.5px;color:var(--text2);padding:4px 0">مفيش</div>');
+}
+// 28/11: الجرد الدوري (10 و20 وآخر الشهر) — مين جرد في آخر يوم جرد ومين لأ
+function lkadmLastCountDay(){
+  const t = new Date().toLocaleDateString('en-CA',{timeZone:'Africa/Cairo'}); let [y,m,d] = t.split('-').map(Number);
+  const lastOf = (yy,mm)=>new Date(Date.UTC(yy,mm,0)).getUTCDate();
+  const cands = [10,20,lastOf(y,m)].filter(x=>x<=d);
+  if(cands.length){ const dd = Math.max(...cands); return `${y}-${String(m).padStart(2,'0')}-${String(dd).padStart(2,'0')}`; }
+  m -= 1; if(m<1){ m=12; y-=1; } return `${y}-${String(m).padStart(2,'0')}-${String(lastOf(y,m)).padStart(2,'0')}`;
+}
+async function lkadmCountHtml(){
+  const reps = _lkadmReps||[]; if(!reps.length) return '';
+  const day = lkadmLastCountDay();
+  const from = new Date(day+'T00:00:00+02:00').toISOString(), to = new Date(new Date(day+'T00:00:00+02:00').getTime()+864e5).toISOString();
+  const enc = reps.map(n=>encodeURIComponent(n)).join(',');
+  const rows = await fetchAllRows(`${SUPABASE_URL}/rest/v1/rep_car_inventory?rep_name=in.(${enc})&created_at=gte.${encodeURIComponent(from)}&created_at=lt.${encodeURIComponent(to)}&select=rep_name,resolved`, lkadmH(), 1000, true).catch(()=>null);
+  if(rows===null) return '<div style="font-size:11.5px;color:#B91C1C;margin-top:10px">مقدرتش أحمّل الجرد الدوري</div>';
+  const done = new Set(rows.map(r=>r.rep_name)), bad = new Set(rows.filter(r=>!r.resolved).map(r=>r.rep_name));
+  const today = new Date().toLocaleDateString('en-CA',{timeZone:'Africa/Cairo'}) === day;
+  const label = new Date(day+'T12:00:00').toLocaleDateString('ar-EG',{weekday:'long',day:'numeric',month:'long'});
+  const chip = (n,c,b)=>`<span style="display:inline-block;margin:2px;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;background:${b};color:${c}">${lkadmEsc(n)}</span>`;
+  const missing = reps.filter(n=>!done.has(n));
+  return `<div style="font-size:12px;font-weight:700;margin:12px 0 6px">الجرد الدوري — ${label}${today?' (النهارده)':''}: ${done.size} من ${reps.length} جردوا</div>
+    <div>${reps.filter(n=>done.has(n)).map(n=>bad.has(n)?chip(n+' ⚠️ فرق كبير','#9E1B1B','#FBEDED'):chip(n+' ✓','#276749','#E8F3EA')).join('')}${missing.map(n=>chip(n+(today?' — لسه':' — ماجردش'),today?'#8A5A00':'#9E1B1B',today?'#FBF0D9':'#FBEDED')).join('')}</div>`;
+}
+async function lkadmRcResolve(id, how){
+  const r = (_lkadmRc||[]).find(x=>x.id===id); if(!r) return;
+  const label = how==='rep'?'اعتماد اللي المندوب استلمه':how==='issued'?'اعتماد المصروف كله':'إلغاء الصرف (مش هيدخل الرصيد)';
+  const note = prompt(`${label} — طلب #${id} (${r.rep_name})\nاكتب السبب (إجباري):`);
+  if(!note || !note.trim()) return;
+  const now = new Date().toISOString(), who = (typeof CU!=='undefined'&&CU&&CU.name)||'admin';
+  const body = how==='cancel'
+    ? {receipt_status:'cancelled', resolved_by:who, resolved_at:now, resolve_note:note.trim()}
+    : {receipt_status:'received', received_at:r.received_at||now, received_by:r.received_by||('اعتماد '+who), received_items: how==='rep' ? r.received_items : null, resolved_by:who, resolved_at:now, resolve_note:note.trim()};
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rep_stock_requests?id=eq.${id}&receipt_status=in.(disputed,pending)`,{method:'PATCH',headers:{...lkadmH(),'Prefer':'return=representation'},body:JSON.stringify(body)});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const out = await res.json().catch(()=>[]);
+    if(!out.length) alert('الطلب ده اتعمل عليه قرار قبل كده'); else showToast('✅ اتسجل');
+  }catch(e){ alert('حصل خطأ: '+(e.message||e)); }
+  lkadmLoad();
+}
+
 async function lkadmUnlock(id, isLock){
   const note = prompt(isLock ? 'سبب فتح التطبيق (إجباري) — اتراجع إيه واتصلح إيه؟' : 'سبب قفل التحذير (إجباري)');
   if(!note || !note.trim()) return;
@@ -45271,7 +45345,7 @@ function lkadmWarnCalc(w){
   const items = (w.details && Array.isArray(w.details.items)) ? w.details.items : [];
   const m = {}; items.forEach(it=>{ m[it.snf] = {snf:it.snf, snap:+it.qty||0, got:0, adj:0, sold:0}; });
   const after = d => !!(sd && d && d>=sd);
-  (raw.reqsApproved||[]).forEach(d=>{ if(d.rep_name===rep && after(d.decided_at||d.created_at)) (d.items||[]).forEach(it=>{ if(m[it.name]) m[it.name].got += +it.qty||0; }); });
+  (raw.reqsApproved||[]).forEach(d=>{ if(d.rep_name===rep && after(rqEffDate(d))) rqEffItems(d).forEach(it=>{ if(m[it.name]) m[it.name].got += +it.qty||0; }); });
   (raw.adjs||[]).forEach(a=>{ if(a.rep_name===rep && after(a.created_at) && m[a.snf]) m[a.snf].adj += +a.qty_delta||0; });
   (raw.dels||[]).forEach(d=>{ if(d.rep_name===rep && after(d.created_at)) (d.items||[]).forEach(it=>{ if(m[it.name]) m[it.name].sold += +it.qty||0; }); });
   const rows = Object.values(m).map(r=>({...r, bal: Math.round((r.got + r.adj - r.sold)*100)/100})).sort((a,b)=>a.bal-b.bal);
@@ -45867,7 +45941,7 @@ function repbalLedgerRows(rep, item){
   const raw = _repbalRawBalanceData || {}, sd = (raw.startDates||{})[rep];
   const after = d => !!(sd && d && d>=sd);
   const mv = [];
-  (raw.reqsApproved||[]).forEach(d=>{ const dt=d.decided_at||d.created_at; if(d.rep_name===rep && after(dt)) (d.items||[]).forEach(it=>{ if(it.name===item) mv.push({t:dt, q:+it.qty||0, doc:`طلب بضاعة #${d.id||''}`, kind:'in'}); }); });
+  (raw.reqsApproved||[]).forEach(d=>{ const dt=rqEffDate(d); if(d.rep_name===rep && after(dt)) rqEffItems(d).forEach(it=>{ if(it.name===item) mv.push({t:dt, q:+it.qty||0, doc:`${Array.isArray(d.issued_items)?'صرف':'طلب بضاعة'} #${d.id||''}`, kind:'in'}); }); });
   (raw.adjs||[]).forEach(a=>{ if(a.rep_name===rep && a.snf===item && after(a.created_at)) mv.push({t:a.created_at, q:+a.qty_delta||0, doc:a.reason||'تعديل', kind:'adj'}); });
   (raw.dels||[]).forEach(d=>{ if(d.rep_name===rep && after(d.created_at)) (d.items||[]).forEach(it=>{ if(it.name===item) mv.push({t:d.created_at, q:-(+it.qty||0), doc:`فاتورة ${d.branch_name||''}${d.id?' #'+d.id:''}`, kind:'out'}); }); });
   mv.sort((a,b)=>a.t<b.t?-1:a.t>b.t?1:0);
