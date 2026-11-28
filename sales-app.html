@@ -3984,7 +3984,7 @@ async function rbFetchRawBalanceData(repNames){
   // limit=10000/5000 كانت بترجع 1000 صف بس فعليًا (سقف Supabase)، ومفيش فلتر تاريخ خالص —
   // خطر مباشر على دقة حساب رصيد المناديب لو فريق المشرف كبير أو الفواتير تراكمت.
   const [dels, rets, reqs, adjs, handovers, startDates] = await Promise.all([
-    sbFetchAll(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&select=rep_name,items,delivery_date,created_at`,H),
+    sbFetchAll(`${SUPABASE_URL}/rest/v1/sales_deliveries?rep_name=in.(${encList})&deleted_at=is.null&select=rep_name,items,delivery_date,created_at`,H),
     sbFetchAll(`${SUPABASE_URL}/rest/v1/sales_returns?rep_name=in.(${encList})&select=rep_name,items,return_date,receipt_status,created_at`,H),
     sbFetchAll(`${SUPABASE_URL}/rest/v1/rep_stock_requests?rep_name=in.(${encList})&status=eq.approved&select=rep_name,items,decided_at,created_at`,H),
     sbFetchAll(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments?rep_name=in.(${encList})&select=rep_name,snf,qty_delta,created_at`,H),
@@ -4024,7 +4024,7 @@ function rbCalcBalances(raw, from, to, has){
   (raw.handovers||[]).forEach(h=>{ if(afterStart(h.rep_name,h.created_at) && inRange(h.created_at)) add(h.rep_name,h.snf,-(+h.qty||0)); });
   // مفيش رصيد سالب فعليًا في الواقع — لو حصل نتيجة حالة قديمة (مرتجع معلّق قبل تصفير الرصيد
   // اتسلّم لإدارة التوالف بعده)، بنثبّته عند صفر بدل ما يظهر رقم سالب مش منطقي
-  Object.keys(bal).forEach(rep=>{ Object.keys(bal[rep]).forEach(item=>{ if(bal[rep][item]<0) bal[rep][item]=0; }); });
+  // 28/11: السالب مابقاش بيتثبّت عند صفر — بيظهر زي ما هو (قانون رصيد مخزن المندوب)
   return bal;
 }
 // تفصيل رصيد كل مندوب لثلاث طبقات: صالح (بضاعة سليمة جاهزة للبيع) / مرتجع صالح / مرتجع تالف
@@ -4054,7 +4054,7 @@ function rbCalcBreakdown(raw, from, to, has){
   (raw.handovers||[]).forEach(h=>{ if(afterStart(h.rep_name,h.created_at) && inRange(h.created_at)) addTo(retDamaged,h.rep_name,h.snf,-(+h.qty||0)); });
   // نفس مبدأ عدم ظهور رصيد سالب — لو حصل نتيجة حالة قديمة (مرتجع معلّق قبل التصفير اتسلّم
   // لإدارة التوالف بعده)، بنثبّته عند صفر
-  [valid, retValid, retDamaged].forEach(map=>{ Object.keys(map).forEach(rep=>{ Object.keys(map[rep]).forEach(item=>{ if(map[rep][item]<0) map[rep][item]=0; }); }); });
+  // 28/11: السالب بيظهر زي ما هو
   return {valid, retValid, retDamaged};
 }
 
@@ -4948,16 +4948,17 @@ function rbRenderBalances(){
     const items = Object.entries(curBal[rep]||{}).filter(([,q])=>Math.round(q*100)!==0);
     const bd = curBd || {valid:{}, retValid:{}, retDamaged:{}};
     const rowsHtml = items.length
-      ? items.sort((a,b)=>b[1]-a[1]).map(([name,qty])=>{
+      ? items.sort((a,b)=>(a[1]<0)===(b[1]<0)?b[1]-a[1]:(a[1]<0?-1:1)).map(([name,qty])=>{
           const v  = (bd.valid[rep]||{})[name]||0;
           const rv = (bd.retValid[rep]||{})[name]||0;
           const rd = (bd.retDamaged[rep]||{})[name]||0;
           const parts = [];
-          if(v)  parts.push(`<span style="color:#276749">✅ صالح ${v}</span>`);
+          if(v)  parts.push(v<0?`<span style="color:#9E1B1B">⚠️ صالح ${Math.round(v*100)/100} — فيه حركة مااتسجلتش</span>`:`<span style="color:#276749">✅ صالح ${v}</span>`);
           if(rv) parts.push(`<span style="color:#1D4ED8">↩️ مرتجع صالح ${rv}</span>`);
           if(rd) parts.push(`<span style="color:#B71C1C">🗑️ مرتجع تالف ${rd}</span>`);
-          return `<div style="padding:4px 0;font-size:11.5px;border-bottom:1px dashed var(--border)">
-            <div style="display:flex;justify-content:space-between"><span>${name}</span><span style="font-weight:700">Σ ${qty}</span></div>
+          const neg = qty<0;
+          return `<div style="padding:4px 0;font-size:11.5px;border-bottom:1px dashed var(--border);${neg?'background:#FDF3F3':''}">
+            <div style="display:flex;justify-content:space-between"><span style="${neg?'color:#9E1B1B;font-weight:700':''}">${neg?'🔴 ':''}${name}</span><span style="font-weight:800;${neg?'color:#9E1B1B':''}">Σ ${Math.round(qty*100)/100}</span></div>
             ${parts.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;font-size:10px;margin-top:2px;font-weight:600">${parts.join('')}</div>` : ''}
           </div>`;
         }).join('')
@@ -4965,7 +4966,7 @@ function rbRenderBalances(){
     const safeRep = rep.replace(/'/g,"\\'");
     return `<details style="border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin-bottom:8px">
       <summary style="cursor:pointer;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:space-between">
-        <span>${rep} <span style="color:var(--text2);font-weight:400;font-size:11px">(${items.length} صنف برصيد)</span></span>
+        <span>${rep} <span style="color:var(--text2);font-weight:400;font-size:11px">(${items.length} صنف برصيد)</span>${items.some(([,q])=>q<0)?` <span style="background:#FBEDED;color:#9E1B1B;border-radius:999px;padding:2px 8px;font-size:10.5px;font-weight:800">🔴 ${items.filter(([,q])=>q<0).length} بالسالب</span>`:''}</span>
         <button onclick="event.preventDefault();event.stopPropagation();rbShareRepBalance('${safeRep}')" style="background:#C8A96E;color:#2C1F0A;border:none;border-radius:6px;padding:5px 10px;font-size:10.5px;font-family:Cairo,sans-serif;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:4px"><i class="ti ti-share"></i> رصيد مخزن المندوب</button>
       </summary>
       <div style="margin-top:8px">${rowsHtml}</div>

@@ -2621,6 +2621,7 @@ function tbOpenDetail(name){
 // — لو الفاتورة قديمة وماعندهاش الحقلين دول (قبل ميزة الفصل)، بنحسبها "مرتجع صالح" بالكامل
 // افتراضيًا عشان الكمية متضيعش من الحساب.
 let _ciBalances     = {};
+let _ciMoves        = [];
 let _ciAllNames     = [];   // قائمة الأصناف الشخصية للمندوب (اللي اشتغل بيها أو أضافها بنفسه)
 let _ciCatalogNames = [];   // كل أصناف الكتالوج (لاستخدامها في مودال "إضافة صنف")
 let _ciCountInputs  = {};
@@ -2757,19 +2758,22 @@ async function ciComputeBalances(opts){
     // ونفلتر بيه في الكود عشان نفرّق فواتير حصلت فعليًا قبل لحظة التصفير في نفس اليوم — لو
     // اعتمدنا على delivery_date بس، فاتورة بيع الصبح (قبل التصفير) كانت هتتخصم من رصيد بعد
     // التصفير من غير ما يكون فيه توريد يقابلها، فيطلع رصيد سالب غلط.
-    sbFetchAll('sales_deliveries',       `?rep_name=eq.${enc}&delivery_date=gte.${startDateOnly}&select=items,created_at`).catch(()=>[]),
+    sbFetchAll('sales_deliveries',       `?rep_name=eq.${enc}&delivery_date=gte.${startDateOnly}&deleted_at=is.null&select=id,items,created_at,branch_name`).catch(()=>[]),
     sbFetchAll('sales_returns',          `?rep_name=eq.${enc}&return_date=gte.${startDateOnly}&select=items,receipt_status,created_at`).catch(()=>[]),
-    sbFetchAll('rep_stock_requests',     `?rep_name=eq.${enc}&status=eq.approved&created_at=gte.${startTs}&select=items`).catch(()=>[]),
-    sbFetchAll('rep_balance_adjustments',`?rep_name=eq.${enc}&created_at=gte.${startTs}&select=snf,qty_delta`).catch(()=>[]),
+    sbFetchAll('rep_stock_requests',     `?rep_name=eq.${enc}&status=eq.approved&created_at=gte.${startTs}&select=id,items,created_at,decided_at`).catch(()=>[]),
+    sbFetchAll('rep_balance_adjustments',`?rep_name=eq.${enc}&created_at=gte.${startTs}&select=snf,qty_delta,created_at,reason`).catch(()=>[]),
     sbFetchAll('rep_damaged_handovers',  `?rep_name=eq.${enc}&created_at=gte.${startTs}&select=snf,qty`).catch(()=>[]),
   ]);
   const valid={}, retValid={}, retDamaged={};
   const addValid      = (name, qty) => { if(!name) return; valid[name]      = (valid[name]||0)      + qty; };
   const addRetValid   = (name, qty) => { if(!name) return; retValid[name]   = (retValid[name]||0)   + qty; };
   const addRetDamaged = (name, qty) => { if(!name) return; retDamaged[name] = (retDamaged[name]||0) + qty; };
-  (dels||[]).filter(d=>d.created_at && d.created_at>=startDate).forEach(d=>(d.items||[]).forEach(it=>addValid(it.name, -(+it.qty||0))));
-  (reqs||[]).forEach(d=>(d.items||[]).forEach(it=>addValid(it.name, +(+it.qty||0))));
-  (adjs||[]).forEach(a=>addValid(a.snf, +(+a.qty_delta||0)));
+  // 28/11: كارت الصنف — كل حركة على "الصالح" بتتسجل هنا بتاريخها ومستندها
+  const moves = [];
+  (dels||[]).filter(d=>d.created_at && d.created_at>=startDate).forEach(d=>(d.items||[]).forEach(it=>{ addValid(it.name, -(+it.qty||0)); moves.push({n:it.name, t:d.created_at, q:-(+it.qty||0), doc:`فاتورة ${d.branch_name||''}`}); }));
+  (reqs||[]).forEach(d=>(d.items||[]).forEach(it=>{ addValid(it.name, +(+it.qty||0)); moves.push({n:it.name, t:d.decided_at||d.created_at, q:+(+it.qty||0), doc:`طلب بضاعة #${d.id||''}`}); }));
+  (adjs||[]).forEach(a=>{ addValid(a.snf, +(+a.qty_delta||0)); moves.push({n:a.snf, t:a.created_at, q:+(+a.qty_delta||0), doc:a.reason||'تعديل'}); });
+  _ciMoves = moves;
   // المرتجع "لسه في العربية" = المرتجعات اللي لسه معلّقة بس (المشرف لسه ما أكّدش استلامها).
   // لحظة ما يتأكد الاستلام، الكمية دي بتخرج فعليًا من حساب العربية.
   // كل صنف في المرتجع بيحمل valid_qty/damaged_qty (اتسجلوا وقت رفع المرتجع) — بنستخدمهم
@@ -2793,8 +2797,8 @@ async function ciComputeBalances(opts){
   (handovers||[]).forEach(h=>addRetDamaged(h.snf, -(+h.qty||0)));
   // مفيش رصيد سالب فعليًا في الواقع — لو حصل نتيجة حالة قديمة (مرتجع معلّق قبل تصفير الرصيد
   // اتسلّم لإدارة التوالف بعده)، بنثبّته عند صفر بدل ما يظهر رقم سالب مش منطقي
-  // opts.raw = الرصيد من غير تثبيت السالب عند صفر (بيستخدمه فحص قفل التطبيق بس)
-  if(!(opts && opts.raw)) [valid, retValid, retDamaged].forEach(map=>{ Object.keys(map).forEach(name=>{ if(map[name]<0) map[name]=0; }); });
+  // 28/11: السالب مابقاش بيتثبّت عند صفر في الصالح (قانون رصيد مخزن المندوب) — المرتجع والتالف بس لسه بيتثبّتوا
+  [retValid, retDamaged].forEach(map=>{ Object.keys(map).forEach(name=>{ if(map[name]<0) map[name]=0; }); });
   return {valid, retValid, retDamaged};
 }
 function ciRenderBalanceList(){
@@ -2825,23 +2829,44 @@ function ciRenderBalanceList(){
     return;
   }
   wrap.innerHTML = names.map(n=>{
-    const v = valid[n]||0, rv = retValid[n]||0, rd = retDamaged[n]||0;
-    const total = v + rv + rd;
-    return `<div style="padding:8px 4px;border-bottom:1px solid var(--bg2)">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-        <div style="font-size:12px;color:var(--t1);flex:1">${n}</div>
-        <span style="background:#EFE7D8;color:#2C1F0A;border-radius:6px;padding:3px 9px;font-size:11.5px;font-weight:800">Σ ${total}</span>
+    const v = Math.round((valid[n]||0)*100)/100, rv = retValid[n]||0, rd = retDamaged[n]||0;
+    const total = Math.round((v + rv + rd)*100)/100;
+    const neg = v<0, lid = 'cil-'+Math.abs([...n].reduce((h,c)=>(h*31+c.charCodeAt(0))|0,7));
+    return `<div style="padding:8px 4px;border-bottom:1px solid var(--bg2);${neg?'background:#FDF3F3':''}">
+      <div onclick="ciLedgerToggle(this.dataset.n,'${lid}')" data-n="${String(n).replace(/"/g,'&quot;')}" style="display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer">
+        <div style="font-size:12px;color:${neg?'#9E1B1B':'var(--t1)'};flex:1;${neg?'font-weight:700':''}">${neg?'🔴 ':''}${n} <span style="font-size:10px;color:var(--t3)">▾</span></div>
+        <span style="background:${neg?'#FBEDED':'#EFE7D8'};color:${neg?'#9E1B1B':'#2C1F0A'};border-radius:6px;padding:3px 9px;font-size:11.5px;font-weight:800">Σ ${total}</span>
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px">
-        <span style="background:#EAF5EE;color:#276749;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:700">✅ صالح ${v}</span>
+        ${neg?`<span style="background:#FBEDED;color:#9E1B1B;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:700">⚠️ صالح ${v} — فيه حركة مااتسجلتش، كلّم المشرف</span>`:`<span style="background:#EAF5EE;color:#276749;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:700">✅ صالح ${v}</span>`}
         ${rv ? `<span style="background:#E8F1FB;color:#1D4ED8;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:700">↩️ مرتجع صالح ${rv}</span>` : ''}
         ${rd ? `<span style="background:#FBEAEA;color:#B71C1C;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:700">🗑️ مرتجع تالف ${rd}</span>` : ''}
       </div>
+      <div id="${lid}"></div>
     </div>`;
   }).join('');
   const hasDamaged = Object.values(retDamaged).some(q=>Math.round((+q||0)*100)>0);
   const handoverBtn = document.getElementById('ci-damaged-handover-btn');
   if(handoverBtn) handoverBtn.style.display = hasDamaged ? 'flex' : 'none';
+}
+
+// ══ كارت الصنف (28/11) — كشف حركة الصنف: التاريخ والمستند والرصيد بعد كل حركة ══
+function ciLedgerToggle(name, boxId){
+  const box = document.getElementById(boxId); if(!box) return;
+  if(box.innerHTML){ box.innerHTML=''; return; }
+  const mv = (_ciMoves||[]).filter(m=>m.n===name).sort((a,b)=>a.t<b.t?-1:a.t>b.t?1:0);
+  if(!mv.length){ box.innerHTML='<div style="font-size:11px;color:var(--t3);padding:6px">مفيش حركات للصنف ده</div>'; return; }
+  let bal=0, firstNeg=-1;
+  mv.forEach((m,i)=>{ bal=Math.round((bal+m.q)*100)/100; m.bal=bal; if(bal<0&&firstNeg<0) firstNeg=i; });
+  const esc = s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const f = ts=>new Date(ts).toLocaleString('ar-EG',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+  box.innerHTML = `<div style="margin-top:6px;border:1px solid #E8DCC4;border-radius:8px;overflow:hidden">
+    <div style="background:#731E2E;color:#fff;font-size:11px;font-weight:800;padding:5px 8px;border-bottom:2px solid #C8A96E">كارت الصنف · ${mv.length} حركة</div>
+    <div style="max-height:240px;overflow-y:auto">${mv.map((m,i)=>`<div style="display:flex;gap:6px;align-items:center;padding:5px 8px;font-size:10.5px;border-bottom:1px solid #F1E9DA;background:${i===firstNeg?'#FBEDED':'#fff'}">
+      <span style="color:var(--t3);white-space:nowrap">${f(m.t)}</span>
+      <span style="flex:1">${esc(m.doc)}${i===firstNeg?' <b style="color:#9E1B1B">← هنا بقى بالسالب</b>':''}</span>
+      <b style="color:${m.q<0?'#9E1B1B':'#276749'}">${m.q>0?'+':''}${m.q}</b>
+      <b style="min-width:34px;text-align:left;color:${m.bal<0?'#9E1B1B':'#2C1F0A'}">${m.bal}</b></div>`).join('')}</div></div>`;
 }
 
 // ══ تسليم تالف لإدارة التوالف ══ — المندوب بيسجّل إن كمية معيّنة من التالف نزلت فعليًا من
