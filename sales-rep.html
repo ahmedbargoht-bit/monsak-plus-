@@ -1678,6 +1678,8 @@ async function doLogin(){
     checkTodayHoliday();
     setTimeout(checkPromoBanner, 1200);
     setTimeout(checkWeeklyMotivationalPopup, 1800);
+    setTimeout(trCheckPending, 900); // بوب أب التحويلات المعلّقة — بيقفل التطبيق لحد التأكيد أو الرفض
+    setTimeout(()=>lkCheck(true), 700); // قفل التطبيق من الإدارة/القواعد — مايتفتحش غير من الأدمن
   }catch(e){
     errEl.classList.add('on');
   }finally{
@@ -1687,6 +1689,7 @@ async function doLogin(){
 }
 
 function doLogout(){
+  document.getElementById('lk-gate')?.remove(); document.getElementById('tr-gate')?.remove();
   currentRep=null; pdbData=null; _salesPricesCache=null;
   _clientDiscCache=null; _branchClientCache=null; _clientPromoCache=null; _branchSpecialPLCache=null; _clientPLCache=null;
   visitState={branch:'',route:'',client:'',fea:null,cat:null,quantities:{},discounts:{},prices:{}};
@@ -2739,7 +2742,7 @@ async function ciGetBalanceStartDate(){
 }
 // الرصيد بقى مقسوم لجزئين منفصلين: "صالح" (بضاعة سليمة جاهزة للبيع) و"مرتجع" (بضاعة رجّعها
 // المندوب من عند العملاء ولسه ماسكها في العربية، لحد ما المشرف يأكّد استلامها فعليًا).
-async function ciComputeBalances(){
+async function ciComputeBalances(opts){
   const startDate = await ciGetBalanceStartDate(); // ممكن يكون تاريخ+وقت كامل دلوقتي
   _ciBalanceStartDate = startDate;
   if(!startDate) return {valid:{}, retValid:{}, retDamaged:{}};
@@ -2790,7 +2793,8 @@ async function ciComputeBalances(){
   (handovers||[]).forEach(h=>addRetDamaged(h.snf, -(+h.qty||0)));
   // مفيش رصيد سالب فعليًا في الواقع — لو حصل نتيجة حالة قديمة (مرتجع معلّق قبل تصفير الرصيد
   // اتسلّم لإدارة التوالف بعده)، بنثبّته عند صفر بدل ما يظهر رقم سالب مش منطقي
-  [valid, retValid, retDamaged].forEach(map=>{ Object.keys(map).forEach(name=>{ if(map[name]<0) map[name]=0; }); });
+  // opts.raw = الرصيد من غير تثبيت السالب عند صفر (بيستخدمه فحص قفل التطبيق بس)
+  if(!(opts && opts.raw)) [valid, retValid, retDamaged].forEach(map=>{ Object.keys(map).forEach(name=>{ if(map[name]<0) map[name]=0; }); });
   return {valid, retValid, retDamaged};
 }
 function ciRenderBalanceList(){
@@ -2980,25 +2984,164 @@ async function ciConfirmTransfer(id, action){
     if(action==='source_confirm'){
       if(!confirm(`تأكيد تسليم البضاعة دي لـ${t.to_rep}؟ هتتخصم من رصيدك فورًا.`)) return;
       const adjRows = (t.items||[]).map(it=>({rep_name:t.from_rep, snf:it.name, qty_delta:-it.qty, reason:`تحويل بضاعة إلى ${t.to_rep}`, adjusted_by:currentRep.name, source_transfer_id:t.id}));
-      const r1 = await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{method:'POST',headers:H,body:JSON.stringify(adjRows)});
-      if(!r1.ok) throw new Error(await r1.text());
-      await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'pending_target', source_confirmed_by:currentRep.name, source_confirmed_at:new Date().toISOString()})});
+      // حماية من الخصم مرتين: لو الخصم ده اتسجل قبل كده للتحويل ده (محاولة سابقة فشلت في نصها) مانسجلوش تاني
+      const _doneS = await sbFetch('rep_balance_adjustments', `?source_transfer_id=eq.${id}&rep_name=eq.${encodeURIComponent(t.from_rep)}&select=id&limit=1`);
+      if(!_doneS.length){
+        const r1 = await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{method:'POST',headers:H,body:JSON.stringify(adjRows)});
+        if(!r1.ok) throw new Error(await r1.text());
+      }
+      await trPatchOk(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'pending_target', source_confirmed_by:currentRep.name, source_confirmed_at:new Date().toISOString()})});
     } else if(action==='source_reject'){
       if(!confirm('رفض طلب التحويل ده؟')) return;
-      await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'rejected_source', rejected_by:currentRep.name, rejected_at:new Date().toISOString()})});
+      await trPatchOk(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'rejected_source', rejected_by:currentRep.name, rejected_at:new Date().toISOString()})});
     } else if(action==='target_confirm'){
       if(!confirm(`تأكيد استلام البضاعة دي من ${t.from_rep}؟ هتتضاف لرصيدك فورًا.`)) return;
       const adjRows = (t.items||[]).map(it=>({rep_name:t.to_rep, snf:it.name, qty_delta:+it.qty, reason:`تحويل بضاعة من ${t.from_rep}`, adjusted_by:currentRep.name, source_transfer_id:t.id}));
-      const r1 = await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{method:'POST',headers:H,body:JSON.stringify(adjRows)});
-      if(!r1.ok) throw new Error(await r1.text());
-      await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'completed', target_confirmed_by:currentRep.name, target_confirmed_at:new Date().toISOString()})});
+      // حماية من الإضافة مرتين لنفس التحويل
+      const _doneT = await sbFetch('rep_balance_adjustments', `?source_transfer_id=eq.${id}&rep_name=eq.${encodeURIComponent(t.to_rep)}&select=id&limit=1`);
+      if(!_doneT.length){
+        const r1 = await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_balance_adjustments`,{method:'POST',headers:H,body:JSON.stringify(adjRows)});
+        if(!r1.ok) throw new Error(await r1.text());
+      }
+      await trPatchOk(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'completed', target_confirmed_by:currentRep.name, target_confirmed_at:new Date().toISOString()})});
     } else if(action==='target_reject'){
       if(!confirm('رفض استلام البضاعة دي؟ الحالة هتفضل معلّقة لحد ما المشرف يتدخل يدويًا.')) return;
-      await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'disputed', rejected_by:currentRep.name, rejected_at:new Date().toISOString(), reject_reason:'رفض المندوب المستلم تأكيد الاستلام'})});
+      await trPatchOk(`${SUPABASE_URL}/rest/v1/rep_stock_transfers?id=eq.${id}`,{method:'PATCH',headers:H,body:JSON.stringify({status:'disputed', rejected_by:currentRep.name, rejected_at:new Date().toISOString(), reject_reason:'رفض المندوب المستلم تأكيد الاستلام'})});
     }
     showToast?.('✅ تم');
     ciLoad();
+    trCheckPending();
   }catch(e){ showToast?.('❌ حصل خطأ، حاول تاني','err') || alert('حصل خطأ، حاول تاني'); }
+}
+
+// ══ بوب أب التحويلات المعلّقة (28/11/2026) ══
+// أي تحويل مستني تأكيد المندوب ده (كمسلّم أو كمستلم) بيطلع في بوب أب بيقفل التطبيق لحد ما يأكد أو يرفض.
+// الأزرار بتنادي نفس ciConfirmTransfer — نفس الحسبة بالظبط. لو النت فاصل ومقدرناش نتأكد، مانقفلش التطبيق.
+async function trPatchOk(url, opts){
+  const r = await _apiFetch(url, opts);
+  if(!r || !r.ok) throw new Error('transfer patch failed');
+  return r;
+}
+let _trBusy = false, _trWaitToastShown = false;
+async function trCheckPending(){
+  if(!currentRep || _trBusy) return;
+  _trBusy = true;
+  try{
+    const enc = encodeURIComponent(currentRep.name);
+    const rows = await sbFetch('rep_stock_transfers', `?or=(from_rep.eq.${enc},to_rep.eq.${enc})&status=in.(pending_source,pending_target)&order=requested_at.asc`);
+    _ciTransfers = rows || [];
+    trRenderGate();
+  }catch(e){ /* مقدرناش نتأكد (نت/سيرفر) — نسيب الحالة زي ما هي */ }
+  finally{ _trBusy = false; }
+}
+function trEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function trRenderGate(){
+  const me = currentRep && currentRep.name;
+  const mine = _ciTransfers.filter(t=>(t.from_rep===me && t.status==='pending_source') || (t.to_rep===me && t.status==='pending_target'));
+  const waiting = _ciTransfers.filter(t=>(t.from_rep===me && t.status==='pending_target') || (t.to_rep===me && t.status==='pending_source'));
+  let ov = document.getElementById('tr-gate');
+  if(!mine.length){
+    if(ov) ov.remove();
+    if(waiting.length && !_trWaitToastShown){
+      _trWaitToastShown = true;
+      const w = waiting[0];
+      const other = w.status==='pending_target' ? w.to_rep : w.from_rep;
+      showToast?.(`⏳ مستني تأكيد ${other} على تحويل${waiting.length>1?' ('+waiting.length+')':''}`, 4500);
+    }
+    return;
+  }
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = 'tr-gate';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(20,10,5,.82);display:flex;align-items:center;justify-content:center;padding:16px;direction:rtl;font-family:Cairo,sans-serif';
+    document.body.appendChild(ov);
+  }
+  const btn = (bg)=>`flex:1;min-height:46px;background:${bg};color:#fff;border:none;border-radius:10px;font-family:Cairo,sans-serif;font-size:14px;font-weight:800;cursor:pointer`;
+  const cards = mine.map(t=>{
+    const asSource = t.from_rep===me && t.status==='pending_source';
+    const title = asSource ? `سلّم البضاعة دي لـ ${trEsc(t.to_rep)}` : `بضاعة جاية لك من ${trEsc(t.from_rep)}`;
+    const when = t.requested_at ? new Date(t.requested_at).toLocaleDateString('ar-EG',{day:'numeric',month:'long'}) : '';
+    const days = t.requested_at ? Math.floor((Date.now()-new Date(t.requested_at).getTime())/864e5) : 0;
+    const items = (t.items||[]).map(it=>`<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid #F1E9DA;font-size:13px"><span>${trEsc(it.name)}</span><b>${trEsc(it.qty)}</b></div>`).join('');
+    const actions = asSource
+      ? `<button onclick="ciConfirmTransfer(${Number(t.id)},'source_confirm')" style="${btn('#276749')}">✅ تأكيد التسليم</button><button onclick="ciConfirmTransfer(${Number(t.id)},'source_reject')" style="${btn('#B71C1C')}">❌ رفض</button>`
+      : `<button onclick="ciConfirmTransfer(${Number(t.id)},'target_confirm')" style="${btn('#276749')}">✅ تأكيد الاستلام</button><button onclick="ciConfirmTransfer(${Number(t.id)},'target_reject')" style="${btn('#B71C1C')}">❌ رفض الاستلام</button>`;
+    return `<div style="border:1.5px solid #E8DCC4;border-radius:12px;padding:12px;margin-bottom:12px;background:#fff">
+      <div style="font-size:15px;font-weight:800;color:#731E2E">🔁 ${title}</div>
+      <div style="font-size:11.5px;color:#6B5B45;margin:2px 0 8px">تحويل #${Number(t.id)}${t.requested_by?' · طلبه '+trEsc(t.requested_by):''}${when?' · '+when:''}${days>=1?' · بقاله '+days+' يوم':''}</div>
+      ${items}
+      <div style="display:flex;gap:8px;margin-top:10px">${actions}</div>
+    </div>`;
+  }).join('');
+  ov.innerHTML = `<div style="background:#F7F2EA;border-radius:16px;max-width:460px;width:100%;max-height:88vh;overflow:auto;padding:16px;box-shadow:0 10px 40px rgba(0,0,0,.35)">
+    <div style="font-size:17px;font-weight:900;color:#2C1F0A;margin-bottom:4px">لازم تأكد ${mine.length>1?'التحويلات دي':'التحويل ده'} الأول</div>
+    <div style="font-size:12.5px;color:#6B5B45;margin-bottom:12px">التطبيق هيفضل مقفول لحد ما تأكد أو ترفض. التأكيد بيعدّل رصيد عربيتك فورًا.</div>
+    ${cards}
+  </div>`;
+}
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ trCheckPending(); lkCheck(false); } });
+setInterval(()=>{ if(!document.hidden){ trCheckPending(); lkCheck(false); } }, 10*60*1000);
+
+// ══ قفل التطبيق (28/11/2026) — rep_app_locks + rep_app_lock_rules ══
+// أي قفلة مفتوحة (mode=lock) على المندوب = التطبيق مقفول بالكامل، ومايتفتحش غير من الأدمن بسبب مكتوب.
+// القواعد الأوتوماتيك بتتقرا من rep_app_lock_rules: off = مش شغالة، warn = بتتسجل تحذير للإدارة بس، lock = بتقفل.
+let _lkBusy = false;
+async function lkEvalRules(){
+  const rules = await sbFetch('rep_app_lock_rules','?select=code,mode,threshold').catch(()=>null);
+  if(!rules) return;
+  const neg = rules.find(r=>r.code==='neg_balance');
+  if(neg && neg.mode!=='off'){
+    const b = await ciComputeBalances({raw:true}).catch(()=>null);
+    if(b && b.valid){
+      const lim = -(+neg.threshold||0);
+      const bad = Object.entries(b.valid).filter(([n,q])=>q<lim).map(([n,q])=>({snf:n, qty:Math.round(q*100)/100}));
+      if(bad.length){
+        const H = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json','Prefer':'return=minimal'};
+        // لو فيه قفلة/تحذير مفتوح بنفس السبب، الفهرس الفريد بيرفض التكرار — ودي حاجة عادية
+        await _apiFetch(`${SUPABASE_URL}/rest/v1/rep_app_locks`,{method:'POST',headers:H,body:JSON.stringify({
+          rep_name: currentRep.name, reason_code:'neg_balance', mode: neg.mode,
+          reason_text: `${bad.length} صنف رصيدهم في العربية بالسالب (اتفوتر أكتر من اللي استلمته)`,
+          details: {items: bad.slice(0,60), start: _ciBalanceStartDate}
+        })}).catch(()=>{});
+      }
+    }
+  }
+}
+async function lkCheck(evalRules){
+  if(!currentRep || _lkBusy) return;
+  _lkBusy = true;
+  try{
+    if(evalRules) await lkEvalRules();
+    const enc = encodeURIComponent(currentRep.name);
+    const rows = await sbFetch('rep_app_locks', `?rep_name=eq.${enc}&mode=eq.lock&unlocked_at=is.null&select=id,reason_text,locked_by,created_at&order=created_at.asc`);
+    lkRender(rows||[]);
+  }catch(e){ /* مقدرناش نتأكد — نسيب الحالة زي ما هي */ }
+  finally{ _lkBusy = false; }
+}
+function lkRender(rows){
+  let ov = document.getElementById('lk-gate');
+  if(!rows.length){ if(ov) ov.remove(); return; }
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = 'lk-gate';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:100001;background:#2C1F0A;display:flex;align-items:center;justify-content:center;padding:18px;direction:rtl;font-family:Cairo,sans-serif';
+    document.body.appendChild(ov);
+  }
+  const list = rows.map(r=>{
+    const when = r.created_at ? new Date(r.created_at).toLocaleString('ar-EG',{day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'}) : '';
+    return `<div style="background:#FBEDED;border-right:5px solid #9E1B1B;border-radius:10px;padding:10px 12px;margin-bottom:8px;text-align:right">
+      <div style="font-size:14px;font-weight:800;color:#7A1414">${trEsc(r.reason_text)}</div>
+      <div style="font-size:11.5px;color:#6B5B45">${r.locked_by==='system'?'قفل أوتوماتيك':'اتقفل بواسطة '+trEsc(r.locked_by)}${when?' · '+when:''} · رقم ${Number(r.id)}</div>
+    </div>`;
+  }).join('');
+  ov.innerHTML = `<div style="background:#F7F2EA;border-radius:16px;max-width:440px;width:100%;max-height:90vh;overflow:auto;padding:20px;text-align:center;border-top:6px solid #C8A96E">
+    <div style="font-size:40px;line-height:1">🔒</div>
+    <div style="font-size:19px;font-weight:900;color:#731E2E;margin:6px 0 4px">التطبيق مقفول</div>
+    <div style="font-size:13px;color:#2C1F0A;margin-bottom:14px">فيه مشكلة محتاجة مراجعة. كلّم الإدارة عشان تراجعها وتفتح لك التطبيق.</div>
+    ${list}
+    <button onclick="lkCheck(false)" style="margin-top:8px;width:100%;min-height:48px;background:#731E2E;color:#fff;border:none;border-radius:10px;font-family:Cairo,sans-serif;font-size:14px;font-weight:800;cursor:pointer">الإدارة فتحت؟ جرّب تاني</button>
+    <button onclick="doLogout()" style="margin-top:8px;width:100%;min-height:44px;background:#fff;color:#2C1F0A;border:1.5px solid #D4C4A8;border-radius:10px;font-family:Cairo,sans-serif;font-size:13px;font-weight:700;cursor:pointer">خروج</button>
+  </div>`;
 }
 
 // فلتر الفترة (من/إلى) على سجل الجرد وسجل الطلبات — بدون فترة = آخر السجلات زي ما كانت
