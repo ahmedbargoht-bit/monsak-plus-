@@ -63041,7 +63041,7 @@ function sfcHijBack(s){ // نفس اليوم الهجري في السنة اله
   return sfcAdd(s,-354); }
 function sfcHLabel(f,t){ const a=sfcHij(f), b=sfcHij(t); if(!a||!b) return '';
   return a.m===b.m&&a.y===b.y?`${SFC_HM[a.m-1]} ${a.y}`:`${a.d} ${SFC_HM[a.m-1]}${a.y!==b.y?' '+a.y:''} – ${b.d} ${SFC_HM[b.m-1]} ${b.y}`; }
-function sfcLastData(){ return sfcAdd(ccToday(),-1); }
+function sfcLastData(){ const y=sfcAdd(ccToday(),-1); return (SFC.lastInv&&SFC.lastInv<y)?SFC.lastInv:y; } // (28/11) آخر يوم فواتير مرفوع من جريد (مش امبارح) — الأيام اللي لسه مااترفعتش ماتتحسبش صفر
 function sfcMonthRange(ym){ const y=+ym.slice(0,4), m=+ym.slice(5,7); return [ym+'-01', sfcS(new Date(Date.UTC(y,m,0)))]; }
 function sfcAddM(ym,k){ let y=+ym.slice(0,4), m=+ym.slice(5,7)+k; while(m>12){m-=12;y++;} while(m<1){m+=12;y--;} return y+'-'+String(m).padStart(2,'0'); }
 function sfcBaseOf(ym){ // فترة الأساس للشهر: نفس الأيام الهجرية من السنة الهجرية اللي فاتت (أو اللي قبلها لو لسه مالهاش بيع)
@@ -63139,12 +63139,13 @@ function sfmFit(rows, opt){
     for(let j=0;j<p;j++){ if(j>0){ g[j]-=lam*beta[j]; H[j][j]+=lam; } if(!use[j]){ H[j]=H[j].map((_,k)=>k===j?1:0); g[j]=0; } }
     const d=sfmSolve(H,g); let mx=0; for(let j=0;j<p;j++){ beta[j]+=d[j]; mx=Math.max(mx,Math.abs(d[j])); } if(mx<1e-7) break; }
   const pred=n=>{ const x=sfmFeat(n,t0,b); let e=0; for(let j=0;j<p;j++) e+=x[j]*beta[j]; return Math.exp(Math.min(e,30))*sc; };
-  return { last:sfmS(b), day:s=>pred(sfmD(s)), range:(f,t)=>{ let s=0; for(let n=sfmD(f);n<=sfmD(t);n++) s+=pred(n); return s; } };
+  return { last:sfmS(b), beta, t0, b, day:s=>pred(sfmD(s)), range:(f,t)=>{ let s=0; for(let n=sfmD(f);n<=sfmD(t);n++) s+=pred(n); return s; } };
 }
 
 // ── تحميل/تشغيل النموذج على نفس فلاتر التوقع ──
 function sfmArgs(){ return {p_branches:sfcArr('br'),p_grps:sfcArr('grp'),p_routes:sfcArr('route'),p_customers:sfcArr('cust'),p_sites:sfcArr('site'),p_items:sfcArr('item')}; }
 function sfmEnsure(){
+  if(!SFC.lastInvAt) return sfcLastInv().then(()=>sfmEnsure());
   const args=sfmArgs(), to=sfcLastData(), key=JSON.stringify({...args,to});
   if(SFC.sfm&&SFC.sfm.key===key) return SFC.sfm.p||Promise.resolve();
   const S={key,loading:true}; SFC.sfm=S;
@@ -63160,7 +63161,15 @@ function sfmEnsure(){
         const tr=rows.filter(x=>x[0]<f); if(tr.length<200) continue; const Mk=sfmFit(tr,{to:prev});
         const act=rows.filter(x=>x[0]>=f&&x[0]<=t).reduce((a,x)=>a+x[1],0); if(act>0) bt.push({ym,act,pred:Mk.range(f,t)}); }
       const mape=bt.length?bt.reduce((a,x)=>a+Math.abs(x.pred-x.act)/x.act,0)/bt.length*100:null;
-      Object.assign(S,{M,bt,mape,n:rows.length,loading:false});
+      // (28/11) دقة شهور آخر موسم كامل (من 10 أسابيع قبل رمضان لحد 6 أسابيع بعده) — كل شهر بيتوقع من اللي قبله بس
+      const rs=SFM_RAM.filter(x=>sfmD(x)+41<=sfmD(to)).pop(), btS=[];
+      if(rs){ let ym=sfmS(sfmD(rs)-70).slice(0,7); const ye=sfmS(sfmD(rs)+41).slice(0,7);
+        while(ym<=ye&&ym<=lastFull){ const [f,t]=sfcMonthRange(ym), prev=sfmS(sfmD(f)-1), tr=rows.filter(x=>x[0]<f);
+          if(tr.length>=200){ const Mk=sfmFit(tr,{to:prev}); const act=rows.filter(x=>x[0]>=f&&x[0]<=t).reduce((a,x)=>a+x[1],0); if(act>0) btS.push({ym,act,pred:Mk.range(f,t)}); }
+          ym=sfcAddM(ym,1); } }
+      const mapeS=btS.length?btS.reduce((a,x)=>a+Math.abs(x.pred-x.act)/x.act,0)/btS.length*100:null;
+      const day={}; rows.forEach(([d,v])=>{ day[d]=(day[d]||0)+v; });
+      Object.assign(S,{M,bt,mape,btS,mapeS,day,n:rows.length,loading:false});
     }catch(e){ console.error('[sfm]',e); Object.assign(S,{err:String(e&&e.message||e),loading:false}); }
     if(SFC.sfm!==S) return;
     if(SFC.mode==='stat'&&Object.keys(SFC.base).length){ sfcComputeAll(); sfcRender(); } else sfcRenderMonths();
@@ -63183,17 +63192,65 @@ function sfmMix(rows,L3){
   const kS=base*(1-shareN)/sS, kN=sN?base*shareN/sN:0;
   return {rows:stable.map(x=>({...x,w:x.w*kS,q:x.q*kS})).concat(nw.map(x=>({...x,w:x.w*kN,q:x.q*kN}))),hij,shareN,dropped,nNew:new Set(nw.map(x=>x.i)).size};
 }
-function sfmMonth(ym){ const S=SFC.sfm; if(!S||!S.M) return 0; const [f,t]=sfcMonthRange(ym); return Math.round(S.M.range(f,t)); }
+function sfmParts(ym){ const S=SFC.sfm; if(!S||!S.M) return null; const [f,t]=sfcMonthRange(ym), L=S.M.last;
+  if(f>L) return {act:0,rest:S.M.range(f,t),from:f,to:t,actTo:null};
+  let act=0; for(let n=sfmD(f);n<=sfmD(t<L?t:L);n++) act+=(S.day&&S.day[sfmS(n)])||0;
+  if(t<=L) return {act,rest:0,from:null,to:t,actTo:t};
+  const f2=sfmS(sfmD(L)+1); return {act,rest:S.M.range(f2,t),from:f2,to:t,actTo:L}; }
+function sfmMonth(ym){ const P=sfmParts(ym); return P?Math.round(P.act+P.rest):0; } // (28/11) الشهر اللي بدأ = الفعلي لحد آخر يوم مرفوع + توقع الباقي
 function sfmUseAll(){ const S=SFC.sfm; if(!S||!S.M) return;
   const L=sfcMonthList(); if(!confirm('هيتكتب توقع النموذج كهدف في كل الشهور ('+L.length+' شهر) بدل الأرقام اللي فيها. تكمل؟')) return;
   L.forEach(ym=>{ const v=sfmMonth(ym); if(v>0) SFC.months[ym]=v; }); sfcRenderMonths(); sfcChanged(); sfcLoad(); }
 function sfmUse(ym){ const v=sfmMonth(ym); if(v>0){ SFC.months[ym]=v; sfcRenderMonths(); sfcChanged(); sfcLoad(); } }
+// ══ (28/11 — طلب أحمد) ليه؟ شرح رقم النموذج لكل شهر: البيع العادي × أثر أسابيع الموسم والعيد وآخر السنة ══
+function sfmWkName(w){ if(w<=-3) return `قبل رمضان بـ ${-w} أسابيع`; if(w===-2) return 'قبل رمضان بأسبوعين'; if(w===-1) return 'الأسبوع اللي قبل رمضان';
+  if(w>=0&&w<=3) return `الأسبوع ${['الأول','التاني','التالت','الرابع'][w]} من رمضان`; if(w===4) return 'آخر رمضان وعيد الفطر'; return 'الأسبوع اللي بعد العيد'; }
+function sfmWhy(ym){
+  const S=SFC.sfm, P=sfmParts(ym); if(!S||!S.M||!S.M.beta||!P) return null;
+  const M=S.M, B=M.beta, out={ym,act:P.act,actTo:P.actTo,rest:P.rest,total:P.act+P.rest,weeks:{},adha:{pre:0,eid:0},dec:0,days:0,full:0,normal:0};
+  if(P.from){ for(let n=sfmD(P.from);n<=sfmD(P.to);n++){ const x=sfmFeat(n,M.t0,sfmD(M.last)); let e=0, e0=0;
+      for(let j=0;j<x.length;j++){ const v=x[j]*B[j]; e+=v; if(!(j>=1&&j<=18)&&j!==28) e0+=v; }  // 1..16 أسابيع رمضان، 17..18 العيد الكبير، 28 آخر السنة (19..25 أيام الأسبوع، 26..27 أول/آخر الشهر، 29 الاتجاه)
+      out.full+=Math.exp(Math.min(e,30))*1000; out.normal+=Math.exp(Math.min(e0,30))*1000; out.days++;
+      for(let j=1;j<=16;j++) if(x[j]){ const w=j-11; const o=out.weeks[w]=out.weeks[w]||{days:0,mult:Math.exp(B[j])}; o.days++; }
+      if(x[17]) out.adha.pre++; if(x[18]) out.adha.eid++; if(x[28]) out.dec++; }
+    out.adhaPreM=Math.exp(B[17]); out.adhaM=Math.exp(B[18]); out.decM=Math.exp(B[28]); }
+  out.mult=out.normal>0?out.full/out.normal:1;
+  return out; }
+function sfmWhyHtml(ym){
+  const W=sfmWhy(ym); if(!W) return '';
+  const N=v=>sfcN(v), X=m=>(+m<0.1?'تقريبًا مفيش بيع (×'+(+m).toFixed(2)+')':'×'+(+m).toFixed(2).replace(/\.?0+$/,'')), dmy=s=>s?s.split('-').reverse().join('/'):'',
+    DY=n=>n===1?'يوم':n===2?'يومين':n<=10?n+' أيام':n+' يوم';
+  const li=[];
+  if(W.actTo) li.push(`اتباع فعلاً من أول الشهر لحد ${dmy(W.actTo)} (آخر يوم فواتير مرفوع): <b>${N(W.act)} ج</b>${W.rest>0?' — والباقي تحت هو توقع الأيام اللي فاضلة بس':''}.`);
+  if(W.days){
+    li.push(`البيع العادي المتوقع${W.actTo?' للأيام الباقية':''} (${DY(W.days)}، من غير أي موسم): <b>${N(W.normal)} ج</b> — ده محسوب من مستوى البيع الأخير وأيام الأسبوع وأول وآخر الشهر.`);
+    const ws=Object.keys(W.weeks).map(Number).sort((a,b)=>a-b);
+    if(ws.length) li.push(`أسابيع الموسم في الشهر ده (البيع فيها قد العادي كام مرة):<br>${ws.map(w=>`&nbsp;&nbsp;• ${sfmWkName(w)}: ${DY(W.weeks[w].days)}، البيع ${X(W.weeks[w].mult)}`).join('<br>')}`);
+    if(W.adha.pre) li.push(`الأسبوعين قبل العيد الكبير: ${DY(W.adha.pre)}، البيع ${X(W.adhaPreM)}`);
+    if(W.adha.eid) li.push(`أيام العيد الكبير: ${DY(W.adha.eid)}، البيع ${X(W.adhaM)}`);
+    if(W.dec) li.push(`آخر السنة (20–31 ديسمبر): ${DY(W.dec)}، البيع ${X(W.decM)}`);
+    if(ws.length||W.adha.pre||W.adha.eid||W.dec) li.push(`المحصلة: الموسم والمناسبات خلّوا الشهر ${X(W.mult)} من العادي ← <b>${N(W.rest)} ج</b>${W.actTo?' للأيام الباقية':''}`);
+    else li.push(`الشهر ده مفيهوش موسم ولا مناسبات، فتوقعه = البيع العادي.`);
+  }
+  li.push(`<b>توقع النظام للشهر: ${N(W.total)} ج</b>`);
+  const B0=SFC.base[ym];
+  if(B0&&B0.stat&&B0.stat.hij) li.push(`للمقارنة: نفس الأيام الهجري السنة اللي فاتت (${ccEsc(B0.b.f)} → ${ccEsc(B0.b.t)}) اتباع فيها ${N(B0.stat.hij)} ج — توقع النظام ${W.total>=B0.stat.hij?'أعلى':'أقل'} منها بـ ${Math.abs((W.total/B0.stat.hij-1)*100).toFixed(0)}%.`);
+  const man=SFC.months[ym]>0?SFC.months[ym]:null;
+  if(man){ const d=man-W.total; let s=`رقمك المكتوب: <b>${N(man)} ج</b> — ${d>=0?'أعلى':'أقل'} من توقع النظام بـ ${N(Math.abs(d))} ج (${Math.abs(d/W.total*100).toFixed(0)}%).`;
+    if(W.days&&W.normal>0){ const base=man-W.act; s+=` رقمك${W.actTo?' (للأيام الباقية)':''} = ${X(Math.max(0,base)/W.normal)} من البيع العادي، والنظام = ${X(W.mult)}${Object.keys(W.weeks).length?' — يعني الفرق بينكم في قد إيه الموسم هيرفع البيع':''}.`; }
+    li.push(s); }
+  const S=SFC.sfm, inSeason=Object.keys(W.weeks).length>0;
+  if(inSeason&&S.mapeS!=null) li.push(`<span style="color:#B71C1C">⚠️ في شهور الموسم اللي فات النظام كان بيغلط بمتوسط ${S.mapeS.toFixed(0)}% (${S.btS.map(x=>sfcMonLbl(x.ym)+': '+(x.pred>=x.act?'+':'')+Math.round((x.pred-x.act)/x.act*100)+'%').join('، ')}) — ومتعلّم الموسم من سنتين بس. خد الرقم كإشارة.</span>`);
+  return `<div style="margin-top:10px;background:#F6FBF6;border:1.5px solid #81C784;border-radius:10px;padding:10px 14px;font-size:12.5px;line-height:2">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><b style="color:#1B5E20;font-size:13.5px">ليه توقع ${sfcMonLbl(ym)} = ${N(W.total)} ج؟</b>
+      <a href="javascript:void 0" onclick="SFC.why=null;sfcRenderMonths()" style="margin-right:auto;color:#8B6F47;font-size:12px">✕ قفل</a></div>
+    ${li.map(x=>`<div>• ${x}</div>`).join('')}</div>`; }
 function sfmRowHtml(L){
   const S=SFC.sfm;
   if(!S||S.loading) return `<tr><td colspan="${L.length}" style="padding:6px;font-size:11px;color:#8B6F47">📈 جاري حساب توقع النموذج الإحصائي...</td></tr>`;
   if(S.err||!S.M) return `<tr><td colspan="${L.length}" style="padding:6px;font-size:11px;color:#B71C1C">📈 تعذر حساب النموذج${S.err?': '+ccEsc(S.err):''}</td></tr>`;
   return `<tr style="background:#EEF6EE">${L.map(ym=>{ const v=sfmMonth(ym); return `<td style="padding:4px 3px;white-space:nowrap"><button type="button" onclick="sfmUse('${ym}')" title="حط توقع النموذج كهدف للشهر ده"
-    style="width:104px;padding:5px 2px;border:1px dashed #2E7D32;border-radius:7px;background:#fff;color:#1B5E20;font-family:inherit;font-weight:800;font-size:11.5px;cursor:pointer;direction:ltr">${v?sfcN(v):'—'}</button></td>`; }).join('')}</tr>`; }
+    style="width:104px;padding:5px 2px;border:1px dashed #2E7D32;border-radius:7px;background:#fff;color:#1B5E20;font-family:inherit;font-weight:800;font-size:11.5px;cursor:pointer;direction:ltr">${v?sfcN(v):'—'}</button>${v?`<div><a href="javascript:void 0" onclick="SFC.why=SFC.why==='${ym}'?null:'${ym}';sfcRenderMonths()" style="font-size:10.5px;font-weight:700;color:${SFC.why===ym?'#B71C1C':'#2E7D32'}">${SFC.why===ym?'▴ قفل':'ليه؟'}</a></div>`:''}</td>`; }).join('')}</tr>`; }
 function sfmChartHtml(){
   const ms=sfcActiveMonths().filter(ym=>SFC.base[ym]&&SFC.base[ym].stat); if(!ms.length) return '';
   const D=ms.map(ym=>({ym,m:sfmMonth(ym),h:SFC.base[ym].stat.hij,t:SFC.tgt[ym]||0,sn:SFC.base[ym].stat.shareN}));
@@ -63219,11 +63276,12 @@ function sfmBarHtml(){
   const bt=(S.bt||[]).map(x=>`${sfcMonLbl(x.ym)}: ${Math.round((x.pred-x.act)/x.act*100)}%`).join(' · ');
   return `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:#EEF6EE;border:1px solid #A5D6A7;border-radius:10px;padding:8px 12px;margin-bottom:8px;font-size:12px">
     <b style="color:#1B5E20">📈 توقع النموذج الإحصائي</b>
-    <span style="color:#33691E">مبني على البيع اليومي من يناير 2025 لحد ${S.M.last} بنفس الفلاتر — بيتعلم موسم رمضان (بالأسابيع قبله وبعده)، والعيد الكبير، وأيام الأسبوع، وأول وآخر الشهر، وآخر السنة، والاتجاه العام.</span>
+    <span style="color:#33691E">مبني على البيع اليومي من يناير 2025 لحد ${S.M.last} (آخر يوم فواتير مرفوع) بنفس الفلاتر — بيتعلم موسم رمضان (بالأسابيع قبله وبعده)، والعيد الكبير، وأيام الأسبوع، وأول وآخر الشهر، وآخر السنة، والاتجاه العام.</span>
     ${S.mape!=null?`<span style="background:#fff;border-radius:8px;padding:2px 8px;font-weight:800;color:#1B5E20" title="${ccEsc(bt)}">دقته على آخر ${S.bt.length} شهور: متوسط خطأ ${S.mape.toFixed(0)}%</span>`:''}
+    ${S.mapeS!=null?`<span style="background:#fff;border-radius:8px;padding:2px 8px;font-weight:800;color:#B71C1C" title="${ccEsc((S.btS||[]).map(x=>`${sfcMonLbl(x.ym)}: ${Math.round((x.pred-x.act)/x.act*100)}%`).join(' · '))}">وفي شهور الموسم اللي فات (${sfcMonLbl(S.btS[0].ym)} – ${sfcMonLbl(S.btS[S.btS.length-1].ym)}): متوسط خطأ ${S.mapeS.toFixed(0)}%</span>`:''}
     <button class="btn btn-ghost btn-sm" style="margin-right:auto;background:#fff;border:1px solid #2E7D32;color:#1B5E20;font-weight:800" onclick="sfmUseAll()">استخدم توقع النموذج كهدف لكل الشهور</button>
     ${SFC.mode==='stat'?sfmChartHtml():''}
-    <span style="width:100%;color:#6B7B5B;font-size:11px">الصف الأخضر تحت الشهور = توقع النموذج. دوس على أي رقم يتكتب هدف للشهر ده. ⚠️ اتعلّم موسم رمضان من سنتين بس، فخد أرقام الموسم كإشارة وراجعها.</span>
+    <span style="width:100%;color:#6B7B5B;font-size:11px">الصف الأخضر تحت الشهور = توقع النموذج (الشهر اللي بدأ = الفعلي لحد آخر يوم مرفوع + توقع الباقي). دوس على أي رقم يتكتب هدف للشهر ده، ودوس "ليه؟" تحته عشان تشوف جاي منين. ⚠️ اتعلّم موسم رمضان من سنتين بس، فخد أرقام الموسم كإشارة وراجعها.</span>
   </div>`; }
 
 function sfcRenderMonths(){
@@ -63252,7 +63310,7 @@ function sfcRenderMonths(){
         style="width:104px;padding:6px 4px;border:1.5px solid ${man?'#731E2E':(auto?'#C8A96E':'#D4C4A8')};border-radius:7px;font-family:inherit;font-weight:${man?800:600};color:${man?'#731E2E':'#5B4630'};background:${man?'#FFF8E1':'#fff'};text-align:center;direction:ltr"/>${man&&R.has(ym)?`<div><a href="javascript:void 0" data-ym="${ym}" onclick="sfcSetMonth(this.dataset.ym,'')" style="font-size:10px;color:#B71C1C">📌 إلغاء التثبيت</a></div>`:''}</td>`; }).join('')}</tr>
       <tr>${L.map(ym=>{ const b=sfcBaseOf(ym); return `<td style="padding:2px 3px;font-size:10px;color:#8B6F47;line-height:1.4" title="أساس النسب: من ${b.f} إلى ${b.t}">${b.lbl}${b.back>1?'<br><span style="color:#B26A00">(سنتين قبل)</span>':''}</td>`; }).join('')}</tr>
       ${sfmRowHtml(L)}
-    </table></div></div>`;
+    </table></div>${SFC.why&&SFC.sfm&&SFC.sfm.M?sfmWhyHtml(SFC.why):''}</div>`;
 }
 function sfcSetAnnual(k,v){ if(k==='total'){ const n=sfcNum(v); SFC.annual.total=n&&n>0?n:0; } else SFC.annual[k]=v;
   sfcRenderMonths(); sfcChanged(); sfcLoad(); }
@@ -63297,6 +63355,8 @@ function sfcClearAll(){ SFC_LEVELS.forEach(([k])=>SFC.sel[k].clear()); SFC.open=
 function sfcActiveWin(){ const t=sfcLastData(); return [sfcAdd(t,-122),t]; } // آخر 4 شهور
 async function sfcLoad(){
   const my=++SFC.req, body=document.getElementById('sfc-body'); if(!body) return;
+  await sfcLastInv(); if(my!==SFC.req) return;
+  await sfcLoadPpc();  // عدد القطع في الكرتونة (عمود الكراتين)
   sfcRenderMonths();
   const ms=sfcActiveMonths();
   // فترة القوائم = من أول أساس لآخر أساس للشهور اللي ليها هدف (أو الشهر الجاي لو مفيش)
@@ -63321,7 +63381,7 @@ async function sfcLoad(){
     const full={...args,p_items:SFC.isrc.length?null:sfcArr('item')};
     const need=ms.map(ym=>{ const b=sfcBaseOf(ym); return {ym,b,key:JSON.stringify({...full,f:b.f,t:b.t})+(SFC.mode==='stat'?'|stat|'+(SFC.l3?SFC.l3.a:''):'')}; }).filter(x=>!SFC.base[x.ym]||SFC.base[x.ym].key!==x.key);
     let done=0; const q=need.slice(), got={};
-    const RPC=SFC.mode==='avg'?'fc_base_net':'fc_base';
+    const RPC=SFC.mode==='hij'?'fc_base':'fc_base_net';  // (28/11) النموذج والمتوسط بالبيع − المرتجع؛ الهجري بالبيع زي ما كان
     let L3=null;
     if(SFC.mode==='stat'){
       body.innerHTML='<div style="text-align:center;padding:50px;color:#8B6F47"><div class="spinner" style="margin:0 auto 12px"></div>جاري حساب النموذج الإحصائي وبيع آخر 3 شهور...</div>';
@@ -63353,16 +63413,22 @@ async function sfcLoad(){
 
 // ══ متابعة الشهر: المباع فعلاً (جريد + فواتير MT) لحد آخر يوم مرفوع، والفاضل من المتوقع ══
 function sfcActArgs(){ return {p_branches:sfcArr('br'),p_grps:sfcArr('grp'),p_routes:sfcArr('route'),p_customers:sfcArr('cust'),p_sites:sfcArr('site'),p_items:sfcArr('item')}; }
-async function sfcLastInv(){ if(SFC.lastInv) return SFC.lastInv;
-  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_invoices?select=invoice_date&order=invoice_date.desc&limit=1`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
-    const j=r.ok?await r.json():[]; SFC.lastInv=(j[0]&&j[0].invoice_date)||sfcLastData(); }catch(e){ SFC.lastInv=sfcLastData(); }
-  return SFC.lastInv; }
+async function sfcLastInv(){ if(SFC.lastInv&&Date.now()-(SFC.lastInvAt||0)<10*60*1000) return SFC.lastInv;
+  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/tamr_sales_items?select=invoice_date&order=invoice_date.desc&limit=1`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`},cache:'no-store'});
+    const j=r.ok?await r.json():[]; const d=j[0]&&String(j[0].invoice_date||'').slice(0,10); SFC.lastInv=/^\d{4}-\d{2}-\d{2}$/.test(d)?d:null; }catch(e){ SFC.lastInv=null; }
+  SFC.lastInvAt=Date.now(); return SFC.lastInv||sfcLastData(); }
+// (28/11) عدد القطع في الكرتونة لكل صنف = chain_item_ppc (نفس اللي الداتابيز بتحوّل بيه الكراتين لقطع: الكتالوج، وإلا سعر الكرتونة ÷ سعر القطعة)
+async function sfcLoadPpc(){ if(SFC.ppc) return SFC.ppc;
+  try{ const r=await fetch(`${SUPABASE_URL}/rest/v1/chain_item_ppc?select=item,ppc&limit=5000`,{headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}});
+    const j=r.ok?await r.json():[]; const m={}; (j||[]).forEach(x=>{ const v=+x.ppc; if(x.item!=null&&v>1) m[x.item]=v; }); SFC.ppc=m; }catch(e){ console.warn('[sfc ppc]',e); }
+  return SFC.ppc||{}; }
+function sfcCtn(item,q){ const p=SFC.ppc&&SFC.ppc[item]; return p>1&&q!=null?q/p:null; }
 async function sfcActLoad(ym){
   const L=await sfcLastInv(), [f,e]=sfcMonthRange(ym); if(f>L) return null;      // الشهر لسه مابدأش
-  const to=e<L?e:L, key=JSON.stringify({...sfcActArgs(),f,to});
+  const AR=SFC.mode==='hij'?'fc_base':'fc_base_net', to=e<L?e:L, key=JSON.stringify({...sfcActArgs(),f,to,AR});
   if(SFC.act[ym]&&SFC.act[ym].key===key) return SFC.act[ym];
   SFC.actBusy=true;
-  const r=await csRpc('fc_base',{p_from:f,p_to:to,...sfcActArgs()});
+  const r=await csRpc(AR,{p_from:f,p_to:to,...sfcActArgs()});
   SFC.actBusy=false;
   SFC.act[ym]={key,to,rows:((r&&r.rows)||[]).map(a=>({b:a[0],g:a[1],r:a[2],c:a[3],s:a[4],i:a[5],w:+a[6]||0}))};
   return SFC.act[ym];
@@ -63577,13 +63643,13 @@ function sfcRender(){
       <thead style="position:sticky;top:0;z-index:1"><tr style="background:#731E2E;color:#fff">
         ${isItem||isSite||isRoute?'<th style="padding:8px;text-align:right">المجموعة</th>':''}${isSite?'<th style="padding:8px;text-align:right">خط السير</th>':''}
         <th style="padding:8px;text-align:right">${{grp:'المجموعة',route:'خط السير',cust:'العميل',site:'فرع العميل',item:'الصنف',br:'فرع الشركة'}[tab]}</th>${isSite?'<th style="padding:8px;text-align:right">العميل</th>':''}
-        <th style="padding:8px">بيع الأساس</th><th style="padding:8px">النسبة</th><th style="padding:8px">التوقع (ج)</th>${AC?'<th style="padding:8px;background:#1A5E8A">اتباع فعلاً</th><th style="padding:8px;background:#1A5E8A">الفاضل</th><th style="padding:8px;background:#1A5E8A">% الإنجاز</th>':''}${isItem?'<th style="padding:8px">الكمية</th>':''}${SR?'<th style="padding:8px">خصم الشيك %</th><th style="padding:8px">الصافي بعد الخصم</th>':''}${canFix?'<th style="padding:8px">تثبيت</th>':''}</tr></thead><tbody>
+        <th style="padding:8px">بيع الأساس</th><th style="padding:8px">النسبة</th><th style="padding:8px">التوقع (ج)</th>${AC?'<th style="padding:8px;background:#1A5E8A">اتباع فعلاً</th><th style="padding:8px;background:#1A5E8A">الفاضل</th><th style="padding:8px;background:#1A5E8A">% الإنجاز</th>':''}${isItem?'<th style="padding:8px">الكمية (قطعة)</th><th style="padding:8px" title="الكمية ÷ عدد القطع في الكرتونة (نفس الرقم اللي الداتابيز حوّلت بيه الكراتين لقطع)">الكراتين</th>':''}${SR?'<th style="padding:8px">خصم الشيك %</th><th style="padding:8px">الصافي بعد الخصم</th>':''}${canFix?'<th style="padding:8px">تثبيت</th>':''}</tr></thead><tbody>
       ${rows.map(r=>{ const k=ovKey(r), fixed=canFix&&k&&OV[k]!=null;
         return `<tr style="border-bottom:1px solid #EFE6D6;${fixed?'background:#FFF8E1':''}">
           ${isItem||isSite||isRoute?`<td style="padding:6px;text-align:right;color:#8B6F47">${ccEsc(r.grp||'')}</td>`:''}${isSite?`<td style="padding:6px;text-align:right;color:#8B6F47">${ccEsc(r.route||'')}</td>`:''}
           <td style="padding:6px;text-align:right;font-weight:700">${isSite?`<a href="javascript:void 0" data-s="${ccEsc(r.n)}" onclick="sfcToggleSite(this.dataset.s)" style="color:#2C1F0A;text-decoration:none">${SFC.openSite[r.n]?'▾':'▸'} ${ccEsc(r.n)}</a>`:ccEsc(r.n)}${fixed?' <span title="مثبت" style="color:#B26A00">📌</span>':''}</td>${isSite?`<td style="padding:6px;text-align:right;font-size:11.5px">${ccEsc(r.cust||'')}</td>`:''}
           <td style="color:#8B6F47">${sfcN(r.w)}</td><td>${S?(r.v/S*100).toFixed(1)+'%':'—'}</td><td style="font-weight:800;color:#731E2E">${sfcN(r.v)}</td>${AC?(()=>{ const a=AM[sfcActRowKey(tab,r)]||0, le=Math.max(0,r.v-a), pr=r.v>0?a/r.v:null;
-            return `<td style="font-weight:700;color:#1A5E8A">${sfcN(a)}</td><td style="font-weight:800;color:${le>0?'#B26A00':'#1A7A4A'}">${le>0?sfcN(le):'✅ اتحقق'}</td><td style="font-weight:700;color:${pr==null?'#888':pr>=1?'#1A7A4A':pr>=0.6?'#B26A00':'#B71C1C'}">${pr==null?'—':(pr*100).toFixed(0)+'%'}</td>`; })():''}${isItem?`<td>${r.hasQ?sfcQ(r.qty):'—'}</td>`:''}${SR?`<td style="color:#B45309">${r.v?(r.dk/r.v*100).toFixed(1)+'%':'—'}</td><td style="font-weight:700;color:#1A7A4A">${sfcN(r.v-r.dk)}</td>`:''}
+            return `<td style="font-weight:700;color:#1A5E8A">${sfcN(a)}</td><td style="font-weight:800;color:${le>0?'#B26A00':'#1A7A4A'}">${le>0?sfcN(le):'✅ اتحقق'}</td><td style="font-weight:700;color:${pr==null?'#888':pr>=1?'#1A7A4A':pr>=0.6?'#B26A00':'#B71C1C'}">${pr==null?'—':(pr*100).toFixed(0)+'%'}</td>`; })():''}${isItem?`<td>${r.hasQ?sfcQ(r.qty):'—'}</td><td style="font-weight:700">${r.hasQ?(()=>{ const c=sfcCtn(r.i,r.qty); return c!=null?sfcQ(c):'—'; })():'—'}</td>`:''}${SR?`<td style="color:#B45309">${r.v?(r.dk/r.v*100).toFixed(1)+'%':'—'}</td><td style="font-weight:700;color:#1A7A4A">${sfcN(r.v-r.dk)}</td>`:''}
           ${canFix?`<td style="white-space:nowrap"><input type="text" inputmode="decimal" data-k="${ccEsc(k)}" value="${fixed?Math.round(OV[k]).toLocaleString('en-US'):''}" placeholder="—" onchange="sfcSetOv(this.dataset.k,this.value)" style="width:110px;padding:4px 6px;border:1.5px solid ${fixed?'#B26A00':'#D4C4A8'};border-radius:6px;font-family:inherit;text-align:center;direction:ltr"/>${fixed?` <button type="button" onclick="sfcSetOv(this.previousElementSibling.dataset.k,'')" title="إلغاء التثبيت" style="background:#FFEBEE;color:#B71C1C;border:none;border-radius:6px;padding:3px 7px;cursor:pointer">✕</button>`:''}</td>`:''}</tr>
           ${isSite&&SFC.openSite[r.n]?sfcSiteItemsHTML(rowsAll,r.n):''}`; }).join('')||'<tr><td colspan="9" style="padding:20px;color:#8B6F47">مفيش بيانات</td></tr>'}
       </tbody></table></div></div>`;
@@ -63614,7 +63680,7 @@ function sfcTblModel(){
   head.push('بيع الأساس','النسبة','التوقع (ج)');
   const AC=sfcActOn(), AM=AC?sfcActMap(tab):null;
   if(AC) head.push('اتباع فعلاً','الفاضل','% الإنجاز');
-  if(isItem) head.push('الكمية');
+  if(isItem) head.push('الكمية (قطعة)','الكراتين');
   if(SR) head.push('خصم الشيك %','الصافي بعد الخصم');
   head.forEach((h,i)=>{ if(['المجموعة','خط السير','العميل',tabLbl].indexOf(h)>=0) alignR.push(i); });
   const N=v=>String(Math.round(+v||0));
@@ -63624,7 +63690,7 @@ function sfcTblModel(){
     o.push(r.n); if(isSite) o.push(r.cust||'');
     o.push(N(r.w), S?(r.v/S*100).toFixed(1)+'%':'—', N(r.v));
     if(AC){ const a=AM[sfcActRowKey(tab,r)]||0; o.push(N(a), N(Math.max(0,r.v-a)), r.v>0?(a/r.v*100).toFixed(0)+'%':'—'); }
-    if(isItem) o.push(r.hasQ?sfcQ(r.qty):'—');
+    if(isItem) o.push(r.hasQ?sfcQ(r.qty):'—', r.hasQ?(()=>{ const c=sfcCtn(r.i,r.qty); return c!=null?sfcQ(c):'—'; })():'—');
     if(SR) o.push(r.v?(r.dk/r.v*100).toFixed(1)+'%':'—', N(r.v-r.dk));
     return o; });
   const tot=new Array(head.length).fill('');
@@ -63662,8 +63728,8 @@ function sfcExpXlsx(send){ const d=sfcTblModel(); if(!d){ showToast('مفيش ب
 function sfcSiteItemsHTML(rowsAll,site){
   const its=sfcAgg(rowsAll.filter(r=>r.s===site),['i']).sort((a,b)=>a.i.localeCompare(b.i,'ar'));
   return `<tr><td colspan="9" style="background:#FBF8F2;padding:6px 30px"><table style="width:100%;border-collapse:collapse;font-size:12px">
-    <tr style="background:#EDE5D8"><th style="padding:5px;text-align:right">الصنف</th><th>التوقع (ج)</th><th>الكمية</th></tr>
-    ${its.map(r=>`<tr style="border-bottom:1px solid #EFE6D6"><td style="padding:4px;text-align:right">${ccEsc(r.i)}</td><td>${sfcN(r.v)}</td><td style="font-weight:700">${r.hasQ?sfcQ(r.qty):'—'}</td></tr>`).join('')}</table></td></tr>`;
+    <tr style="background:#EDE5D8"><th style="padding:5px;text-align:right">الصنف</th><th>التوقع (ج)</th><th>الكمية (قطعة)</th><th>الكراتين</th></tr>
+    ${its.map(r=>`<tr style="border-bottom:1px solid #EFE6D6"><td style="padding:4px;text-align:right">${ccEsc(r.i)}</td><td>${sfcN(r.v)}</td><td style="font-weight:700">${r.hasQ?sfcQ(r.qty):'—'}</td><td style="font-weight:700">${r.hasQ?(()=>{ const c=sfcCtn(r.i,r.qty); return c!=null?sfcQ(c):'—'; })():'—'}</td></tr>`).join('')}</table></td></tr>`;
 }
 function sfcToggleSite(s){ SFC.openSite[s]=!SFC.openSite[s]; sfcRender(); }
 function sfcSetOv(k,v){ const ym=SFC.view; if(ym==='all') return; const n=sfcNum(v), o=SFC.ov[ym]=SFC.ov[ym]||{};
@@ -66064,7 +66130,7 @@ function sfaRows(r){ return ((r&&r.rows)||[]).map(a=>({b:a[0],g:a[1],r:a[2],c:a[
 function sfaAgg(rows,d){ const m={}; rows.forEach(x=>{ const k=x[d]; m[k]=(m[k]||0)+x.w; }); return m; }
 function sfaWape(P,A){ const ks=new Set([...Object.keys(P),...Object.keys(A)]); let e=0, s=0; ks.forEach(k=>{ e+=Math.abs((P[k]||0)-(A[k]||0)); s+=Math.max(0,A[k]||0); }); return s>0?Math.max(0,1-e/s):null; }
 async function sfaRun(){
-  if(SFA.busy) return; SFA.busy=true; SFA.ym=SFA.ym||sfaPastMonths()[0]; sfaRender();
+  if(SFA.busy) return; SFA.busy=true; await sfcLastInv(); SFA.ym=SFA.ym||sfaPastMonths()[0]; sfaRender();
   try{
     const ym=SFA.ym, b=sfcBaseOf(ym), [f,t]=sfcMonthRange(ym), args=sfaArgs();
     const [rb,ra]=await Promise.all([csRpc('fc_base',{p_from:b.f,p_to:b.t,...args}), csRpc('fc_base',{p_from:f,p_to:t,...args})]);
@@ -66076,9 +66142,9 @@ async function sfaRun(){
   SFA.busy=false; sfaRender();
 }
 async function sfaTrack(){ // متابعة شهور التوقع المحفوظ اللي بدأت
-  const t=sfcLastData(), cm=t.slice(0,7), ms=sfcActiveMonths().filter(m=>m<=cm&&SFC.res[m]);
+  await sfcLastInv(); const t=sfcLastData(), cm=t.slice(0,7), ms=sfcActiveMonths().filter(m=>m<=cm&&SFC.res[m]);
   if(!ms.length) return null; const args=sfaArgs(), out=[];
-  for(const ym of ms){ const [f,e]=sfcMonthRange(ym), to=e<t?e:t; const A=sfaRows(await csRpc('fc_base',{p_from:f,p_to:to,...args}));
+  for(const ym of ms){ const [f,e]=sfcMonthRange(ym), to=e<t?e:t; const A=sfaRows(await csRpc(SFC.mode==='hij'?'fc_base':'fc_base_net',{p_from:f,p_to:to,...args}));
     const P=SFC.res[ym].rows; const pt=P.reduce((a,x)=>a+x.v,0), at=A.reduce((a,x)=>a+x.w,0);
     const days=new Date(+ym.slice(0,4),+ym.slice(5,7),0).getDate(), done=Math.min(days,+to.slice(8,10)), full=to===e;
     const pg={}; P.forEach(x=>{ pg[x.g]=(pg[x.g]||0)+x.v*(full?1:done/days); }); const ag=sfaAgg(A,'g');
